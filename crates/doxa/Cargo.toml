@@ -1,0 +1,70 @@
+[package]
+name = "doxa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "Facade crate re-exporting the doxa family: OpenAPI docs, auth, policy, audit, and secret types. Enable only the features you need."
+keywords = ["axum", "openapi", "auth", "cedar", "doxa"]
+categories = ["web-programming::http-server", "authentication"]
+
+[features]
+default = ["docs", "macros", "docs-scalar"]
+
+# OpenAPI documentation, Scalar UI hosting, and the core doxa-docs
+# surface (ApiDocBuilder, MountDocsExt, ProblemDetails, etc.).
+docs = ["dep:doxa-docs"]
+
+# Forward Scalar UI feature to doxa-docs.
+docs-scalar = ["docs", "doxa-docs/docs-scalar"]
+
+# Re-export doxa-macros proc-macros (#[derive(ApiError)],
+# #[derive(SseEvent)], #[get]/#[post]/…) through doxa-docs.
+macros = ["docs", "doxa-docs/macros"]
+
+# Zeroize-on-drop secret string type with [REDACTED] display.
+protected = ["dep:doxa-protected"]
+
+# SOC 2-flavored append-only audit logging primitives.
+audit = ["dep:doxa-audit"]
+
+# SeaORM persistence backend for doxa-audit.
+audit-sea-orm = ["audit", "doxa-audit/sea-orm"]
+
+# Provider-agnostic OIDC / JWT auth middleware. Enables axum integration
+# and audit support by default.
+auth = ["dep:doxa-auth", "doxa-auth/axum", "doxa-auth/audit"]
+
+# Cedar-based authorization policy engine (framework-neutral core).
+policy = ["dep:doxa-policy"]
+
+# Policy with axum HTTP surface (POST /check, POST /test).
+policy-axum = ["policy", "doxa-policy/axum"]
+
+# Everything.
+full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "policy-axum"]
+
+[dependencies]
+doxa-docs = { workspace = true, optional = true }
+doxa-protected = { workspace = true, optional = true }
+doxa-audit = { workspace = true, optional = true }
+doxa-auth = { workspace = true, optional = true, default-features = false }
+doxa-policy = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+async-stream = "0.3"
+async-trait = { workspace = true }
+futures-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+utoipa = { workspace = true }
+
+[[example]]
+name = "full_test"
+required-features = ["full"]

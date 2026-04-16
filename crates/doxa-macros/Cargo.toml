@@ -1,0 +1,43 @@
+[package]
+name = "doxa-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "Procedural macros for doxa: #[derive(ApiError)], #[derive(SseEvent)], and HTTP method shortcuts that delegate to utoipa::path."
+keywords = ["axum", "openapi", "macros", "utoipa", "doxa"]
+categories = ["web-programming::http-server", "development-tools::procedural-macro-helpers"]
+
+[features]
+default = []
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+# Pulled in solely so rustdoc links in the macro doc comments
+# (`utoipa::path`, `axum::response::IntoResponse`, etc.) can resolve.
+# The macros emit tokens referencing fully-qualified paths but do not
+# call any items directly at expand time, so these are build-time-only
+# and add no runtime cost.
+axum = { workspace = true }
+utoipa = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+doxa = { package = "doxa-docs", path = "../doxa-docs", version = "0.1.0" }
+futures = { workspace = true }
+futures-core = { workspace = true }
+http-body-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+utoipa = { workspace = true }
+uuid = { workspace = true }

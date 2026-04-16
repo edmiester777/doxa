@@ -1,0 +1,57 @@
+[package]
+name = "doxa-docs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "Ergonomic OpenAPI documentation and Scalar UI hosting for axum. Built on utoipa + utoipa-axum with minimal handler attributes and in-memory spec serving."
+keywords = ["axum", "openapi", "documentation", "scalar", "utoipa"]
+categories = ["web-programming::http-server", "development-tools"]
+
+[features]
+# Default feature set: include the Scalar UI which loads its JavaScript
+# from a CDN — near-zero binary cost, no embedded assets. Scalar is
+# preferred because it is actively maintained, ships OpenAPI 3.2
+# parsing support, renders the `x-badges` vendor extension natively,
+# and surfaces required OAuth2 scopes inline under each operation. See
+# `src/ui/scalar.rs` for the default configuration (three-pane `modern`
+# layout, dark mode on, Scalar Agent / MCP integrations disabled). All
+# knobs are overridable via `ScalarConfig` on `MountOpts::scalar`.
+default = ["docs-scalar", "macros"]
+
+# Mount the Scalar UI at the configured docs path. Scalar is a small
+# HTML template that pulls `@scalar/api-reference` from cdn.jsdelivr.net
+# at runtime; binary impact is roughly one HTML string. Ships
+# configured for dark mode by default with a user-facing toggle.
+docs-scalar = []
+
+# Re-export the companion `doxa-macros` proc-macro crate
+# (`#[derive(ApiError)]`, `#[derive(SseEvent)]`, `#[get]`/`#[post]`/…).
+# Enabled by default so consumers get the full ergonomic surface with a
+# single dependency; disable default features to drop the proc-macro
+# compile cost when the derives aren't needed.
+macros = ["dep:doxa-macros"]
+
+[dependencies]
+axum = { workspace = true }
+doxa-macros = { workspace = true, optional = true }
+bytes = { workspace = true }
+futures-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true }
+paste = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+doxa = { workspace = true }
+tokio = { workspace = true }
+http-body-util = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }

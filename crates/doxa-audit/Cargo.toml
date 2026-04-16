@@ -1,0 +1,34 @@
+[package]
+name = "doxa-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "SOC 2-flavored append-only audit logging primitives with an optional SeaORM persistence backend. Events buffer through an async mpsc channel and persist via a background writer."
+keywords = ["audit", "logging", "soc2", "sea-orm", "axum"]
+categories = ["web-programming", "database"]
+
+[features]
+default = ["sea-orm"]
+# Enables the SeaORM-backed audit log entity and the
+# `spawn_audit_writer` background persistence task. Disable to consume
+# only the channel surface (`AuditLogger`, `AuditEventBuilder`,
+# `AuditEvent`, `EventType`, `Outcome`) — useful for downstream
+# services that want to ship audit events to a different sink.
+sea-orm = ["dep:sea-orm", "dep:sea-orm-migration"]
+
+[dependencies]
+sea-orm = { workspace = true, optional = true }
+sea-orm-migration = { workspace = true, optional = true }
+axum = { workspace = true }
+doxa-docs = { workspace = true, default-features = false }
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

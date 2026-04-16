@@ -1,0 +1,19 @@
+[package]
+name = "doxa-protected"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "Zeroize-on-drop string type with [REDACTED] Debug/Display/Serialize and OpenAPI schema. Framework-neutral, zero internal dependencies."
+keywords = ["secrets", "redact", "zeroize", "openapi", "utoipa"]
+categories = ["cryptography", "data-structures"]
+
+[dependencies]
+secrecy = { workspace = true }
+serde = { workspace = true }
+utoipa = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
