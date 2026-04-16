@@ -10,6 +10,17 @@ members = [
     "crates/doxa-policy",
 ]
 
+[workspace.metadata.release]
+# Publish crates in dependency order with a delay for index propagation.
+publish = true
+push = true
+tag = true
+tag-prefix = "v"
+# Consolidate into a single tag for the workspace (not per-crate).
+consolidate-commits = true
+# Pre-release check: ensure everything builds and tests pass.
+verify = true
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
