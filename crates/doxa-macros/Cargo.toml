@@ -30,7 +30,7 @@ utoipa = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
-doxa = { package = "doxa-docs", path = "../doxa-docs", version = "0.1.0" }
+doxa = { package = "doxa-docs", path = "../doxa-docs" }
 futures = { workspace = true }
 futures-core = { workspace = true }
 http-body-util = { workspace = true }

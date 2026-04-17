@@ -49,7 +49,9 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-doxa = { workspace = true }
+# Path-only (no version) so cargo publish strips it — avoids the
+# circular resolution that blocks initial crates.io bootstrap.
+doxa = { path = "../doxa" }
 tokio = { workspace = true }
 http-body-util = { workspace = true }
 futures = { workspace = true }
