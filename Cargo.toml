@@ -15,7 +15,7 @@ members = [
 publish = true
 push = true
 tag = true
-tag-prefix = "v"
+tag-prefix = ""
 # Consolidate into a single tag for the workspace (not per-crate).
 consolidate-commits = true
 # Pre-release check: ensure everything builds and tests pass.
