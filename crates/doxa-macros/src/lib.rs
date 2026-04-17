@@ -1,20 +1,54 @@
 //! Procedural macros for [`doxa`](../doxa/index.html).
 //!
-//! Provides:
+//! # Derive macros
 //!
-//! - [`macro@ApiError`] — derive that wires an enum into both
+//! - [`macro@ApiError`] — wires an error enum into both
 //!   [`axum::response::IntoResponse`] and [`utoipa::IntoResponses`] from a
-//!   single per-variant `#[api(...)]` declaration. Multiple variants may share
-//!   a status code; they are grouped into one OpenAPI Response per status with
-//!   each variant becoming a named example.
-//! - [`macro@SseEvent`] — derive that implements
+//!   single per-variant `#[api(...)]` declaration. Multiple variants sharing
+//!   a status code are grouped into one OpenAPI response with distinct
+//!   examples. An optional `outcome` attribute integrates with the audit
+//!   trail.
+//! - [`macro@SseEvent`] — implements
 //!   [`SseEventMeta`](../doxa/trait.SseEventMeta.html) for a tagged enum
-//!   so [`SseStream`](../doxa/struct.SseStream.html) can name each event
-//!   frame after the variant carrying it.
-//! - HTTP method shortcuts ([`macro@get`], [`macro@post`], [`macro@put`],
-//!   [`macro@patch`], [`macro@delete`]) that delegate to [`utoipa::path`] with
-//!   sensible defaults filled in. Use [`macro@operation`] for cases that need a
-//!   custom HTTP method or multi-method registration.
+//!   so [`SseStream`](../doxa/struct.SseStream.html) names each SSE frame
+//!   after the variant carrying it. Override names with `#[sse(name = "…")]`.
+//!
+//! # HTTP method attribute macros
+//!
+//! [`macro@get`], [`macro@post`], [`macro@put`], [`macro@patch`],
+//! [`macro@delete`] delegate to [`utoipa::path`] with automatic inference
+//! from the handler signature. Use [`macro@operation`] for custom or
+//! multi-method routes.
+//!
+//! ## What the method macros infer
+//!
+//! - **`operation_id`** — defaults to the function name.
+//! - **`request_body`** — detected from the first `Json<T>` parameter,
+//!   including through transparent wrappers like `Valid<Json<T>>`.
+//! - **Path parameters** — `{name}` segments in the route template are
+//!   matched to `Path<T>` extractors (scalar, tuple, and struct forms).
+//! - **Query parameters** — `Query<T>` extractors (including wrapped)
+//!   contribute query parameters via trait dispatch.
+//! - **Header parameters** — `Header<H>` extractors contribute header
+//!   parameters. The `headers(H1, H2)` attribute documents headers
+//!   without extracting them; both forms deduplicate.
+//! - **Success response** — `Json<T>` → 200; `(StatusCode, Json<T>)` → 201;
+//!   `SseStream<E, _>` → `text/event-stream` with per-variant event names.
+//! - **Error responses** — the `E` from `Result<_, E>` is folded into
+//!   `responses(...)` as an `IntoResponses` reference.
+//! - **Tags** — `tag = "Name"` for a single tag, `tags("A", "B")` for
+//!   multiple. Tags control grouping in documentation UIs.
+//!
+//! Explicit overrides always win: if you supply `request_body = ...`,
+//! `params(...)`, or `responses(...)` by hand, inference for that field
+//! is suppressed.
+//!
+//! # Capability attribute macro
+//!
+//! [`macro@capability`] declares a `Capable` marker type backed by a
+//! `Capability` constant for use with `doxa_auth::Require<M>`.
+//!
+//! # Usage
 //!
 //! Consumers should depend on `doxa` (with the default `macros`
 //! feature) and import these macros via `doxa::{get, post,
