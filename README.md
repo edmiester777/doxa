@@ -106,12 +106,12 @@ utoipa = "5"             # required — see note below
 
 | Feature | Crate | Does |
 |---|---|---|
-| `docs` (default) | [`doxa-docs`](crates/doxa-docs) | OpenAPI docs, Scalar UI, `#[get]` / `#[post]` / `#[derive(ApiError)]`, SSE |
-| `macros` (default) | [`doxa-macros`](crates/doxa-macros) | Proc macros — re-exported from `doxa` by default |
-| `auth` | [`doxa-auth`](crates/doxa-auth) | OIDC / JWT middleware, generic over your claim struct |
-| `policy` | [`doxa-policy`](crates/doxa-policy) | Cedar authorization with pluggable storage |
-| `audit` | [`doxa-audit`](crates/doxa-audit) | Non-blocking audit log with auto-capture and trait-based outcomes, optional SeaORM sink |
-| `protected` | [`doxa-protected`](crates/doxa-protected) | `ProtectedString` — zeroize-on-drop, redacted everywhere |
+| `docs` (default) | [`doxa-docs`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-docs) | OpenAPI docs, Scalar UI, `#[get]` / `#[post]` / `#[derive(ApiError)]`, SSE |
+| `macros` (default) | [`doxa-macros`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-macros) | Proc macros — re-exported from `doxa` by default |
+| `auth` | [`doxa-auth`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-auth) | OIDC / JWT middleware, generic over your claim struct |
+| `policy` | [`doxa-policy`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-policy) | Cedar authorization with pluggable storage |
+| `audit` | [`doxa-audit`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-audit) | Non-blocking audit log with auto-capture and trait-based outcomes, optional SeaORM sink |
+| `protected` | [`doxa-protected`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-protected) | `ProtectedString` — zeroize-on-drop, redacted everywhere |
 
 Each crate also works standalone if you prefer fine-grained control over your dependency graph.
 
@@ -660,4 +660,4 @@ Huge thanks to the [axum](https://github.com/tokio-rs/axum) and [utoipa](https:/
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](https://github.com/edmiester777/doxa/blob/main/LICENSE).
