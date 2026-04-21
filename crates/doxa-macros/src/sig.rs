@@ -199,6 +199,56 @@ fn strip_impl_trait(ty: Type) -> Type {
     }
 }
 
+/// Walk a type and collect every nested generic argument that appears
+/// anywhere inside it, at any depth. Does **not** include `ty` itself.
+///
+/// Used by the inferred `ApidocHandlerSchemas::collect` impl to route
+/// each nested type through a
+/// [`GenericArgSchemaContribution`](../../doxa/__private/struct.GenericArgSchemaContribution.html)
+/// probe so types buried inside generic wrappers (e.g. `SourceSummary`
+/// inside `Paginated<SourceSummary>`) get registered on
+/// `components.schemas`. Types that do not implement `ToSchema`
+/// silently no-op via the probe's depth-1 fallback — so emitting
+/// probes for wrapper types like `Json`, `Result`, `Vec`, `Option`,
+/// and tuples is safe.
+///
+/// The recursion follows every shape that can contain a type inside
+/// generic angle brackets or element position: path-type generics,
+/// tuples, arrays, references, pointers, parens, and grouping nodes.
+/// `impl Trait` and other non-nominal shapes are skipped because they
+/// have already been normalized to `()` by [`strip_impl_trait`].
+fn collect_nested_type_args(ty: &Type, out: &mut Vec<Type>) {
+    match ty {
+        Type::Path(tp) => {
+            for seg in &tp.path.segments {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    for arg in &args.args {
+                        if let GenericArgument::Type(inner) = arg {
+                            out.push(inner.clone());
+                            collect_nested_type_args(inner, out);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Tuple(tt) => {
+            for elem in &tt.elems {
+                out.push(elem.clone());
+                collect_nested_type_args(elem, out);
+            }
+        }
+        Type::Array(ta) => {
+            out.push((*ta.elem).clone());
+            collect_nested_type_args(&ta.elem, out);
+        }
+        Type::Reference(tr) => collect_nested_type_args(&tr.elem, out),
+        Type::Ptr(tp) => collect_nested_type_args(&tp.elem, out),
+        Type::Paren(tp) => collect_nested_type_args(&tp.elem, out),
+        Type::Group(tg) => collect_nested_type_args(&tg.elem, out),
+        _ => {}
+    }
+}
+
 /// Match `Wrapper<Inner>` and return `("Wrapper", Inner)`. Recognizes
 /// both bare `Json<T>` and qualified `axum::Json<T>` / `axum::extract::Json<T>`
 /// by inspecting the final segment.
@@ -378,6 +428,44 @@ impl InferredAttrs {
             quote! {}
         };
 
+        // Generic-argument schema registration. For every type
+        // parameter that appears anywhere inside the handler's return
+        // type, emit a `GenericArgSchemaContribution` probe so the
+        // type's root schema lands on `components.schemas`. Utoipa's
+        // `ToSchema` derive filters type-parameter fields into its
+        // `generic_references` bucket and emits only the recursive
+        // `<T as ToSchema>::schemas(out)` call for them — never the
+        // `(name, schema)` pair — so a concrete instantiation like
+        // `Paginated<SourceSummary>` where `SourceSummary` is never
+        // returned directly anywhere else leaves a dangling
+        // `$ref: #/components/schemas/SourceSummary` in the spec.
+        // The probe's depth-1 fallback no-ops for types that don't
+        // implement `ToSchema + PartialSchema`, so emitting probes
+        // for wrappers like `Json`, `Result`, `Vec`, and `Option` is
+        // safe.
+        let generic_arg_schemas_tt = if let Some(ret_ty) = &self.return_type {
+            let mut nested: Vec<Type> = Vec::new();
+            collect_nested_type_args(ret_ty, &mut nested);
+            let probes = nested.iter().map(|ty| {
+                quote! {
+                    {
+                        #[allow(unused_imports)]
+                        use ::doxa::__private::{
+                            GenericArgSchemaImplementedAdhoc as _,
+                            GenericArgSchemaMissingAdhoc as _,
+                        };
+                        ::doxa::__private::GenericArgSchemaContribution::<
+                            #ty,
+                        >::new()
+                        .__collect(__out);
+                    }
+                }
+            });
+            quote! { #(#probes)* }
+        } else {
+            quote! {}
+        };
+
         // Response-body trait dispatch. When the handler's return type
         // implements `DocResponseBody` (covers `axum::Json<T>`,
         // `SseStream<E, _>`, `Result<Ok, _>` where `Ok: DocResponseBody`,
@@ -514,6 +602,7 @@ impl InferredAttrs {
                     )*
                     #error_schemas_tt
                     #response_body_schemas_tt
+                    #generic_arg_schemas_tt
                 }
             }
         });
