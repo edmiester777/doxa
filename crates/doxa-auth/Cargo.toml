@@ -27,7 +27,7 @@ audit = ["dep:doxa-audit"]
 doxa-policy = { workspace = true }
 doxa-audit = { workspace = true, optional = true, default-features = false }
 doxa-protected = { workspace = true }
-doxa = { package = "doxa-docs", path = "../doxa-docs", version = "0.1.1", optional = true }
+doxa = { package = "doxa-docs", path = "../doxa-docs", version = "0.1.2", optional = true }
 cedar-policy = { workspace = true }
 axum = { workspace = true, optional = true }
 http = { workspace = true }

@@ -22,7 +22,7 @@ consolidate-commits = true
 verify = true
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["edmiester777"]
@@ -32,13 +32,13 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 # Internal crates
-doxa = { path = "crates/doxa", version = "0.1.1" }
-doxa-docs = { path = "crates/doxa-docs", version = "0.1.1", default-features = false }
-doxa-macros = { path = "crates/doxa-macros", version = "0.1.1" }
-doxa-protected = { path = "crates/doxa-protected", version = "0.1.1" }
-doxa-audit = { path = "crates/doxa-audit", version = "0.1.1", default-features = false }
-doxa-auth = { path = "crates/doxa-auth", version = "0.1.1", default-features = false }
-doxa-policy = { path = "crates/doxa-policy", version = "0.1.1", default-features = false }
+doxa = { path = "crates/doxa", version = "0.1.2" }
+doxa-docs = { path = "crates/doxa-docs", version = "0.1.2", default-features = false }
+doxa-macros = { path = "crates/doxa-macros", version = "0.1.2" }
+doxa-protected = { path = "crates/doxa-protected", version = "0.1.2" }
+doxa-audit = { path = "crates/doxa-audit", version = "0.1.2", default-features = false }
+doxa-auth = { path = "crates/doxa-auth", version = "0.1.2", default-features = false }
+doxa-policy = { path = "crates/doxa-policy", version = "0.1.2", default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
