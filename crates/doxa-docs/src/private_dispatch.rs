@@ -333,6 +333,74 @@ impl<T: ?Sized> BareSchemaMissingAdhoc for &BareSchemaContribution<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Generic-argument schema probe (for types buried inside generic wrappers)
+// ---------------------------------------------------------------------------
+
+/// Probe that registers a type by its [`utoipa::ToSchema::name`] plus
+/// every schema transitively referenced by it, so `$ref`s resolve.
+///
+/// The method macro emits one of these probes per type argument
+/// discovered anywhere inside the handler's return type. This closes
+/// a gap in utoipa's derive: when a field's type is a generic
+/// parameter (e.g. `items: Vec<T>` in a `Paginated<T: ToSchema>`),
+/// the derive emits only a recursive `<T as ToSchema>::schemas(out)`
+/// call and never pushes `T`'s own `(name, schema)` pair. For a
+/// concrete instantiation like `Paginated<SourceSummary>` where
+/// `SourceSummary` is never returned directly anywhere else, this
+/// leaves a dangling `$ref: #/components/schemas/SourceSummary` in
+/// the final spec. Walking the return type at macro-expansion time
+/// and routing each generic argument through this probe registers
+/// the missing roots.
+///
+/// Types that do not implement [`utoipa::ToSchema`] +
+/// [`utoipa::PartialSchema`] route to the depth-1 fallback and
+/// contribute nothing — so emitting probes for wrapper types like
+/// `axum::Json`, `Result`, and `std::vec::Vec<T>` is safe.
+pub struct GenericArgSchemaContribution<T: ?Sized>(PhantomData<T>);
+
+impl<T: ?Sized> GenericArgSchemaContribution<T> {
+    /// Construct a zero-sized probe for `T`.
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: ?Sized> Default for GenericArgSchemaContribution<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Depth-0 specialization — invokes the shared `register_named_schema`
+/// helper so this probe and `register_schema`-for-response-body follow
+/// the same dedupe rules.
+pub trait GenericArgSchemaImplementedAdhoc: Sized {
+    /// Register the type and its transitive dependencies.
+    fn __collect(self, out: &mut Vec<(String, RefOr<Schema>)>);
+}
+
+impl<T> GenericArgSchemaImplementedAdhoc for GenericArgSchemaContribution<T>
+where
+    T: utoipa::PartialSchema + utoipa::ToSchema,
+{
+    fn __collect(self, out: &mut Vec<(String, RefOr<Schema>)>) {
+        crate::doc_responses::register_named_schema::<T>(out);
+    }
+}
+
+/// Depth-1 fallback — applies to every `T`. Chosen when the depth-0
+/// impl above is unavailable (i.e. `T` does not implement
+/// `ToSchema + PartialSchema`).
+pub trait GenericArgSchemaMissingAdhoc: Sized {
+    /// No-op fallback — registers nothing.
+    fn __collect(self, _out: &mut Vec<(String, RefOr<Schema>)>);
+}
+
+impl<T: ?Sized> GenericArgSchemaMissingAdhoc for &GenericArgSchemaContribution<T> {
+    fn __collect(self, _out: &mut Vec<(String, RefOr<Schema>)>) {}
+}
+
+// ---------------------------------------------------------------------------
 // Per-operation security/permission contribution
 // ---------------------------------------------------------------------------
 

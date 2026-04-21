@@ -284,13 +284,15 @@ pub mod __private {
     // part of the public API.
     pub use crate::private_dispatch::{
         BareSchemaContribution, BareSchemaImplementedAdhoc, BareSchemaMissingAdhoc,
-        HeaderParamContribution, HeaderParamsImplementedAdhoc, HeaderParamsMissingAdhoc,
-        InnerSchemaContribution, InnerSchemaImplementedAdhoc, InnerSchemaMissingAdhoc,
-        OpSecurityContribution, OpSecurityImplementedAdhoc, OpSecurityMissingAdhoc,
-        PathParamContribution, PathParamsImplementedAdhoc, PathParamsMissingAdhoc,
-        PathScalarContribution, PathScalarImplementedAdhoc, PathScalarMissingAdhoc,
-        QueryParamContribution, QueryParamsImplementedAdhoc, QueryParamsMissingAdhoc,
-        ResponseBodyContribution, ResponseBodyImplementedAdhoc, ResponseBodyMissingAdhoc,
+        GenericArgSchemaContribution, GenericArgSchemaImplementedAdhoc,
+        GenericArgSchemaMissingAdhoc, HeaderParamContribution, HeaderParamsImplementedAdhoc,
+        HeaderParamsMissingAdhoc, InnerSchemaContribution, InnerSchemaImplementedAdhoc,
+        InnerSchemaMissingAdhoc, OpSecurityContribution, OpSecurityImplementedAdhoc,
+        OpSecurityMissingAdhoc, PathParamContribution, PathParamsImplementedAdhoc,
+        PathParamsMissingAdhoc, PathScalarContribution, PathScalarImplementedAdhoc,
+        PathScalarMissingAdhoc, QueryParamContribution, QueryParamsImplementedAdhoc,
+        QueryParamsMissingAdhoc, ResponseBodyContribution, ResponseBodyImplementedAdhoc,
+        ResponseBodyMissingAdhoc,
     };
 
     // Re-export paste so our `routes!` macro can concatenate idents
