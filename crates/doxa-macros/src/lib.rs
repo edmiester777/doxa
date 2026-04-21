@@ -210,25 +210,26 @@ mod sse_event;
 ///
 /// # Example
 ///
-/// ```ignore
-/// use doxa_macros::ApiError;
+/// ```no_run
+/// use doxa::{ApiError, ToSchema};
+/// use serde::Serialize;
 ///
-/// #[derive(Debug, thiserror::Error, ApiError)]
+/// #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
 /// pub enum MyError {
 ///     #[error("validation failed: {0}")]
-///     #[api_error(status = 400, code = "validation_error")]
+///     #[api(status = 400, code = "validation_error")]
 ///     Validation(String),
 ///
 ///     #[error("query failed: {0}")]
-///     #[api_error(status = 400, code = "query_error")]
+///     #[api(status = 400, code = "query_error")]
 ///     Query(String),
 ///
 ///     #[error("not found: {0}")]
-///     #[api_error(status = 404, code = "not_found")]
+///     #[api(status = 404, code = "not_found")]
 ///     NotFound(String),
 ///
 ///     #[error("internal error")]
-///     #[api_error(status = 500, code = "internal")]
+///     #[api(status = 500, code = "internal")]
 ///     Internal,
 /// }
 /// ```
@@ -255,7 +256,7 @@ pub fn derive_api_error(input: TokenStream) -> TokenStream {
 /// aligned. Each variant's event name defaults to its snake-case form;
 /// override with `#[sse(name = "…")]`.
 ///
-/// ```rust,ignore
+/// ```no_run
 /// use doxa::SseEvent;
 ///
 /// #[derive(serde::Serialize, utoipa::ToSchema, SseEvent)]
@@ -294,12 +295,16 @@ pub fn derive_sse_event(input: TokenStream) -> TokenStream {
 ///
 /// # Tags
 ///
-/// ```rust,ignore
+/// ```no_run
+/// use doxa::get;
+///
 /// // Single tag (forwarded to utoipa as-is):
 /// #[get("/api/v1/models", tag = "Models")]
+/// async fn list_models() -> &'static str { "[]" }
 ///
 /// // Multiple tags (extracted and emitted as `tags = [...]`):
-/// #[get("/api/v1/models", tags("Models", "Public API"))]
+/// #[get("/api/v2/models", tags("Models", "Public API"))]
+/// async fn list_models_public() -> &'static str { "[]" }
 /// ```
 #[proc_macro_attribute]
 pub fn get(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -360,8 +365,8 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use doxa_macros::capability;
+/// ```no_run
+/// use doxa::capability;
 ///
 /// #[capability(
 ///     name = "widgets.read",

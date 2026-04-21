@@ -31,6 +31,10 @@ utoipa = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 doxa = { package = "doxa-docs", path = "../doxa-docs" }
+# Pulled in so the `capability!` doctest compiles — the macro expands
+# to `::doxa_policy::{Capable, Capability, CapabilityCheck}` paths
+# that the consumer must have in scope.
+doxa-policy = { path = "../doxa-policy" }
 futures = { workspace = true }
 futures-core = { workspace = true }
 http-body-util = { workspace = true }
