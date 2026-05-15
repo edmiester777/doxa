@@ -131,7 +131,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             let entity_type = &c.entity_type;
             let entity_id = &c.entity_id;
             quote! {
-                ::doxa_policy::CapabilityCheck {
+                ::doxa::policy::CapabilityCheck {
                     action: #action,
                     entity_type: #entity_type,
                     entity_id: #entity_id,
@@ -144,14 +144,14 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #input
 
         #[doc(hidden)]
-        const #const_name: ::doxa_policy::Capability = ::doxa_policy::Capability {
+        const #const_name: ::doxa::policy::Capability = ::doxa::policy::Capability {
             name: #cap_name,
             description: #cap_description,
             checks: &[#(#check_tokens),*],
         };
 
-        impl ::doxa_policy::Capable for #struct_name {
-            const CAPABILITY: &'static ::doxa_policy::Capability = &#const_name;
+        impl ::doxa::policy::Capable for #struct_name {
+            const CAPABILITY: &'static ::doxa::policy::Capability = &#const_name;
         }
     }
 }

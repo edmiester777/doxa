@@ -353,8 +353,8 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Generates the struct, a hidden `Capability` constant, and the
 /// `Capable` impl so the marker can be used with
-/// `doxa_auth::Require<M>` immediately. Requires `doxa-policy` in the
-/// consumer's dependency tree.
+/// `doxa_auth::Require<M>` immediately. Requires the `policy` feature
+/// on `doxa` (which re-exports `doxa-policy` as `doxa::policy`).
 ///
 /// # Attribute arguments
 ///
