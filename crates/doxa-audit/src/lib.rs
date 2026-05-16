@@ -22,7 +22,7 @@
 //!   │ inject   │  │ actor_attrs   │  │ resource │  │ (if not  │
 //!   │ metadata │  │ source_ip     │  │ req_body │  │  already │
 //!   └──────────┘  │ user_agent    │  └──────────┘  │  done)   │
-//!                 │ request_id    │                 └──────────┘
+//!                 │ request_id    │                └──────────┘
 //!                 └───────────────┘
 //! ```
 //!
@@ -37,6 +37,8 @@ pub mod event;
 pub mod layer;
 pub mod logger;
 #[cfg(feature = "sea-orm")]
+pub mod migration;
+#[cfg(feature = "sea-orm")]
 mod sea_orm_impls;
 
 pub use builder::AuditEventBuilder;
@@ -46,6 +48,8 @@ pub use logger::AuditLogger;
 
 #[cfg(feature = "sea-orm")]
 pub use logger::spawn_audit_writer;
+#[cfg(feature = "sea-orm")]
+pub use migration::{init, Migrator};
 
 #[cfg(test)]
 mod tests {
