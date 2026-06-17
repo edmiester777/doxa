@@ -36,6 +36,8 @@ use utoipa::openapi::path::Operation;
 use utoipa::openapi::response::ResponseBuilder;
 use utoipa::openapi::{Content, RefOr, Schema};
 
+use crate::sse::SseEventMeta;
+
 /// Describe how a handler's return type contributes to its
 /// OpenAPI operation's 200 response.
 ///
@@ -92,7 +94,7 @@ where
 
 impl<E, S> DocResponseBody for crate::SseStream<E, S>
 where
-    E: utoipa::PartialSchema + utoipa::ToSchema + 'static,
+    E: utoipa::PartialSchema + utoipa::ToSchema + SseEventMeta + 'static,
 {
     fn describe(op: &mut Operation, schemas: &mut Vec<(String, RefOr<Schema>)>) {
         insert_sse_200::<E>(op);
@@ -159,7 +161,7 @@ where
 
 fn insert_sse_200<E>(op: &mut Operation)
 where
-    E: utoipa::PartialSchema + utoipa::ToSchema,
+    E: utoipa::PartialSchema + utoipa::ToSchema + SseEventMeta,
 {
     if op.responses.responses.contains_key("200") {
         return;
@@ -176,9 +178,30 @@ where
             "#/components/schemas/{name}"
         )))
     };
-    let content = Content::new(Some(schema));
+
+    // The `itemSchema` only describes the JSON `data:` payload. Surface the
+    // discrete `event:` frame names — which `SseEventMeta` already knows —
+    // as an `x-sse-event-names` extension so a spec reader (and SDK codegen)
+    // can see the full event vocabulary, not just the payload union. This
+    // survives the spec-version post-process; only `x-sse-stream` is stripped.
+    let event_names = E::all_event_names();
+    let mut content = Content::new(Some(schema));
+    content.extensions = Some(
+        utoipa::openapi::extensions::ExtensionsBuilder::new()
+            .add(
+                "x-sse-event-names",
+                serde_json::Value::Array(
+                    event_names
+                        .iter()
+                        .map(|n| serde_json::Value::String((*n).to_owned()))
+                        .collect(),
+                ),
+            )
+            .build(),
+    );
+
     let response = ResponseBuilder::new()
-        .description("")
+        .description(sse_response_description(event_names))
         .content("text/event-stream", content)
         .build();
     op.responses
@@ -188,6 +211,25 @@ where
     // `ApiDocBuilder::build`'s post-process can rewrite it under the
     // selected `SseSpecVersion`. See `crate::sse::mark_sse_response`.
     crate::sse::mark_sse_response(op);
+}
+
+/// Human-readable description for an SSE 200 response that enumerates the
+/// `event:` frame names. Rendered by docs UIs (Scalar, Swagger UI) so the
+/// stream is self-explanatory without cross-referencing the event enum.
+fn sse_response_description(event_names: &[&str]) -> String {
+    if event_names.is_empty() {
+        return "Server-Sent Event stream (`text/event-stream`).".to_owned();
+    }
+    let names = event_names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Server-Sent Event stream (`text/event-stream`). Each frame's `event:` field \
+         is one of: {names}. The `data:` payload is the JSON for that event, described \
+         by the schema below."
+    )
 }
 
 /// Runtime heuristic that distinguishes a "nominal" schema type

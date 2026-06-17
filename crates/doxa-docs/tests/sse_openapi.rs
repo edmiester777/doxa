@@ -115,6 +115,30 @@ fn default_output_leaves_non_sse_endpoints_alone() {
     assert!(hello_200.get("x-sse-stream").is_none());
 }
 
+#[test]
+fn sse_response_documents_event_names() {
+    let v = build(SseSpecVersion::V3_2);
+    let resp = &v["paths"]["/migrations/stream"]["get"]["responses"]["200"];
+
+    // Machine-readable event vocabulary on the content entry — the discrete
+    // `event:` frame names the schema's payload union can't express.
+    let names: Vec<&str> = resp["content"]["text/event-stream"]["x-sse-event-names"]
+        .as_array()
+        .expect("x-sse-event-names present")
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["started", "progress", "finished", "heartbeat"]);
+
+    // Human-readable description enumerates the frame names (the `#[sse(name)]`
+    // override is honored).
+    let desc = resp["description"].as_str().unwrap();
+    assert!(
+        desc.contains("`started`") && desc.contains("`finished`"),
+        "description should enumerate event names: {desc}"
+    );
+}
+
 // ---- 3.1 opt-out
 // -------------------------------------------------------------
 
@@ -138,5 +162,11 @@ fn v3_1_opt_out_keeps_schema_and_does_not_upgrade_version() {
     assert!(
         sse.get("x-sse-stream").is_none(),
         "marker must be stripped in both modes: {sse:#?}",
+    );
+    // The event-name vocabulary is version-independent — it documents the
+    // stream, not the 3.1-vs-3.2 schema placement.
+    assert!(
+        sse["x-sse-event-names"].is_array(),
+        "x-sse-event-names must survive in 3.1 mode too: {sse:#?}",
     );
 }
