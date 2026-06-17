@@ -26,7 +26,8 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    parse2, Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, Result, Type, Variant,
+    parse2, Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, GenericArgument, Lit,
+    PathArguments, Result, Type, Variant,
 };
 
 /// Top-level entry point invoked from `lib.rs`.
@@ -145,22 +146,25 @@ fn expand_schema(
         // into the payload via allOf).
         let component_schema = match (content, &v.kind) {
             // Adjacent tagging, newtype: { tag: <lit>, content: $ref<Payload> }.
-            (Some(content), VariantKind::Newtype(payload)) => quote! {
-                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
-                    ::utoipa::openapi::ObjectBuilder::new()
-                        .schema_type(::utoipa::openapi::schema::Type::Object)
-                        .property(#tag, #tag_property)
-                        .property(
-                            #content,
-                            ::utoipa::openapi::RefOr::Ref(::utoipa::openapi::Ref::from_schema_name(
-                                <#payload as ::utoipa::ToSchema>::name(),
-                            )),
-                        )
-                        .required(#tag)
-                        .required(#content)
-                        .build(),
-                ))
-            },
+            (Some(content), VariantKind::Newtype(payload)) => {
+                let pname = payload_name_expr(payload);
+                quote! {
+                    ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                        ::utoipa::openapi::ObjectBuilder::new()
+                            .schema_type(::utoipa::openapi::schema::Type::Object)
+                            .property(#tag, #tag_property)
+                            .property(
+                                #content,
+                                ::utoipa::openapi::RefOr::Ref(
+                                    ::utoipa::openapi::Ref::from_schema_name(#pname),
+                                ),
+                            )
+                            .required(#tag)
+                            .required(#content)
+                            .build(),
+                    ))
+                }
+            }
             // Adjacent tagging, unit: { tag: <lit> }.
             (Some(_), VariantKind::Unit) => quote! {
                 ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
@@ -172,22 +176,25 @@ fn expand_schema(
                 ))
             },
             // Internal tagging, newtype: allOf[ $ref<Payload>, { tag: <lit> } ].
-            (None, VariantKind::Newtype(payload)) => quote! {
-                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::AllOf(
-                    ::utoipa::openapi::AllOfBuilder::new()
-                        .item(::utoipa::openapi::RefOr::Ref(::utoipa::openapi::Ref::from_schema_name(
-                            <#payload as ::utoipa::ToSchema>::name(),
-                        )))
-                        .item(::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
-                            ::utoipa::openapi::ObjectBuilder::new()
-                                .schema_type(::utoipa::openapi::schema::Type::Object)
-                                .property(#tag, #tag_property)
-                                .required(#tag)
-                                .build(),
-                        )))
-                        .build(),
-                ))
-            },
+            (None, VariantKind::Newtype(payload)) => {
+                let pname = payload_name_expr(payload);
+                quote! {
+                    ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::AllOf(
+                        ::utoipa::openapi::AllOfBuilder::new()
+                            .item(::utoipa::openapi::RefOr::Ref(
+                                ::utoipa::openapi::Ref::from_schema_name(#pname),
+                            ))
+                            .item(::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                                ::utoipa::openapi::ObjectBuilder::new()
+                                    .schema_type(::utoipa::openapi::schema::Type::Object)
+                                    .property(#tag, #tag_property)
+                                    .required(#tag)
+                                    .build(),
+                            )))
+                            .build(),
+                    ))
+                }
+            }
             // Internal tagging, unit: { tag: <lit> }.
             (None, VariantKind::Unit) => quote! {
                 ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
@@ -244,17 +251,14 @@ fn expand_schema(
             schemas.push((#comp_name.to_string(), #component_schema));
         });
 
-        // Register the payload component (and its own dependencies) once.
+        // Register the payload component and every nested generic argument.
+        // `<Payload>::name()` collapses generics to the base ident
+        // (`Envelope<RunStarted>` -> "Envelope"), and utoipa's generic
+        // `schemas()` registers a type's deps but not its own generic
+        // arguments — so both the monomorphized payload names and the argument
+        // components are emitted here to keep every `$ref` resolvable.
         if let VariantKind::Newtype(payload) = &v.kind {
-            component_pushes.push(quote! {
-                {
-                    let __name = <#payload as ::utoipa::ToSchema>::name().into_owned();
-                    if !schemas.iter().any(|(__n, _)| *__n == __name) {
-                        schemas.push((__name, <#payload as ::utoipa::PartialSchema>::schema()));
-                    }
-                    <#payload as ::utoipa::ToSchema>::schemas(schemas);
-                }
-            });
+            component_pushes.extend(emit_registration(payload, payload_name_expr(payload)));
         }
 
         // Struct variants inline their fields; register each field type's
@@ -537,6 +541,99 @@ fn struct_field_props(fields: &[StructField]) -> Vec<TokenStream> {
 /// `Option<T>` and `std::option::Option<T>` count).
 fn is_option(ty: &Type) -> bool {
     matches!(ty, Type::Path(tp) if tp.path.segments.last().is_some_and(|s| s.ident == "Option"))
+}
+
+/// The schema name used to reference a newtype variant's payload component.
+///
+/// Defers to `<Payload as ToSchema>::name()` for a concrete payload so
+/// `#[schema(rename)]` is honored. For a *generic* payload utoipa erases the
+/// type arguments in `name()` (`Envelope<RunStarted>` → `"Envelope"`), which
+/// would collapse every variant onto one component — so the name is composed
+/// from the monomorphization to match utoipa's own generic naming
+/// (`Envelope_RunStarted`, `Envelope_FormRequested_RequestedForm`).
+fn payload_name_expr(ty: &Type) -> TokenStream {
+    match composed_generic_name(ty) {
+        Some(name) => quote! { #name },
+        None => quote! { <#ty as ::utoipa::ToSchema>::name() },
+    }
+}
+
+/// Emit registration statements for a newtype payload and every nested generic
+/// argument. The payload is registered under `name_expr` (its monomorphized
+/// name for generics); each generic argument is registered under
+/// `<Arg as ToSchema>::name()` — the same name utoipa emits for the `$ref`
+/// inside the parent's own schema — and recursed into, so no inner `$ref`
+/// dangles regardless of nesting depth.
+fn emit_registration(ty: &Type, name_expr: TokenStream) -> Vec<TokenStream> {
+    let mut out = vec![quote! {
+        {
+            let __name = ::std::string::String::from(#name_expr);
+            if !schemas.iter().any(|(__n, _)| *__n == __name) {
+                schemas.push((__name, <#ty as ::utoipa::PartialSchema>::schema()));
+            }
+            <#ty as ::utoipa::ToSchema>::schemas(schemas);
+        }
+    }];
+    for arg in generic_args(ty) {
+        out.extend(emit_registration(
+            &arg,
+            quote! { <#arg as ::utoipa::ToSchema>::name() },
+        ));
+    }
+    out
+}
+
+/// The angle-bracketed generic type arguments of a path type (empty otherwise).
+fn generic_args(ty: &Type) -> Vec<Type> {
+    let Type::Path(tp) = ty else {
+        return Vec::new();
+    };
+    let Some(seg) = tp.path.segments.last() else {
+        return Vec::new();
+    };
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return Vec::new();
+    };
+    args.args
+        .iter()
+        .filter_map(|a| match a {
+            GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `Some(composed)` when `ty` carries angle-bracketed type arguments; `None`
+/// for a non-generic path (the caller falls back to `ToSchema::name()`).
+fn composed_generic_name(ty: &Type) -> Option<String> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    if !matches!(seg.arguments, PathArguments::AngleBracketed(_)) {
+        return None;
+    }
+    Some(monomorphized_name(ty))
+}
+
+/// Joins a type's path-final ident with each generic type argument's name,
+/// recursively and underscore-separated — matching utoipa's generic schema
+/// naming so the composed `$ref` resolves to the registered component.
+fn monomorphized_name(ty: &Type) -> String {
+    let Type::Path(tp) = ty else {
+        return "Schema".to_string();
+    };
+    let Some(seg) = tp.path.segments.last() else {
+        return "Schema".to_string();
+    };
+    let mut name = seg.ident.to_string();
+    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+        for arg in &args.args {
+            if let GenericArgument::Type(inner) = arg {
+                name.push('_');
+                name.push_str(&monomorphized_name(inner));
+            }
+        }
+    }
+    name
 }
 
 #[cfg(test)]
