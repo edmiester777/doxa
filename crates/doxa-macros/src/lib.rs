@@ -90,7 +90,7 @@
 //! }
 //!
 //! // -- SseEvent: variant-tagged event stream --------------------------------
-//! #[derive(Serialize, ToSchema, SseEvent)]
+//! #[derive(Serialize, SseEvent)]
 //! #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 //! enum BuildEvent {
 //!     Started { id: u64 },
@@ -259,7 +259,7 @@ pub fn derive_api_error(input: TokenStream) -> TokenStream {
 /// ```no_run
 /// use doxa::SseEvent;
 ///
-/// #[derive(serde::Serialize, utoipa::ToSchema, SseEvent)]
+/// #[derive(serde::Serialize, SseEvent)]
 /// #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 /// enum MigrationEvent {
 ///     Started { pipeline: String },
@@ -270,9 +270,13 @@ pub fn derive_api_error(input: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// The derive does not implement `Serialize` or `ToSchema` itself —
-/// that keeps serde's renaming rules authoritative and avoids
-/// duplicating them in this crate.
+/// The derive implements `ToSchema` for the enum — a discriminated `oneOf`
+/// with one component per variant and an OpenAPI `discriminator` keyed on
+/// the serde tag (utoipa's own derive can't express this for tagged enums).
+/// It does **not** implement `Serialize`: pair it with serde's `Serialize`
+/// derive, which stays authoritative for the wire format. Variants must be
+/// unit, newtype, or named-struct (their fields must implement
+/// `utoipa::PartialSchema`; wrap `chrono`/`uuid` fields in a payload type).
 #[proc_macro_derive(SseEvent, attributes(sse))]
 pub fn derive_sse_event(input: TokenStream) -> TokenStream {
     sse_event::expand(input.into())

@@ -92,11 +92,12 @@
 //!
 //! // ----- SSE event stream --------------------------------------------------
 //! //
-//! // `#[derive(SseEvent)]` provides the per-variant event name; pair
-//! // it with `serde::Serialize` and `ToSchema` so the wire format and
-//! // OpenAPI schema stay aligned. `SseStream<E, S>` is the response
-//! // wrapper — handlers never construct axum's `Sse` directly.
-//! #[derive(Serialize, ToSchema, SseEvent)]
+//! // `#[derive(SseEvent)]` provides the per-variant event name *and* the
+//! // `ToSchema` impl (a discriminated `oneOf`); pair it with
+//! // `serde::Serialize`, which stays authoritative for the wire format.
+//! // `SseStream<E, S>` is the response wrapper — handlers never construct
+//! // axum's `Sse` directly.
+//! #[derive(Serialize, SseEvent)]
 //! #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 //! enum BuildEvent {
 //!     Started { id: u64 },

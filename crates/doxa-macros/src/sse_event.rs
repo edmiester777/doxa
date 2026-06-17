@@ -1,22 +1,32 @@
 //! Implementation of `#[derive(SseEvent)]`.
 //!
-//! Generates a [`SseEventMeta`][meta] impl for the enum, mapping each
-//! variant to an SSE event name. The name defaults to the variant's
-//! snake-case form and can be overridden per variant with
-//! `#[sse(name = "…")]`.
+//! Generates two things for a tagged event enum:
 //!
-//! This derive does *not* generate `serde::Serialize` or
-//! `utoipa::ToSchema` — callers combine it with those upstream derives
-//! and their `#[serde(tag = "event", content = "data")]` attribute, so
-//! the wire format stays aligned with the schema description without
-//! the macro re-implementing serde's renaming rules.
+//! 1. A [`SseEventMeta`][meta] impl mapping each variant to its SSE
+//!    `event:` frame name (snake-case by default, overridable per variant
+//!    with `#[sse(name = "…")]`).
+//! 2. The enum's [`utoipa::ToSchema`] / [`utoipa::PartialSchema`] impls,
+//!    emitting a **discriminated** `oneOf`: each variant becomes its own
+//!    `#/components/schemas/<Enum>_<Variant>` component and the union
+//!    carries an OpenAPI `discriminator`. This is the verbose, tooling-
+//!    standard SSE shape utoipa's own derive can't produce for tagged
+//!    enums — so callers drop `#[derive(ToSchema)]` and let `SseEvent`
+//!    own it.
+//!
+//! Because the derive owns `ToSchema`, it requires the enum to be a serde
+//! **tagged** union (`#[serde(tag = "…")]`, optionally `content = "…"`).
+//! Variants may be **unit**, **newtype** (single field — emitted as a `$ref`
+//! to the payload's component), or **named-struct** (fields inlined under the
+//! content object; each field type must implement `utoipa::PartialSchema`, so
+//! wrap `chrono`/`uuid` fields in a payload type). Multi-field tuple variants
+//! are rejected.
 //!
 //! [meta]: ../../doxa/trait.SseEventMeta.html
 
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    parse2, Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, Result, Variant,
+    parse2, Attribute, Data, DeriveInput, Error, Expr, ExprLit, Fields, Lit, Result, Type, Variant,
 };
 
 /// Top-level entry point invoked from `lib.rs`.
@@ -34,10 +44,18 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         }
     };
 
+    let serde = parse_serde_enum_attrs(&derive_input.attrs)?;
+    let Some(tag) = serde.tag.as_deref() else {
+        return Err(Error::new_spanned(
+            &derive_input,
+            "SseEvent requires a serde tag: add `#[serde(tag = \"…\")]` (optionally with `content = \"…\"`)",
+        ));
+    };
+
     let variants = data
         .variants
         .iter()
-        .map(parse_variant)
+        .map(|v| parse_variant(v, serde.rename_all.as_deref()))
         .collect::<Result<Vec<_>>>()?;
 
     if variants.is_empty() {
@@ -47,24 +65,30 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         ));
     }
 
-    // `event_name(&self)` arms must match by shape (unit / tuple /
-    // struct) so we don't require `PartialEq` on inner types.
-    let name_arms = variants.iter().map(|v| {
-        let ident = &v.ident;
-        let name_lit = &v.name;
-        match &v.fields_kind {
-            FieldsKind::Unit => quote! { Self::#ident => #name_lit, },
-            FieldsKind::Tuple => quote! { Self::#ident(..) => #name_lit, },
-            FieldsKind::Named => quote! { Self::#ident { .. } => #name_lit, },
-        }
-    });
-
-    let all_names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-
-    let (impl_generics, ty_generics, where_clause) = derive_input.generics.split_for_impl();
+    let meta_impl = expand_meta(&enum_name, &variants);
+    let schema_impl = expand_schema(&enum_name, tag, serde.content.as_deref(), &variants);
 
     Ok(quote! {
-        impl #impl_generics ::doxa::SseEventMeta for #enum_name #ty_generics #where_clause {
+        #meta_impl
+        #schema_impl
+    })
+}
+
+/// Generate the [`SseEventMeta`] impl (event-name metadata).
+fn expand_meta(enum_name: &syn::Ident, variants: &[ParsedVariant]) -> TokenStream {
+    let name_arms = variants.iter().map(|v| {
+        let ident = &v.ident;
+        let name_lit = &v.event_name;
+        match v.kind {
+            VariantKind::Unit => quote! { Self::#ident => #name_lit, },
+            VariantKind::Newtype(_) => quote! { Self::#ident(..) => #name_lit, },
+            VariantKind::Struct(_) => quote! { Self::#ident { .. } => #name_lit, },
+        }
+    });
+    let all_names = variants.iter().map(|v| v.event_name.as_str());
+
+    quote! {
+        impl ::doxa::SseEventMeta for #enum_name {
             fn event_name(&self) -> &'static str {
                 match self {
                     #(#name_arms)*
@@ -75,113 +99,474 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                 &[#(#all_names),*]
             }
         }
-    })
+    }
+}
+
+/// Generate `ToSchema` + `PartialSchema` emitting the discriminated `oneOf`
+/// plus a per-variant component for each event.
+fn expand_schema(
+    enum_name: &syn::Ident,
+    tag: &str,
+    content: Option<&str>,
+    variants: &[ParsedVariant],
+) -> TokenStream {
+    let enum_name_str = enum_name.to_string();
+
+    // Per-variant: component name, the oneOf item ($ref), the discriminator
+    // mapping entry, and the component-registration statement.
+    let mut oneof_items = Vec::new();
+    let mut mapping_entries = Vec::new();
+    let mut component_pushes = Vec::new();
+
+    for v in variants {
+        let comp_name = format!("{enum_name_str}_{}", v.ident);
+        let comp_ref = format!("#/components/schemas/{comp_name}");
+        let tag_value = &v.tag_value;
+
+        oneof_items.push(quote! {
+            .item(::utoipa::openapi::RefOr::Ref(
+                ::utoipa::openapi::Ref::from_schema_name(#comp_name),
+            ))
+        });
+        mapping_entries.push(quote! { (#tag_value, #comp_ref) });
+
+        // The tag literal property: { "type": "string", "enum": ["<tag_value>"] }.
+        let tag_property = quote! {
+            ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                ::utoipa::openapi::ObjectBuilder::new()
+                    .schema_type(::utoipa::openapi::schema::Type::String)
+                    .enum_values(::core::option::Option::Some([#tag_value]))
+                    .build(),
+            ))
+        };
+
+        // The variant component schema, matching serde's wire format for the
+        // tagging mode (adjacent = tag + content keys; internal = tag merged
+        // into the payload via allOf).
+        let component_schema = match (content, &v.kind) {
+            // Adjacent tagging, newtype: { tag: <lit>, content: $ref<Payload> }.
+            (Some(content), VariantKind::Newtype(payload)) => quote! {
+                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                    ::utoipa::openapi::ObjectBuilder::new()
+                        .schema_type(::utoipa::openapi::schema::Type::Object)
+                        .property(#tag, #tag_property)
+                        .property(
+                            #content,
+                            ::utoipa::openapi::RefOr::Ref(::utoipa::openapi::Ref::from_schema_name(
+                                <#payload as ::utoipa::ToSchema>::name(),
+                            )),
+                        )
+                        .required(#tag)
+                        .required(#content)
+                        .build(),
+                ))
+            },
+            // Adjacent tagging, unit: { tag: <lit> }.
+            (Some(_), VariantKind::Unit) => quote! {
+                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                    ::utoipa::openapi::ObjectBuilder::new()
+                        .schema_type(::utoipa::openapi::schema::Type::Object)
+                        .property(#tag, #tag_property)
+                        .required(#tag)
+                        .build(),
+                ))
+            },
+            // Internal tagging, newtype: allOf[ $ref<Payload>, { tag: <lit> } ].
+            (None, VariantKind::Newtype(payload)) => quote! {
+                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::AllOf(
+                    ::utoipa::openapi::AllOfBuilder::new()
+                        .item(::utoipa::openapi::RefOr::Ref(::utoipa::openapi::Ref::from_schema_name(
+                            <#payload as ::utoipa::ToSchema>::name(),
+                        )))
+                        .item(::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                            ::utoipa::openapi::ObjectBuilder::new()
+                                .schema_type(::utoipa::openapi::schema::Type::Object)
+                                .property(#tag, #tag_property)
+                                .required(#tag)
+                                .build(),
+                        )))
+                        .build(),
+                ))
+            },
+            // Internal tagging, unit: { tag: <lit> }.
+            (None, VariantKind::Unit) => quote! {
+                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                    ::utoipa::openapi::ObjectBuilder::new()
+                        .schema_type(::utoipa::openapi::schema::Type::Object)
+                        .property(#tag, #tag_property)
+                        .required(#tag)
+                        .build(),
+                ))
+            },
+            // Adjacent tagging, struct: { tag: <lit>, content: { …fields… } }.
+            // The content object's fields are inlined from their own
+            // `PartialSchema`; their transitive component deps are registered
+            // below so no `$ref` dangles.
+            (Some(content), VariantKind::Struct(fields)) => {
+                let props = struct_field_props(fields);
+                quote! {
+                    ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                        ::utoipa::openapi::ObjectBuilder::new()
+                            .schema_type(::utoipa::openapi::schema::Type::Object)
+                            .property(#tag, #tag_property)
+                            .property(
+                                #content,
+                                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                                    ::utoipa::openapi::ObjectBuilder::new()
+                                        .schema_type(::utoipa::openapi::schema::Type::Object)
+                                        #(#props)*
+                                        .build(),
+                                )),
+                            )
+                            .required(#tag)
+                            .required(#content)
+                            .build(),
+                    ))
+                }
+            }
+            // Internal tagging, struct: fields merged alongside the tag.
+            (None, VariantKind::Struct(fields)) => {
+                let props = struct_field_props(fields);
+                quote! {
+                    ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::Object(
+                        ::utoipa::openapi::ObjectBuilder::new()
+                            .schema_type(::utoipa::openapi::schema::Type::Object)
+                            .property(#tag, #tag_property)
+                            #(#props)*
+                            .required(#tag)
+                            .build(),
+                    ))
+                }
+            }
+        };
+
+        component_pushes.push(quote! {
+            schemas.push((#comp_name.to_string(), #component_schema));
+        });
+
+        // Register the payload component (and its own dependencies) once.
+        if let VariantKind::Newtype(payload) = &v.kind {
+            component_pushes.push(quote! {
+                {
+                    let __name = <#payload as ::utoipa::ToSchema>::name().into_owned();
+                    if !schemas.iter().any(|(__n, _)| *__n == __name) {
+                        schemas.push((__name, <#payload as ::utoipa::PartialSchema>::schema()));
+                    }
+                    <#payload as ::utoipa::ToSchema>::schemas(schemas);
+                }
+            });
+        }
+
+        // Struct variants inline their fields; register each field type's
+        // transitive component deps so the inlined `$ref`s resolve.
+        if let VariantKind::Struct(fields) = &v.kind {
+            for f in fields {
+                let ty = &f.ty;
+                component_pushes.push(quote! {
+                    <#ty as ::utoipa::ToSchema>::schemas(schemas);
+                });
+            }
+        }
+    }
+
+    quote! {
+        impl ::utoipa::PartialSchema for #enum_name {
+            fn schema() -> ::utoipa::openapi::RefOr<::utoipa::openapi::schema::Schema> {
+                ::utoipa::openapi::RefOr::T(::utoipa::openapi::Schema::OneOf(
+                    ::utoipa::openapi::OneOfBuilder::new()
+                        #(#oneof_items)*
+                        .discriminator(::core::option::Option::Some(
+                            ::utoipa::openapi::Discriminator::with_mapping(#tag, [#(#mapping_entries),*]),
+                        ))
+                        .build(),
+                ))
+            }
+        }
+
+        impl ::utoipa::ToSchema for #enum_name {
+            fn name() -> ::std::borrow::Cow<'static, str> {
+                ::std::borrow::Cow::Borrowed(#enum_name_str)
+            }
+
+            fn schemas(
+                schemas: &mut ::std::vec::Vec<(
+                    ::std::string::String,
+                    ::utoipa::openapi::RefOr<::utoipa::openapi::schema::Schema>,
+                )>,
+            ) {
+                #(#component_pushes)*
+            }
+        }
+    }
+}
+
+/// Enum-level serde attributes relevant to the schema shape.
+#[derive(Default)]
+struct SerdeEnumAttrs {
+    tag: Option<String>,
+    content: Option<String>,
+    rename_all: Option<String>,
 }
 
 /// Parsed metadata for one variant.
 struct ParsedVariant {
     ident: syn::Ident,
-    name: String,
-    fields_kind: FieldsKind,
+    /// SSE `event:` frame name (`#[sse(name)]` or snake-case of the ident).
+    event_name: String,
+    /// serde tag value (the JSON discriminator value): `#[serde(rename)]`
+    /// or `rename_all` applied to the ident. Distinct from `event_name`.
+    tag_value: String,
+    kind: VariantKind,
 }
 
-enum FieldsKind {
+enum VariantKind {
     Unit,
-    Tuple,
-    Named,
+    Newtype(Type),
+    Struct(Vec<StructField>),
 }
 
-fn parse_variant(variant: &Variant) -> Result<ParsedVariant> {
-    let explicit = parse_sse_name_attr(&variant.attrs)?;
-    let name = explicit.unwrap_or_else(|| to_snake_case(&variant.ident.to_string()));
+/// A named field of a struct variant. SSE event enums don't rename fields,
+/// so the JSON key is the field ident verbatim.
+struct StructField {
+    name: String,
+    ty: Type,
+    /// `Option<…>` fields are omitted from `required`.
+    optional: bool,
+}
 
-    let fields_kind = match &variant.fields {
-        Fields::Unit => FieldsKind::Unit,
-        Fields::Unnamed(_) => FieldsKind::Tuple,
-        Fields::Named(_) => FieldsKind::Named,
+fn parse_variant(variant: &Variant, rename_all: Option<&str>) -> Result<ParsedVariant> {
+    let ident_str = variant.ident.to_string();
+
+    let event_name = parse_sse_name_attr(&variant.attrs)?
+        .unwrap_or_else(|| apply_rename(&ident_str, Some("snake_case")));
+
+    let tag_value = parse_serde_rename_attr(&variant.attrs)?
+        .unwrap_or_else(|| apply_rename(&ident_str, rename_all));
+
+    let kind = match &variant.fields {
+        Fields::Unit => VariantKind::Unit,
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            VariantKind::Newtype(fields.unnamed[0].ty.clone())
+        }
+        Fields::Named(fields) => VariantKind::Struct(
+            fields
+                .named
+                .iter()
+                .map(|f| StructField {
+                    name: f
+                        .ident
+                        .as_ref()
+                        .expect("named field has an ident")
+                        .to_string(),
+                    ty: f.ty.clone(),
+                    optional: is_option(&f.ty),
+                })
+                .collect(),
+        ),
+        Fields::Unnamed(_) => {
+            return Err(Error::new_spanned(
+                variant,
+                "SseEvent does not support multi-field tuple variants — use a unit, a \
+                 single-field (newtype) variant, or named struct fields",
+            ))
+        }
     };
 
     Ok(ParsedVariant {
         ident: variant.ident.clone(),
-        name,
-        fields_kind,
+        event_name,
+        tag_value,
+        kind,
     })
 }
 
 /// Parse `#[sse(name = "…")]` from a variant's attribute list.
-///
-/// Supports exactly one key (`name`). Any other key or repeated
-/// attribute is a compile error so typos surface early.
 fn parse_sse_name_attr(attrs: &[Attribute]) -> Result<Option<String>> {
     let mut found: Option<String> = None;
     for attr in attrs {
         if !attr.path().is_ident("sse") {
             continue;
         }
-        let mut this_name: Option<String> = None;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("name") {
-                let value = meta.value()?;
-                let lit: Expr = value.parse()?;
-                let Expr::Lit(ExprLit {
-                    lit: Lit::Str(s), ..
-                }) = lit
-                else {
-                    return Err(meta.error("expected `name = \"...\"` string literal"));
-                };
-                this_name = Some(s.value());
+                found = Some(parse_string_value(&meta)?);
                 Ok(())
             } else {
                 Err(meta.error("unknown key in #[sse(...)]; expected `name`"))
             }
         })?;
-        if found.is_some() {
-            return Err(Error::new_spanned(
-                attr,
-                "duplicate #[sse(...)] attribute on variant",
-            ));
-        }
-        found = this_name;
     }
     Ok(found)
 }
 
-/// Convert `PascalCase` identifier into `snake_case`.
-///
-/// Matches the simple rule serde applies for `rename_all =
-/// "snake_case"` on PascalCase variants: every uppercase character
-/// becomes lowercase, and `_` is inserted before each uppercase
-/// character that is not at the start of the string. This keeps the
-/// event-name line aligned with the `event` field produced by a
-/// `#[serde(tag = "event", content = "data", rename_all =
-/// "snake_case")]` attribute.
-///
-/// Acronym runs (`HTTPError`) intentionally produce `h_t_t_p_error`
-/// to match serde's behavior — callers who want a different shape
-/// can override per variant with `#[sse(name = "…")]`.
-fn to_snake_case(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+/// Parse `#[serde(rename = "…")]` from a variant's attribute list, ignoring
+/// every other serde key.
+fn parse_serde_rename_attr(attrs: &[Attribute]) -> Result<Option<String>> {
+    let mut found: Option<String> = None;
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                // serde `rename` can be a string or `serialize`/`deserialize`
+                // map; SSE enums use the simple string form.
+                if let Ok(value) = parse_string_value(&meta) {
+                    found = Some(value);
+                }
+                Ok(())
+            } else {
+                skip_meta_value(&meta)
+            }
+        })?;
+    }
+    Ok(found)
+}
+
+/// Parse the enum-level `#[serde(tag, content, rename_all)]` attributes.
+fn parse_serde_enum_attrs(attrs: &[Attribute]) -> Result<SerdeEnumAttrs> {
+    let mut out = SerdeEnumAttrs::default();
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("tag") {
+                out.tag = Some(parse_string_value(&meta)?);
+            } else if meta.path.is_ident("content") {
+                out.content = Some(parse_string_value(&meta)?);
+            } else if meta.path.is_ident("rename_all") {
+                out.rename_all = Some(parse_string_value(&meta)?);
+            } else {
+                return skip_meta_value(&meta);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(out)
+}
+
+/// Read a `key = "string"` value from a nested-meta callback.
+fn parse_string_value(meta: &syn::meta::ParseNestedMeta) -> Result<String> {
+    let value = meta.value()?;
+    let expr: Expr = value.parse()?;
+    if let Expr::Lit(ExprLit {
+        lit: Lit::Str(s), ..
+    }) = expr
+    {
+        Ok(s.value())
+    } else {
+        Err(meta.error("expected a string literal"))
+    }
+}
+
+/// Consume and discard the value of an unrecognized nested meta so parsing
+/// of the remaining serde keys can continue.
+fn skip_meta_value(meta: &syn::meta::ParseNestedMeta) -> Result<()> {
+    if meta.input.peek(syn::Token![=]) {
+        let _: Expr = meta.value()?.parse()?;
+    } else if meta.input.peek(syn::token::Paren) {
+        let _: proc_macro2::Group = meta.input.parse()?;
+    }
+    Ok(())
+}
+
+/// Apply a serde `rename_all` rule to a PascalCase variant ident. Covers the
+/// rules serde supports; an unrecognized rule falls back to the ident
+/// unchanged (matching serde's "no rename" behavior for `None`).
+fn apply_rename(variant: &str, rule: Option<&str>) -> String {
+    match rule {
+        None | Some("PascalCase") => variant.to_owned(),
+        Some("lowercase") => variant.to_lowercase(),
+        Some("UPPERCASE") => variant.to_uppercase(),
+        Some("camelCase") => {
+            let mut chars = variant.chars();
+            match chars.next() {
+                Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+        Some("snake_case") => split_words(variant).join("_"),
+        Some("kebab-case") => split_words(variant).join("-"),
+        Some("SCREAMING_SNAKE_CASE") => split_words(variant).join("_").to_uppercase(),
+        Some("SCREAMING-KEBAB-CASE") => split_words(variant).join("-").to_uppercase(),
+        Some(_) => variant.to_owned(),
+    }
+}
+
+/// Split a PascalCase identifier into lowercase words at each uppercase
+/// boundary, matching serde's char-based snake_case rule (acronym runs like
+/// `HTTPError` become `h_t_t_p_error`).
+fn split_words(s: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
     for c in s.chars() {
         if c.is_ascii_uppercase() {
-            if !out.is_empty() {
-                out.push('_');
-            }
-            out.push(c.to_ascii_lowercase());
+            words.push(c.to_ascii_lowercase().to_string());
+        } else if let Some(last) = words.last_mut() {
+            last.push(c);
         } else {
-            out.push(c);
+            words.push(c.to_string());
         }
     }
-    out
+    words
+}
+
+/// Build the `.property(name, schema).required(name)` tokens for each field
+/// of a struct variant. Field schemas are inlined from each field type's
+/// `PartialSchema`; `Option<…>` fields are omitted from `required`.
+fn struct_field_props(fields: &[StructField]) -> Vec<TokenStream> {
+    fields
+        .iter()
+        .map(|f| {
+            let name = &f.name;
+            let ty = &f.ty;
+            let required = if f.optional {
+                quote! {}
+            } else {
+                quote! { .required(#name) }
+            };
+            quote! {
+                .property(#name, <#ty as ::utoipa::PartialSchema>::schema())
+                #required
+            }
+        })
+        .collect()
+}
+
+/// Whether a field type is `Option<…>` (by last path segment, so both
+/// `Option<T>` and `std::option::Option<T>` count).
+fn is_option(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp) if tp.path.segments.last().is_some_and(|s| s.ident == "Option"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::to_snake_case;
+    use super::*;
 
     #[test]
-    fn snake_case_pascal_case_variants() {
-        assert_eq!(to_snake_case("Started"), "started");
-        assert_eq!(to_snake_case("InProgress"), "in_progress");
-        assert_eq!(to_snake_case("Done"), "done");
+    fn snake_case_rename_matches_serde() {
+        assert_eq!(apply_rename("Started", Some("snake_case")), "started");
+        assert_eq!(
+            apply_rename("InProgress", Some("snake_case")),
+            "in_progress"
+        );
+        assert_eq!(
+            apply_rename("RunStarted", Some("snake_case")),
+            "run_started"
+        );
+    }
+
+    #[test]
+    fn other_rename_rules() {
+        assert_eq!(apply_rename("RunStarted", None), "RunStarted");
+        assert_eq!(apply_rename("RunStarted", Some("camelCase")), "runStarted");
+        assert_eq!(
+            apply_rename("RunStarted", Some("kebab-case")),
+            "run-started"
+        );
+        assert_eq!(
+            apply_rename("RunStarted", Some("SCREAMING_SNAKE_CASE")),
+            "RUN_STARTED"
+        );
     }
 }

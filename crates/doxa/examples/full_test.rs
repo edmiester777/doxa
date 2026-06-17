@@ -87,7 +87,8 @@ enum WidgetError {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[allow(dead_code)]
-#[derive(Serialize, ToSchema, SseEvent)]
+// `SseEvent` owns the `ToSchema` impl, so the enum drops the `ToSchema` derive.
+#[derive(Serialize, SseEvent)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 enum WidgetProgress {
     Started { widget_id: u32 },
