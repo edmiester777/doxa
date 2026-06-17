@@ -225,7 +225,11 @@ async fn stream_progress(Path(id): Path<u64>)
 }
 ```
 
-The spec reflects `text/event-stream` and the three event names.
+The spec reflects `text/event-stream` and the three event names: the 200
+response gets a description enumerating the `event:` frame names (`started`,
+`tick`, `completed`) and an `x-sse-event-names` extension carrying the same
+list machine-readably, alongside the event-payload schema (`itemSchema` in
+3.2, `schema` in 3.1).
 
 ### 4. Secrets that don't leak
 

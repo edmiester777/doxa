@@ -25,7 +25,10 @@ struct ProgressPayload {
     total: u64,
 }
 
-#[derive(Serialize, ToSchema, SseEvent)]
+// `SseEvent` now owns `ToSchema` for the event enum (so it can emit the
+// discriminated oneOf utoipa won't), so the `ToSchema` derive is dropped and
+// variants must be unit or newtype.
+#[derive(Serialize, SseEvent)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 #[allow(dead_code)]
 enum MigrationEvent {
@@ -34,6 +37,10 @@ enum MigrationEvent {
     #[sse(name = "finished")]
     Completed,
     Heartbeat,
+    // Inline struct variant: fields are emitted directly (no payload type).
+    Reticulated {
+        splines: u32,
+    },
 }
 
 #[derive(Serialize, ToSchema)]
@@ -98,11 +105,45 @@ fn default_output_is_openapi_3_2_with_item_schema() {
     let ref_path = sse["itemSchema"]["$ref"].as_str().unwrap();
     assert_eq!(ref_path, "#/components/schemas/MigrationEvent");
 
-    // Component schema is a oneOf tagged on `event`.
+    // Component is a discriminated oneOf of per-variant component $refs.
     let component = &v["components"]["schemas"]["MigrationEvent"];
+    let one_of = component["oneOf"].as_array().expect("oneOf array");
+    let refs: Vec<&str> = one_of
+        .iter()
+        .map(|b| b["$ref"].as_str().expect("oneOf branch is a $ref"))
+        .collect();
     assert!(
-        component["oneOf"].is_array() || component["discriminator"].is_object(),
-        "expected oneOf/discriminator on tagged enum: {component:#?}",
+        refs.contains(&"#/components/schemas/MigrationEvent_Started")
+            && refs.contains(&"#/components/schemas/MigrationEvent_Heartbeat"),
+        "oneOf should reference per-variant components: {refs:?}"
+    );
+
+    // Discriminator keyed on the serde tag, mapping serde tag values (not SSE
+    // frame names) to the per-variant components.
+    let disc = &component["discriminator"];
+    assert_eq!(disc["propertyName"], "event");
+    assert_eq!(
+        disc["mapping"]["completed"], "#/components/schemas/MigrationEvent_Completed",
+        "discriminator maps the serde tag value (`completed`), not the SSE name (`finished`): {disc:#?}"
+    );
+
+    // The Started variant component carries the tag literal + a $ref to the
+    // payload type (which is itself registered).
+    let started = &v["components"]["schemas"]["MigrationEvent_Started"];
+    assert_eq!(started["properties"]["event"]["enum"][0], "started");
+    assert_eq!(
+        started["properties"]["data"]["$ref"],
+        "#/components/schemas/StartedPayload"
+    );
+    assert!(v["components"]["schemas"]["StartedPayload"].is_object());
+
+    // Inline struct variant: fields emitted directly under the content object,
+    // no separate payload component.
+    let retic = &v["components"]["schemas"]["MigrationEvent_Reticulated"];
+    assert_eq!(retic["properties"]["event"]["enum"][0], "reticulated");
+    assert!(
+        retic["properties"]["data"]["properties"]["splines"].is_object(),
+        "struct-variant fields are inlined under `data`: {retic:#?}"
     );
 }
 
@@ -113,6 +154,39 @@ fn default_output_leaves_non_sse_endpoints_alone() {
     assert!(hello_200["schema"].is_object());
     assert!(hello_200.get("itemSchema").is_none());
     assert!(hello_200.get("x-sse-stream").is_none());
+}
+
+#[test]
+fn sse_response_documents_event_names() {
+    let v = build(SseSpecVersion::V3_2);
+    let resp = &v["paths"]["/migrations/stream"]["get"]["responses"]["200"];
+
+    // Machine-readable event vocabulary on the content entry — the discrete
+    // `event:` frame names the schema's payload union can't express.
+    let names: Vec<&str> = resp["content"]["text/event-stream"]["x-sse-event-names"]
+        .as_array()
+        .expect("x-sse-event-names present")
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "started",
+            "progress",
+            "finished",
+            "heartbeat",
+            "reticulated"
+        ]
+    );
+
+    // Human-readable description enumerates the frame names (the `#[sse(name)]`
+    // override is honored).
+    let desc = resp["description"].as_str().unwrap();
+    assert!(
+        desc.contains("`started`") && desc.contains("`finished`"),
+        "description should enumerate event names: {desc}"
+    );
 }
 
 // ---- 3.1 opt-out
@@ -138,5 +212,11 @@ fn v3_1_opt_out_keeps_schema_and_does_not_upgrade_version() {
     assert!(
         sse.get("x-sse-stream").is_none(),
         "marker must be stripped in both modes: {sse:#?}",
+    );
+    // The event-name vocabulary is version-independent — it documents the
+    // stream, not the 3.1-vs-3.2 schema placement.
+    assert!(
+        sse["x-sse-event-names"].is_array(),
+        "x-sse-event-names must survive in 3.1 mode too: {sse:#?}",
     );
 }
