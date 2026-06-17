@@ -305,7 +305,7 @@ fn extract_headers_arg(extra: &[Meta]) -> Result<(Vec<Type>, Vec<Meta>)> {
             };
             let parser = Punctuated::<Type, Token![,]>::parse_terminated;
             let parsed = parser.parse2(list.tokens.clone())?;
-            header_types.extend(parsed.into_iter());
+            header_types.extend(parsed);
         } else {
             forwarded.push(meta.clone());
         }
@@ -330,7 +330,7 @@ fn extract_tags_arg(extra: &[Meta]) -> Result<(Vec<LitStr>, Vec<Meta>)> {
             };
             let parser = Punctuated::<LitStr, Token![,]>::parse_terminated;
             let parsed = parser.parse2(list.tokens.clone())?;
-            tag_lits.extend(parsed.into_iter());
+            tag_lits.extend(parsed);
         } else {
             forwarded.push(meta.clone());
         }
