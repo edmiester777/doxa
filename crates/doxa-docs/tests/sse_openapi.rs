@@ -25,6 +25,21 @@ struct ProgressPayload {
     total: u64,
 }
 
+// Generic payload: utoipa erases the type argument in `name()`, so the macro
+// must compose the monomorphized component name (`Wrap_WrappedOnly`).
+#[derive(Serialize, ToSchema)]
+struct Wrap<T> {
+    inner: T,
+}
+
+// Used *only* as a generic argument, so it is registered solely by the macro's
+// recursive generic-argument registration (utoipa's generic `schemas()` skips
+// the argument itself).
+#[derive(Serialize, ToSchema)]
+struct WrappedOnly {
+    value: u8,
+}
+
 // `SseEvent` now owns `ToSchema` for the event enum (so it can emit the
 // discriminated oneOf utoipa won't), so the `ToSchema` derive is dropped and
 // variants must be unit or newtype.
@@ -41,6 +56,8 @@ enum MigrationEvent {
     Reticulated {
         splines: u32,
     },
+    // Generic newtype payload: the component must $ref the monomorphized name.
+    Wrapped(Wrap<WrappedOnly>),
 }
 
 #[derive(Serialize, ToSchema)]
@@ -145,6 +162,30 @@ fn default_output_is_openapi_3_2_with_item_schema() {
         retic["properties"]["data"]["properties"]["splines"].is_object(),
         "struct-variant fields are inlined under `data`: {retic:#?}"
     );
+
+    // Generic newtype variant: utoipa's `name()` erases the type argument, so
+    // the macro composes the monomorphized component name and registers it.
+    let wrapped = &v["components"]["schemas"]["MigrationEvent_Wrapped"];
+    assert_eq!(
+        wrapped["properties"]["data"]["$ref"], "#/components/schemas/Wrap_WrappedOnly",
+        "generic payload must $ref the monomorphized component, not bare `Wrap`: {wrapped:#?}"
+    );
+    let wrap = &v["components"]["schemas"]["Wrap_WrappedOnly"];
+    assert!(
+        wrap.is_object(),
+        "the monomorphized generic payload component must be registered"
+    );
+    // The inner generic argument must also be registered — utoipa's generic
+    // `schemas()` skips it, so the macro registers it under the name the
+    // payload's own schema references.
+    assert_eq!(
+        wrap["properties"]["inner"]["$ref"], "#/components/schemas/WrappedOnly",
+        "the generic argument is referenced by its own name: {wrap:#?}"
+    );
+    assert!(
+        v["components"]["schemas"]["WrappedOnly"].is_object(),
+        "the generic argument component must be registered so its $ref resolves"
+    );
 }
 
 #[test]
@@ -176,7 +217,8 @@ fn sse_response_documents_event_names() {
             "progress",
             "finished",
             "heartbeat",
-            "reticulated"
+            "reticulated",
+            "wrapped"
         ]
     );
 
