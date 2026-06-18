@@ -58,6 +58,11 @@ enum MigrationEvent {
     },
     // Generic newtype payload: the component must $ref the monomorphized name.
     Wrapped(Wrap<WrappedOnly>),
+    // Two variants whose payloads nest the *same* generic base (`Wrap<…>`) with
+    // different arguments. utoipa refs the inner `Wrap<…>` by its base ident, so
+    // without the ref-rewrite these would collapse onto one `Wrap` component.
+    DoubleA(Wrap<Wrap<WrappedOnly>>),
+    DoubleB(Wrap<Wrap<StartedPayload>>),
 }
 
 #[derive(Serialize, ToSchema)]
@@ -186,6 +191,21 @@ fn default_output_is_openapi_3_2_with_item_schema() {
         v["components"]["schemas"]["WrappedOnly"].is_object(),
         "the generic argument component must be registered so its $ref resolves"
     );
+
+    // Sibling monomorphizations of the same generic base stay distinct: the
+    // inner `Wrap<…>` ref is rewritten to its composed name, not the bare `Wrap`
+    // base utoipa emits (which would collapse both onto one component).
+    let outer_a = &v["components"]["schemas"]["Wrap_Wrap_WrappedOnly"];
+    assert_eq!(
+        outer_a["properties"]["inner"]["$ref"], "#/components/schemas/Wrap_WrappedOnly",
+        "nested generic inner ref must be composed, not bare `Wrap`: {outer_a:#?}"
+    );
+    let outer_b = &v["components"]["schemas"]["Wrap_Wrap_StartedPayload"];
+    assert_eq!(
+        outer_b["properties"]["inner"]["$ref"], "#/components/schemas/Wrap_StartedPayload",
+        "the second monomorphization must reference its own component: {outer_b:#?}"
+    );
+    assert!(v["components"]["schemas"]["Wrap_StartedPayload"].is_object());
 }
 
 #[test]
@@ -218,7 +238,9 @@ fn sse_response_documents_event_names() {
             "finished",
             "heartbeat",
             "reticulated",
-            "wrapped"
+            "wrapped",
+            "double_a",
+            "double_b"
         ]
     );
 
