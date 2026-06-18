@@ -304,4 +304,59 @@ pub mod __private {
     // `doxa::routes!` can call into it without requiring the
     // caller crate to declare `utoipa-axum` as a direct dependency.
     pub use utoipa_axum::routes as utoipa_axum_routes;
+
+    /// Rewrites every `#/components/schemas/{from}` reference to
+    /// `#/components/schemas/{to}` within `schema`, recursively.
+    ///
+    /// `#[derive(SseEvent)]` uses this so two monomorphizations of the same
+    /// generic payload base (e.g. `Wrap<A>` and `Wrap<B>`) reference distinct
+    /// components: utoipa emits the inner `$ref` under the base ident
+    /// (`Wrap`), which would otherwise collapse both onto one component.
+    pub fn rewrite_schema_refs(
+        schema: &mut ::utoipa::openapi::RefOr<::utoipa::openapi::schema::Schema>,
+        from: &str,
+        to: &str,
+    ) {
+        use ::utoipa::openapi::schema::{AdditionalProperties, ArrayItems, Schema};
+        use ::utoipa::openapi::RefOr;
+
+        match schema {
+            RefOr::Ref(reference) => {
+                if reference.ref_location == format!("#/components/schemas/{from}") {
+                    reference.ref_location = format!("#/components/schemas/{to}");
+                }
+            }
+            RefOr::T(Schema::Object(object)) => {
+                for value in object.properties.values_mut() {
+                    rewrite_schema_refs(value, from, to);
+                }
+                if let Some(AdditionalProperties::RefOr(inner)) =
+                    object.additional_properties.as_deref_mut()
+                {
+                    rewrite_schema_refs(inner, from, to);
+                }
+            }
+            RefOr::T(Schema::Array(array)) => {
+                if let ArrayItems::RefOrSchema(items) = &mut array.items {
+                    rewrite_schema_refs(items, from, to);
+                }
+            }
+            RefOr::T(Schema::OneOf(one_of)) => {
+                for item in one_of.items.iter_mut() {
+                    rewrite_schema_refs(item, from, to);
+                }
+            }
+            RefOr::T(Schema::AllOf(all_of)) => {
+                for item in all_of.items.iter_mut() {
+                    rewrite_schema_refs(item, from, to);
+                }
+            }
+            RefOr::T(Schema::AnyOf(any_of)) => {
+                for item in any_of.items.iter_mut() {
+                    rewrite_schema_refs(item, from, to);
+                }
+            }
+            _ => {}
+        }
+    }
 }

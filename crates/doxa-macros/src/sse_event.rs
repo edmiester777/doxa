@@ -565,20 +565,39 @@ fn payload_name_expr(ty: &Type) -> TokenStream {
 /// inside the parent's own schema — and recursed into, so no inner `$ref`
 /// dangles regardless of nesting depth.
 fn emit_registration(ty: &Type, name_expr: TokenStream) -> Vec<TokenStream> {
+    let args = generic_args(ty);
+
+    // utoipa emits the inner `$ref` for a generic argument under its base ident
+    // (`Wrap<A>` -> `$ref Wrap`), so sibling monomorphizations collapse onto one
+    // component. Rewrite each such ref to the argument's composed name to keep
+    // them distinct.
+    let rewrites = args.iter().filter_map(|arg| {
+        let composed = composed_generic_name(arg)?;
+        Some(quote! {
+            ::doxa::__private::rewrite_schema_refs(
+                &mut __schema,
+                <#arg as ::utoipa::ToSchema>::name().as_ref(),
+                #composed,
+            );
+        })
+    });
+
     let mut out = vec![quote! {
         {
             let __name = ::std::string::String::from(#name_expr);
             if !schemas.iter().any(|(__n, _)| *__n == __name) {
-                schemas.push((__name, <#ty as ::utoipa::PartialSchema>::schema()));
+                let mut __schema = <#ty as ::utoipa::PartialSchema>::schema();
+                #(#rewrites)*
+                schemas.push((__name, __schema));
             }
             <#ty as ::utoipa::ToSchema>::schemas(schemas);
         }
     }];
-    for arg in generic_args(ty) {
-        out.extend(emit_registration(
-            &arg,
-            quote! { <#arg as ::utoipa::ToSchema>::name() },
-        ));
+
+    // Recurse under the *composed* name so the argument component matches the
+    // rewritten ref above.
+    for arg in &args {
+        out.extend(emit_registration(arg, payload_name_expr(arg)));
     }
     out
 }
