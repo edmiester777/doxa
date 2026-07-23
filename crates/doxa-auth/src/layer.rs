@@ -37,7 +37,10 @@ use audit_support::AuditSession;
 
 #[cfg(feature = "audit")]
 mod audit_support {
+    use std::net::SocketAddr;
+
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::Request;
     use doxa_audit::{AuditEventBuilder, EventType, Outcome};
 
@@ -65,10 +68,18 @@ mod audit_support {
             }
 
             // Fallback: create from AuthState's logger (backward compat
-            // when AuditLayer is not in the middleware stack).
+            // when AuditLayer is not in the middleware stack). Without the
+            // layer nothing else stamps HTTP context, so do it here — auth
+            // failures emit from this builder before any handler runs.
             Self(auth.audit.as_ref().map(|logger| {
                 let builder = AuditEventBuilder::new(logger.clone());
                 builder.set_request_metadata(request.headers());
+                if let Some(ConnectInfo(addr)) =
+                    request.extensions().get::<ConnectInfo<SocketAddr>>()
+                {
+                    builder.set_source_ip_fallback(*addr);
+                }
+                builder.set_http_request(request.method().as_str(), request.uri().path());
                 builder
             }))
         }
@@ -521,6 +532,89 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"ok");
+    }
+
+    #[cfg(feature = "audit")]
+    #[tokio::test]
+    async fn auth_failure_records_route_and_ip_via_fallback_builder() {
+        use std::net::SocketAddr;
+
+        use axum::extract::ConnectInfo;
+        use doxa_audit::{AuditLogger, Outcome};
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let state = Arc::new(AuthState {
+            validator: Arc::new(StubValidator { accept: "good" }),
+            resolver: Arc::new(StubResolver),
+            policy: Box::new(StubPolicy),
+            audit: Some(AuditLogger::from_sender(tx)),
+        });
+        let svc = build_service(state, |_req| {
+            Response::builder().body(Body::empty()).unwrap()
+        });
+
+        let mut req = Request::builder()
+            .uri("/streams/orders/status")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "198.51.100.7:44100".parse::<SocketAddr>().unwrap(),
+        ));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let event = rx
+            .recv()
+            .await
+            .expect("auth failure should emit an audit event");
+        assert_eq!(event.outcome, Outcome::Denied);
+        assert_eq!(event.action, "missing_credentials");
+        assert_eq!(event.http_method.as_deref(), Some("GET"));
+        assert_eq!(event.http_path.as_deref(), Some("/streams/orders/status"));
+        assert_eq!(event.source_ip.as_deref(), Some("198.51.100.7"));
+    }
+
+    #[cfg(feature = "audit")]
+    #[tokio::test]
+    async fn auth_failure_records_route_and_ip_through_audit_layer() {
+        use std::net::SocketAddr;
+
+        use axum::extract::ConnectInfo;
+        use doxa_audit::{AuditLayer, AuditLogger, Outcome};
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // AuthState carries no logger of its own — the AuditLayer supplies the
+        // builder, exactly as a server that mounts both layers does.
+        let auth = AuthLayer::new(make_state("good")).layer(tower::service_fn(
+            |_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::builder().body(Body::empty()).unwrap())
+            },
+        ));
+        let svc = AuditLayer::new(AuditLogger::from_sender(tx)).layer(auth);
+
+        let mut req = Request::builder()
+            .uri("/widgets/42")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "203.0.113.9:51000".parse::<SocketAddr>().unwrap(),
+        ));
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let event = rx
+            .recv()
+            .await
+            .expect("auth failure should emit an audit event");
+        assert_eq!(event.outcome, Outcome::Denied);
+        assert_eq!(event.http_method.as_deref(), Some("GET"));
+        assert_eq!(event.http_path.as_deref(), Some("/widgets/42"));
+        assert_eq!(event.source_ip.as_deref(), Some("203.0.113.9"));
     }
 
     #[tokio::test]

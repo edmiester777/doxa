@@ -18,6 +18,7 @@
 //! share state behind an [`Arc`], and the first caller to emit takes the inner
 //! state — subsequent attempts are no-ops.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -156,6 +157,22 @@ impl AuditEventBuilder {
                 .get("x-request-id")
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
+        });
+    }
+
+    /// Fall back to the socket peer address for `source_ip` when no
+    /// forwarding header supplied one.
+    ///
+    /// Only fills the field if [`set_request_metadata`](Self::set_request_metadata)
+    /// left it empty, so a proxy-supplied `x-forwarded-for` client address
+    /// always wins over the direct TCP peer. Lets a deployment with no
+    /// forwarding proxy (or a `kubectl port-forward` dev tunnel) still
+    /// record the caller's address.
+    pub fn set_source_ip_fallback(&self, addr: SocketAddr) {
+        self.with_inner(|inner| {
+            if inner.source_ip.is_none() {
+                inner.source_ip = Some(addr.ip().to_string());
+            }
         });
     }
 

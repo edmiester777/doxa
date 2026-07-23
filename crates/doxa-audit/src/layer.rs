@@ -28,10 +28,12 @@
 
 use std::convert::Infallible;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::Request;
 use axum::response::Response;
 use tower::{Layer, Service};
@@ -72,14 +74,19 @@ impl<S> Layer<S> for AuditLayer {
 /// Service produced by [`AuditLayer`].
 ///
 /// On each request it:
-/// 1. Creates an [`AuditEventBuilder`] and populates request metadata
-///    (source IP, user-agent, request ID) from headers.
+/// 1. Creates an [`AuditEventBuilder`], populates request metadata
+///    (source IP from `x-forwarded-for`, falling back to the
+///    [`ConnectInfo`] peer; user-agent; request ID), and stamps the HTTP
+///    method and path — all *before* the inner service runs, so a layer
+///    that emits a terminal event during the call (e.g. an auth
+///    rejection) still records the route.
 /// 2. Inserts the builder into request extensions so inner layers and
 ///    handlers can enrich it.
 /// 3. Calls the inner service.
-/// 4. After the response, calls [`auto_emit`](AuditEventBuilder::auto_emit)
-///    which sends the event with [`Outcome::Allowed`](crate::Outcome::Allowed)
-///    if no prior explicit emission occurred.
+/// 4. After the response, records the status and calls
+///    [`auto_emit`](AuditEventBuilder::auto_emit) which sends the event
+///    with [`Outcome::Allowed`](crate::Outcome::Allowed) if no prior
+///    explicit emission occurred.
 #[derive(Clone)]
 pub struct AuditService<S> {
     logger: AuditLogger,
@@ -102,10 +109,16 @@ where
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
         let builder = AuditEventBuilder::new(self.logger.clone());
         builder.set_request_metadata(req.headers());
+        if let Some(ConnectInfo(addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+            builder.set_source_ip_fallback(*addr);
+        }
 
-        // Capture HTTP metadata before the request is consumed.
-        let method = req.method().to_string();
-        let path = req.uri().path().to_owned();
+        // Stamp method and path *before* calling inner: a layer that emits
+        // a terminal event during the call (e.g. an `AuthLayer` rejecting a
+        // request before it reaches a handler) takes the builder then, so
+        // the post-response setters below would arrive too late to record
+        // the route. Status still comes from the response.
+        builder.set_http_request(req.method().as_str(), req.uri().path());
 
         req.extensions_mut().insert(builder.clone());
 
@@ -117,8 +130,6 @@ where
         Box::pin(async move {
             let response = inner.call(req).await?;
 
-            // Record HTTP metadata.
-            builder.set_http_request(&method, &path);
             builder.set_http_status(response.status().as_u16());
 
             // Read the outcome from response extensions if the error

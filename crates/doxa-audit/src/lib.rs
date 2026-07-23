@@ -218,6 +218,29 @@ mod tests {
         assert_eq!(event.request_id.as_deref(), Some("req-abc-123"));
     }
 
+    #[tokio::test]
+    async fn source_ip_fallback_only_fills_when_header_absent() {
+        let (logger, mut rx) = make_logger(16);
+
+        let builder = AuditEventBuilder::new(logger.clone());
+        builder.set_request_metadata(&axum::http::HeaderMap::new());
+        builder.set_source_ip_fallback("198.51.100.7:52001".parse().unwrap());
+        builder.set_event(EventType::DataAccess, "test");
+        builder.emit_allowed();
+        let event = rx.recv().await.expect("should receive event");
+        assert_eq!(event.source_ip.as_deref(), Some("198.51.100.7"));
+
+        let builder = AuditEventBuilder::new(logger);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        builder.set_request_metadata(&headers);
+        builder.set_source_ip_fallback("198.51.100.7:52001".parse().unwrap());
+        builder.set_event(EventType::DataAccess, "test");
+        builder.emit_allowed();
+        let event = rx.recv().await.expect("should receive event");
+        assert_eq!(event.source_ip.as_deref(), Some("203.0.113.9"));
+    }
+
     #[test]
     fn event_type_display() {
         assert_eq!(EventType::DataAccess.to_string(), "data_access");
