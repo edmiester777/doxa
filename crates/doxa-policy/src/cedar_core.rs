@@ -184,8 +184,15 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
 
         let mut all_entities = store.entity_jsons.clone();
         all_entities.push(user_entity_json);
+        // `.partial()` makes an absent resource entity dereference to a Cedar
+        // residual instead of erroring, so a `when { resource.<field> == … }`
+        // clause survives partial evaluation as a residual the consumer can
+        // translate into a row filter. Without it the residual branch of
+        // `evaluate_resource` is unreachable — a missing entity errors and the
+        // policy is dropped, collapsing every conditional grant to a denial.
         let entities = Entities::from_json_value(Value::Array(all_entities), None)
-            .map_err(|e| AuthError::PolicyFailed(format!("entity parse error: {e}")))?;
+            .map_err(|e| AuthError::PolicyFailed(format!("entity parse error: {e}")))?
+            .partial();
 
         Ok(Self {
             authorizer: Authorizer::new(),
