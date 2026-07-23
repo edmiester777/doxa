@@ -10,7 +10,8 @@ SOC 2-flavored append-only audit logging primitives with an optional SeaORM pers
 use doxa_audit::{AuditEventBuilder, AuditLogger, EventType, Outcome};
 
 let audit = AuditEventBuilder::new(logger.clone());
-audit.set_actor(Some(&principal), &roles, json!({ "tenant": tenant }));
+audit.set_actor(Some(&principal), &roles, json!({ "department": dept }));
+audit.set_tenant(Some(&tenant));
 audit.set_event(EventType::DataAccess, "read");
 audit.set_resource("document", "doc-42");
 audit.set_outcome(Outcome::Allowed);
@@ -70,6 +71,45 @@ impl AuditEventType for BillingEvent {
 
 audit.set_event(BillingEvent::PaymentProcessed, "charge");
 ```
+
+## Tenancy
+
+`tenant_id` is a first-class indexed column, not a key inside
+`actor_attrs`. With `doxa-auth` in the stack it is populated
+automatically from `Claims::scope()` — the same partition key the policy
+evaluator scopes by, so an audit trail filters to exactly the tenant
+whose policies decided the request. Outside a request's auth context,
+set it yourself with `set_tenant`.
+
+It is nullable: single-tenant deployments never set it, and auth
+failures are recorded before a principal — and therefore a tenant — has
+been resolved. Every other identity dimension (project, department, …)
+stays in the opaque `actor_attrs` JSON.
+
+## Schema and indexes
+
+`Migrator` owns `doxa_audit_log` and tracks itself in
+`doxa_audit_seaql_migrations`, isolated from the consuming
+application's own migrations. Indexes ship with the schema:
+
+| Index | Serves |
+|-------|--------|
+| `created_at DESC` | Unfiltered timeline; retention sweeps |
+| `tenant_id, created_at DESC` | Per-tenant activity feed |
+| `actor_sub, created_at DESC` | "Everything this principal did" — subject-access requests |
+| `resource_type, resource_id, created_at DESC` | Per-object history |
+| `event_type, created_at DESC` | Category rollups |
+| `outcome, created_at DESC` | Failed-access review |
+| `request_id` | Correlation back to application logs |
+
+Each composite trails `created_at DESC` so a filtered scan comes back
+already ordered — audit reads are newest-first without exception, so the
+planner walks matching rows in output order and stops at the `LIMIT`
+instead of sorting the whole match set.
+
+This is a write-amplifying set, and an append-only log pays for every
+index on every insert. It is sized for deployments that actually query
+their audit trail; drop the ones yours never uses.
 
 ## Key types
 

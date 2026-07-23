@@ -36,6 +36,7 @@ struct BuilderInner {
     start: Instant,
 
     // Auth layer
+    tenant_id: Option<String>,
     actor_sub: Option<String>,
     actor_roles: Option<Vec<String>>,
     actor_attrs: serde_json::Value,
@@ -89,6 +90,7 @@ impl AuditEventBuilder {
             inner: Arc::new(Mutex::new(Some(BuilderInner {
                 logger,
                 start: Instant::now(),
+                tenant_id: None,
                 actor_sub: None,
                 actor_roles: None,
                 actor_attrs: serde_json::Value::Null,
@@ -137,6 +139,23 @@ impl AuditEventBuilder {
             inner.actor_sub = sub.map(str::to_owned);
             inner.actor_roles = Some(roles.to_vec());
             inner.actor_attrs = attrs;
+        });
+    }
+
+    /// Record the tenancy boundary the request is operating within.
+    ///
+    /// Tenant id, organization id, workspace id — whatever partitions
+    /// the deployment. It lands in the indexed `tenant_id` column, so
+    /// compliance queries can scope an audit trail to one tenant
+    /// without reaching into `actor_attrs` JSON.
+    ///
+    /// Pass `None` for single-tenant deployments; the column stays
+    /// empty. When `doxa-auth`'s `AuthLayer` is in the stack this is
+    /// called automatically from `Claims::scope()` — handlers only need
+    /// it for events raised outside a request's auth context.
+    pub fn set_tenant(&self, tenant_id: Option<&str>) {
+        self.with_inner(|inner| {
+            inner.tenant_id = tenant_id.map(str::to_owned);
         });
     }
 
@@ -369,6 +388,7 @@ impl AuditEventBuilder {
             event_type: inner.event_type.unwrap_or_default(),
             action: inner.action.unwrap_or_default(),
             outcome,
+            tenant_id: inner.tenant_id,
             actor_sub: inner.actor_sub,
             actor_roles: inner.actor_roles,
             actor_attrs: inner.actor_attrs,

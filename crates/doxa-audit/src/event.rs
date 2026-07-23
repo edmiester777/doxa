@@ -153,12 +153,11 @@ pub trait AuditOutcome {
 
 /// A fully-populated audit event ready for persistence.
 ///
-/// Actor fields are intentionally limited to `sub`, `roles`, and an
-/// opaque `attrs` JSON map — the audit library has no opinion on how
-/// consumers model tenancy, project scoping, or any other identity
-/// dimension. Deployments that want to query audit events by tenant
-/// store the tenant id inside `actor_attrs` and use a JSON operator
-/// at query time.
+/// Actor fields are limited to `tenant_id`, `sub`, `roles`, and an
+/// opaque `attrs` JSON map. Tenancy is the one identity dimension the
+/// library promotes to a real column — every other scoping concern
+/// (project, department, …) stays in `actor_attrs`, which the library
+/// has no opinion about.
 #[derive(Debug, Clone)]
 pub struct AuditEvent {
     /// String representation of the event type (e.g. `"data_access"`).
@@ -166,10 +165,15 @@ pub struct AuditEvent {
     pub event_type: String,
     pub action: String,
     pub outcome: Outcome,
+    /// Tenancy boundary the event occurred within — tenant id,
+    /// organization id, workspace id, whatever partitions the
+    /// deployment. `None` for single-tenant deployments and for events
+    /// recorded before a principal was resolved.
+    pub tenant_id: Option<String>,
     pub actor_sub: Option<String>,
     pub actor_roles: Option<Vec<String>>,
-    /// Consumer-defined JSON map carrying any additional identity
-    /// attributes (tenant id, project id, department, …). Opaque to
+    /// Consumer-defined JSON map carrying identity attributes beyond
+    /// the promoted `tenant_id` (project id, department, …). Opaque to
     /// the library — persisted verbatim into the `actor_attrs` JSONB
     /// column.
     pub actor_attrs: serde_json::Value,
