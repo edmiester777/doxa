@@ -86,7 +86,7 @@ sea-orm-migration = { version = "1", features = ["sqlx-postgres", "sqlx-sqlite",
 # Auth / policy
 cached = { version = "0.59", features = ["async_tokio_rt_multi_thread"] }
 cedar-policy = { version = "4", features = ["partial-eval"] }
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 sha2 = "0.11"
 
 # Secret management
