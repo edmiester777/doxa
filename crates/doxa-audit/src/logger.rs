@@ -106,6 +106,7 @@ mod sea_orm_writer {
             event_type: Set(event.event_type.clone()),
             action: Set(event.action.clone()),
             outcome: Set(event.outcome),
+            tenant_id: Set(event.tenant_id.clone()),
             actor_sub: Set(event.actor_sub.clone()),
             actor_roles: Set(roles_json),
             actor_attrs: Set(event.actor_attrs.clone()),

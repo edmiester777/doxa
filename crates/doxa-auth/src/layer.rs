@@ -100,6 +100,10 @@ mod audit_support {
         pub fn take_with_actor<C: Claims>(&mut self, claims: &C) -> Option<AuditEventBuilder> {
             let builder = self.0.take()?;
             builder.set_actor(Some(claims.sub()), claims.roles(), claims.audit_attrs());
+            // Same partition key the policy evaluator scopes by, so an
+            // audit trail can be filtered to exactly the tenant whose
+            // policies decided the request.
+            builder.set_tenant(claims.scope());
             Some(builder)
         }
     }
@@ -615,6 +619,67 @@ mod tests {
         assert_eq!(event.http_method.as_deref(), Some("GET"));
         assert_eq!(event.http_path.as_deref(), Some("/widgets/42"));
         assert_eq!(event.source_ip.as_deref(), Some("203.0.113.9"));
+    }
+
+    #[cfg(feature = "audit")]
+    #[tokio::test]
+    async fn resolved_claims_stamp_the_tenant_onto_the_audit_event() {
+        use doxa_audit::{AuditLayer, AuditLogger};
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let auth = AuthLayer::new(make_state("good")).layer(tower::service_fn(
+            |_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::builder().body(Body::empty()).unwrap())
+            },
+        ));
+        let svc = AuditLayer::new(AuditLogger::from_sender(tx)).layer(auth);
+
+        let req = Request::builder()
+            .uri("/widgets/42")
+            .header("authorization", "Bearer good")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = svc.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let event = rx.recv().await.expect("success should emit an audit event");
+        // The stub resolver scopes claims to `tenant-1`; the audit trail
+        // has to land in the same partition the policy evaluated under.
+        assert_eq!(event.tenant_id.as_deref(), Some("tenant-1"));
+        assert_eq!(event.actor_sub.as_deref(), Some("test-sub"));
+    }
+
+    #[cfg(feature = "audit")]
+    #[tokio::test]
+    async fn auth_failure_leaves_the_tenant_unset() {
+        use doxa_audit::{AuditLayer, AuditLogger};
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let auth = AuthLayer::new(make_state("good")).layer(tower::service_fn(
+            |_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::builder().body(Body::empty()).unwrap())
+            },
+        ));
+        let svc = AuditLayer::new(AuditLogger::from_sender(tx)).layer(auth);
+
+        let req = Request::builder()
+            .uri("/widgets/42")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            svc.oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let event = rx.recv().await.expect("auth failure emits an event");
+        // Nothing resolved a principal, so there is no tenant to claim —
+        // the denial must not be filed under someone else's partition.
+        assert!(event.tenant_id.is_none());
     }
 
     #[tokio::test]

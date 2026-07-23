@@ -21,16 +21,27 @@ pub mod doxa_audit_log {
         #[sea_orm(column_type = "String(StringLen::N(255))")]
         pub action: String,
         pub outcome: Outcome,
+        /// Tenancy boundary the event occurred within — tenant id,
+        /// organization id, workspace id, whatever partitions the
+        /// deployment. `None` for single-tenant deployments and for
+        /// events recorded before authentication resolved a principal
+        /// (auth failures, in particular).
+        ///
+        /// A point-in-time snapshot like the other actor fields — never
+        /// a foreign key into a live tenants table.
+        #[sea_orm(column_type = "String(StringLen::N(255))", nullable)]
+        pub tenant_id: Option<String>,
         /// JWT `sub` claim of the actor.
         #[sea_orm(column_type = "String(StringLen::N(255))", nullable)]
         pub actor_sub: Option<String>,
         /// Snapshot of the actor's roles at event time (not a live FK).
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub actor_roles: Option<serde_json::Value>,
-        /// Consumer-defined identity attributes (tenant id, project id,
-        /// department, …). Opaque JSON — the library has no opinion on
-        /// the shape. Query with JSON operators (`actor_attrs->>'key'`)
-        /// when filtering by tenant.
+        /// Consumer-defined identity attributes (project id, department,
+        /// …) beyond the promoted `tenant_id` column. Opaque JSON — the
+        /// library has no opinion on the shape. Query with JSON operators
+        /// (`actor_attrs->>'key'`); filter by tenant with the indexed
+        /// [`tenant_id`](Self::tenant_id) column instead.
         #[sea_orm(column_type = "JsonBinary")]
         pub actor_attrs: serde_json::Value,
         /// Resource type name — `document`, `role`, `connection`, etc.

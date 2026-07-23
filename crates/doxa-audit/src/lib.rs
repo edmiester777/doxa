@@ -70,6 +70,7 @@ mod tests {
             event_type: "data_access".to_owned(),
             action: "read".into(),
             outcome: Outcome::Allowed,
+            tenant_id: Some("acme".into()),
             actor_sub: Some("user-123".into()),
             actor_roles: Some(vec!["viewer".into()]),
             actor_attrs: serde_json::Value::Null,
@@ -91,6 +92,7 @@ mod tests {
         assert_eq!(event.event_type, "data_access");
         assert_eq!(event.action, "read");
         assert_eq!(event.outcome, Outcome::Allowed);
+        assert_eq!(event.tenant_id.as_deref(), Some("acme"));
         assert_eq!(event.actor_sub.as_deref(), Some("user-123"));
         assert_eq!(event.resource_id.as_deref(), Some("doc-42"));
         assert_eq!(event.duration_ms, Some(42));
@@ -104,6 +106,7 @@ mod tests {
             event_type: "data_access".to_owned(),
             action: "test".into(),
             outcome: Outcome::Allowed,
+            tenant_id: None,
             actor_sub: None,
             actor_roles: None,
             actor_attrs: serde_json::Value::Null,
@@ -147,6 +150,35 @@ mod tests {
             Some(&["admin".to_string(), "viewer".to_string()][..])
         );
         assert_eq!(event.outcome, Outcome::Allowed);
+    }
+
+    #[tokio::test]
+    async fn builder_set_tenant_populates_field() {
+        let (logger, mut rx) = make_logger(16);
+        let builder = AuditEventBuilder::new(logger);
+
+        builder.set_tenant(Some("acme"));
+        builder.set_event(EventType::DataAccess, "read");
+        builder.emit_allowed();
+
+        let event = rx.recv().await.expect("should receive event");
+        assert_eq!(event.tenant_id.as_deref(), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn builder_tenant_defaults_to_none() {
+        let (logger, mut rx) = make_logger(16);
+        let builder = AuditEventBuilder::new(logger);
+
+        builder.set_actor(Some("sub-abc"), &[], serde_json::Value::Null);
+        builder.set_event(EventType::DataAccess, "read");
+        builder.emit_allowed();
+
+        let event = rx.recv().await.expect("should receive event");
+        assert!(
+            event.tenant_id.is_none(),
+            "single-tenant deployments leave the column empty",
+        );
     }
 
     #[tokio::test]
