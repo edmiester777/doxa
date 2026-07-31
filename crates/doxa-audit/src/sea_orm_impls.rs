@@ -6,7 +6,7 @@ use crate::event::Outcome;
 
 impl From<Outcome> for sea_orm::Value {
     fn from(val: Outcome) -> Self {
-        sea_orm::Value::String(Some(Box::new(val.to_string())))
+        sea_orm::Value::String(Some(val.to_string()))
     }
 }
 

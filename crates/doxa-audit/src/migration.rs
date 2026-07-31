@@ -300,7 +300,7 @@ mod tests {
     /// Indexes this migrator owns, excluding the implicit one SQLite
     /// builds for the non-integer primary key.
     async fn index_names(db: &DatabaseConnection) -> Vec<String> {
-        db.query_all(Statement::from_string(
+        db.query_all_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT name FROM sqlite_master \
              WHERE type = 'index' AND tbl_name = 'doxa_audit_log' \
@@ -350,7 +350,7 @@ mod tests {
             "DROP INDEX idx_doxa_audit_log_tenant_created_at",
             "ALTER TABLE doxa_audit_log DROP COLUMN tenant_id",
         ] {
-            db.execute(Statement::from_string(DbBackend::Sqlite, sql))
+            db.execute_raw(Statement::from_string(DbBackend::Sqlite, sql))
                 .await
                 .unwrap_or_else(|e| panic!("{sql}: {e}"));
         }
