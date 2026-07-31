@@ -80,8 +80,8 @@ bytes = "1"
 hex = "0.4"
 
 # ORM (optional, for doxa-audit SeaORM backend)
-sea-orm = { version = "1", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-json", "with-chrono"] }
-sea-orm-migration = { version = "1", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-orm = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-json", "with-chrono"] }
+sea-orm-migration = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
 
 # Auth / policy
 cached = { version = "0.59", features = ["async_tokio_rt_multi_thread"] }
