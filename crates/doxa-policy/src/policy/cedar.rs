@@ -154,7 +154,10 @@ mod tests {
     use crate::test_support::{StubExtension, StubStore};
 
     fn build_policy() -> CedarPolicy<StubExtension> {
-        let store: SharedPolicyStore = Arc::new(StubStore { policy_text: "" });
+        let store: SharedPolicyStore = Arc::new(StubStore {
+            policy_text: "",
+            entities: Vec::new(),
+        });
         CedarPolicy::new(store, StubExtension)
     }
 
@@ -241,7 +244,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_uses_custom_is_admin_role() {
         use crate::policy::Policy;
-        let store: SharedPolicyStore = Arc::new(StubStore { policy_text: "" });
+        let store: SharedPolicyStore = Arc::new(StubStore {
+            policy_text: "",
+            entities: Vec::new(),
+        });
         let policy = CedarPolicy::new(store, CustomAdminExtension);
 
         // Custom admin role triggers admin_session().
@@ -279,7 +285,10 @@ mod tests {
 
         // Building a second policy with the same cache produces a policy
         // whose ttl matches (the cache carries its own ttl value).
-        let store: SharedPolicyStore = Arc::new(StubStore { policy_text: "" });
+        let store: SharedPolicyStore = Arc::new(StubStore {
+            policy_text: "",
+            entities: Vec::new(),
+        });
         let policy2 = CedarPolicy::new(store, StubExtension).with_cache(cache);
         assert_eq!(policy2.cache_ttl(), Duration::from_secs(7));
     }

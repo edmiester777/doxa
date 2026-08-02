@@ -46,6 +46,8 @@ pub mod layer;
 pub mod middleware;
 #[cfg(feature = "axum")]
 pub mod openapi;
+#[cfg(feature = "axum")]
+pub mod permitted;
 
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};
@@ -60,3 +62,5 @@ pub use layer::{AuthLayer, AuthService};
 pub use middleware::AuthState;
 #[cfg(feature = "axum")]
 pub use openapi::{auth_contribution, BearerAuthorization};
+#[cfg(feature = "axum")]
+pub use permitted::{LoadResource, PermitSite, Permitted};

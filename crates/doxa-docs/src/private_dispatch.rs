@@ -37,7 +37,8 @@ use utoipa::openapi::RefOr;
 
 use crate::doc_responses::DocResponseBody;
 use crate::doc_traits::{
-    DocHeaderParams, DocOperationSecurity, DocPathParams, DocPathScalar, DocQueryParams,
+    DocHeaderParams, DocOperationContribution, DocOperationSecurity, DocPathParams, DocPathScalar,
+    DocQueryParams,
 };
 use crate::inner_schema::InnerToSchema;
 
@@ -441,6 +442,49 @@ pub trait OpSecurityMissingAdhoc: Sized {
 }
 
 impl<T: ?Sized> OpSecurityMissingAdhoc for &OpSecurityContribution<T> {
+    fn __describe(self, _op: &mut utoipa::openapi::path::Operation) {}
+}
+
+// ---------------------------------------------------------------------------
+// Per-operation responses/headers/badges contribution
+// ---------------------------------------------------------------------------
+
+/// Probe routed through [`DocOperationContribution`]. Documents the
+/// statuses an extractor can reject with before the handler runs.
+pub struct OpContribution<T: ?Sized>(PhantomData<T>);
+
+impl<T: ?Sized> OpContribution<T> {
+    /// Construct a zero-sized probe for `T`.
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: ?Sized> Default for OpContribution<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Depth-0 specialization.
+pub trait OpContributionImplementedAdhoc: Sized {
+    /// Apply the specialized impl, mutating `op` in place.
+    fn __describe(self, op: &mut utoipa::openapi::path::Operation);
+}
+
+impl<T: DocOperationContribution + ?Sized> OpContributionImplementedAdhoc for OpContribution<T> {
+    fn __describe(self, op: &mut utoipa::openapi::path::Operation) {
+        crate::contribution::apply_contribution_to_operation(op, &T::contribution());
+    }
+}
+
+/// Depth-1 fallback.
+pub trait OpContributionMissingAdhoc: Sized {
+    /// No-op fallback — does not mutate `op`.
+    fn __describe(self, op: &mut utoipa::openapi::path::Operation);
+}
+
+impl<T: ?Sized> OpContributionMissingAdhoc for &OpContribution<T> {
     fn __describe(self, _op: &mut utoipa::openapi::path::Operation) {}
 }
 

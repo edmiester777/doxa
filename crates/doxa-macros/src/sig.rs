@@ -556,6 +556,17 @@ impl InferredAttrs {
                                 >::new()
                                 .__describe(__op);
                             }
+                            {
+                                #[allow(unused_imports)]
+                                use ::doxa::__private::{
+                                    OpContributionImplementedAdhoc as _,
+                                    OpContributionMissingAdhoc as _,
+                                };
+                                ::doxa::__private::OpContribution::<
+                                    #arg_types_for_ops,
+                                >::new()
+                                .__describe(__op);
+                            }
                         )*
                         // Schemas referenced by the response body are
                         // already collected via `ApidocHandlerSchemas`

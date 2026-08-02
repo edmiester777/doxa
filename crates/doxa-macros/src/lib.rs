@@ -189,6 +189,8 @@ use proc_macro::TokenStream;
 mod api_error;
 mod capability;
 mod method;
+mod permit;
+mod policy_resource;
 mod sig;
 mod sse_event;
 
@@ -349,6 +351,36 @@ pub fn patch(args: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
     method::expand("delete", args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derive Cedar entity identity so a type can be authorized by instance
+/// with `Permitted<R>`.
+///
+/// `entity_type` is reused as the audit `resource_type`, so audit rows
+/// join to the decisions that produced them. Fields opt into a role:
+/// `#[resource(id)]` (required, exactly one), `#[resource(attr)]` to
+/// expose a field to policies as `resource.<name>` (`attr = "key"`
+/// renames), and `#[resource(parent = "Folder")]` for `in` checks.
+/// `ID_TYPE` is inferred from the id field's type; override with
+/// `id_type = "uuid"`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(PolicyResource)]
+/// #[resource(entity_type = "Widget")]
+/// struct Widget {
+///     #[resource(id)]              id: u32,
+///     #[resource(attr)]            region: String,
+///     #[resource(parent = "Folder")] folder_id: String,
+///     name: String,
+/// }
+/// ```
+#[proc_macro_derive(PolicyResource, attributes(resource))]
+pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
+    policy_resource::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
