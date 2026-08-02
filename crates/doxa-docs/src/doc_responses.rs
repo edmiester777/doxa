@@ -301,10 +301,10 @@ pub(crate) fn has_collision_prone_name<T: utoipa::ToSchema>() -> bool {
 /// at `utoipa-gen/src/component.rs` (the `format!("{}_{}", base,
 /// children)` path).
 ///
-/// Example: `Paginated<datalake::SourceSummary>` →
-/// `"Paginated_SourceSummary"`. Multi-argument generics join every
+/// Example: `Paginated<catalog::ItemSummary>` →
+/// `"Paginated_ItemSummary"`. Multi-argument generics join every
 /// argument in declaration order:
-/// `Map<Key, datalake::SourceSummary>` → `"Map_Key_SourceSummary"`.
+/// `Map<Key, catalog::ItemSummary>` → `"Map_Key_ItemSummary"`.
 ///
 /// Only used when [`has_collision_prone_name`] returns `true`. The
 /// inner names are parsed from the type-name string rather than via
@@ -365,7 +365,7 @@ fn split_top_level_generic_args(type_name: &str) -> Vec<&str> {
 /// Return the last `::`-separated segment of a Rust path (the
 /// trailing ident), plus any generic arguments attached to it. Used
 /// to drop module prefixes when composing OpenAPI component names —
-/// `datalake_server::api::Foo` becomes `Foo`.
+/// `my_server::api::Foo` becomes `Foo`.
 fn last_path_segment(path: &str) -> &str {
     // Strip leading reference / whitespace noise that type_name
     // might include.
