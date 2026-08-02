@@ -26,6 +26,7 @@ use crate::capability::{Capability, CapabilityChecker};
 use crate::cedar_core::{CedarEvaluator, TenantStoreCache};
 use crate::error::AuthError;
 use crate::extension::PolicyExtension;
+use crate::resource::ResourceEntity;
 use crate::store::SharedPolicyStore;
 
 /// Outcome of a [`PolicyRouter::check`] call.
@@ -165,6 +166,49 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
         })
     }
 
+    /// Check `action` against one concrete object.
+    ///
+    /// Unlike [`check_capability`](Self::check_capability), whose
+    /// resource ids are `&'static str` sentinels, this evaluates against
+    /// the instance the request actually touches — and injects its
+    /// attributes into the entity set, so a `when { resource.<attr> … }`
+    /// clause resolves instead of collapsing to a residual denial.
+    #[tracing::instrument(skip_all, fields(tenant_id, action))]
+    pub async fn check_instance(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        action: &str,
+        resource: &ResourceEntity,
+    ) -> Result<AccessDecision, AuthError> {
+        if tenant_id.is_empty() {
+            return Ok(AccessDecision::deny(
+                "no tenant context — cannot evaluate action",
+            ));
+        }
+
+        let uid = self.extension.build_resource_uid(
+            tenant_id,
+            &resource.entity_type,
+            &resource.entity_id,
+        )?;
+
+        let store = self.cache.get_or_load(&self.store, tenant_id).await?;
+        let evaluator = CedarEvaluator::new_with_resource(
+            &store,
+            tenant_id,
+            roles,
+            self.extension.as_ref(),
+            Some(resource),
+        )?;
+        let allowed = evaluator.check_action(action, uid.clone())?;
+
+        Ok(AccessDecision {
+            allowed,
+            reason: (!allowed).then(|| format!("policy denied {action} on {uid}")),
+        })
+    }
+
     /// Evaluate a single [`Capability`] against the tenant's policies.
     ///
     /// Returns `Ok(true)` only if every underlying [`CapabilityCheck`]
@@ -233,13 +277,30 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for PolicyRouter<E> {
     ) -> Result<bool, AuthError> {
         self.check_capability(tenant_id, roles, cap).await
     }
+
+    async fn check_instance(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        action: &str,
+        resource: &ResourceEntity,
+    ) -> Result<bool, AuthError> {
+        // Disambiguated: the inherent method shares this name.
+        Ok(
+            PolicyRouter::check_instance(self, tenant_id, roles, action, resource)
+                .await?
+                .allowed,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capability::CapabilityCheck;
-    use crate::test_support::{build_failing_uid_router, build_stub_router};
+    use crate::test_support::{
+        build_failing_uid_router, build_stub_router, build_stub_router_with_entities,
+    };
 
     // Each router now owns its own tenant-store cache, so tests no longer
     // have to use unique tenant ids to avoid process-wide cache pollution.
@@ -454,5 +515,142 @@ mod tests {
             .await
             .expect("router ok");
         assert!(!allowed);
+    }
+
+    // ── Instance-level checks ───────────────────────────────
+
+    /// Grants only when the object's own `region` attribute matches, so
+    /// the decision is unreachable without the entity in scope.
+    const REGION_POLICY: &str = r#"
+        permit(principal in Role::"viewer", action == Action::"read", resource)
+        when { resource.region == "us" };
+    "#;
+
+    fn widget(id: &str, region: &str) -> ResourceEntity {
+        let mut attrs = serde_json::Map::new();
+        attrs.insert("region".into(), serde_json::json!(region));
+        ResourceEntity::new("Widget", id).with_attrs(attrs)
+    }
+
+    #[tokio::test]
+    async fn attribute_policy_allows_when_the_instance_matches() {
+        let router = build_stub_router(REGION_POLICY);
+        let decision = router
+            .check_instance(
+                "inst_t1",
+                &["viewer".to_string()],
+                "read",
+                &widget("w-1", "us"),
+            )
+            .await
+            .expect("router ok");
+        assert!(decision.allowed, "matching attribute should grant access");
+    }
+
+    #[tokio::test]
+    async fn attribute_policy_denies_when_the_instance_differs() {
+        let router = build_stub_router(REGION_POLICY);
+        let decision = router
+            .check_instance(
+                "inst_t2",
+                &["viewer".to_string()],
+                "read",
+                &widget("w-2", "eu"),
+            )
+            .await
+            .expect("router ok");
+        assert!(!decision.allowed, "non-matching attribute should deny");
+        assert!(decision.reason.is_some(), "denials carry a reason");
+    }
+
+    #[tokio::test]
+    async fn attribute_policy_denies_without_the_entity_in_scope() {
+        // The same policy through the capability path, whose resource
+        // has no attributes: `resource.region` cannot be dereferenced,
+        // the clause survives as a residual, and the residual reads as
+        // a denial. This is what instance checks exist to fix.
+        let router = build_stub_router(REGION_POLICY);
+        let uid = crate::uid::build_uid("Widget", "w-1").expect("uid");
+        let decision = router
+            .check("inst_t3", &["viewer".to_string()], "read", uid)
+            .await
+            .expect("router ok");
+        assert!(
+            !decision.allowed,
+            "an attribute clause with no entity to read must not grant",
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_check_denies_on_empty_tenant() {
+        let router = build_stub_router(REGION_POLICY);
+        let decision = router
+            .check_instance("", &["viewer".to_string()], "read", &widget("w-1", "us"))
+            .await
+            .expect("router ok");
+        assert!(!decision.allowed);
+    }
+
+    /// A store that already persists an entity for the checked UID must
+    /// not produce two entries — Cedar rejects the duplicate and the
+    /// check would error instead of deciding.
+    #[tokio::test]
+    async fn stored_entity_for_the_same_uid_is_merged_not_duplicated() {
+        let stored = serde_json::json!({
+            "uid": {"type": "Widget", "id": "w-1"},
+            "attrs": {"region": "eu"},
+            "parents": [],
+        });
+        let router = build_stub_router_with_entities(REGION_POLICY, vec![stored]);
+
+        let decision = router
+            .check_instance(
+                "inst_t4",
+                &["viewer".to_string()],
+                "read",
+                &widget("w-1", "us"),
+            )
+            .await
+            .expect("a stored entity must not turn the check into an error");
+        assert!(
+            decision.allowed,
+            "the live attribute is authoritative over the stored one",
+        );
+    }
+
+    /// The stored entity carries the hierarchy tenant policies are
+    /// written against; a loaded resource declaring no parents must not
+    /// drop it.
+    #[tokio::test]
+    async fn stored_parents_survive_the_merge() {
+        const TENANT_POLICY: &str = r#"
+            permit(principal in Role::"viewer", action == Action::"read", resource)
+            when { resource in Tenant::"acme" && resource.region == "us" };
+        "#;
+        let entities = vec![
+            serde_json::json!({
+                "uid": {"type": "Tenant", "id": "acme"}, "attrs": {}, "parents": [],
+            }),
+            serde_json::json!({
+                "uid": {"type": "Widget", "id": "w-1"},
+                "attrs": {},
+                "parents": [{"type": "Tenant", "id": "acme"}],
+            }),
+        ];
+        let router = build_stub_router_with_entities(TENANT_POLICY, entities);
+
+        let decision = router
+            .check_instance(
+                "acme",
+                &["viewer".to_string()],
+                "read",
+                &widget("w-1", "us"),
+            )
+            .await
+            .expect("router ok");
+        assert!(
+            decision.allowed,
+            "membership from the stored entity must still hold after the merge",
+        );
     }
 }

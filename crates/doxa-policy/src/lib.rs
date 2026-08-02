@@ -23,12 +23,14 @@
 //! | [`router`] | [`PolicyRouter`] — centralized slow-path PEP |
 //! | [`error`] | [`AuthError`] enum (no HTTP response mapping) |
 //! | [`uid`] | Cedar entity UID builder with input validation |
+//! | [`resource`] | [`PolicyResource`] — instance-level resource identity |
 
 pub mod capability;
 pub mod cedar_core;
 pub mod error;
 pub mod extension;
 pub mod policy;
+pub mod resource;
 pub mod router;
 pub mod store;
 pub mod uid;
@@ -44,5 +46,6 @@ pub use cedar_core::{TenantStoreCache, DEFAULT_TENANT_CACHE_TTL};
 pub use error::AuthError;
 pub use extension::{PolicyExtension, ResourceAccess};
 pub use policy::Policy;
+pub use resource::{PolicyResource, ResourceEntity, ResourceIdType};
 pub use router::{AccessDecision, PolicyRouter};
 pub use store::{PolicyStore, SharedPolicyStore};

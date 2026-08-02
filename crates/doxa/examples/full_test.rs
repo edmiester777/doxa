@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use doxa::audit::{AuditEventBuilder, AuditLayer, EventType};
 use doxa::auth::{Auth, AuthLayer, AuthState, Claims, Require};
-use doxa::policy::{Capability, CapabilityCheck, CapabilityChecker, Capable};
+use doxa::policy::{Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity};
 use doxa::protected::ProtectedString;
 use doxa::{
     get, post, routes, ApiDocBuilder, ApiError, MountDocsExt, MountOpts, OpenApiRouter,
@@ -220,6 +220,16 @@ impl CapabilityChecker for AllowAll {
         _tenant_id: &str,
         _roles: &[String],
         _cap: &Capability,
+    ) -> Result<bool, doxa::policy::AuthError> {
+        Ok(true)
+    }
+
+    async fn check_instance(
+        &self,
+        _tenant_id: &str,
+        _roles: &[String],
+        _action: &str,
+        _resource: &ResourceEntity,
     ) -> Result<bool, doxa::policy::AuthError> {
         Ok(true)
     }

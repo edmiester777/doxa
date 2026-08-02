@@ -120,10 +120,10 @@ impl Outcome {
 /// read the outcome from response extensions without status-code heuristics.
 ///
 /// `#[derive(ApiError)]` generates this impl automatically when the `audit`
-/// feature is enabled on `doxa-macros`. Each variant's outcome is declared
-/// via `#[api(outcome = "denied")]` — when omitted, the variant must still
-/// be handled by a manual `impl` or the layer falls back to
-/// [`Outcome::Allowed`].
+/// feature is enabled on `doxa-macros`. Each variant declares its outcome
+/// via `#[api(outcome = "denied")]`; omitted variants default to
+/// [`Outcome::Error`]. Declare `denied` on authorization failures so a
+/// policy denial is not recorded as a system fault.
 ///
 /// # Example
 ///

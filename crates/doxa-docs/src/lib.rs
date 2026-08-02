@@ -205,13 +205,14 @@ mod ui;
 pub use builder::{ApiDoc, ApiDocBuilder, BuildError, SseSpecVersion};
 pub use contribution::{
     apply_badge_to_operation, apply_contribution, record_required_permission, BadgeContribution,
-    DocumentedLayer, LayerContribution, ResponseContribution, SecurityContribution,
+    DocumentedLayer, LayerContribution, OperationContribution, ResponseContribution,
+    SecurityContribution,
 };
 pub use doc_params::DocHeaderEntry;
 pub use doc_responses::DocResponseBody;
 pub use doc_traits::{
-    DocHeaderParams, DocOperationSecurity, DocPathParams, DocPathScalar, DocQueryParams,
-    DocRequestBody, PathScalar,
+    DocHeaderParams, DocOperationContribution, DocOperationSecurity, DocPathParams, DocPathScalar,
+    DocQueryParams, DocRequestBody, PathScalar,
 };
 pub use extractor::Header;
 pub use handler_ops::{operation_for_method_mut, ApidocHandlerOps};
@@ -231,7 +232,9 @@ pub use ui::{DeveloperTools, DocumentDownload, ScalarConfig, ScalarLayout, Scala
 // (enabled by default) so the proc-macro compile cost can be opted
 // out of when the derives aren't needed.
 #[cfg(feature = "macros")]
-pub use doxa_macros::{capability, delete, get, operation, patch, post, put, ApiError, SseEvent};
+pub use doxa_macros::{
+    capability, delete, get, operation, patch, post, put, ApiError, PolicyResource, SseEvent,
+};
 
 // Re-export the underlying utoipa types so consumers depend on a single
 // crate. Each re-export is explicit (no glob) so the public surface is
@@ -257,6 +260,10 @@ pub type ApiResult<T, E> = Result<T, E>;
 #[doc(hidden)]
 pub mod __private {
     pub use tracing;
+
+    /// Referenced by `#[derive(PolicyResource)]` when building the
+    /// attribute map, so consumers need not depend on `serde_json`.
+    pub use serde_json;
 
     /// Audit outcome attached to response extensions by
     /// `#[derive(ApiError)]`'s generated `IntoResponse` impl.
@@ -288,7 +295,8 @@ pub mod __private {
         GenericArgSchemaContribution, GenericArgSchemaImplementedAdhoc,
         GenericArgSchemaMissingAdhoc, HeaderParamContribution, HeaderParamsImplementedAdhoc,
         HeaderParamsMissingAdhoc, InnerSchemaContribution, InnerSchemaImplementedAdhoc,
-        InnerSchemaMissingAdhoc, OpSecurityContribution, OpSecurityImplementedAdhoc,
+        InnerSchemaMissingAdhoc, OpContribution, OpContributionImplementedAdhoc,
+        OpContributionMissingAdhoc, OpSecurityContribution, OpSecurityImplementedAdhoc,
         OpSecurityMissingAdhoc, PathParamContribution, PathParamsImplementedAdhoc,
         PathParamsMissingAdhoc, PathScalarContribution, PathScalarImplementedAdhoc,
         PathScalarMissingAdhoc, QueryParamContribution, QueryParamsImplementedAdhoc,

@@ -182,3 +182,20 @@ impl<M: Capable, S: SchemeName> doxa::DocOperationSecurity for Require<M, S> {
         );
     }
 }
+
+/// Documents the statuses the capability gate itself can return, which
+/// the handler's own error type never mentions.
+impl<M: Capable, S: SchemeName> doxa::DocOperationContribution for Require<M, S> {
+    fn contribution() -> doxa::OperationContribution {
+        doxa::OperationContribution::new()
+            .with_response(doxa::ResponseContribution::unauthorized())
+            .with_response(doxa::ResponseContribution::new(
+                "403",
+                format!("Caller lacks the `{}` capability", M::CAPABILITY.name),
+            ))
+            .with_response(doxa::ResponseContribution::new(
+                "500",
+                "Policy evaluation failed",
+            ))
+    }
+}

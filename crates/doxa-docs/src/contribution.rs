@@ -30,6 +30,10 @@ pub struct LayerContribution {
     pub(crate) badges: Vec<BadgeContribution>,
 }
 
+/// Extractor-side alias for [`LayerContribution`] — same shape, applied
+/// to one operation rather than every route a layer covers.
+pub type OperationContribution = LayerContribution;
+
 /// One badge entry the layer attaches to every operation it covers.
 /// Surfaces in doc UIs that render the `x-badges` vendor extension
 /// (Scalar): a colored chip with the supplied name.

@@ -104,6 +104,17 @@ pub trait CapabilityChecker: Send + Sync {
         roles: &[String],
         cap: &Capability,
     ) -> Result<bool, crate::AuthError>;
+
+    /// Evaluate `action` against one concrete object, with its
+    /// attributes in scope. The instance-level counterpart to
+    /// [`check`](Self::check), whose resource ids are static sentinels.
+    async fn check_instance(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        action: &str,
+        resource: &crate::ResourceEntity,
+    ) -> Result<bool, crate::AuthError>;
 }
 
 /// One `(action, entity_type, entity_id)` triple inside a [`Capability`].
