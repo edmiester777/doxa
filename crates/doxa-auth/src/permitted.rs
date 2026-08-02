@@ -61,6 +61,68 @@ pub trait LoadResource: PolicyResource {
     ) -> impl Future<Output = Result<Option<Self>, Self::Error>> + Send;
 }
 
+/// Load `R` by id and authorize `action` against it, using the caller
+/// and checker already resolved into `extensions`.
+///
+/// This is the body of [`Permitted`], exposed for ids the extractor
+/// cannot see — one named in a request body, a query plan, or a config
+/// document. A resource reached that way gets the same decision and the
+/// same failure modes as a path-named one, instead of a bare lookup with
+/// no policy in it.
+///
+/// Deliberately leaves the audit builder alone: an event names one
+/// resource, and only the caller knows whether this is the object the
+/// request is about or a dependency of it. Stamp it yourself, guarding
+/// on `AuditEventBuilder::has_resource` for the dependency case.
+///
+/// Fails with 401 (no auth context), 403 (policy denial), or 404 (no
+/// such object); a loader error is returned verbatim.
+pub async fn authorize_instance<R: LoadResource>(
+    id: R::Id,
+    action: &str,
+    state: &R::State,
+    extensions: &http::Extensions,
+) -> Result<R, Response> {
+    // Resolved before the load so an unauthenticated caller cannot tell
+    // a missing object from one they may not see.
+    let ctx = extensions
+        .get::<CapabilityContext>()
+        .ok_or_else(|| AuthError::MissingCredentials.into_response())?;
+    let checker = extensions
+        .get::<Arc<dyn CapabilityChecker>>()
+        .ok_or_else(|| {
+            AuthError::PolicyFailed("capability checker not configured on AuthLayer".into())
+                .into_response()
+        })?;
+
+    let resource = R::load(id, state, ctx)
+        .await
+        .map_err(IntoResponse::into_response)?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("{} not found", R::ENTITY_TYPE),
+            )
+                .into_response()
+        })?;
+
+    let allowed = checker
+        .check_instance(
+            ctx.tenant_id.as_deref().unwrap_or(""),
+            &ctx.roles,
+            action,
+            &ResourceEntity::of(&resource),
+        )
+        .await
+        .map_err(IntoResponse::into_response)?;
+
+    if !allowed {
+        return Err(AuthError::Forbidden.into_response());
+    }
+
+    Ok(resource)
+}
+
 /// A loaded resource the caller is authorized to act on.
 ///
 /// Extraction fails with 400 (unparseable id), 401 (no auth context),
@@ -131,53 +193,17 @@ where
                 .into_response()
         })?;
 
-        // Stamp before authorizing so a denial names the object.
+        // Stamp before authorizing so a denial names the object. The
+        // route's own resource, so it claims the audit event outright.
         stamp_audit::<R, S>(parts, raw);
 
-        // Resolved before the load so an unauthenticated caller cannot
-        // tell a missing object from one they may not see.
-        let ctx = parts
-            .extensions
-            .get::<CapabilityContext>()
-            .ok_or_else(|| AuthError::MissingCredentials.into_response())?;
-        let checker = parts
-            .extensions
-            .get::<Arc<dyn CapabilityChecker>>()
-            .ok_or_else(|| {
-                AuthError::PolicyFailed("capability checker not configured on AuthLayer".into())
-                    .into_response()
-            })?;
-
-        let resource = R::load(id, &R::State::from_ref(state), ctx)
-            .await
-            .map_err(IntoResponse::into_response)?
-            .ok_or_else(|| {
-                (
-                    axum::http::StatusCode::NOT_FOUND,
-                    format!("{} not found", R::ENTITY_TYPE),
-                )
-                    .into_response()
-            })?;
-
-        let entity = ResourceEntity::of(&resource);
-
-        let allowed = checker
-            .check_instance(
-                ctx.tenant_id.as_deref().unwrap_or(""),
-                &ctx.roles,
-                S::ACTION,
-                &entity,
-            )
-            .await
-            .map_err(IntoResponse::into_response)?;
-
-        if !allowed {
-            return Err(AuthError::Forbidden.into_response());
-        }
+        let resource =
+            authorize_instance::<R>(id, S::ACTION, &R::State::from_ref(state), &parts.extensions)
+                .await?;
 
         // The loaded object's id is authoritative — it may differ from
         // the path segment when the route keys on a slug.
-        restamp_audit::<R>(parts, &entity.entity_id);
+        restamp_audit::<R>(parts, &resource.resource_id());
 
         Ok(Permitted(resource, PhantomData))
     }

@@ -72,13 +72,6 @@ impl<S, C: Claims> AuthContext<S, C> {
     pub fn tenant_id(&self) -> Option<&str> {
         self.claims.scope()
     }
-
-    /// Policy scope, falling back to the literal string `"default"` when
-    /// the caller has no scope. Convenience accessor for legacy code
-    /// paths that need a non-optional tenant string.
-    pub fn company_id(&self) -> &str {
-        self.tenant_id().unwrap_or("default")
-    }
 }
 
 #[cfg(test)]
@@ -113,10 +106,12 @@ mod tests {
         assert!(c.is_admin);
     }
 
+    /// An unscoped caller reports no tenant rather than a placeholder —
+    /// a consumer that needs a fallback has to name it itself, where the
+    /// choice is visible.
     #[test]
-    fn company_id_falls_back_to_default_when_scope_missing() {
+    fn a_caller_without_a_scope_has_no_tenant() {
         let c = ctx(vec!["viewer"], false, None);
         assert!(c.tenant_id().is_none());
-        assert_eq!(c.company_id(), "default");
     }
 }

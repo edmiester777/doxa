@@ -14,7 +14,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{CapabilityContext, LoadResource, Permitted};
+use doxa::auth::{authorize_instance, CapabilityContext, LoadResource, Permitted};
 use doxa::policy::{AuthError, Capability, CapabilityChecker, ResourceEntity};
 use doxa::{get, routes, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -206,6 +206,56 @@ async fn unauthenticated_requests_never_reach_the_loader() {
         .await
         .expect("request");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---- inline authorization ---------------------------------------------------
+
+/// Extensions as `AuthLayer` would leave them, with no request around
+/// them — the position a handler is in when the id it needs came out of
+/// a request body.
+fn caller_extensions() -> axum::http::Extensions {
+    let mut ext = axum::http::Extensions::new();
+    ext.insert(CapabilityContext {
+        tenant_id: Some("acme".into()),
+        roles: vec!["viewer".into()],
+    });
+    let checker: Arc<dyn CapabilityChecker> = Arc::new(RegionChecker);
+    ext.insert(checker);
+    ext
+}
+
+/// An id no extractor can see still gets the guard's decision, not a
+/// bare lookup.
+#[tokio::test]
+async fn inline_authorization_reaches_the_same_verdicts() {
+    let ext = caller_extensions();
+
+    let allowed = authorize_instance::<Widget>(1, "read", &(), &ext)
+        .await
+        .expect("region us is granted");
+    assert_eq!(allowed.name, "sprocket");
+
+    // Same policy, same checker — the attributes decide, exactly as they
+    // do through the extractor.
+    let denied = authorize_instance::<Widget>(2, "read", &(), &ext)
+        .await
+        .expect_err("region eu is denied");
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let missing = authorize_instance::<Widget>(99, "read", &(), &ext)
+        .await
+        .expect_err("no such widget");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+/// Without a caller in extensions there is nothing to authorize against,
+/// and a body-named id must not become a lookup oracle either.
+#[tokio::test]
+async fn inline_authorization_without_a_caller_is_unauthorized() {
+    let err = authorize_instance::<Widget>(1, "read", &(), &axum::http::Extensions::new())
+        .await
+        .expect_err("no capability context");
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ---- openapi ----------------------------------------------------------------

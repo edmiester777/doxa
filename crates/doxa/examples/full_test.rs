@@ -271,7 +271,7 @@ async fn list_widgets(
     Auth(ctx): Auth<(), MyClaims>,
     Extension(audit): Extension<AuditEventBuilder>,
 ) -> Json<Vec<Widget>> {
-    let tenant = ctx.company_id();
+    let tenant = ctx.tenant_id().unwrap_or("default");
     audit.set_event(EventType::DataAccess, "list");
     audit.set_resource("widget", "collection");
     // AuditLayer auto-emits with Outcome::Allowed after the response
@@ -304,7 +304,7 @@ async fn get_widget(
     Ok(Json(Widget {
         id,
         name: "gadget".into(),
-        tenant: ctx.company_id().into(),
+        tenant: ctx.tenant_id().unwrap_or("default").into(),
     }))
 }
 
