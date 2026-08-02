@@ -21,6 +21,7 @@ use tokio::sync::Mutex;
 
 use crate::error::AuthError;
 use crate::extension::{PolicyExtension, ResourceAccess, ResourceGrants};
+use crate::resource::ResourceEntity;
 use crate::store::SharedPolicyStore;
 use crate::uid::{action_uid, principal_uid};
 
@@ -171,6 +172,22 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
         roles: &[String],
         extension: &'a E,
     ) -> Result<Self, AuthError> {
+        Self::new_with_resource(store, tenant_id, roles, extension, None)
+    }
+
+    /// Build an evaluator with one ad-hoc resource entity in scope.
+    ///
+    /// The entity's UID is resolved through
+    /// [`build_resource_uid`](PolicyExtension::build_resource_uid) — the
+    /// same call the check itself makes — so the attributes land on
+    /// exactly the UID the policy is evaluated against.
+    pub(crate) fn new_with_resource(
+        store: &'a CedarStore,
+        tenant_id: &str,
+        roles: &[String],
+        extension: &'a E,
+        resource: Option<&ResourceEntity>,
+    ) -> Result<Self, AuthError> {
         let principal_type = extension.principal_entity_type();
         let principal_id = extension.synthetic_principal_id();
         let principal = principal_uid(principal_type, principal_id)?;
@@ -184,6 +201,12 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
 
         let mut all_entities = store.entity_jsons.clone();
         all_entities.push(user_entity_json);
+        if let Some(r) = resource {
+            merge_resource_entity(
+                &mut all_entities,
+                resource_entity_json(extension, tenant_id, r)?,
+            )?;
+        }
         // `.partial()` makes an absent resource entity dereference to a Cedar
         // residual instead of erroring, so a `when { resource.<field> == … }`
         // clause survives partial evaluation as a residual the consumer can
@@ -371,6 +394,95 @@ fn extract_condition_body(policy: &cedar_policy::Policy) -> Result<Option<Value>
 /// Build Cedar parent entity references for the user's roles, delegating UID
 /// construction to the extension so consumers can choose their own role
 /// hierarchy (per-tenant prefixed, flat namespace, etc.).
+/// Render a [`ResourceEntity`] as Cedar entity JSON.
+///
+/// UIDs round-trip through [`EntityUid::to_json_value`] rather than
+/// being rebuilt from `(type, id)` strings, so a namespaced type or an
+/// id the extension rewrote still names the entity the check queries.
+fn resource_entity_json<E: PolicyExtension>(
+    extension: &E,
+    tenant_id: &str,
+    resource: &ResourceEntity,
+) -> Result<Value, AuthError> {
+    let uid_json = |ty: &str, id: &str| -> Result<Value, AuthError> {
+        extension
+            .build_resource_uid(tenant_id, ty, id)?
+            .to_json_value()
+            .map_err(|e| AuthError::PolicyFailed(format!("entity uid serialize error: {e}")))
+    };
+
+    let parents = resource
+        .parents
+        .iter()
+        .map(|(ty, id)| uid_json(ty, id))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(serde_json::json!({
+        "uid": uid_json(&resource.entity_type, &resource.entity_id)?,
+        "attrs": Value::Object(resource.attrs.clone()),
+        "parents": parents,
+    }))
+}
+
+/// Add `injected` to `entities`, folding it into any stored entity that
+/// already claims the same UID.
+///
+/// Cedar rejects two entries for one UID, so a consumer that persists an
+/// entity for a resource it also loads live would otherwise get a policy
+/// error instead of a decision. Live attributes win; parents are unioned
+/// so the stored hierarchy (tenant membership, groups) still applies.
+fn merge_resource_entity(entities: &mut Vec<Value>, injected: Value) -> Result<(), AuthError> {
+    let uid = entity_uid_of(&injected)?;
+    let stored = entities
+        .iter()
+        .position(|e| entity_uid_of(e).is_ok_and(|u| u == uid));
+
+    match stored {
+        Some(index) => entities[index] = merge_entity_json(&entities[index], &injected),
+        None => entities.push(injected),
+    }
+    Ok(())
+}
+
+/// Parse the `uid` field of an entity JSON object.
+fn entity_uid_of(entity: &Value) -> Result<cedar_policy::EntityUid, AuthError> {
+    let uid = entity
+        .get("uid")
+        .ok_or_else(|| AuthError::PolicyFailed("entity json has no `uid`".into()))?;
+    cedar_policy::EntityUid::from_json(uid.clone())
+        .map_err(|e| AuthError::PolicyFailed(format!("entity uid parse error: {e}")))
+}
+
+/// Overlay `injected` onto `stored`: attributes are merged key-wise with
+/// `injected` winning, parents are concatenated (Cedar collects them into
+/// a set, so repeats collapse).
+fn merge_entity_json(stored: &Value, injected: &Value) -> Value {
+    let object = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let array = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let mut attrs = object(stored, "attrs");
+    attrs.extend(object(injected, "attrs"));
+
+    let mut parents = array(stored, "parents");
+    parents.extend(array(injected, "parents"));
+
+    serde_json::json!({
+        "uid": injected.get("uid").cloned().unwrap_or(Value::Null),
+        "attrs": Value::Object(attrs),
+        "parents": Value::Array(parents),
+    })
+}
+
 fn build_role_parents<E: PolicyExtension>(
     extension: &E,
     tenant_id: &str,

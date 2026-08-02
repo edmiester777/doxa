@@ -16,19 +16,31 @@
 )]
 pub enum AuthError {
     #[error("missing credentials")]
-    #[cfg_attr(feature = "axum", api(status = 401, code = "missing_credentials"))]
+    #[cfg_attr(
+        feature = "axum",
+        api(status = 401, code = "missing_credentials", outcome = "denied")
+    )]
     MissingCredentials,
 
     #[error("invalid token: {0}")]
-    #[cfg_attr(feature = "axum", api(status = 401, code = "invalid_token"))]
+    #[cfg_attr(
+        feature = "axum",
+        api(status = 401, code = "invalid_token", outcome = "denied")
+    )]
     InvalidToken(String),
 
     #[error("token is inactive")]
-    #[cfg_attr(feature = "axum", api(status = 401, code = "token_inactive"))]
+    #[cfg_attr(
+        feature = "axum",
+        api(status = 401, code = "token_inactive", outcome = "denied")
+    )]
     TokenInactive,
 
     #[error("forbidden")]
-    #[cfg_attr(feature = "axum", api(status = 403, code = "forbidden"))]
+    #[cfg_attr(
+        feature = "axum",
+        api(status = 403, code = "forbidden", outcome = "denied")
+    )]
     Forbidden,
 
     #[error("introspection failed: {0}")]
@@ -44,6 +56,9 @@ pub enum AuthError {
     JwksFailed(String),
 
     #[error("unsupported filter: {0}")]
-    #[cfg_attr(feature = "axum", api(status = 403, code = "unsupported_filter"))]
+    #[cfg_attr(
+        feature = "axum",
+        api(status = 403, code = "unsupported_filter", outcome = "denied")
+    )]
     UnsupportedFilter(String),
 }

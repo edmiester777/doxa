@@ -130,6 +130,8 @@ impl PolicyExtension for FailingUidExtension {
 /// policy set means Cedar denies every request by default.
 pub(crate) struct StubStore {
     pub policy_text: &'static str,
+    /// Persisted entities, as a consumer's own store would return them.
+    pub entities: Vec<Value>,
 }
 
 #[async_trait]
@@ -147,19 +149,34 @@ impl PolicyStore for StubStore {
         }
     }
     async fn load_entity_jsons(&self, _: &str) -> Result<Vec<Value>, AuthError> {
-        Ok(Vec::new())
+        Ok(self.entities.clone())
     }
 }
 
 /// Build a router backed by the [`StubExtension`] and a [`StubStore`]
 /// holding the supplied Cedar policy text.
 pub(crate) fn build_stub_router(policy_text: &'static str) -> Arc<PolicyRouter<StubExtension>> {
-    let store: SharedPolicyStore = Arc::new(StubStore { policy_text });
+    build_stub_router_with_entities(policy_text, Vec::new())
+}
+
+/// Variant whose store also persists `entities`, for the case where a
+/// stored entity and a live instance check name the same UID.
+pub(crate) fn build_stub_router_with_entities(
+    policy_text: &'static str,
+    entities: Vec<Value>,
+) -> Arc<PolicyRouter<StubExtension>> {
+    let store: SharedPolicyStore = Arc::new(StubStore {
+        policy_text,
+        entities,
+    });
     Arc::new(PolicyRouter::new(store, StubExtension))
 }
 
 /// Build a router whose extension's `build_resource_uid` always fails.
 pub(crate) fn build_failing_uid_router() -> Arc<PolicyRouter<FailingUidExtension>> {
-    let store: SharedPolicyStore = Arc::new(StubStore { policy_text: "" });
+    let store: SharedPolicyStore = Arc::new(StubStore {
+        policy_text: "",
+        entities: Vec::new(),
+    });
     Arc::new(PolicyRouter::new(store, FailingUidExtension))
 }

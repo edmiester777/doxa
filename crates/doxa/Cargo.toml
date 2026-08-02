@@ -68,3 +68,11 @@ utoipa = { workspace = true }
 [[example]]
 name = "full_test"
 required-features = ["full"]
+
+[[test]]
+name = "guard_responses"
+required-features = ["full"]
+
+[[test]]
+name = "permitted"
+required-features = ["full"]

@@ -130,6 +130,15 @@ pub trait DocOperationSecurity {
     fn describe(op: &mut Operation);
 }
 
+/// Responses an extractor can produce by rejecting before the handler
+/// body runs. Response inference reads only the handler's `Err` type,
+/// so guards that reject with 401/403/404 go undocumented without this.
+/// Statuses the handler already declares win.
+pub trait DocOperationContribution {
+    /// Metadata this extractor adds to every operation it guards.
+    fn contribution() -> crate::contribution::OperationContribution;
+}
+
 // ---------------------------------------------------------------------------
 // Built-in extractor impls
 // ---------------------------------------------------------------------------

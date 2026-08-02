@@ -237,6 +237,19 @@ impl AuditEventBuilder {
         });
     }
 
+    /// Set the action without touching the event category.
+    ///
+    /// For callers that know what is being done but not which domain
+    /// event it belongs to — an authorization guard knows it is
+    /// checking `read`, not whether that is `data_access` or something
+    /// the application named itself.
+    pub fn set_action(&self, action: impl Into<String>) {
+        let action_str = action.into();
+        self.with_inner(|inner| {
+            inner.action = Some(action_str);
+        });
+    }
+
     /// Identify the resource being accessed or modified.
     pub fn set_resource(&self, resource_type: impl Into<String>, resource_id: impl Into<String>) {
         let rt = resource_type.into();
