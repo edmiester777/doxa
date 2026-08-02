@@ -344,9 +344,10 @@ where
             audit.emit_failure(action, &e.to_string());
         })?;
 
-    // Record scope on the parent http_request span for log correlation.
+    // Record scope on the parent request span for log correlation. The
+    // consumer declares the field; an undeclared one makes this a no-op.
     if let Some(scope) = claims.scope() {
-        tracing::Span::current().record("company_id", scope);
+        tracing::Span::current().record("tenant_id", scope);
     }
 
     // 4. Resolve RBAC: roles → session output via the configured policy. Tenant

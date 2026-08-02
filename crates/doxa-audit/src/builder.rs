@@ -260,6 +260,21 @@ impl AuditEventBuilder {
         });
     }
 
+    /// Returns `true` if a resource has already been identified on this
+    /// builder.
+    ///
+    /// An event names one resource. A request that authorizes several —
+    /// a route's own object plus the ones its body refers to — uses this
+    /// to leave the first claim standing rather than overwrite it with
+    /// whichever dependency was checked last.
+    pub fn has_resource(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|inner| inner.resource_type.is_some())
+    }
+
     /// Attach a sanitized copy of the request payload. Must never contain
     /// raw secrets.
     pub fn set_request_body(&self, body: serde_json::Value) {
@@ -418,5 +433,41 @@ impl AuditEventBuilder {
             duration_ms: inner.duration_ms,
             error_message: inner.error_message,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn builder() -> (AuditEventBuilder, tokio::sync::mpsc::Receiver<AuditEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        (AuditEventBuilder::new(AuditLogger::from_sender(tx)), rx)
+    }
+
+    #[test]
+    fn a_fresh_builder_claims_no_resource() {
+        let (b, _rx) = builder();
+        assert!(!b.has_resource());
+        b.set_resource("Widget", "1");
+        assert!(b.has_resource());
+    }
+
+    /// A request that authorizes its own object and then a dependency
+    /// must still be recorded against its own object.
+    #[tokio::test]
+    async fn guarding_on_has_resource_keeps_the_first_claim() {
+        let (b, mut rx) = builder();
+        b.set_resource("Widget", "1");
+
+        // How a dependency check stamps: only when unclaimed.
+        if !b.has_resource() {
+            b.set_resource("Folder", "shared");
+        }
+
+        b.emit_allowed();
+        let event = rx.recv().await.expect("emitted");
+        assert_eq!(event.resource_type.as_deref(), Some("Widget"));
+        assert_eq!(event.resource_id.as_deref(), Some("1"));
     }
 }
