@@ -14,7 +14,9 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{authorize_instance, CapabilityContext, LoadResource, Permitted};
+use doxa::auth::{
+    authorize_instance, authorize_loaded, CapabilityContext, LoadResource, Permitted,
+};
 use doxa::policy::{AuthError, Capability, CapabilityChecker, ResourceEntity};
 use doxa::{get, routes, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -253,6 +255,52 @@ async fn inline_authorization_reaches_the_same_verdicts() {
 #[tokio::test]
 async fn inline_authorization_without_a_caller_is_unauthorized() {
     let err = authorize_instance::<Widget>(1, "read", &(), &axum::http::Extensions::new())
+        .await
+        .expect_err("no capability context");
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A caller that fetched the object itself — from a transaction the
+/// loader cannot see — must reach the same verdict as one that let
+/// `authorize_instance` load it.
+#[tokio::test]
+async fn authorizing_a_loaded_object_matches_loading_it() {
+    let ext = caller_extensions();
+
+    let sprocket = Widget {
+        id: 1,
+        name: "sprocket".into(),
+        region: "us".into(),
+        folder: "shared".into(),
+    };
+    let allowed = authorize_loaded(sprocket, "read", &ext)
+        .await
+        .expect("region us is granted");
+    assert_eq!(allowed.name, "sprocket");
+
+    let cog = Widget {
+        id: 2,
+        name: "cog".into(),
+        region: "eu".into(),
+        folder: "shared".into(),
+    };
+    let denied = authorize_loaded(cog, "read", &ext)
+        .await
+        .expect_err("region eu is denied");
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+}
+
+/// Holding the object is not authorization — an unauthenticated caller
+/// gets 401 rather than the row they arrived with.
+#[tokio::test]
+async fn authorizing_a_loaded_object_without_a_caller_is_unauthorized() {
+    let widget = Widget {
+        id: 1,
+        name: "sprocket".into(),
+        region: "us".into(),
+        folder: "shared".into(),
+    };
+    let err = authorize_loaded(widget, "read", &axum::http::Extensions::new())
         .await
         .expect_err("no capability context");
     assert_eq!(err.status(), StatusCode::UNAUTHORIZED);

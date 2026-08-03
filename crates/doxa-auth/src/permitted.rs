@@ -88,12 +88,6 @@ pub async fn authorize_instance<R: LoadResource>(
     let ctx = extensions
         .get::<CapabilityContext>()
         .ok_or_else(|| AuthError::MissingCredentials.into_response())?;
-    let checker = extensions
-        .get::<Arc<dyn CapabilityChecker>>()
-        .ok_or_else(|| {
-            AuthError::PolicyFailed("capability checker not configured on AuthLayer".into())
-                .into_response()
-        })?;
 
     let resource = R::load(id, state, ctx)
         .await
@@ -103,6 +97,39 @@ pub async fn authorize_instance<R: LoadResource>(
                 axum::http::StatusCode::NOT_FOUND,
                 format!("{} not found", R::ENTITY_TYPE),
             )
+                .into_response()
+        })?;
+
+    authorize_loaded(resource, action, extensions).await
+}
+
+/// Authorize `action` against an object the caller has already loaded.
+///
+/// [`authorize_instance`] is this plus the load, and is the better choice
+/// when the loader can reach the object. Use this when it cannot: a row
+/// resolved inside an open transaction is invisible to a
+/// [`LoadResource::State`] holding a separate connection, so loading it
+/// again would 404 on the very object the request just wrote.
+///
+/// Carries the same caveat as [`authorize_instance`]: the audit builder
+/// is left alone, so stamp it yourself — guarding on
+/// `AuditEventBuilder::has_resource` when this is a dependency of the
+/// request rather than its subject.
+///
+/// Fails with 401 (no auth context) or 403 (policy denial). There is no
+/// 404: the object is in hand.
+pub async fn authorize_loaded<R: PolicyResource>(
+    resource: R,
+    action: &str,
+    extensions: &http::Extensions,
+) -> Result<R, Response> {
+    let ctx = extensions
+        .get::<CapabilityContext>()
+        .ok_or_else(|| AuthError::MissingCredentials.into_response())?;
+    let checker = extensions
+        .get::<Arc<dyn CapabilityChecker>>()
+        .ok_or_else(|| {
+            AuthError::PolicyFailed("capability checker not configured on AuthLayer".into())
                 .into_response()
         })?;
 
