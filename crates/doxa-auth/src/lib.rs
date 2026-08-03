@@ -63,4 +63,4 @@ pub use middleware::AuthState;
 #[cfg(feature = "axum")]
 pub use openapi::{auth_contribution, BearerAuthorization};
 #[cfg(feature = "axum")]
-pub use permitted::{authorize_instance, LoadResource, PermitSite, Permitted};
+pub use permitted::{authorize_instance, authorize_loaded, LoadResource, PermitSite, Permitted};
