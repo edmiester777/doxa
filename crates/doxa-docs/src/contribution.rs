@@ -501,6 +501,153 @@ pub(crate) fn path_item_operations_mut(
     .flatten()
 }
 
+/// Union every scope actually stamped onto an operation into the
+/// declaring security scheme's vocabulary.
+///
+/// [`record_required_permission`] composes a scope string per call site
+/// and merges it into `op.security`, but the scheme's scope vocabulary
+/// is supplied separately by the consumer via
+/// [`ApiDocBuilder::oauth2_security`](crate::ApiDocBuilder::oauth2_security).
+/// Left alone the two drift, and the document ends up referencing scopes
+/// its own scheme never declares: strict validators flag them, and SDK
+/// generators that surface per-operation scope requirements cannot
+/// resolve them.
+///
+/// A consumer cannot close this from outside, because the strings only
+/// exist per `(subject, site)` monomorphization at assembly time — there
+/// is no constant to enumerate. doxa is the only component that has the
+/// full list, because it emitted every entry, so it declares them.
+///
+/// Only OAuth2 schemes have a scope vocabulary to declare into; a bearer
+/// HTTP scheme has nowhere to put them.
+pub(crate) fn declare_stamped_scopes(doc: &mut utoipa::openapi::OpenApi) {
+    use std::collections::BTreeMap;
+    use utoipa::openapi::security::{Flow, Scopes, SecurityScheme};
+
+    // scheme -> scope -> description. `None` means two operations
+    // stamped the same scope with different labels, so neither is the
+    // scope's description and the scope names itself instead.
+    let mut stamped: BTreeMap<String, BTreeMap<String, Option<String>>> = BTreeMap::new();
+
+    for path_item in doc.paths.paths.values() {
+        for op in path_item_operations(path_item) {
+            let Some(security) = op.security.as_ref() else {
+                continue;
+            };
+
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for requirement in security {
+                let Ok(value) = serde_json::to_value(requirement) else {
+                    continue;
+                };
+                let Ok(map) = serde_json::from_value::<BTreeMap<String, Vec<String>>>(value) else {
+                    continue;
+                };
+                for (scheme, scopes) in map {
+                    for scope in scopes {
+                        pairs.push((scheme.clone(), scope));
+                    }
+                }
+            }
+
+            // `record_required_permission` appends to `security` and to
+            // `x-required-permissions` in one call, but the two dedupe
+            // on different keys, so their positions only correspond when
+            // the operation stamped exactly one of each. Anything else
+            // falls back to the scope itself — less pretty, never wrong.
+            let displays = op
+                .extensions
+                .as_ref()
+                .and_then(|ext| serde_json::to_value(ext).ok())
+                .map(|ext| extract_extension_array(Some(&ext), "x-required-permissions"))
+                .unwrap_or_default();
+            let display = match (pairs.as_slice(), displays.as_slice()) {
+                ([_], [only]) => only.as_str().map(str::to_owned),
+                _ => None,
+            };
+
+            for (scheme, scope) in pairs {
+                match stamped.entry(scheme).or_default().entry(scope) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(display.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        // Path order decides nothing: a scope described
+                        // two ways has no single right label.
+                        if *slot.get() != display {
+                            slot.insert(None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if stamped.is_empty() {
+        return;
+    }
+    let Some(components) = doc.components.as_mut() else {
+        return;
+    };
+
+    for (name, scheme) in components.security_schemes.iter_mut() {
+        let Some(wanted) = stamped.get(name) else {
+            continue;
+        };
+        let SecurityScheme::OAuth2(oauth2) = scheme else {
+            continue;
+        };
+
+        for flow in oauth2.flows.values_mut() {
+            let scopes = match flow {
+                Flow::Implicit(f) => &mut f.scopes,
+                Flow::Password(f) => &mut f.scopes,
+                Flow::ClientCredentials(f) => &mut f.scopes,
+                Flow::AuthorizationCode(f) => &mut f.scopes,
+            };
+
+            // A declaration the consumer wrote wins over the description
+            // doxa would compose — doxa fills gaps, it does not restate.
+            let mut merged = declared_scopes(scopes);
+            for (scope, description) in wanted {
+                merged
+                    .entry(scope.clone())
+                    .or_insert_with(|| description.clone().unwrap_or_else(|| scope.clone()));
+            }
+
+            *scopes = Scopes::from_iter(merged);
+        }
+    }
+}
+
+/// Read a [`Scopes`](utoipa::openapi::security::Scopes) back out as a
+/// plain map.
+///
+/// It keeps its `BTreeMap` private and offers no accessor, so the only
+/// way in is how it serializes — and that is not stable in shape. The
+/// struct has one field, itself named `scopes`, and the flow structs
+/// flatten it, so today it round-trips as `{"scopes": {…}}` while a
+/// future `#[serde(flatten)]` on the field would make it a bare map.
+/// Accept either rather than silently reading an empty map and
+/// clobbering what the consumer declared.
+fn declared_scopes(
+    scopes: &utoipa::openapi::security::Scopes,
+) -> std::collections::BTreeMap<String, String> {
+    use std::collections::BTreeMap;
+
+    let Ok(value) = serde_json::to_value(scopes) else {
+        return BTreeMap::new();
+    };
+
+    if let Some(inner) = value.get("scopes") {
+        if let Ok(map) = serde_json::from_value::<BTreeMap<String, String>>(inner.clone()) {
+            return map;
+        }
+    }
+
+    serde_json::from_value(value).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

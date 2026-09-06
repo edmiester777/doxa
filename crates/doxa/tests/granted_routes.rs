@@ -332,3 +332,109 @@ fn each_form_words_its_own_badge() {
     assert_eq!(badge("/widgets"), json!(["read on Widget (collection)"]));
     assert_eq!(badge("/flush"), json!(["`widgets.read` capability"]));
 }
+
+// ---- the scheme declares what the guards stamped -----------------------------
+
+/// A guard composes its scope string per call site, so the security
+/// scheme — declared separately by the consumer — has no way to know
+/// about it. Left alone the document references scopes it never defines,
+/// which strict validators reject and SDK generators cannot resolve.
+#[test]
+fn stamped_scopes_are_declared_on_the_scheme() {
+    use utoipa::openapi::security::{AuthorizationCode, Flow, Scopes};
+
+    let (_router, api) = OpenApiRouter::<()>::new()
+        .routes(routes!(get_widget))
+        .split_for_parts();
+
+    // An OAuth2 scheme that declares no vocabulary of its own — the
+    // worst case, and the one a consumer reaches for first.
+    let doc = doxa::ApiDocBuilder::new()
+        .title("test")
+        .version("0.1")
+        .oauth2_security(
+            "bearer",
+            [Flow::AuthorizationCode(AuthorizationCode::new(
+                "https://idp.example/authorize",
+                "https://idp.example/token",
+                Scopes::new(),
+            ))],
+        )
+        .merge(api)
+        .build();
+
+    let spec: serde_json::Value = serde_json::from_slice(&doc.spec_json).unwrap();
+    let declared =
+        &spec["components"]["securitySchemes"]["bearer"]["flows"]["authorizationCode"]["scopes"];
+
+    assert_eq!(
+        declared["widgets.read"],
+        json!("read on Widget (instance)"),
+        "the scope the guards stamped is declared, described by the operation's own badge",
+    );
+}
+
+/// A description the consumer wrote is theirs — doxa fills gaps, it does
+/// not overwrite.
+#[test]
+fn a_consumer_declaration_is_not_overwritten() {
+    use utoipa::openapi::security::{AuthorizationCode, Flow, Scopes};
+
+    let (_router, api) = OpenApiRouter::<()>::new()
+        .routes(routes!(get_widget))
+        .split_for_parts();
+
+    let doc = doxa::ApiDocBuilder::new()
+        .title("test")
+        .version("0.1")
+        .oauth2_security(
+            "bearer",
+            [Flow::AuthorizationCode(AuthorizationCode::new(
+                "https://idp.example/authorize",
+                "https://idp.example/token",
+                Scopes::one("widgets.read", "Read widget definitions"),
+            ))],
+        )
+        .merge(api)
+        .build();
+
+    let spec: serde_json::Value = serde_json::from_slice(&doc.spec_json).unwrap();
+    let declared =
+        &spec["components"]["securitySchemes"]["bearer"]["flows"]["authorizationCode"]["scopes"];
+
+    assert_eq!(declared["widgets.read"], json!("Read widget definitions"));
+}
+
+/// `Granted<Widget>` and `Granted<Many<Widget>>` share a capability, so
+/// both stamp `widgets.read` — with different labels. Neither label is
+/// the scope's description, and path order deciding it would be a coin
+/// flip that reads like a fact, so the scope names itself.
+#[test]
+fn a_scope_described_two_ways_falls_back_to_its_own_name() {
+    use utoipa::openapi::security::{AuthorizationCode, Flow, Scopes};
+
+    let (_router, api) = OpenApiRouter::<()>::new()
+        .routes(routes!(get_widget))
+        .routes(routes!(list_widgets))
+        .split_for_parts();
+
+    let doc = doxa::ApiDocBuilder::new()
+        .title("test")
+        .version("0.1")
+        .oauth2_security(
+            "bearer",
+            [Flow::AuthorizationCode(AuthorizationCode::new(
+                "https://idp.example/authorize",
+                "https://idp.example/token",
+                Scopes::new(),
+            ))],
+        )
+        .merge(api)
+        .build();
+
+    let spec: serde_json::Value = serde_json::from_slice(&doc.spec_json).unwrap();
+    let declared =
+        &spec["components"]["securitySchemes"]["bearer"]["flows"]["authorizationCode"]["scopes"];
+
+    assert_eq!(declared["widgets.read"], json!("widgets.read"));
+}
