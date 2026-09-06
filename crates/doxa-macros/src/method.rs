@@ -20,25 +20,19 @@ use syn::{
     parse::Parser, parse2, punctuated::Punctuated, ItemFn, LitStr, Meta, Result, Token, Type,
 };
 
-use crate::{permit, sig};
+use crate::sig;
 
 /// Expand `#[get("/path", ...)]` and friends.
 pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed_args = parse_method_args(args)?;
-    let mut item_fn: ItemFn = parse2(item)?;
+    let item_fn: ItemFn = parse2(item)?;
     let method_ident = syn::Ident::new(method, proc_macro2::Span::call_site());
     let path_lit = parsed_args.path;
     let extra = parsed_args.extra;
 
-    // Rewrite `Permitted<R>` arguments before inference runs, so the
-    // signature the doc probes see is the one that actually compiles.
-    let path_names = sig::parse_path_names(&path_lit.value());
-    let sites = permit::rewrite(&mut item_fn, method, &path_names)?;
-
     let utoipa_attr = build_utoipa_attr(&method_ident, &path_lit, &extra, &item_fn)?;
 
     Ok(quote! {
-        #sites
         #utoipa_attr
         #item_fn
     })
@@ -48,15 +42,11 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
 /// the method is the first positional argument.
 pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed = parse_operation_args(args)?;
-    let mut item_fn: ItemFn = parse2(item)?;
-
-    let path_names = sig::parse_path_names(&parsed.path.value());
-    let sites = permit::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
+    let item_fn: ItemFn = parse2(item)?;
 
     let utoipa_attr = build_utoipa_attr(&parsed.method, &parsed.path, &parsed.extra, &item_fn)?;
 
     Ok(quote! {
-        #sites
         #utoipa_attr
         #item_fn
     })
