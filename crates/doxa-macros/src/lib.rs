@@ -188,6 +188,7 @@ use proc_macro::TokenStream;
 
 mod api_error;
 mod capability;
+mod grant;
 mod method;
 mod policy_resource;
 mod sig;

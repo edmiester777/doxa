@@ -243,6 +243,18 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
 // Subjects
 // ---------------------------------------------------------------------------
 
+/// Which of the three forms a subject is. Documentation words itself
+/// from this, and only the instance form can answer 400 or 404.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubjectForm {
+    /// One object, named by a key in the route.
+    Instance,
+    /// The subset of a collection a caller may see.
+    Collection,
+    /// A bare capability with no asset behind it.
+    Capability,
+}
+
 /// What a route authorizes: an object, a collection, or a bare
 /// capability.
 ///
@@ -261,6 +273,13 @@ pub trait Subject: Send + Sync + 'static {
     /// Loader failure this subject's chain can raise. [`Cap`] loads
     /// nothing and uses [`Infallible`](std::convert::Infallible).
     type Error: IntoResponse + Send;
+
+    /// Which of the three forms this is.
+    const FORM: SubjectForm;
+
+    /// What this subject is about, for documentation prose — the Cedar
+    /// entity type for a resource, the capability name for a bare gate.
+    fn doc_name() -> Cow<'static, str>;
 
     /// Permission name for the OpenAPI badge, given the route's action.
     fn permission(action: &str) -> Cow<'static, str>;
@@ -354,6 +373,12 @@ impl<R: Granting> Subject for One<R> {
     type Key = R::Key;
     type Error = R::Error;
 
+    const FORM: SubjectForm = SubjectForm::Instance;
+
+    fn doc_name() -> Cow<'static, str> {
+        Cow::Borrowed(R::ENTITY_TYPE)
+    }
+
     fn permission(action: &str) -> Cow<'static, str> {
         match R::capability(action) {
             Some(cap) => Cow::Borrowed(cap.name),
@@ -405,6 +430,12 @@ impl<R: Granting> Subject for Many<R> {
     type Key = ();
     type Error = R::Error;
 
+    const FORM: SubjectForm = SubjectForm::Collection;
+
+    fn doc_name() -> Cow<'static, str> {
+        Cow::Borrowed(R::ENTITY_TYPE)
+    }
+
     fn permission(action: &str) -> Cow<'static, str> {
         match R::capability(action) {
             Some(cap) => Cow::Borrowed(cap.name),
@@ -442,6 +473,12 @@ impl<M: Capable> Subject for Cap<M> {
     type State = ();
     type Key = ();
     type Error = std::convert::Infallible;
+
+    const FORM: SubjectForm = SubjectForm::Capability;
+
+    fn doc_name() -> Cow<'static, str> {
+        Cow::Borrowed(M::CAPABILITY.name)
+    }
 
     fn permission(_action: &str) -> Cow<'static, str> {
         Cow::Borrowed(M::CAPABILITY.name)
@@ -659,4 +696,101 @@ async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
     }
 
     Ok(T::Key::parse(&raw)?)
+}
+
+// ---------------------------------------------------------------------------
+// OpenAPI
+// ---------------------------------------------------------------------------
+
+/// Map a [`ResourceIdType`] to the OpenAPI schema for one key segment.
+fn segment_schema(kind: ResourceIdType) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    use utoipa::openapi::schema::{KnownFormat, SchemaFormat};
+    use utoipa::openapi::{ObjectBuilder, RefOr, Schema, Type};
+
+    let mut b = ObjectBuilder::new();
+    b = match kind {
+        ResourceIdType::String => b.schema_type(Type::String),
+        ResourceIdType::Integer => b
+            .schema_type(Type::Integer)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64))),
+        ResourceIdType::Uuid => b
+            .schema_type(Type::String)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Uuid))),
+    };
+    RefOr::T(Schema::Object(b.build()))
+}
+
+/// Segments come from [`GrantSite::PARAMS`] paired with the key's own
+/// [`RouteKey::SEGMENTS`], never from the positional template list — the
+/// site is authoritative about which segments feed the key, and in what
+/// order.
+impl<T: Subject, S: GrantSite> doxa::DocPathParams for Granted<T, S> {
+    fn describe(op: &mut utoipa::openapi::path::Operation, _positional: &[&'static str]) {
+        use utoipa::openapi::path::{ParameterBuilder, ParameterIn};
+        use utoipa::openapi::Required;
+
+        let name_of = T::doc_name();
+        let composite = S::PARAMS.len() > 1;
+
+        for (segment, kind) in S::PARAMS.iter().zip(T::Key::SEGMENTS) {
+            let description = if composite {
+                format!("`{segment}` segment of the {name_of} identifier")
+            } else {
+                format!("Identifier of the {name_of}")
+            };
+
+            let param = ParameterBuilder::new()
+                .name(*segment)
+                .parameter_in(ParameterIn::Path)
+                .required(Required::True)
+                .description(Some(description))
+                .schema(Some(segment_schema(*kind)))
+                .build();
+            op.parameters.get_or_insert_with(Vec::new).push(param);
+        }
+    }
+}
+
+impl<T: Subject, S: GrantSite> doxa::DocOperationSecurity for Granted<T, S> {
+    fn describe(op: &mut utoipa::openapi::path::Operation) {
+        let name_of = T::doc_name();
+        let display = match T::FORM {
+            SubjectForm::Instance => format!("{} on {name_of} (instance)", S::ACTION),
+            SubjectForm::Collection => format!("{} on {name_of} (collection)", S::ACTION),
+            SubjectForm::Capability => format!("`{name_of}` capability"),
+        };
+        doxa::record_required_permission(op, S::SCHEME, &T::permission(S::ACTION), &display);
+    }
+}
+
+impl<T: Subject, S: GrantSite> doxa::DocOperationContribution for Granted<T, S> {
+    fn contribution() -> doxa::OperationContribution {
+        let name_of = T::doc_name();
+
+        let denied = match T::FORM {
+            SubjectForm::Instance => format!("Policy denied `{}` on this {name_of}", S::ACTION),
+            SubjectForm::Collection => format!("No authorized scope on {name_of}"),
+            SubjectForm::Capability => format!("Capability `{name_of}` denied"),
+        };
+
+        let contribution = doxa::OperationContribution::new()
+            .with_response(doxa::ResponseContribution::unauthorized())
+            .with_response(doxa::ResponseContribution::new("403", denied));
+
+        // Only the instance form reads a key out of the route and loads
+        // an object, so only it can answer 400 or 404.
+        if T::FORM != SubjectForm::Instance {
+            return contribution;
+        }
+
+        contribution
+            .with_response(doxa::ResponseContribution::new(
+                "400",
+                format!("Malformed {name_of} identifier"),
+            ))
+            .with_response(doxa::ResponseContribution::new(
+                "404",
+                format!("No such {name_of}"),
+            ))
+    }
 }
