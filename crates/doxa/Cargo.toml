@@ -74,9 +74,9 @@ name = "guard_responses"
 required-features = ["full"]
 
 [[test]]
-name = "permitted"
+name = "denials"
 required-features = ["full"]
 
 [[test]]
-name = "denials"
+name = "granted"
 required-features = ["full"]
