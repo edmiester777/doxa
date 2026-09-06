@@ -15,7 +15,10 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One};
+use doxa::auth::{
+    Cap, CapabilityContext, FromAuthExtensions, GrantSite, Granted, Granting, Many, One, Refusal,
+    Subject,
+};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -344,4 +347,58 @@ async fn the_coarse_gate_runs_before_the_load() {
 async fn an_unparseable_key_is_rejected_early() {
     let (status, _) = get_widget(&["viewer"], "/widgets/not-a-number").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---- authorizing what the extractor cannot reach -----------------------------
+
+/// A guard runs in `FromRequestParts`, which sees no request body, so an
+/// id named in a payload can only be authorized from inside the handler
+/// that parsed it. `authorize` is the extractor's own body, callable.
+#[tokio::test]
+async fn a_handler_can_authorize_an_id_from_its_body() {
+    let (parts, _rx) = parts(&["viewer"]);
+
+    let widget = doxa::auth::authorize::<One<Widget>>(1, "read", &(), &parts.extensions)
+        .await
+        .expect("region us is granted");
+
+    assert_eq!(widget.region, "us");
+}
+
+/// The point of routing it through `authorize` rather than
+/// `Subject::authorize`: a refusal is recorded whichever door the check
+/// came in by, so the manual path and the guard path cannot disagree
+/// about whether a denial is auditable.
+#[tokio::test]
+async fn a_manual_refusal_is_recorded_like_the_extractors() {
+    let (parts, mut rx) = parts(&["viewer"]);
+
+    let refused = doxa::auth::authorize::<One<Widget>>(2, "read", &(), &parts.extensions)
+        .await
+        .expect_err("region eu is denied");
+
+    assert_eq!(refused.into_response().status(), StatusCode::FORBIDDEN);
+
+    let event = rx.try_recv().expect("the refusal is recorded");
+    assert_eq!(event.outcome, Outcome::Denied);
+    assert_eq!(event.action, "read");
+    assert_eq!(event.resource_id.as_deref(), Some("2"));
+    assert_eq!(event.error_message.as_deref(), Some("instance denied"));
+}
+
+/// The raw chain is still reachable for anyone implementing `Subject`,
+/// and still records nothing — which is why `authorize` exists.
+#[tokio::test]
+async fn the_raw_chain_records_nothing() {
+    let (parts, mut rx) = parts(&["viewer"]);
+    let ctx = CapabilityContext::from_extensions(&parts.extensions).expect("ctx");
+    let checker: Arc<dyn CapabilityChecker> = Arc::new(RegionChecker);
+
+    let refused = One::<Widget>::authorize(2, "read", &(), &ctx, checker.as_ref()).await;
+
+    assert!(matches!(refused, Err(Refusal::Denied { .. })));
+    assert!(
+        rx.try_recv().is_err(),
+        "`Subject::authorize` is the decision alone — recording is `authorize`'s job",
+    );
 }

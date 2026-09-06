@@ -108,11 +108,16 @@ where
 
 /// The identifying values a loader needs, parsed from route segments.
 ///
-/// Implemented for any [`FromStr`](std::str::FromStr) scalar and for
-/// tuples of them. A composite key is better written as a struct
-/// deriving `RouteKey`, so the route binds by field name instead of by
-/// position — a two-`String` tuple bound in the wrong order parses
-/// cleanly and loads the wrong object.
+/// Implemented for `()`, for the scalars below, and for tuples of them
+/// up to four.
+///
+/// A composite key binds **by position**: the order of `#[key("a", "b")]`
+/// is the order of the tuple, and a two-`String` key bound the wrong way
+/// round parses cleanly and loads the wrong object. Prefer distinct
+/// types per segment where you can, so a swap fails to parse instead of
+/// succeeding quietly. [`SEGMENTS`](Self::SEGMENTS) is checked against
+/// the site's parameter count before any of them are read, so a key and
+/// a route that disagree are refused rather than silently truncated.
 pub trait RouteKey: Sized + Send {
     /// Schema kind per segment, in key order. Drives the OpenAPI
     /// parameter types without a runtime call.
@@ -150,14 +155,35 @@ impl RouteKey for () {
     }
 }
 
+/// One value inside a key.
+///
+/// Separate from [`RouteKey`] because a tuple has to build its own
+/// `SEGMENTS` from its parts' kinds, and slices cannot be concatenated
+/// in a const context — a `KIND` per part can.
+pub trait KeySegment: Sized + Send {
+    /// Schema kind for this segment, driving the OpenAPI parameter type.
+    const KIND: ResourceIdType;
+
+    /// Parse one raw segment. The caller attaches the position.
+    fn parse_segment(raw: &str) -> Option<Self>;
+}
+
 macro_rules! scalar_key {
     ($ty:ty, $kind:expr) => {
+        impl KeySegment for $ty {
+            const KIND: ResourceIdType = $kind;
+
+            fn parse_segment(raw: &str) -> Option<Self> {
+                raw.parse().ok()
+            }
+        }
+
         impl RouteKey for $ty {
             const SEGMENTS: &'static [ResourceIdType] = &[$kind];
 
             fn parse(raw: &[&str]) -> Result<Self, KeyError> {
                 let text = raw.first().copied().unwrap_or_default();
-                text.parse().map_err(|_| KeyError {
+                <$ty as KeySegment>::parse_segment(text).ok_or_else(|| KeyError {
                     position: 0,
                     raw: text.to_owned(),
                 })
@@ -170,6 +196,30 @@ scalar_key!(String, ResourceIdType::String);
 scalar_key!(i64, ResourceIdType::Integer);
 scalar_key!(u32, ResourceIdType::Integer);
 scalar_key!(u64, ResourceIdType::Integer);
+
+macro_rules! tuple_key {
+    ($($name:ident @ $index:tt),+) => {
+        impl<$($name: KeySegment),+> RouteKey for ($($name,)+) {
+            const SEGMENTS: &'static [ResourceIdType] = &[$($name::KIND),+];
+
+            fn parse(raw: &[&str]) -> Result<Self, KeyError> {
+                Ok(($(
+                    {
+                        let text = raw.get($index).copied().unwrap_or_default();
+                        $name::parse_segment(text).ok_or_else(|| KeyError {
+                            position: $index,
+                            raw: text.to_owned(),
+                        })?
+                    },
+                )+))
+            }
+        }
+    };
+}
+
+tuple_key!(A @ 0, B @ 1);
+tuple_key!(A @ 0, B @ 1, C @ 2);
+tuple_key!(A @ 0, B @ 1, C @ 2, D @ 3);
 
 // ---------------------------------------------------------------------------
 // Refusals
@@ -243,6 +293,18 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
 // Subjects
 // ---------------------------------------------------------------------------
 
+/// Which of the three forms a subject is. Documentation words itself
+/// from this, and only the instance form can answer 400 or 404.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubjectForm {
+    /// One object, named by a key in the route.
+    Instance,
+    /// The subset of a collection a caller may see.
+    Collection,
+    /// A bare capability with no asset behind it.
+    Capability,
+}
+
 /// What a route authorizes: an object, a collection, or a bare
 /// capability.
 ///
@@ -262,10 +324,22 @@ pub trait Subject: Send + Sync + 'static {
     /// nothing and uses [`Infallible`](std::convert::Infallible).
     type Error: IntoResponse + Send;
 
+    /// Which of the three forms this is.
+    const FORM: SubjectForm;
+
+    /// What this subject is about, for documentation prose — the Cedar
+    /// entity type for a resource, the capability name for a bare gate.
+    fn doc_name() -> Cow<'static, str>;
+
     /// Permission name for the OpenAPI badge, given the route's action.
     fn permission(action: &str) -> Cow<'static, str>;
 
     /// Run the chain: coarse gate, then whatever this subject is about.
+    ///
+    /// This is the raw decision and **records nothing** — a denial taken
+    /// through it leaves no audit row. Call
+    /// [`authorize`] instead unless you are implementing this trait; it
+    /// wraps this and records.
     fn authorize(
         key: Self::Key,
         action: &'static str,
@@ -354,6 +428,12 @@ impl<R: Granting> Subject for One<R> {
     type Key = R::Key;
     type Error = R::Error;
 
+    const FORM: SubjectForm = SubjectForm::Instance;
+
+    fn doc_name() -> Cow<'static, str> {
+        Cow::Borrowed(R::ENTITY_TYPE)
+    }
+
     fn permission(action: &str) -> Cow<'static, str> {
         match R::capability(action) {
             Some(cap) => Cow::Borrowed(cap.name),
@@ -405,6 +485,12 @@ impl<R: Granting> Subject for Many<R> {
     type Key = ();
     type Error = R::Error;
 
+    const FORM: SubjectForm = SubjectForm::Collection;
+
+    fn doc_name() -> Cow<'static, str> {
+        Cow::Borrowed(R::ENTITY_TYPE)
+    }
+
     fn permission(action: &str) -> Cow<'static, str> {
         match R::capability(action) {
             Some(cap) => Cow::Borrowed(cap.name),
@@ -442,6 +528,12 @@ impl<M: Capable> Subject for Cap<M> {
     type State = ();
     type Key = ();
     type Error = std::convert::Infallible;
+
+    const FORM: SubjectForm = SubjectForm::Capability;
+
+    fn doc_name() -> Cow<'static, str> {
+        Cow::Borrowed(M::CAPABILITY.name)
+    }
 
     fn permission(_action: &str) -> Cow<'static, str> {
         Cow::Borrowed(M::CAPABILITY.name)
@@ -577,48 +669,88 @@ where
     ) -> Result<Self, Self::Rejection> {
         let ctx = T::Ctx::from_extensions(&parts.extensions)
             .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
-        let checker = parts
-            .extensions
-            .get::<std::sync::Arc<dyn CapabilityChecker>>()
-            .cloned()
-            .ok_or_else(|| {
-                Refusal::Auth(AuthError::PolicyFailed(
-                    "capability checker not configured on AuthLayer".into(),
-                ))
-            })?;
 
         let key = fetch_key::<T, S, St>(parts, state).await?;
         let state = <T::State as axum::extract::FromRef<St>>::from_ref(state);
 
-        let refusal = match T::authorize(key, S::ACTION, &state, &ctx, checker.as_ref()).await {
-            Ok(loaded) => return Ok(Granted(ctx, loaded, PhantomData)),
-            Err(refusal) => refusal,
-        };
+        // Same entry point a handler uses, so the refusal is recorded by
+        // the same code either way.
+        let loaded = authorize::<T>(key, S::ACTION, &state, &parts.extensions).await?;
+        Ok(Granted(ctx, loaded, PhantomData))
+    }
+}
 
-        // The one place a denial is recorded. Everything else is a
-        // request that never reached a decision, so there is nothing to
-        // record — it renders through `IntoResponse` like any rejection.
-        if let Refusal::Denied {
+/// Authorize a subject against the caller and checker already resolved
+/// into `extensions`, recording the refusal if the policy says no.
+///
+/// This is the body of [`Granted`], exposed for a subject the extractor
+/// cannot reach. A guard runs in `FromRequestParts`, which sees no
+/// request body, so an id named in a payload — a pipeline referring to
+/// its source, a query naming the models it reads — can only be
+/// authorized from inside the handler that parsed it. The same applies
+/// to a row inside an open transaction, which a [`Granting::State`]
+/// holding a separate connection would not find.
+///
+/// Prefer this over calling [`Subject::authorize`] directly: that is the
+/// raw chain and records nothing, so a refusal taken through it leaves
+/// no audit row.
+///
+/// Like the extractor, this leaves the audit builder's *resource* alone
+/// on success — an event names one resource, and only the caller knows
+/// whether this is the request's subject or a dependency of it. Stamp it
+/// yourself, guarding on `AuditEventBuilder::has_resource` for the
+/// dependency case.
+pub async fn authorize<T: Subject>(
+    key: T::Key,
+    action: &'static str,
+    state: &T::State,
+    extensions: &Extensions,
+) -> Result<T::Loaded, Refusal<T::Error>> {
+    let ctx =
+        T::Ctx::from_extensions(extensions).ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
+    let checker = extensions
+        .get::<std::sync::Arc<dyn CapabilityChecker>>()
+        .cloned()
+        .ok_or_else(|| {
+            Refusal::Auth(AuthError::PolicyFailed(
+                "capability checker not configured on AuthLayer".into(),
+            ))
+        })?;
+
+    match T::authorize(key, action, state, &ctx, checker.as_ref()).await {
+        Ok(loaded) => Ok(loaded),
+        Err(refusal) => {
+            record_refusal(&refusal, extensions, ctx.tenant());
+            Err(refusal)
+        }
+    }
+}
+
+/// The one place a denial is recorded, whichever door the check came in
+/// by. Everything else is a request that never reached a decision, so
+/// there is nothing to record — it renders through `IntoResponse` like
+/// any other rejection.
+fn record_refusal<E>(refusal: &Refusal<E>, extensions: &Extensions, tenant: Option<&str>) {
+    let Refusal::Denied {
+        action,
+        resource_type,
+        resource_id,
+        reason,
+    } = refusal
+    else {
+        return;
+    };
+
+    crate::denial::record(
+        extensions,
+        crate::denial::Denial {
+            tenant,
             action,
             resource_type,
             resource_id,
             reason,
-        } = &refusal
-        {
-            crate::denial::record(
-                &parts.extensions,
-                crate::denial::Denial {
-                    tenant: ctx.tenant(),
-                    action,
-                    resource_type,
-                    resource_id,
-                    reason,
-                },
-            );
-        }
-
-        Err(refusal)
-    }
+        },
+    );
 }
 
 /// Pull the key's segments out of the route, in the order the site names
@@ -627,6 +759,17 @@ async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
     parts: &mut http::request::Parts,
     state: &St,
 ) -> Result<T::Key, Refusal<T::Error>> {
+    // A site that names fewer segments than the key parses would have
+    // the surplus silently dropped — a folder-scoped route loading an
+    // object from another folder. Refuse instead.
+    if S::PARAMS.len() != T::Key::SEGMENTS.len() {
+        return Err(Refusal::Auth(AuthError::PolicyFailed(format!(
+            "route names {} key segment(s) but the key takes {}",
+            S::PARAMS.len(),
+            T::Key::SEGMENTS.len(),
+        ))));
+    }
+
     if T::Key::SEGMENTS.is_empty() {
         return Ok(T::Key::parse(&[])?);
     }
@@ -659,4 +802,101 @@ async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
     }
 
     Ok(T::Key::parse(&raw)?)
+}
+
+// ---------------------------------------------------------------------------
+// OpenAPI
+// ---------------------------------------------------------------------------
+
+/// Map a [`ResourceIdType`] to the OpenAPI schema for one key segment.
+fn segment_schema(kind: ResourceIdType) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    use utoipa::openapi::schema::{KnownFormat, SchemaFormat};
+    use utoipa::openapi::{ObjectBuilder, RefOr, Schema, Type};
+
+    let mut b = ObjectBuilder::new();
+    b = match kind {
+        ResourceIdType::String => b.schema_type(Type::String),
+        ResourceIdType::Integer => b
+            .schema_type(Type::Integer)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64))),
+        ResourceIdType::Uuid => b
+            .schema_type(Type::String)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Uuid))),
+    };
+    RefOr::T(Schema::Object(b.build()))
+}
+
+/// Segments come from [`GrantSite::PARAMS`] paired with the key's own
+/// [`RouteKey::SEGMENTS`], never from the positional template list — the
+/// site is authoritative about which segments feed the key, and in what
+/// order.
+impl<T: Subject, S: GrantSite> doxa::DocPathParams for Granted<T, S> {
+    fn describe(op: &mut utoipa::openapi::path::Operation, _positional: &[&'static str]) {
+        use utoipa::openapi::path::{ParameterBuilder, ParameterIn};
+        use utoipa::openapi::Required;
+
+        let name_of = T::doc_name();
+        let composite = S::PARAMS.len() > 1;
+
+        for (segment, kind) in S::PARAMS.iter().zip(T::Key::SEGMENTS) {
+            let description = if composite {
+                format!("`{segment}` segment of the {name_of} identifier")
+            } else {
+                format!("Identifier of the {name_of}")
+            };
+
+            let param = ParameterBuilder::new()
+                .name(*segment)
+                .parameter_in(ParameterIn::Path)
+                .required(Required::True)
+                .description(Some(description))
+                .schema(Some(segment_schema(*kind)))
+                .build();
+            op.parameters.get_or_insert_with(Vec::new).push(param);
+        }
+    }
+}
+
+impl<T: Subject, S: GrantSite> doxa::DocOperationSecurity for Granted<T, S> {
+    fn describe(op: &mut utoipa::openapi::path::Operation) {
+        let name_of = T::doc_name();
+        let display = match T::FORM {
+            SubjectForm::Instance => format!("{} on {name_of} (instance)", S::ACTION),
+            SubjectForm::Collection => format!("{} on {name_of} (collection)", S::ACTION),
+            SubjectForm::Capability => format!("`{name_of}` capability"),
+        };
+        doxa::record_required_permission(op, S::SCHEME, &T::permission(S::ACTION), &display);
+    }
+}
+
+impl<T: Subject, S: GrantSite> doxa::DocOperationContribution for Granted<T, S> {
+    fn contribution() -> doxa::OperationContribution {
+        let name_of = T::doc_name();
+
+        let denied = match T::FORM {
+            SubjectForm::Instance => format!("Policy denied `{}` on this {name_of}", S::ACTION),
+            SubjectForm::Collection => format!("No authorized scope on {name_of}"),
+            SubjectForm::Capability => format!("Capability `{name_of}` denied"),
+        };
+
+        let contribution = doxa::OperationContribution::new()
+            .with_response(doxa::ResponseContribution::unauthorized())
+            .with_response(doxa::ResponseContribution::new("403", denied));
+
+        // Only the instance form reads a key out of the route and loads
+        // an object, so only it can answer 400 or 404.
+        if T::FORM != SubjectForm::Instance {
+            return contribution;
+        }
+
+        contribution
+            .with_response(doxa::ResponseContribution::new(
+                "400",
+                format!("Malformed {name_of} identifier"),
+            ))
+            .with_response(doxa::ResponseContribution::new(
+                "404",
+                format!("No such {name_of}"),
+            ))
+    }
 }
