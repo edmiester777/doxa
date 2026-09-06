@@ -270,7 +270,6 @@ mod m20260723_000002_add_audit_log_indexes {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
-    use sea_orm_migration::prelude::*;
 
     use super::*;
 
