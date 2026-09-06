@@ -188,6 +188,7 @@ use proc_macro::TokenStream;
 
 mod api_error;
 mod capability;
+mod grant;
 mod method;
 mod policy_resource;
 mod sig;
@@ -240,6 +241,47 @@ mod sse_event;
 /// `code` and the variant's `Display` output as the `message`. The
 /// `IntoResponses` impl groups `Validation` and `Query` under one
 /// `400` response with two examples.
+///
+/// # Sharing failure modes between enums
+///
+/// `#[api(transparent)]` delegates a variant's status, code and audit
+/// outcome to a nested error type instead of declaring literals, so a
+/// set of cross-cutting failure modes lives in one enum rather than
+/// being copy-pasted into every endpoint's:
+///
+/// ```no_run
+/// # use doxa::{ApiError, ToSchema};
+/// # use serde::Serialize;
+/// # #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
+/// # pub enum ApiFault {
+/// #     #[error("rate limited")]
+/// #     #[api(status = 429, code = "rate_limited")]
+/// #     RateLimited,
+/// # }
+/// #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
+/// pub enum SyncError {
+///     #[error("no such pipeline: {0}")]
+///     #[api(status = 404, code = "pipeline_not_found")]
+///     PipelineNotFound(String),
+///
+///     #[error(transparent)]
+///     #[api(transparent)]
+///     #[serde(untagged)]
+///     Fault(ApiFault),
+/// }
+/// ```
+///
+/// A transparent variant declares no `status` or `code` of its own —
+/// there is only one right answer and the nested value has it. Its
+/// statuses merge into the outer `IntoResponses` map, unioning the
+/// `code` enum and the `error` `oneOf` at any status both declare, so
+/// the document keeps every mode the endpoint can actually return.
+///
+/// Pair it with serde's `#[serde(untagged)]` (which requires the variant
+/// to come last) to keep the emitted body flat — `{"error": {"RateLimited": …}}`
+/// rather than `{"error": {"Fault": {"RateLimited": …}}}` — so
+/// consolidating shared modes stays a non-breaking refactor rather than
+/// an SDK-visible one.
 #[proc_macro_derive(ApiError, attributes(api, api_error, api_default))]
 pub fn derive_api_error(input: TokenStream) -> TokenStream {
     api_error::expand(input.into())
