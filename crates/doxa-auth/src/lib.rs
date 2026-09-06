@@ -39,6 +39,8 @@ pub mod context;
 pub mod provider;
 
 #[cfg(feature = "axum")]
+pub(crate) mod denial;
+#[cfg(feature = "axum")]
 pub mod extractors;
 #[cfg(feature = "axum")]
 pub mod layer;
