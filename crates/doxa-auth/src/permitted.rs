@@ -21,6 +21,7 @@ use http::request::Parts;
 use doxa_policy::{AuthError, CapabilityChecker, PolicyResource, ResourceEntity, ResourceIdType};
 
 use crate::context::CapabilityContext;
+use crate::denial::{self, Denial};
 
 /// Everything the route macro knows about one `Permitted` argument:
 /// which path parameter carries the id, which Cedar action to check,
@@ -70,10 +71,12 @@ pub trait LoadResource: PolicyResource {
 /// same failure modes as a path-named one, instead of a bare lookup with
 /// no policy in it.
 ///
-/// Deliberately leaves the audit builder alone: an event names one
-/// resource, and only the caller knows whether this is the object the
-/// request is about or a dependency of it. Stamp it yourself, guarding
-/// on `AuditEventBuilder::has_resource` for the dependency case.
+/// On success, deliberately leaves the audit builder alone: an event
+/// names one resource, and only the caller knows whether this is the
+/// object the request is about or a dependency of it. Stamp it yourself,
+/// guarding on `AuditEventBuilder::has_resource` for the dependency
+/// case. A *denial* is recorded either way — a refusal nobody asked to
+/// have logged is still the event an audit trail exists for.
 ///
 /// Fails with 401 (no auth context), 403 (policy denial), or 404 (no
 /// such object); a loader error is returned verbatim.
@@ -111,10 +114,10 @@ pub async fn authorize_instance<R: LoadResource>(
 /// [`LoadResource::State`] holding a separate connection, so loading it
 /// again would 404 on the very object the request just wrote.
 ///
-/// Carries the same caveat as [`authorize_instance`]: the audit builder
-/// is left alone, so stamp it yourself — guarding on
+/// Carries the same caveat as [`authorize_instance`]: on success the
+/// audit builder is left alone, so stamp it yourself — guarding on
 /// `AuditEventBuilder::has_resource` when this is a dependency of the
-/// request rather than its subject.
+/// request rather than its subject. A denial is recorded for you.
 ///
 /// Fails with 401 (no auth context) or 403 (policy denial). There is no
 /// 404: the object is in hand.
@@ -144,6 +147,16 @@ pub async fn authorize_loaded<R: PolicyResource>(
         .map_err(IntoResponse::into_response)?;
 
     if !allowed {
+        denial::record(
+            extensions,
+            Denial {
+                tenant: ctx.tenant_id.as_deref(),
+                action,
+                resource_type: R::ENTITY_TYPE,
+                resource_id: &resource.resource_id(),
+                reason: "instance denied",
+            },
+        );
         return Err(AuthError::Forbidden.into_response());
     }
 
