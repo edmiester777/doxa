@@ -13,7 +13,7 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{CapabilityContext, LoadResource, Permitted, Require};
+use doxa::auth::{CapabilityContext, GrantSite, Granted, Granting, One, Require};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -44,14 +44,19 @@ struct Widget {
     name: String,
 }
 
-impl LoadResource for Widget {
+/// No coarse capability, so the chain goes straight to the instance
+/// check — this file is about what an *instance* denial records.
+impl Granting for Widget {
+    type Key = u32;
+    type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
+    type Filter = ();
 
     async fn load(
         id: u32,
         _state: &(),
-        _caller: &CapabilityContext,
+        _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
         Ok(Some(Widget {
             id,
@@ -60,13 +65,19 @@ impl LoadResource for Widget {
     }
 }
 
+/// What the route macro will generate per call site.
+struct GetWidget;
+impl GrantSite for GetWidget {
+    const PARAMS: &'static [&'static str] = &["id"];
+    const ACTION: &'static str = "read";
+}
+
 #[get("/widgets", tag = "Widgets")]
 async fn list_widgets(_: Require<WidgetsRead>) -> &'static str {
     "ok"
 }
 
-#[get("/widgets/{id}", tag = "Widgets")]
-async fn get_widget(widget: Permitted<Widget>) -> &'static str {
+async fn get_widget(widget: Granted<One<Widget>, GetWidget>) -> &'static str {
     let _ = widget.into_inner();
     "ok"
 }
@@ -110,10 +121,12 @@ async fn with_audit_layer(path: &str) -> (StatusCode, AuditEvent) {
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let (router, _) = OpenApiRouter::<()>::new()
         .routes(routes!(list_widgets))
-        .routes(routes!(get_widget))
         .split_for_parts();
 
     let app = router
+        // Documented separately from `list_widgets`: `Granted` has no
+        // OpenAPI doc impls yet, so it cannot go through `routes!`.
+        .route("/widgets/{id}", axum::routing::get(get_widget))
         .layer(axum::middleware::from_fn(
             |mut request: Request<Body>, next: axum::middleware::Next| async move {
                 caller(&mut request);

@@ -1,12 +1,11 @@
 //! The shared refusal path for the authorization guards.
 //!
-//! [`Require`](crate::Require), [`Permitted`](crate::Permitted) and
-//! [`authorize_loaded`](crate::authorize_loaded) all end a denied request
-//! the same way: one `warn` naming what was refused, and one audit event
-//! recording it. Routing every refusal through [`record`] keeps the log
-//! line and the audit row reading from the same values — when each guard
-//! owned its own deny branch, both drifted to nothing and a refusal left
-//! no trace but the 403 the client received.
+//! [`Require`](crate::Require) and [`Granted`](crate::Granted) both end a
+//! denied request the same way: one `warn` naming what was refused, and
+//! one audit event recording it. Routing every refusal through [`record`]
+//! keeps the log line and the audit row reading from the same values —
+//! when each guard owned its own deny branch, both drifted to nothing and
+//! a refusal left no trace but the 403 the client received.
 
 use http::Extensions;
 

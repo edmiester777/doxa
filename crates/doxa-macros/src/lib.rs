@@ -189,7 +189,6 @@ use proc_macro::TokenStream;
 mod api_error;
 mod capability;
 mod method;
-mod permit;
 mod policy_resource;
 mod sig;
 mod sse_event;
@@ -356,7 +355,7 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Derive Cedar entity identity so a type can be authorized by instance
-/// with `Permitted<R>`.
+/// with `Granted<R>`.
 ///
 /// `entity_type` is reused as the audit `resource_type`, so audit rows
 /// join to the decisions that produced them. Fields opt into a role:
