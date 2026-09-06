@@ -285,6 +285,11 @@ pub trait Subject: Send + Sync + 'static {
     fn permission(action: &str) -> Cow<'static, str>;
 
     /// Run the chain: coarse gate, then whatever this subject is about.
+    ///
+    /// This is the raw decision and **records nothing** — a denial taken
+    /// through it leaves no audit row. Call
+    /// [`authorize`] instead unless you are implementing this trait; it
+    /// wraps this and records.
     fn authorize(
         key: Self::Key,
         action: &'static str,
@@ -614,48 +619,88 @@ where
     ) -> Result<Self, Self::Rejection> {
         let ctx = T::Ctx::from_extensions(&parts.extensions)
             .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
-        let checker = parts
-            .extensions
-            .get::<std::sync::Arc<dyn CapabilityChecker>>()
-            .cloned()
-            .ok_or_else(|| {
-                Refusal::Auth(AuthError::PolicyFailed(
-                    "capability checker not configured on AuthLayer".into(),
-                ))
-            })?;
 
         let key = fetch_key::<T, S, St>(parts, state).await?;
         let state = <T::State as axum::extract::FromRef<St>>::from_ref(state);
 
-        let refusal = match T::authorize(key, S::ACTION, &state, &ctx, checker.as_ref()).await {
-            Ok(loaded) => return Ok(Granted(ctx, loaded, PhantomData)),
-            Err(refusal) => refusal,
-        };
+        // Same entry point a handler uses, so the refusal is recorded by
+        // the same code either way.
+        let loaded = authorize::<T>(key, S::ACTION, &state, &parts.extensions).await?;
+        Ok(Granted(ctx, loaded, PhantomData))
+    }
+}
 
-        // The one place a denial is recorded. Everything else is a
-        // request that never reached a decision, so there is nothing to
-        // record — it renders through `IntoResponse` like any rejection.
-        if let Refusal::Denied {
+/// Authorize a subject against the caller and checker already resolved
+/// into `extensions`, recording the refusal if the policy says no.
+///
+/// This is the body of [`Granted`], exposed for a subject the extractor
+/// cannot reach. A guard runs in `FromRequestParts`, which sees no
+/// request body, so an id named in a payload — a pipeline referring to
+/// its source, a query naming the models it reads — can only be
+/// authorized from inside the handler that parsed it. The same applies
+/// to a row inside an open transaction, which a [`Granting::State`]
+/// holding a separate connection would not find.
+///
+/// Prefer this over calling [`Subject::authorize`] directly: that is the
+/// raw chain and records nothing, so a refusal taken through it leaves
+/// no audit row.
+///
+/// Like the extractor, this leaves the audit builder's *resource* alone
+/// on success — an event names one resource, and only the caller knows
+/// whether this is the request's subject or a dependency of it. Stamp it
+/// yourself, guarding on `AuditEventBuilder::has_resource` for the
+/// dependency case.
+pub async fn authorize<T: Subject>(
+    key: T::Key,
+    action: &'static str,
+    state: &T::State,
+    extensions: &Extensions,
+) -> Result<T::Loaded, Refusal<T::Error>> {
+    let ctx =
+        T::Ctx::from_extensions(extensions).ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
+    let checker = extensions
+        .get::<std::sync::Arc<dyn CapabilityChecker>>()
+        .cloned()
+        .ok_or_else(|| {
+            Refusal::Auth(AuthError::PolicyFailed(
+                "capability checker not configured on AuthLayer".into(),
+            ))
+        })?;
+
+    match T::authorize(key, action, state, &ctx, checker.as_ref()).await {
+        Ok(loaded) => Ok(loaded),
+        Err(refusal) => {
+            record_refusal(&refusal, extensions, ctx.tenant());
+            Err(refusal)
+        }
+    }
+}
+
+/// The one place a denial is recorded, whichever door the check came in
+/// by. Everything else is a request that never reached a decision, so
+/// there is nothing to record — it renders through `IntoResponse` like
+/// any other rejection.
+fn record_refusal<E>(refusal: &Refusal<E>, extensions: &Extensions, tenant: Option<&str>) {
+    let Refusal::Denied {
+        action,
+        resource_type,
+        resource_id,
+        reason,
+    } = refusal
+    else {
+        return;
+    };
+
+    crate::denial::record(
+        extensions,
+        crate::denial::Denial {
+            tenant,
             action,
             resource_type,
             resource_id,
             reason,
-        } = &refusal
-        {
-            crate::denial::record(
-                &parts.extensions,
-                crate::denial::Denial {
-                    tenant: ctx.tenant(),
-                    action,
-                    resource_type,
-                    resource_id,
-                    reason,
-                },
-            );
-        }
-
-        Err(refusal)
-    }
+        },
+    );
 }
 
 /// Pull the key's segments out of the route, in the order the site names
