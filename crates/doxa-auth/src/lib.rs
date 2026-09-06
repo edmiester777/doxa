@@ -43,6 +43,8 @@ pub(crate) mod denial;
 #[cfg(feature = "axum")]
 pub mod extractors;
 #[cfg(feature = "axum")]
+pub mod granted;
+#[cfg(feature = "axum")]
 pub mod layer;
 #[cfg(feature = "axum")]
 pub mod middleware;
@@ -58,6 +60,11 @@ pub use provider::{ClaimResolver, MinimalClaims, OidcClaimConfig, TokenValidator
 
 #[cfg(feature = "axum")]
 pub use extractors::{Auth, BearerScheme, Require, SchemeName};
+#[cfg(feature = "axum")]
+pub use granted::{
+    Cap, FromAuthExtensions, GrantSite, Granted, Granting, KeyError, Many, One, Refusal, RouteKey,
+    Subject,
+};
 #[cfg(feature = "axum")]
 pub use layer::{AuthLayer, AuthService};
 #[cfg(feature = "axum")]
