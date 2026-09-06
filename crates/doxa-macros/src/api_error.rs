@@ -50,11 +50,13 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let into_response = generate_into_response(&enum_name, &variants);
     let into_responses = generate_into_responses(&enum_name, &variants);
     let audit_outcome = generate_audit_outcome(&enum_name, &variants);
+    let api_metadata = generate_api_metadata(&enum_name, &variants);
 
     Ok(quote! {
         #into_response
         #into_responses
         #audit_outcome
+        #api_metadata
     })
 }
 
@@ -67,6 +69,20 @@ struct ParsedVariant {
     /// Audit outcome declared via `#[api(outcome = "denied")]`.
     /// Defaults to `"error"` when omitted.
     outcome: Option<String>,
+    /// Declared via `#[api(transparent)]`: status, code and audit
+    /// outcome are read off the nested value instead of literals, and
+    /// the nested type's responses merge into this enum's.
+    transparent: bool,
+}
+
+impl ParsedVariant {
+    /// The nested type a transparent variant delegates to.
+    fn delegate(&self) -> Option<&Type> {
+        match (&self.shape, self.transparent) {
+            (VariantShape::SingleField(inner), true) => Some(inner),
+            _ => None,
+        }
+    }
 }
 
 enum VariantShape {
@@ -97,12 +113,49 @@ fn parse_variant(variant: &Variant) -> Result<ParsedVariant> {
         _ => VariantShape::Other,
     };
 
+    // Delegation needs somewhere to delegate to, and a literal status
+    // next to `transparent` is two answers to one question.
+    if args.transparent {
+        if !matches!(shape, VariantShape::SingleField(_)) {
+            return Err(Error::new_spanned(
+                variant,
+                "`#[api(transparent)]` needs exactly one unnamed field to delegate to",
+            ));
+        }
+        if args.status.is_some() {
+            return Err(Error::new_spanned(
+                attr,
+                "`#[api(transparent)]` reads the status from the nested value — drop `status`",
+            ));
+        }
+        if args.code_is_explicit {
+            return Err(Error::new_spanned(
+                attr,
+                "`#[api(transparent)]` reads the code from the nested value — drop `code`",
+            ));
+        }
+    }
+
+    // Transparent variants carry no status of their own; the placeholder
+    // is never emitted, because every site that would use it delegates.
+    let status = match (args.status, args.transparent) {
+        (Some(status), _) => status,
+        (None, true) => 0,
+        (None, false) => {
+            return Err(Error::new_spanned(
+                attr,
+                "api attribute requires `status = N`",
+            ))
+        }
+    };
+
     Ok(ParsedVariant {
         ident: variant.ident.clone(),
         shape,
-        status: args.status,
+        status,
         code: args.code,
         outcome: args.outcome,
+        transparent: args.transparent,
     })
 }
 
@@ -123,9 +176,13 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
     let mut status: Option<u16> = None;
     let mut code: Option<String> = None;
     let mut outcome: Option<String> = None;
+    let mut transparent = false;
 
     attr.parse_nested_meta(|meta| {
-        if meta.path.is_ident("status") {
+        if meta.path.is_ident("transparent") {
+            transparent = true;
+            Ok(())
+        } else if meta.path.is_ident("status") {
             let value: Expr = meta.value()?.parse()?;
             status = Some(parse_u16_lit(&value)?);
             Ok(())
@@ -147,24 +204,31 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
             outcome = Some(s);
             Ok(())
         } else {
-            Err(meta.error("unknown api key — supported: `status`, `code`, `outcome`"))
+            Err(meta
+                .error("unknown api key — supported: `status`, `code`, `outcome`, `transparent`"))
         }
     })?;
 
-    let status =
-        status.ok_or_else(|| Error::new_spanned(attr, "api attribute requires `status = N`"))?;
+    let code_is_explicit = code.is_some();
     let code = code.unwrap_or_else(|| to_snake_case(&variant_ident.to_string()));
     Ok(ApiAttrArgs {
         status,
         code,
+        code_is_explicit,
         outcome,
+        transparent,
     })
 }
 
 struct ApiAttrArgs {
-    status: u16,
+    /// `None` for a transparent variant, which has no status of its own.
+    status: Option<u16>,
     code: String,
+    /// Whether `code` was written out, as opposed to derived from the
+    /// variant name — a transparent variant may have neither.
+    code_is_explicit: bool,
     outcome: Option<String>,
+    transparent: bool,
 }
 
 /// Convert a `PascalCase` identifier to `snake_case`. Used as the
@@ -221,6 +285,18 @@ fn generate_into_response(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
         let variant_name_lit = LitStr::new(&variant_name, proc_macro2::Span::call_site());
         let code_lit = LitStr::new(code_str, proc_macro2::Span::call_site());
         let status_lit = LitInt::new(&format!("{status}u16"), proc_macro2::Span::call_site());
+
+        // A transparent variant reads both off the nested value, so the
+        // outer literals never appear.
+        if v.transparent {
+            return quote! {
+                Self::#ident(inner) => (
+                    ::doxa::__private::HasApiMetadata::api_status(inner),
+                    ::doxa::__private::HasApiMetadata::api_code(inner),
+                    #variant_name_lit,
+                )
+            };
+        }
 
         let pattern = match &v.shape {
             VariantShape::Unit => quote! { Self::#ident },
@@ -385,8 +461,25 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
     // each group.
     let mut grouped: BTreeMap<u16, Vec<&ParsedVariant>> = BTreeMap::new();
     for v in variants {
+        // A transparent variant has no status of its own to group
+        // under; its statuses arrive with the nested map below.
+        if v.transparent {
+            continue;
+        }
         grouped.entry(v.status).or_default().push(v);
     }
+
+    let delegated = variants
+        .iter()
+        .filter_map(ParsedVariant::delegate)
+        .map(|inner| {
+            quote! {
+                ::doxa::__private::merge_response_maps(
+                    &mut map,
+                    <#inner as ::utoipa::IntoResponses>::responses(),
+                );
+            }
+        });
 
     let entries = grouped.iter().map(|(status, group)| {
         let status_str = LitStr::new(&status.to_string(), proc_macro2::Span::call_site());
@@ -517,6 +610,7 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
                     ::utoipa::openapi::RefOr<::utoipa::openapi::response::Response>,
                 > = ::std::collections::BTreeMap::new();
                 #(#entries)*
+                #(#delegated)*
                 map
             }
         }
@@ -535,6 +629,15 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
 fn generate_audit_outcome(enum_name: &Ident, variants: &[ParsedVariant]) -> TokenStream {
     let match_arms = variants.iter().map(|v| {
         let ident = &v.ident;
+
+        // The nested value declared its own outcomes per variant; an
+        // outer literal would flatten them all to one.
+        if v.transparent {
+            return quote! {
+                Self::#ident(inner) => ::doxa::__private::HasAuditOutcome::audit_outcome(inner)
+            };
+        }
+
         let outcome_path = match v.outcome.as_deref() {
             Some("allowed") => quote! { ::doxa::__private::ResponseAuditOutcome::Allowed },
             Some("denied") => quote! { ::doxa::__private::ResponseAuditOutcome::Denied },
@@ -558,6 +661,67 @@ fn generate_audit_outcome(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
                 match self {
                     #(#match_arms),*
                 }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HasApiMetadata codegen
+// ---------------------------------------------------------------------------
+
+/// Generate `impl HasApiMetadata for Self`.
+///
+/// This is what `#[api(transparent)]` delegates *to*. `IntoResponse` is
+/// not enough to read from — it yields a rendered `Response`, and an
+/// outer enum needs the status and code as values. Emitting it for every
+/// derived enum is what makes them nest arbitrarily deep.
+fn generate_api_metadata(enum_name: &Ident, variants: &[ParsedVariant]) -> TokenStream {
+    let arms: Vec<TokenStream> = variants
+        .iter()
+        .map(|v| {
+            let ident = &v.ident;
+
+            if v.transparent {
+                return quote! {
+                    Self::#ident(inner) => (
+                        ::doxa::__private::HasApiMetadata::api_status(inner),
+                        ::doxa::__private::HasApiMetadata::api_code(inner),
+                    )
+                };
+            }
+
+            let status_lit =
+                LitInt::new(&format!("{}u16", v.status), proc_macro2::Span::call_site());
+            let code_lit = LitStr::new(&v.code, proc_macro2::Span::call_site());
+            let pattern = match &v.shape {
+                VariantShape::Unit => quote! { Self::#ident },
+                VariantShape::SingleField(_) => quote! { Self::#ident(..) },
+                VariantShape::Other => quote! { Self::#ident { .. } },
+            };
+
+            quote! { #pattern => (#status_lit, #code_lit) }
+        })
+        .collect();
+
+    let status_arms = arms.clone();
+    let code_arms = arms;
+
+    quote! {
+        #[automatically_derived]
+        impl ::doxa::__private::HasApiMetadata for #enum_name {
+            fn api_status(&self) -> u16 {
+                let (status, _): (u16, &'static str) = match self {
+                    #(#status_arms),*
+                };
+                status
+            }
+
+            fn api_code(&self) -> &'static str {
+                let (_, code): (u16, &'static str) = match self {
+                    #(#code_arms),*
+                };
+                code
             }
         }
     }
