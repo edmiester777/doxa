@@ -464,6 +464,12 @@ impl ApiDocBuilder {
             }
         }
 
+        // Guards compose their scope strings per call site, so the
+        // schemes just registered do not know about them yet. Declare
+        // what was actually stamped, or the document references scopes
+        // its own scheme never defines.
+        crate::contribution::declare_stamped_scopes(&mut doc);
+
         // --- Tag discovery and grouping ---
         //
         // 1. Walk all operations to discover every tag in use.

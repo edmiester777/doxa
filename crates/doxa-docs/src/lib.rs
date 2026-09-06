@@ -190,6 +190,7 @@ mod contribution;
 mod doc_params;
 mod doc_responses;
 mod doc_traits;
+mod error_responses;
 mod extractor;
 mod handler_ops;
 mod headers;
@@ -286,6 +287,23 @@ pub mod __private {
     pub trait HasAuditOutcome {
         fn audit_outcome(&self) -> ResponseAuditOutcome;
     }
+
+    /// Trait for error types that can report their own status and code
+    /// as data, rather than only as a rendered response.
+    ///
+    /// `#[derive(ApiError)]` generates this impl automatically, and
+    /// `#[api(transparent)]` reads it off the nested value — `IntoResponse`
+    /// alone is not enough to delegate from, since it yields a `Response`
+    /// and the outer impl needs the status and code as values. A
+    /// hand-written error type can implement this to become nestable.
+    pub trait HasApiMetadata {
+        /// HTTP status this value renders with.
+        fn api_status(&self) -> u16;
+        /// Machine-readable error code this value renders with.
+        fn api_code(&self) -> &'static str;
+    }
+
+    pub use crate::error_responses::merge_response_maps;
 
     // Autoref-specialized dispatch scaffolding referenced by the
     // method macro's generated per-handler `IntoParams` impls. Not
