@@ -25,6 +25,7 @@ use doxa_policy::{AuthError, CapabilityChecker, Capable};
 
 use crate::claims::Claims;
 use crate::context::{AuthContext, CapabilityContext};
+use crate::denial::{self, Denial};
 
 /// Extracts the authenticated user context. Returns 401 if missing.
 #[derive(Debug, Clone)]
@@ -88,6 +89,11 @@ impl SchemeName for BearerScheme {
 ///    [`AuthError::MissingCredentials`] if the layer never ran, or
 ///    [`AuthError::PolicyFailed`] if the layer ran but no checker was
 ///    configured.
+///
+/// A denial is logged at `warn` and recorded on the request's
+/// `AuditEventBuilder` when one is present, naming the capability and
+/// the check that refused it. No configuration is involved: a deployment
+/// with no audit layer installed still gets the log line.
 ///
 /// On OpenAPI generation the same type stamps
 /// [`record_required_permission`](doxa::record_required_permission)
@@ -165,10 +171,30 @@ where
         let tenant = ctx.tenant_id.as_deref().unwrap_or("");
         let allowed = checker.check(tenant, &ctx.roles, M::CAPABILITY).await?;
         if allowed {
-            Ok(Require(PhantomData))
-        } else {
-            Err(AuthError::Forbidden)
+            return Ok(Require(PhantomData));
         }
+
+        // A capability is granted only when every check passes, so the
+        // first one is the one whose denial short-circuits the
+        // evaluation — it is the one worth naming in the trail. A
+        // capability with no checks at all names itself.
+        let (resource_type, resource_id) = M::CAPABILITY
+            .checks
+            .first()
+            .map(|check| (check.entity_type, check.entity_id))
+            .unwrap_or(("capability", M::CAPABILITY.name));
+
+        denial::record(
+            &parts.extensions,
+            Denial {
+                tenant: ctx.tenant_id.as_deref(),
+                action: M::CAPABILITY.name,
+                resource_type,
+                resource_id,
+                reason: "capability denied",
+            },
+        );
+        Err(AuthError::Forbidden)
     }
 }
 
