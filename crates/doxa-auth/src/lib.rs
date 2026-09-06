@@ -60,8 +60,8 @@ pub use provider::{ClaimResolver, MinimalClaims, OidcClaimConfig, TokenValidator
 pub use extractors::{Auth, BearerScheme, Require, SchemeName};
 #[cfg(feature = "axum")]
 pub use granted::{
-    authorize, Cap, FromAuthExtensions, GrantSite, Granted, Granting, KeyError, Many, One, Refusal,
-    RouteKey, Subject, SubjectForm,
+    authorize, Cap, DefaultSite, FromAuthExtensions, GrantSite, Granted, Granting, KeyError,
+    KeySegment, Many, One, Refusal, RouteKey, Subject, SubjectForm,
 };
 #[cfg(feature = "axum")]
 pub use layer::{AuthLayer, AuthService};

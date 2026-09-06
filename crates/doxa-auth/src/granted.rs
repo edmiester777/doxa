@@ -108,11 +108,16 @@ where
 
 /// The identifying values a loader needs, parsed from route segments.
 ///
-/// Implemented for any [`FromStr`](std::str::FromStr) scalar and for
-/// tuples of them. A composite key is better written as a struct
-/// deriving `RouteKey`, so the route binds by field name instead of by
-/// position — a two-`String` tuple bound in the wrong order parses
-/// cleanly and loads the wrong object.
+/// Implemented for `()`, for the scalars below, and for tuples of them
+/// up to four.
+///
+/// A composite key binds **by position**: the order of `#[key("a", "b")]`
+/// is the order of the tuple, and a two-`String` key bound the wrong way
+/// round parses cleanly and loads the wrong object. Prefer distinct
+/// types per segment where you can, so a swap fails to parse instead of
+/// succeeding quietly. [`SEGMENTS`](Self::SEGMENTS) is checked against
+/// the site's parameter count before any of them are read, so a key and
+/// a route that disagree are refused rather than silently truncated.
 pub trait RouteKey: Sized + Send {
     /// Schema kind per segment, in key order. Drives the OpenAPI
     /// parameter types without a runtime call.
@@ -150,14 +155,35 @@ impl RouteKey for () {
     }
 }
 
+/// One value inside a key.
+///
+/// Separate from [`RouteKey`] because a tuple has to build its own
+/// `SEGMENTS` from its parts' kinds, and slices cannot be concatenated
+/// in a const context — a `KIND` per part can.
+pub trait KeySegment: Sized + Send {
+    /// Schema kind for this segment, driving the OpenAPI parameter type.
+    const KIND: ResourceIdType;
+
+    /// Parse one raw segment. The caller attaches the position.
+    fn parse_segment(raw: &str) -> Option<Self>;
+}
+
 macro_rules! scalar_key {
     ($ty:ty, $kind:expr) => {
+        impl KeySegment for $ty {
+            const KIND: ResourceIdType = $kind;
+
+            fn parse_segment(raw: &str) -> Option<Self> {
+                raw.parse().ok()
+            }
+        }
+
         impl RouteKey for $ty {
             const SEGMENTS: &'static [ResourceIdType] = &[$kind];
 
             fn parse(raw: &[&str]) -> Result<Self, KeyError> {
                 let text = raw.first().copied().unwrap_or_default();
-                text.parse().map_err(|_| KeyError {
+                <$ty as KeySegment>::parse_segment(text).ok_or_else(|| KeyError {
                     position: 0,
                     raw: text.to_owned(),
                 })
@@ -170,6 +196,30 @@ scalar_key!(String, ResourceIdType::String);
 scalar_key!(i64, ResourceIdType::Integer);
 scalar_key!(u32, ResourceIdType::Integer);
 scalar_key!(u64, ResourceIdType::Integer);
+
+macro_rules! tuple_key {
+    ($($name:ident @ $index:tt),+) => {
+        impl<$($name: KeySegment),+> RouteKey for ($($name,)+) {
+            const SEGMENTS: &'static [ResourceIdType] = &[$($name::KIND),+];
+
+            fn parse(raw: &[&str]) -> Result<Self, KeyError> {
+                Ok(($(
+                    {
+                        let text = raw.get($index).copied().unwrap_or_default();
+                        $name::parse_segment(text).ok_or_else(|| KeyError {
+                            position: $index,
+                            raw: text.to_owned(),
+                        })?
+                    },
+                )+))
+            }
+        }
+    };
+}
+
+tuple_key!(A @ 0, B @ 1);
+tuple_key!(A @ 0, B @ 1, C @ 2);
+tuple_key!(A @ 0, B @ 1, C @ 2, D @ 3);
 
 // ---------------------------------------------------------------------------
 // Refusals
@@ -709,6 +759,17 @@ async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
     parts: &mut http::request::Parts,
     state: &St,
 ) -> Result<T::Key, Refusal<T::Error>> {
+    // A site that names fewer segments than the key parses would have
+    // the surplus silently dropped — a folder-scoped route loading an
+    // object from another folder. Refuse instead.
+    if S::PARAMS.len() != T::Key::SEGMENTS.len() {
+        return Err(Refusal::Auth(AuthError::PolicyFailed(format!(
+            "route names {} key segment(s) but the key takes {}",
+            S::PARAMS.len(),
+            T::Key::SEGMENTS.len(),
+        ))));
+    }
+
     if T::Key::SEGMENTS.is_empty() {
         return Ok(T::Key::parse(&[])?);
     }

@@ -438,3 +438,165 @@ fn a_scope_described_two_ways_falls_back_to_its_own_name() {
 
     assert_eq!(declared["widgets.read"], json!("widgets.read"));
 }
+
+// ---- composite keys ----------------------------------------------------------
+
+/// A folder-scoped widget: the key is both segments, so authorizing it
+/// means both reach the loader.
+#[derive(Debug, Clone, Serialize, ToSchema, PolicyResource)]
+#[resource(entity_type = "Filed")]
+struct Filed {
+    #[resource(id)]
+    id: String,
+}
+
+impl Granting for Filed {
+    type Key = (String, u32);
+    type Ctx = CapabilityContext;
+    type State = ();
+    type Error = StatusCode;
+    type Filter = ();
+
+    async fn load(
+        (folder, id): (String, u32),
+        _state: &(),
+        _ctx: &CapabilityContext,
+    ) -> Result<Option<Self>, StatusCode> {
+        // The id alone is not the identity — the folder is half of it.
+        Ok(Some(Filed {
+            id: format!("{folder}/{id}"),
+        }))
+    }
+}
+
+#[get("/folders/{fid}/filed/{id}", tag = "Widgets")]
+async fn get_filed(#[key("fid", "id")] filed: Granted<Filed>) -> String {
+    filed.into_inner().id
+}
+
+async fn call_filed(uri: &str) -> (StatusCode, String) {
+    struct AllowAll;
+    #[async_trait]
+    impl CapabilityChecker for AllowAll {
+        async fn check(&self, _: &str, _: &[String], _: &Capability) -> Result<bool, AuthError> {
+            Ok(true)
+        }
+        async fn check_instance(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &str,
+            _: &ResourceEntity,
+        ) -> Result<bool, AuthError> {
+            Ok(true)
+        }
+    }
+
+    let app = OpenApiRouter::<()>::new()
+        .routes(routes!(get_filed))
+        .split_for_parts()
+        .0
+        .layer(axum::middleware::from_fn(
+            |mut request: Request<Body>, next: axum::middleware::Next| async move {
+                request.extensions_mut().insert(CapabilityContext {
+                    tenant_id: Some("acme".into()),
+                    roles: vec!["viewer".into()],
+                });
+                let checker: Arc<dyn CapabilityChecker> = Arc::new(AllowAll);
+                request.extensions_mut().insert(checker);
+                next.run(request).await
+            },
+        ));
+
+    let response = app
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .expect("request");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// Both named segments reach the loader, in the order `#[key]` named
+/// them. Before tuples were implemented the second was silently dropped.
+#[tokio::test]
+async fn a_composite_key_carries_every_segment() {
+    let (status, body) = call_filed("/folders/inbox/filed/7").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "inbox/7", "the folder is half the identity");
+}
+
+/// The segments are typed independently, so a bad one is a 400 naming
+/// its own position rather than a wrong-object load.
+#[tokio::test]
+async fn a_bad_segment_in_a_composite_key_is_rejected() {
+    let (status, _) = call_filed("/folders/inbox/filed/not-a-number").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// Both segments are documented, each with the schema its own type
+/// implies — not just the first.
+#[test]
+fn a_composite_key_documents_every_segment() {
+    let (_router, api) = OpenApiRouter::<()>::new()
+        .routes(routes!(get_filed))
+        .split_for_parts();
+    let op = operation(
+        &api,
+        "/folders/{fid}/filed/{id}",
+        utoipa::openapi::path::HttpMethod::Get,
+    );
+
+    let params = op.parameters.expect("both segments are declared");
+    let named: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(named, ["fid", "id"]);
+
+    let kinds: Vec<serde_json::Value> = params
+        .iter()
+        .map(|p| serde_json::to_value(p.schema.as_ref().unwrap()).unwrap()["type"].clone())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![json!("string"), json!("integer")],
+        "each segment carries its own type",
+    );
+}
+
+/// A site and a key that disagree about how many segments there are used
+/// to truncate silently. `DefaultSite` names none, so an instance key is
+/// exactly that mismatch.
+#[tokio::test]
+async fn a_site_that_names_too_few_segments_is_refused() {
+    let (mut parts, _rx) = {
+        let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+        request.extensions_mut().insert(CapabilityContext {
+            tenant_id: Some("acme".into()),
+            roles: vec!["viewer".into()],
+        });
+        let checker: Arc<dyn CapabilityChecker> = Arc::new(RegionChecker);
+        request.extensions_mut().insert(checker);
+        let (parts, _) = request.into_parts();
+        (parts, ())
+    };
+
+    use axum::extract::FromRequestParts;
+    use axum::response::IntoResponse;
+
+    let rejection =
+        Granted::<doxa::auth::One<Widget>, doxa::auth::DefaultSite>::from_request_parts(
+            &mut parts,
+            &(),
+        )
+        .await
+        .err()
+        .expect("the site names no segments but the key takes one");
+
+    assert_eq!(
+        rejection.into_response().status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a route/key mismatch is a misconfiguration, not a bad request",
+    );
+}
