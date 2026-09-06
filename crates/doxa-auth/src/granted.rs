@@ -178,9 +178,12 @@ scalar_key!(u64, ResourceIdType::Integer);
 /// Why a subject would not hand its value over.
 ///
 /// [`Denied`](Refusal::Denied) is the policy saying no, and is the only
-/// variant the guard records — everything else already carries its own
-/// response, including a loader's consumer-defined error type.
-pub enum Refusal {
+/// variant the guard records; the rest describe a request that never
+/// reached a decision. Nothing is rendered here — the refusal travels as
+/// itself and meets `IntoResponse` once, at the extractor boundary, so a
+/// loader error arrives with whatever audit outcome it attaches intact.
+#[derive(Debug)]
+pub enum Refusal<E> {
     /// The policy refused. Recorded once, by the extractor.
     Denied {
         /// Capability name, or the Cedar action for an instance check.
@@ -193,20 +196,46 @@ pub enum Refusal {
         /// event's error text.
         reason: &'static str,
     },
-    /// Rendered verbatim: a 404, a bad key, or a loader error whose
-    /// `IntoResponse` may already have attached an audit outcome.
-    Other(Response),
+    /// The key named no object the loader could find.
+    NotFound {
+        /// Cedar entity type that was looked up.
+        entity_type: &'static str,
+    },
+    /// A route segment did not parse into its key component.
+    Key(KeyError),
+    /// No auth context, no checker, or a policy that failed to decide.
+    Auth(AuthError),
+    /// The loader failed with the consumer's own error type.
+    Load(E),
 }
 
-impl From<Response> for Refusal {
-    fn from(response: Response) -> Self {
-        Refusal::Other(response)
+impl<E> From<AuthError> for Refusal<E> {
+    fn from(error: AuthError) -> Self {
+        Refusal::Auth(error)
     }
 }
 
-impl From<AuthError> for Refusal {
-    fn from(error: AuthError) -> Self {
-        Refusal::Other(error.into_response())
+impl<E> From<KeyError> for Refusal<E> {
+    fn from(error: KeyError) -> Self {
+        Refusal::Key(error)
+    }
+}
+
+impl<E: IntoResponse> IntoResponse for Refusal<E> {
+    fn into_response(self) -> Response {
+        match self {
+            // The denial was recorded on the way out; the caller is told
+            // only that it was refused.
+            Refusal::Denied { .. } => AuthError::Forbidden.into_response(),
+            Refusal::NotFound { entity_type } => (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("{entity_type} not found"),
+            )
+                .into_response(),
+            Refusal::Key(error) => error.into_response(),
+            Refusal::Auth(error) => error.into_response(),
+            Refusal::Load(error) => error.into_response(),
+        }
     }
 }
 
@@ -229,6 +258,9 @@ pub trait Subject: Send + Sync + 'static {
     type State: Send + Sync;
     /// Identifying values the route must supply.
     type Key: RouteKey;
+    /// Loader failure this subject's chain can raise. [`Cap`] loads
+    /// nothing and uses [`Infallible`](std::convert::Infallible).
+    type Error: IntoResponse + Send;
 
     /// Permission name for the OpenAPI badge, given the route's action.
     fn permission(action: &str) -> Cow<'static, str>;
@@ -240,7 +272,7 @@ pub trait Subject: Send + Sync + 'static {
         state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
-    ) -> impl Future<Output = Result<Self::Loaded, Refusal>> + Send;
+    ) -> impl Future<Output = Result<Self::Loaded, Refusal<Self::Error>>> + Send;
 }
 
 /// Everything asset-specific: how to load one, which coarse capability
@@ -258,8 +290,9 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
     type Ctx: FromAuthExtensions;
     /// State the loader reaches through `FromRef`.
     type State: Send + Sync;
-    /// Loader failure. Its `IntoResponse` is returned verbatim.
-    type Error: IntoResponse;
+    /// Loader failure. Reaches the client through its own
+    /// `IntoResponse`, so any audit outcome it attaches survives.
+    type Error: IntoResponse + Send;
     /// The caller's authorized subset, as this asset's queries take it.
     type Filter: Send;
 
@@ -319,6 +352,7 @@ impl<R: Granting> Subject for One<R> {
     type Ctx = R::Ctx;
     type State = R::State;
     type Key = R::Key;
+    type Error = R::Error;
 
     fn permission(action: &str) -> Cow<'static, str> {
         match R::capability(action) {
@@ -333,7 +367,7 @@ impl<R: Granting> Subject for One<R> {
         state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
-    ) -> Result<R, Refusal> {
+    ) -> Result<R, Refusal<R::Error>> {
         // Coarse gate first: a caller who may not touch this kind of
         // thing at all should not cost a query, and must not be able to
         // tell a missing object from one they may not see.
@@ -341,15 +375,9 @@ impl<R: Granting> Subject for One<R> {
 
         let resource = R::load(key, state, ctx)
             .await
-            .map_err(|e| Refusal::Other(e.into_response()))?
-            .ok_or_else(|| {
-                Refusal::Other(
-                    (
-                        axum::http::StatusCode::NOT_FOUND,
-                        format!("{} not found", R::ENTITY_TYPE),
-                    )
-                        .into_response(),
-                )
+            .map_err(Refusal::Load)?
+            .ok_or(Refusal::NotFound {
+                entity_type: R::ENTITY_TYPE,
             })?;
 
         let entity = ResourceEntity::of(&resource);
@@ -375,6 +403,7 @@ impl<R: Granting> Subject for Many<R> {
     type Ctx = R::Ctx;
     type State = R::State;
     type Key = ();
+    type Error = R::Error;
 
     fn permission(action: &str) -> Cow<'static, str> {
         match R::capability(action) {
@@ -389,7 +418,7 @@ impl<R: Granting> Subject for Many<R> {
         _state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
-    ) -> Result<R::Filter, Refusal> {
+    ) -> Result<R::Filter, Refusal<R::Error>> {
         coarse_gate::<R>(action, ctx, checker).await?;
 
         if let Some(scope) = R::scope(ctx)? {
@@ -412,6 +441,7 @@ impl<M: Capable> Subject for Cap<M> {
     type Ctx = CapabilityContext;
     type State = ();
     type Key = ();
+    type Error = std::convert::Infallible;
 
     fn permission(_action: &str) -> Cow<'static, str> {
         Cow::Borrowed(M::CAPABILITY.name)
@@ -423,7 +453,7 @@ impl<M: Capable> Subject for Cap<M> {
         _state: &(),
         ctx: &CapabilityContext,
         checker: &dyn CapabilityChecker,
-    ) -> Result<(), Refusal> {
+    ) -> Result<(), Refusal<Self::Error>> {
         let allowed = checker
             .check(ctx.tenant().unwrap_or(""), ctx.roles(), M::CAPABILITY)
             .await?;
@@ -455,7 +485,7 @@ async fn coarse_gate<R: Granting>(
     action: &str,
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
-) -> Result<(), Refusal> {
+) -> Result<(), Refusal<R::Error>> {
     let Some(cap) = R::capability(action) else {
         return Ok(());
     };
@@ -539,51 +569,55 @@ where
     St: Send + Sync,
     T::State: axum::extract::FromRef<St>,
 {
-    // `Response` rather than a concrete error: a loader's error type
-    // belongs to the consumer, and returning it untouched preserves any
-    // audit outcome its `IntoResponse` attaches.
-    type Rejection = Response;
+    type Rejection = Refusal<T::Error>;
 
     async fn from_request_parts(
         parts: &mut http::request::Parts,
         state: &St,
-    ) -> Result<Self, Response> {
+    ) -> Result<Self, Self::Rejection> {
         let ctx = T::Ctx::from_extensions(&parts.extensions)
-            .ok_or_else(|| AuthError::MissingCredentials.into_response())?;
+            .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
         let checker = parts
             .extensions
             .get::<std::sync::Arc<dyn CapabilityChecker>>()
             .cloned()
             .ok_or_else(|| {
-                AuthError::PolicyFailed("capability checker not configured on AuthLayer".into())
-                    .into_response()
+                Refusal::Auth(AuthError::PolicyFailed(
+                    "capability checker not configured on AuthLayer".into(),
+                ))
             })?;
 
         let key = fetch_key::<T, S, St>(parts, state).await?;
         let state = <T::State as axum::extract::FromRef<St>>::from_ref(state);
 
-        match T::authorize(key, S::ACTION, &state, &ctx, checker.as_ref()).await {
-            Ok(loaded) => Ok(Granted(ctx, loaded, PhantomData)),
-            Err(Refusal::Other(response)) => Err(response),
-            Err(Refusal::Denied {
-                action,
-                resource_type,
-                resource_id,
-                reason,
-            }) => {
-                crate::denial::record(
-                    &parts.extensions,
-                    crate::denial::Denial {
-                        tenant: ctx.tenant(),
-                        action: &action,
-                        resource_type: &resource_type,
-                        resource_id: &resource_id,
-                        reason,
-                    },
-                );
-                Err(AuthError::Forbidden.into_response())
-            }
+        let refusal = match T::authorize(key, S::ACTION, &state, &ctx, checker.as_ref()).await {
+            Ok(loaded) => return Ok(Granted(ctx, loaded, PhantomData)),
+            Err(refusal) => refusal,
+        };
+
+        // The one place a denial is recorded. Everything else is a
+        // request that never reached a decision, so there is nothing to
+        // record — it renders through `IntoResponse` like any rejection.
+        if let Refusal::Denied {
+            action,
+            resource_type,
+            resource_id,
+            reason,
+        } = &refusal
+        {
+            crate::denial::record(
+                &parts.extensions,
+                crate::denial::Denial {
+                    tenant: ctx.tenant(),
+                    action,
+                    resource_type,
+                    resource_id,
+                    reason,
+                },
+            );
         }
+
+        Err(refusal)
     }
 }
 
@@ -592,16 +626,23 @@ where
 async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
     parts: &mut http::request::Parts,
     state: &St,
-) -> Result<T::Key, Response> {
+) -> Result<T::Key, Refusal<T::Error>> {
     if T::Key::SEGMENTS.is_empty() {
-        return T::Key::parse(&[]).map_err(IntoResponse::into_response);
+        return Ok(T::Key::parse(&[])?);
     }
 
     // `RawPathParams` borrows `UrlParams` rather than removing it, so a
     // handler may still take its own `Path`.
     let params = axum::extract::RawPathParams::from_request_parts(parts, state)
         .await
-        .map_err(IntoResponse::into_response)?;
+        // A route that names key segments but exposes no path parameters
+        // is a router the macro and the site disagree about, not a bad
+        // request.
+        .map_err(|rejection| {
+            Refusal::Auth(AuthError::PolicyFailed(format!(
+                "route path parameters unavailable: {rejection}"
+            )))
+        })?;
 
     let mut raw = Vec::with_capacity(S::PARAMS.len());
     for name in S::PARAMS {
@@ -610,11 +651,12 @@ async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
             .find(|(param, _)| param == name)
             .map(|(_, value)| value)
             .ok_or_else(|| {
-                AuthError::PolicyFailed(format!("route has no path parameter `{name}`"))
-                    .into_response()
+                Refusal::Auth(AuthError::PolicyFailed(format!(
+                    "route has no path parameter `{name}`"
+                )))
             })?;
         raw.push(value);
     }
 
-    T::Key::parse(&raw).map_err(IntoResponse::into_response)
+    Ok(T::Key::parse(&raw)?)
 }

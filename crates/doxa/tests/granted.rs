@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::FromRequestParts;
 use axum::http::{Request, StatusCode};
+use axum::response::IntoResponse;
 use serde::Serialize;
 use serde_json::json;
 use tower::ServiceExt;
@@ -220,7 +221,7 @@ async fn the_coarse_gate_refuses_before_the_scope_lookup() {
         .err()
         .expect("no capability");
 
-    assert_eq!(rejection.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
     let event = rx.try_recv().expect("the refusal is recorded");
     assert_eq!(event.outcome, Outcome::Denied);
     assert_eq!(event.action, "widgets.read");
@@ -239,7 +240,7 @@ async fn a_caller_with_no_scope_is_refused_by_default() {
         .err()
         .expect("no scope");
 
-    assert_eq!(rejection.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
     let event = rx.try_recv().expect("recorded");
     assert_eq!(event.error_message.as_deref(), Some("no authorized scope"));
     assert_eq!(event.resource_id.as_deref(), Some("collection"));
@@ -267,7 +268,7 @@ async fn a_bare_capability_gate_records_its_refusal() {
         .err()
         .expect("no capability");
 
-    assert_eq!(rejection.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
     let event = rx.try_recv().expect("recorded");
     assert_eq!(
         (event.resource_type.as_deref(), event.resource_id.as_deref()),
