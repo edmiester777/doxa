@@ -11,10 +11,13 @@ struct CapabilityArgs {
     checks: Vec<CheckArgs>,
 }
 
-struct CheckArgs {
-    action: LitStr,
-    entity_type: LitStr,
-    entity_id: LitStr,
+/// One `(action, entity_type, entity_id)` triple. Shared with the
+/// `Actions` derive, which builds them from defaults rather than
+/// parsing them.
+pub(crate) struct CheckArgs {
+    pub action: LitStr,
+    pub entity_type: LitStr,
+    pub entity_id: LitStr,
 }
 
 mod kw {
@@ -115,16 +118,30 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let struct_name = &input.ident;
-    let const_name = Ident::new(
-        &format!("_DOXA_CAPABILITY_{struct_name}"),
-        struct_name.span(),
-    );
-    let cap_name = &args.name;
-    let cap_description = &args.description;
+    let declaration = declare(&input.ident, &args.name, &args.description, &args.checks);
 
-    let check_tokens: Vec<_> = args
-        .checks
+    quote! {
+        #input
+        #declaration
+    }
+}
+
+/// The capability half of a declaration: the const, the [`Capable`] impl
+/// binding it to `marker`, and the catalog registration.
+///
+/// Shared by `#[capability]` and `#[derive(Actions)]` so a capability
+/// means the same thing however it was declared — in particular so that
+/// both land in the catalog, which is the whole point of registering at
+/// the declaration rather than in a list somewhere else.
+pub(crate) fn declare(
+    marker: &Ident,
+    name: &LitStr,
+    description: &LitStr,
+    checks: &[CheckArgs],
+) -> TokenStream {
+    let const_name = Ident::new(&format!("_DOXA_CAPABILITY_{marker}"), marker.span());
+
+    let check_tokens: Vec<_> = checks
         .iter()
         .map(|c| {
             let action = &c.action;
@@ -141,17 +158,25 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
 
     quote! {
-        #input
-
+        // The const is named after the marker, which is `CamelCase` by
+        // convention and would otherwise trip `non_upper_case_globals`
+        // in every crate that declares a capability.
         #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
         const #const_name: ::doxa::policy::Capability = ::doxa::policy::Capability {
-            name: #cap_name,
-            description: #cap_description,
+            name: #name,
+            description: #description,
             checks: &[#(#check_tokens),*],
         };
 
-        impl ::doxa::policy::Capable for #struct_name {
+        impl ::doxa::policy::Capable for #marker {
             const CAPABILITY: &'static ::doxa::policy::Capability = &#const_name;
         }
+
+        // Declaring a capability is what puts it in the catalog, so
+        // `doxa::policy::capabilities()` can answer without anyone
+        // maintaining a list. Expands to nothing without the `catalog`
+        // feature.
+        ::doxa::policy::inventory::submit! { &#const_name }
     }
 }

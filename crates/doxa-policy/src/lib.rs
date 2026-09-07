@@ -41,6 +41,31 @@ pub mod http;
 #[cfg(test)]
 mod test_support;
 
+/// Re-exported so `#[capability]`'s output can register itself without
+/// the declaring crate taking a direct dependency on `inventory`.
+#[cfg(feature = "catalog")]
+#[doc(hidden)]
+pub use inventory;
+
+/// Stand-in for the above when the `catalog` feature is off, so
+/// `#[capability]` expands to the same tokens either way and the
+/// registration simply evaporates.
+#[cfg(not(feature = "catalog"))]
+#[doc(hidden)]
+pub mod inventory {
+    #[doc(hidden)]
+    pub use crate::__doxa_capability_submit as submit;
+}
+
+#[cfg(not(feature = "catalog"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __doxa_capability_submit {
+    ($($tt:tt)*) => {};
+}
+
+#[cfg(feature = "catalog")]
+pub use capability::capabilities;
 pub use capability::{Capability, CapabilityCheck, CapabilityChecker, Capable};
 pub use cedar_core::{TenantStoreCache, DEFAULT_TENANT_CACHE_TTL};
 pub use error::AuthError;

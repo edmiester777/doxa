@@ -13,7 +13,7 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{CapabilityContext, Granted, Granting, Require};
+use doxa::auth::{Action, CapabilityContext, Granted, Granting, Require};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -52,6 +52,8 @@ impl Granting for Widget {
     type State = ();
     type Error = StatusCode;
     type Filter = ();
+
+    const ACTIONS: &'static [Action] = &[Action::new("read")];
 
     async fn load(
         id: u32,

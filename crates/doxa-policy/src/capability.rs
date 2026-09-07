@@ -117,6 +117,49 @@ pub trait CapabilityChecker: Send + Sync {
     ) -> Result<bool, crate::AuthError>;
 }
 
+// ---------------------------------------------------------------------------
+// The catalog
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "catalog")]
+inventory::collect!(&'static Capability);
+
+/// Every capability declared anywhere in the linked binary, sorted by
+/// name.
+///
+/// `#[capability]` registers each declaration as it defines it, so this
+/// answers without anyone maintaining a list — which is the point. A
+/// hand-written catalog const is a third place the same facts live, and
+/// the failure mode of forgetting an entry is silent: the capability
+/// works everywhere it is named in code and is simply missing from
+/// whatever the client is told it has.
+///
+/// The usual consumers are a `/me`-style endpoint reporting what the
+/// caller holds, and an OAuth2 scope vocabulary. Both want the whole set
+/// and neither can name it.
+///
+/// Ordering is by name rather than by link order, which is unspecified —
+/// a published OpenAPI document that reshuffled between builds would be
+/// unreadable in review.
+///
+/// ## What it cannot see
+///
+/// A crate that is not linked. Capabilities behind a disabled feature, or
+/// in a dependency the binary never pulls in, are absent with no error,
+/// because there is nothing left to ask. Assert the count in a test if
+/// the set matters.
+///
+/// Requires the `catalog` feature, on by default.
+#[cfg(feature = "catalog")]
+pub fn capabilities() -> Vec<&'static Capability> {
+    let mut all: Vec<&'static Capability> = inventory::iter::<&'static Capability>
+        .into_iter()
+        .copied()
+        .collect();
+    all.sort_unstable_by_key(|cap| cap.name);
+    all
+}
+
 /// One `(action, entity_type, entity_id)` triple inside a [`Capability`].
 ///
 /// `entity_type` and `entity_id` are passed verbatim to the consumer's

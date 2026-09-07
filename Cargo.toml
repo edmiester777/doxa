@@ -67,6 +67,10 @@ quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 paste = "1"
 
+# Distributed registration — capabilities declared anywhere in the
+# dependency graph collect into one catalog without a central list.
+inventory = "0.3"
+
 # Observability
 tracing = "0.1"
 

@@ -11,14 +11,20 @@ keywords = ["authorization", "policy", "cedar", "rbac", "axum"]
 categories = ["authentication", "web-programming"]
 
 [features]
-default = []
+default = ["catalog"]
 # Optional axum integration: derives `ApiError` for `AuthError` so the
 # error type plugs straight into axum handlers with typed OpenAPI docs.
 axum = ["dep:axum", "dep:doxa", "dep:doxa-macros", "dep:http", "dep:serde", "dep:utoipa"]
+# Self-assembling capability catalog. Every `#[capability]` registers
+# itself, so `capabilities()` answers without a hand-maintained list.
+# Costs a life-before-main constructor per declaration; turn it off on a
+# target that objects and enumerate the catalog yourself.
+catalog = ["dep:inventory"]
 
 [dependencies]
 cedar-policy = { workspace = true }
 cached = { workspace = true }
+inventory = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true, optional = true }
