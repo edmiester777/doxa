@@ -308,10 +308,10 @@ mod tests {
     macro_rules! read_cap {
         ($entity_id:literal) => {
             Capability {
-                name: "models.read",
-                description: "list models",
+                name: "widgets.read",
+                description: "list widgets",
                 checks: &[CapabilityCheck {
-                    action: "read_model",
+                    action: "read_widget",
                     entity_type: "WidgetCollection",
                     entity_id: $entity_id,
                 }],
@@ -322,10 +322,10 @@ mod tests {
     macro_rules! write_cap {
         ($entity_id:literal) => {
             Capability {
-                name: "models.write",
-                description: "edit models",
+                name: "widgets.write",
+                description: "edit widgets",
                 checks: &[CapabilityCheck {
-                    action: "write_model",
+                    action: "write_widget",
                     entity_type: "WidgetCollection",
                     entity_id: $entity_id,
                 }],
@@ -336,16 +336,16 @@ mod tests {
     macro_rules! full_cap {
         ($entity_id:literal) => {
             Capability {
-                name: "models.full",
+                name: "widgets.full",
                 description: "read and write",
                 checks: &[
                     CapabilityCheck {
-                        action: "read_model",
+                        action: "read_widget",
                         entity_type: "WidgetCollection",
                         entity_id: $entity_id,
                     },
                     CapabilityCheck {
-                        action: "write_model",
+                        action: "write_widget",
                         entity_type: "WidgetCollection",
                         entity_id: $entity_id,
                     },
@@ -359,7 +359,7 @@ mod tests {
         let policy = r#"
             permit(
                 principal in Role::"viewer",
-                action == Action::"read_model",
+                action == Action::"read_widget",
                 resource == WidgetCollection::"router_t1"
             );
         "#;
@@ -382,7 +382,7 @@ mod tests {
         let policy = r#"
             permit(
                 principal in Role::"viewer",
-                action == Action::"read_model",
+                action == Action::"read_widget",
                 resource == WidgetCollection::"router_t2"
             );
         "#;
@@ -445,9 +445,9 @@ mod tests {
             .await
             .expect("router ok");
         assert_eq!(map.len(), 3);
-        assert!(map.contains_key("models.read"));
-        assert!(map.contains_key("models.write"));
-        assert!(map.contains_key("models.full"));
+        assert!(map.contains_key("widgets.read"));
+        assert!(map.contains_key("widgets.write"));
+        assert!(map.contains_key("widgets.full"));
         // Empty policy set → every capability denied.
         assert!(map.values().all(|allowed| !allowed));
     }
@@ -457,12 +457,12 @@ mod tests {
         let policy = r#"
             permit(
                 principal in Role::"viewer",
-                action == Action::"read_model",
+                action == Action::"read_widget",
                 resource == WidgetCollection::"router_t6"
             );
             permit(
                 principal in Role::"editor",
-                action == Action::"write_model",
+                action == Action::"write_widget",
                 resource == WidgetCollection::"router_t6"
             );
         "#;
@@ -477,8 +477,8 @@ mod tests {
             )
             .await
             .expect("router ok");
-        assert_eq!(viewer.get("models.read"), Some(&true));
-        assert_eq!(viewer.get("models.write"), Some(&false));
+        assert_eq!(viewer.get("widgets.read"), Some(&true));
+        assert_eq!(viewer.get("widgets.write"), Some(&false));
 
         // Editor role: only the write capability should be granted.
         let editor = router
@@ -489,8 +489,8 @@ mod tests {
             )
             .await
             .expect("router ok");
-        assert_eq!(editor.get("models.read"), Some(&false));
-        assert_eq!(editor.get("models.write"), Some(&true));
+        assert_eq!(editor.get("widgets.read"), Some(&false));
+        assert_eq!(editor.get("widgets.write"), Some(&true));
 
         // Both roles together → the multi-check capability passes
         // because every individual check is granted.
@@ -502,7 +502,7 @@ mod tests {
             )
             .await
             .expect("router ok");
-        assert_eq!(combined.get("models.full"), Some(&true));
+        assert_eq!(combined.get("widgets.full"), Some(&true));
     }
 
     #[tokio::test]
