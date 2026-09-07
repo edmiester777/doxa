@@ -18,8 +18,21 @@ use doxa::auth::{
     Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
 };
 use doxa::policy::{AuthError, Capability, CapabilityChecker, Capable, ResourceEntity};
-use doxa::{Actions, PolicyResource, ToSchema};
+use doxa::{capability, Actions, PolicyResource, ToSchema};
 use serde::Serialize;
+
+/// A capability the application already declared — the shape of an app
+/// with a catalog of its own, written before any action table existed.
+#[capability(
+    name = "sources.archive",
+    description = "Archive data source definitions",
+    checks(
+        action = "archive",
+        entity_type = "SourceCollection",
+        entity_id = "collection"
+    )
+)]
+pub struct SourcesArchive;
 
 /// The whole declaration. `Source` comes off the enum name, the Cedar
 /// action off each variant, the capability off the two together, and the
@@ -28,16 +41,26 @@ use serde::Serialize;
 #[actions(prefix = "sources")]
 pub enum SourceAction {
     /// List and view data source definitions.
-    #[action(event = "data_access")]
+    // The category is a const expression rather than a string, so a
+    // misspelling is a resolution error instead of an audit row filed
+    // under a category nothing reads. Not a doc comment: that is the
+    // capability's description, which `the_description_comes_off_the_doc_comment`
+    // pins.
+    #[action(event = EventType::DataAccess.as_static())]
     Read,
 
     /// Remove data source definitions.
-    #[action(event = "admin_delete")]
+    #[action(event = EventType::AdminDelete.as_static())]
     Delete,
 
     /// A name that is not the variant's, because Cedar already had one.
-    #[action(name = "run_query", event = "data_access")]
+    #[action(name = "run_query", event = EventType::DataAccess.as_static())]
     Query,
+
+    /// Gated on the capability declared above rather than a fresh one,
+    /// so the catalog keeps one entry for `sources.archive`.
+    #[action(capable = SourcesArchive, event = EventType::AdminUpdate.as_static())]
+    Archive,
 
     /// No coarse gate: the instance check alone decides it.
     #[action(instance_only)]
@@ -90,7 +113,24 @@ fn the_action_names_come_off_the_variants() {
     // Overridden, because Cedar already had a name for it.
     assert_eq!(SourceAction::Query.as_static(), "run_query");
 
-    assert_eq!(SourceAction::ALL.len(), 4);
+    assert_eq!(SourceAction::ALL.len(), 5);
+}
+
+/// `capable` gates on a marker that already exists. The row points at
+/// that very constant — not a copy, and not a second declaration that
+/// would sit in the catalog looking enforced while no route named it.
+#[test]
+fn an_existing_capability_is_referenced_rather_than_redeclared() {
+    let archive = SourceAction::ACTIONS
+        .iter()
+        .find(|a| a.name == "archive")
+        .expect("declared");
+
+    assert!(std::ptr::eq(
+        archive.capability.expect("gated"),
+        SourcesArchive::CAPABILITY,
+    ));
+    assert_eq!(archive.event_type, Some(EventType::AdminUpdate.as_static()));
 }
 
 #[test]
@@ -171,6 +211,11 @@ fn a_table_that_repeats_an_action_is_not_distinct() {
 
 /// Every generated marker is a capability declaration like any other, so
 /// it reaches the catalog without being listed anywhere.
+///
+/// `sources.archive` appears exactly once despite an action gating on it:
+/// `capable` references the marker rather than minting a second one. A
+/// duplicate here would be a catalog entry advertised to clients that no
+/// route ever checks.
 #[test]
 fn the_generated_capabilities_reach_the_catalog() {
     let names: Vec<_> = doxa::policy::capabilities()
@@ -180,8 +225,13 @@ fn the_generated_capabilities_reach_the_catalog() {
 
     assert_eq!(
         names,
-        ["sources.delete", "sources.read", "sources.run_query"],
-        "three declared, three registered, and `Ping` declared none",
+        [
+            "sources.archive",
+            "sources.delete",
+            "sources.read",
+            "sources.run_query",
+        ],
+        "three declared by the derive, one referenced, and `Ping` declared none",
     );
 }
 

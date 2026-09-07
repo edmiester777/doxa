@@ -34,6 +34,11 @@ docs-scalar = []
 # compile cost when the derives aren't needed.
 macros = ["dep:doxa-macros"]
 
+# Forward the SeaORM loader half of `#[derive(PolicyResource)]`. Nothing
+# in this crate uses it; the feature exists so `doxa` can reach
+# `doxa-macros` through the same path it reaches every other proc-macro.
+macros-sea-orm = ["macros", "doxa-macros/sea-orm"]
+
 [dependencies]
 axum = { workspace = true }
 doxa-macros = { workspace = true, optional = true }

@@ -12,6 +12,12 @@ categories = ["web-programming::http-server", "development-tools::procedural-mac
 
 [features]
 default = []
+# Emit the SeaORM loader half of `#[derive(PolicyResource)]` — the
+# `ScopedRow` impl built from `#[resource(key)]` and `#[resource(scope)]`.
+# Off by default so the derive costs no ORM dependency for consumers that
+# only need Cedar identity; with it off, using either role is an error
+# naming the feature rather than a missing impl at the call site.
+sea-orm = []
 
 [lib]
 proc-macro = true

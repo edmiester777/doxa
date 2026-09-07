@@ -402,9 +402,16 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// `entity_type` is reused as the audit `resource_type`, so audit rows
 /// join to the decisions that produced them. Fields opt into a role:
-/// `#[resource(id)]` (required, exactly one), `#[resource(attr)]` to
-/// expose a field to policies as `resource.<name>` (`attr = "key"`
-/// renames), and `#[resource(parent = "Folder")]` for `in` checks.
+/// `#[resource(id)]` (exactly one, unless `id_with` supplies it),
+/// `#[resource(attr)]` to expose a field to policies as
+/// `resource.<name>` (`attr = "key"` renames), and
+/// `#[resource(parent = "Folder")]` for `in` checks.
+///
+/// Not every identity is a field. `#[resource(id_with = method)]` names a
+/// method that computes the Cedar id from several columns, and
+/// `#[resource(attrs_with = method)]` merges a map of attributes no field
+/// backs — a derived flag, say. Both take a method on the type; the
+/// merged attributes win on a key collision, being the deliberate ones.
 ///
 /// The route's OpenAPI parameter type comes from the key
 /// (`RouteKey::SEGMENTS`), not from here — a resource is reached by
@@ -422,6 +429,34 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 ///     name: String,
 /// }
 /// ```
+///
+/// # The loader (`policy-sea-orm`)
+///
+/// On a SeaORM `Model`, `#[resource(key)]` and `#[resource(scope)]`
+/// additionally emit a `ScopedRow` impl — the query a route runs before it
+/// can decide anything. `key` is the column the route's path segment
+/// matches; `scope` is the column every lookup is confined to, so a key
+/// belonging to another owner is indistinguishable from one that does not
+/// exist.
+///
+/// The two are independent of the Cedar id: a row reached by `{model_id}`
+/// and the same row reached by `{name}` are one entity with two loaders.
+///
+/// ```ignore
+/// #[derive(DeriveEntityModel, PolicyResource)]
+/// #[sea_orm(table_name = "connections")]
+/// #[resource(entity_type = "Connection")]
+/// pub struct Model {
+///     #[sea_orm(primary_key)]        pub id: Uuid,
+///     #[resource(id, attr, key)]     pub name: String,
+///     #[resource(parent = "Tenant", scope)] pub tenant_id: String,
+/// }
+///
+/// let row = Model::load_scoped("primary".to_owned(), &db, "acme").await?;
+/// ```
+///
+/// Both roles require the `policy-sea-orm` feature; using one without it
+/// is an error naming the feature rather than a missing impl at the route.
 #[proc_macro_derive(PolicyResource, attributes(resource))]
 pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
     policy_resource::expand(input.into())
@@ -452,7 +487,31 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 ///
 /// The audit category has no default: what counts as one is the
 /// application's to say, which is why `doxa_audit::AuditEventType` is a
-/// trait rather than an enum.
+/// trait rather than an enum. It takes any `&'static str` const
+/// expression, so name a variant of that enum rather than spelling the
+/// string — a typo is then a resolution error instead of a category
+/// nothing reads.
+///
+/// # Gating on a capability that already exists
+///
+/// `capability = "…"` *declares* one. An application with a catalog of
+/// its own already has the marker, and declaring a second over the same
+/// action would catalogue an entry that no route names and that therefore
+/// only looks enforced. `capable = <path>` gates on the existing marker
+/// instead, and mints nothing:
+///
+/// ```ignore
+/// #[derive(Actions)]
+/// #[actions(resource = "Connection")]
+/// pub enum ConnectionAction {
+///     #[action(capable = catalog::ConnectionsRead, event = EventType::DataAccess.as_static())]
+///     ReadConnection,
+///     #[action(capable = catalog::ConnectionsWrite, event = EventType::AdminUpdate.as_static())]
+///     WriteConnection,
+/// }
+/// ```
+///
+/// When no variant declares a capability, no marker module is emitted.
 ///
 /// # Example
 ///
@@ -460,10 +519,10 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 /// #[derive(Actions)]
 /// pub enum SourceAction {
 ///     /// List and view data source definitions.
-///     #[action(event = "data_access")]
+///     #[action(event = EventType::DataAccess.as_static())]
 ///     Read,
 ///     /// Remove data source definitions.
-///     #[action(event = "admin_delete")]
+///     #[action(event = EventType::AdminDelete.as_static())]
 ///     Delete,
 ///     /// Nothing coarse to check — the instance decides.
 ///     #[action(instance_only)]

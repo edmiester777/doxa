@@ -20,6 +20,10 @@ axum = ["dep:axum", "dep:doxa", "dep:doxa-macros", "dep:http", "dep:serde", "dep
 # Costs a life-before-main constructor per declaration; turn it off on a
 # target that objects and enumerate the catalog yourself.
 catalog = ["dep:inventory"]
+# SeaORM loaders for rows a route resolves before authorizing them.
+# Enables `ScopedRow`, whose default method bodies turn two column
+# constants into a scoped lookup and a scoped `Select`.
+sea-orm = ["dep:sea-orm"]
 
 [dependencies]
 cedar-policy = { workspace = true }
@@ -34,6 +38,7 @@ thiserror = { workspace = true }
 axum = { workspace = true, optional = true }
 doxa = { package = "doxa-docs", path = "../doxa-docs", version = "0.1.6", optional = true }
 doxa-macros = { workspace = true, optional = true }
+sea-orm = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 utoipa = { workspace = true, optional = true }
 
