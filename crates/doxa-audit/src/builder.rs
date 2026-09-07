@@ -33,6 +33,11 @@
 //! instead, and the deposit is folded in at emit time, filling only fields
 //! nothing else named. Order stops mattering: whatever the handler set
 //! stands, whenever it set it.
+//!
+//! A request that authorizes several things — its own subject, then
+//! whatever its body refers to — needs no coordination either. Between two
+//! deposits the first stands, except that a refusal displaces a grant, so
+//! there is nothing to ask before depositing and no ordering to preserve.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -310,27 +315,6 @@ impl AuditEventBuilder {
             inner.resource_type = Some(rt);
             inner.resource_id = Some(ri);
         });
-    }
-
-    /// Returns `true` if a resource has already been identified on this
-    /// builder.
-    ///
-    /// An event names one resource. A request that authorizes several —
-    /// a route's own object plus the ones its body refers to — uses this
-    /// to leave the first claim standing rather than overwrite it with
-    /// whichever dependency was checked last.
-    ///
-    /// Reports only what a *setter* claimed. A guard's deposit does not
-    /// count, because it has not been folded in yet and would lose to
-    /// anything set here anyway — code choosing between several resources
-    /// should deposit through [`record_decision`](Self::record_decision)
-    /// and let the fold arbitrate, rather than ask this and set.
-    pub fn has_resource(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .is_some_and(|inner| inner.resource_type.is_some())
     }
 
     // ── Guard layer ─────────────────────────────────────────
@@ -967,31 +951,5 @@ mod tests {
         assert_eq!(event.outcome, Outcome::Denied);
         assert_eq!(event.resource_id.as_deref(), Some("7"));
         assert_eq!(event.http_status, Some(403));
-    }
-
-    #[test]
-    fn a_fresh_builder_claims_no_resource() {
-        let (b, _rx) = builder();
-        assert!(!b.has_resource());
-        b.set_resource("Widget", "1");
-        assert!(b.has_resource());
-    }
-
-    /// A request that authorizes its own object and then a dependency
-    /// must still be recorded against its own object.
-    #[tokio::test]
-    async fn guarding_on_has_resource_keeps_the_first_claim() {
-        let (b, mut rx) = builder();
-        b.set_resource("Widget", "1");
-
-        // How a dependency check stamps: only when unclaimed.
-        if !b.has_resource() {
-            b.set_resource("Folder", "shared");
-        }
-
-        b.emit_allowed();
-        let event = rx.recv().await.expect("emitted");
-        assert_eq!(event.resource_type.as_deref(), Some("Widget"));
-        assert_eq!(event.resource_id.as_deref(), Some("1"));
     }
 }
