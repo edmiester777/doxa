@@ -24,6 +24,7 @@
 //! | [`error`] | [`AuthError`] enum (no HTTP response mapping) |
 //! | [`uid`] | Cedar entity UID builder with input validation |
 //! | [`resource`] | [`PolicyResource`] — instance-level resource identity |
+//! | `scoped` | `ScopedRow` — SeaORM lookup confined to an owner (needs `sea-orm`; not linked, as the module is absent without it) |
 
 pub mod capability;
 pub mod cedar_core;
@@ -37,6 +38,9 @@ pub mod uid;
 
 #[cfg(feature = "axum")]
 pub mod http;
+
+#[cfg(feature = "sea-orm")]
+pub mod scoped;
 
 #[cfg(test)]
 mod test_support;
@@ -73,4 +77,15 @@ pub use extension::{PolicyExtension, ResourceAccess};
 pub use policy::Policy;
 pub use resource::{PolicyResource, ResourceEntity, ResourceIdType};
 pub use router::{AccessDecision, PolicyRouter};
+#[cfg(feature = "sea-orm")]
+pub use scoped::ScopedRow;
 pub use store::{PolicyStore, SharedPolicyStore};
+
+/// Re-exported so `#[derive(PolicyResource)]`'s generated [`ScopedRow`]
+/// impl can name SeaORM's traits without assuming the deriving crate
+/// spells the dependency `sea_orm`.
+#[cfg(feature = "sea-orm")]
+#[doc(hidden)]
+pub mod __private {
+    pub use sea_orm;
+}

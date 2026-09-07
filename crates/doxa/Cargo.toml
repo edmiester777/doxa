@@ -49,8 +49,14 @@ policy-axum = ["policy", "doxa-policy/axum"]
 # life-before-main constructor per declaration.
 policy-catalog = ["doxa-policy?/catalog"]
 
+# SeaORM loaders for policy resources: the `ScopedRow` trait, and the
+# `#[resource(key)]` / `#[resource(scope)]` roles on
+# `#[derive(PolicyResource)]` that generate an impl of it. Pulls SeaORM
+# into the policy layer, so it stays opt-in even under `full`'s siblings.
+policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-sea-orm"]
+
 # Everything.
-full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "policy-axum", "policy-catalog"]
+full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "policy-axum", "policy-catalog", "policy-sea-orm"]
 
 [dependencies]
 doxa-docs = { workspace = true, optional = true }
@@ -66,6 +72,9 @@ async-trait = { workspace = true }
 futures-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `mock` so the generated loader can be run and its query inspected
+# without a database.
+sea-orm = { workspace = true, features = ["mock"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -102,6 +111,10 @@ required-features = ["full"]
 
 [[test]]
 name = "actions"
+required-features = ["full"]
+
+[[test]]
+name = "scoped"
 required-features = ["full"]
 
 [[test]]

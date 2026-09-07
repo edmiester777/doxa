@@ -24,7 +24,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Attribute, Data, DeriveInput, Fields, Ident, LitStr, Visibility};
+use syn::{Attribute, Data, DeriveInput, Expr, Fields, Ident, LitStr, Path, Visibility};
 
 use crate::capability::{declare, CheckArgs};
 
@@ -43,8 +43,13 @@ struct Container {
 struct Variant {
     name: Option<LitStr>,
     capability: Option<LitStr>,
+    /// An existing `Capable` marker to gate on, rather than a new one to
+    /// declare. Named as a path because it is a type that already exists.
+    capable: Option<Path>,
     description: Option<LitStr>,
-    event: Option<LitStr>,
+    /// Any `&'static str` const expression, so a variant of the
+    /// application's own event enum can be named rather than spelled.
+    event: Option<Expr>,
     entity_type: Option<LitStr>,
     entity_id: Option<LitStr>,
     instance_only: bool,
@@ -162,14 +167,30 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         let event = match &parsed.event {
             // The audit vocabulary is the application's to define —
             // `doxa_audit::AuditEventType` says so — so this is the one
-            // field with no defensible default.
-            Some(lit) => quote!(.event(#lit)),
+            // field with no defensible default. Taken as an expression
+            // rather than a string so `EventType::DataAccess.as_static()`
+            // is checked, where `"data_acess"` would compile and file
+            // every event of this action under a category nothing reads.
+            Some(expr) => quote!(.event(#expr)),
             None => quote!(),
         };
 
         if parsed.instance_only {
             rows.push(quote! {
                 ::doxa::auth::Action::new(#action) #event
+            });
+            continue;
+        }
+
+        // A capability that already exists is referenced, not redeclared.
+        // Minting a second marker over the same name would put two
+        // entries in the catalog and leave whichever the routes did not
+        // name looking enforced.
+        if let Some(path) = &parsed.capable {
+            rows.push(quote! {
+                ::doxa::auth::Action::new(#action)
+                    .capability(<#path as ::doxa::policy::Capable>::CAPABILITY)
+                    #event
             });
             continue;
         }
@@ -229,17 +250,25 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         });
     }
 
-    let module_doc = format!(
-        "Capability markers for [`{enum_name}`], one per action.\n\n\
-         Each is a full capability declaration — it registers in the \
-         catalog and can be named as `Granted<Cap<{module}::…>>`."
-    );
+    // Every action either gated on a capability declared elsewhere or
+    // instance-only: there is nothing to put in the module, and an empty
+    // one would only be a name to wonder about.
+    let markers = (!markers.is_empty()).then(|| {
+        let module_doc = format!(
+            "Capability markers for [`{enum_name}`], one per action.\n\n\
+             Each is a full capability declaration — it registers in the \
+             catalog and can be named as `Granted<Cap<{module}::…>>`."
+        );
+        quote! {
+            #[doc = #module_doc]
+            #vis mod #module {
+                #(#markers)*
+            }
+        }
+    });
 
     Ok(quote! {
-        #[doc = #module_doc]
-        #vis mod #module {
-            #(#markers)*
-        }
+        #markers
 
         impl #enum_name {
             /// Every action this asset permits, as `Granting::ACTIONS`
@@ -306,22 +335,33 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
                 return Ok(());
             }
 
+            // A type, not a string: the marker exists already, and
+            // naming it as a path is what makes a typo a resolution
+            // error rather than a silently duplicated catalog entry.
+            if meta.path.is_ident("capable") {
+                out.capable = Some(meta.value()?.parse::<Path>()?);
+                return Ok(());
+            }
+
+            if meta.path.is_ident("event") {
+                out.event = Some(meta.value()?.parse::<Expr>()?);
+                return Ok(());
+            }
+
             let target = if meta.path.is_ident("name") {
                 &mut out.name
             } else if meta.path.is_ident("capability") {
                 &mut out.capability
             } else if meta.path.is_ident("description") {
                 &mut out.description
-            } else if meta.path.is_ident("event") {
-                &mut out.event
             } else if meta.path.is_ident("entity_type") {
                 &mut out.entity_type
             } else if meta.path.is_ident("entity_id") {
                 &mut out.entity_id
             } else {
                 return Err(meta.error(
-                    "unknown `action` option; expected `name`, `capability`, `description`, \
-                     `event`, `entity_type`, `entity_id` or `instance_only`",
+                    "unknown `action` option; expected `name`, `capability`, `capable`, \
+                     `description`, `event`, `entity_type`, `entity_id` or `instance_only`",
                 ));
             };
             *target = Some(meta.value()?.parse()?);
@@ -329,14 +369,27 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
         })?;
     }
 
-    if out.instance_only && out.capability.is_some() {
+    let span = || {
+        attrs
+            .iter()
+            .find(|a| a.path().is_ident("action"))
+            .map(|a| a.span())
+            .unwrap_or_else(proc_macro2::Span::call_site)
+    };
+
+    if out.instance_only && (out.capability.is_some() || out.capable.is_some()) {
         return Err(syn::Error::new(
-            attrs
-                .iter()
-                .find(|a| a.path().is_ident("action"))
-                .map(|a| a.span())
-                .unwrap_or_else(proc_macro2::Span::call_site),
+            span(),
             "`instance_only` means there is no coarse capability, so naming one contradicts it",
+        ));
+    }
+
+    if out.capability.is_some() && out.capable.is_some() {
+        return Err(syn::Error::new(
+            span(),
+            "`capability` declares a new capability and `capable` gates on one that already \
+             exists; naming both would catalogue a second entry over the same action and leave \
+             it looking enforced. Keep whichever is right",
         ));
     }
 
@@ -416,6 +469,10 @@ mod tests {
 
     fn expand_ok(input: TokenStream) -> String {
         expand(input).expect("expands").to_string()
+    }
+
+    fn expand_err(input: TokenStream) -> String {
+        expand(input).expect_err("rejected").to_string()
     }
 
     #[test]
@@ -509,6 +566,98 @@ mod tests {
         })
         .expect_err("both spell `read`");
         assert!(err.to_string().contains("`Read` already declares"));
+    }
+
+    /// `capable` gates on a marker that exists; it must not also declare
+    /// one, or the catalog would carry an entry no route names.
+    #[test]
+    fn capable_references_without_declaring() {
+        let out = expand_ok(quote! {
+            pub enum SourceAction {
+                #[action(capable = catalog::SourcesRead)]
+                Read,
+            }
+        });
+
+        assert!(
+            out.contains(
+                "< catalog :: SourcesRead as :: doxa :: policy :: Capable > :: CAPABILITY"
+            ),
+            "{out}",
+        );
+        assert!(!out.contains("CapabilityCheck"), "{out}");
+        assert!(!out.contains("struct Read"), "{out}");
+    }
+
+    /// Nothing to declare means no module, rather than an empty one left
+    /// behind as a name to wonder about.
+    #[test]
+    fn an_enum_that_declares_nothing_emits_no_module() {
+        let out = expand_ok(quote! {
+            pub enum SourceAction {
+                #[action(capable = catalog::SourcesRead)]
+                Read,
+                #[action(instance_only)]
+                Ping,
+            }
+        });
+
+        assert!(!out.contains("mod source_action"), "{out}");
+    }
+
+    #[test]
+    fn declaring_and_referencing_one_capability_is_refused() {
+        let message = expand_err(quote! {
+            pub enum SourceAction {
+                #[action(capability = "sources.read", capable = catalog::SourcesRead)]
+                Read,
+            }
+        });
+
+        assert!(message.contains("Keep whichever is right"), "{message}");
+    }
+
+    #[test]
+    fn an_instance_only_action_may_not_name_an_existing_capability() {
+        let message = expand_err(quote! {
+            pub enum SourceAction {
+                #[action(instance_only, capable = catalog::SourcesRead)]
+                Ping,
+            }
+        });
+
+        assert!(message.contains("contradicts it"), "{message}");
+    }
+
+    /// A string literal is an expression too, so widening `event` to take
+    /// one did not invalidate the tables already written against it.
+    #[test]
+    fn the_event_category_is_still_accepted_as_a_string() {
+        let out = expand_ok(quote! {
+            pub enum SourceAction {
+                #[action(instance_only, event = "data_access")]
+                Read,
+            }
+        });
+
+        assert!(out.contains(r#". event ("data_access")"#), "{out}");
+    }
+
+    /// The category is an expression, so an enum variant is checked where
+    /// a bare string never was.
+    #[test]
+    fn the_event_category_may_be_a_const_expression() {
+        let out = expand_ok(quote! {
+            pub enum SourceAction {
+                #[action(instance_only, event = EventType::DataAccess.as_static())]
+                Read,
+            }
+        });
+
+        assert!(
+            out.contains(". event (EventType :: DataAccess . as_static ())"),
+            "{out}",
+        );
     }
 
     #[test]
