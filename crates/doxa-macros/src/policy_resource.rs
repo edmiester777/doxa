@@ -7,7 +7,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, LitStr, Result, Type};
+use syn::{Data, DeriveInput, Fields, Ident, LitStr, Result};
 
 /// Role a field plays in the generated impl.
 enum Role {
@@ -20,7 +20,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let input: DeriveInput = syn::parse2(input)?;
     let ident = &input.ident;
 
-    let (entity_type, id_type_override) = container_args(&input)?;
+    let entity_type = container_args(&input)?;
 
     let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new_spanned(
@@ -35,7 +35,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         ));
     };
 
-    let mut id_field: Option<(Ident, Type)> = None;
+    let mut id_field: Option<Ident> = None;
     let mut attrs: Vec<(String, Ident)> = Vec::new();
     let mut parents: Vec<(LitStr, Ident)> = Vec::new();
 
@@ -50,7 +50,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                             "only one field may be marked `#[resource(id)]`",
                         ));
                     }
-                    id_field = Some((name.clone(), field.ty.clone()));
+                    id_field = Some(name.clone());
                 }
                 Role::Attr(key) => attrs.push((key, name.clone())),
                 Role::Parent(ty) => parents.push((ty, name.clone())),
@@ -58,17 +58,12 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         }
     }
 
-    let (id_ident, id_ty) = id_field.ok_or_else(|| {
+    let id_ident = id_field.ok_or_else(|| {
         syn::Error::new_spanned(
             &input.ident,
             "`PolicyResource` needs one field marked `#[resource(id)]`",
         )
     })?;
-
-    let id_type_variant = match id_type_override {
-        Some(lit) => id_type_from_str(&lit)?,
-        None => infer_id_type(&id_ty),
-    };
 
     let attr_inserts = attrs.iter().map(|(key, field)| {
         quote! {
@@ -90,9 +85,6 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         #[automatically_derived]
         impl ::doxa::policy::PolicyResource for #ident {
             const ENTITY_TYPE: &'static str = #entity_type;
-            const ID_TYPE: ::doxa::policy::ResourceIdType = #id_type_variant;
-
-            type Id = #id_ty;
 
             fn resource_id(&self) -> ::std::string::String {
                 ::std::string::ToString::to_string(&self.#id_ident)
@@ -118,10 +110,9 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     })
 }
 
-/// Parse `#[resource(entity_type = "…", id_type = "…")]` off the struct.
-fn container_args(input: &DeriveInput) -> Result<(LitStr, Option<LitStr>)> {
+/// Parse `#[resource(entity_type = "…")]` off the struct.
+fn container_args(input: &DeriveInput) -> Result<LitStr> {
     let mut entity_type = None;
-    let mut id_type = None;
 
     for attr in &input.attrs {
         if !attr.path().is_ident("resource") {
@@ -131,22 +122,18 @@ fn container_args(input: &DeriveInput) -> Result<(LitStr, Option<LitStr>)> {
             if meta.path.is_ident("entity_type") {
                 entity_type = Some(meta.value()?.parse::<LitStr>()?);
                 Ok(())
-            } else if meta.path.is_ident("id_type") {
-                id_type = Some(meta.value()?.parse::<LitStr>()?);
-                Ok(())
             } else {
-                Err(meta.error("expected `entity_type` or `id_type`"))
+                Err(meta.error("expected `entity_type`"))
             }
         })?;
     }
 
-    let entity_type = entity_type.ok_or_else(|| {
+    entity_type.ok_or_else(|| {
         syn::Error::new_spanned(
             &input.ident,
             "missing `#[resource(entity_type = \"…\")]` on the struct",
         )
-    })?;
-    Ok((entity_type, id_type))
+    })
 }
 
 /// Parse `#[resource(id)]` / `#[resource(attr)]` / `#[resource(attr =
@@ -185,35 +172,4 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
     }
 
     Ok(roles)
-}
-
-fn id_type_from_str(lit: &LitStr) -> Result<TokenStream> {
-    match lit.value().as_str() {
-        "string" => Ok(quote! { ::doxa::policy::ResourceIdType::String }),
-        "integer" => Ok(quote! { ::doxa::policy::ResourceIdType::Integer }),
-        "uuid" => Ok(quote! { ::doxa::policy::ResourceIdType::Uuid }),
-        other => Err(syn::Error::new(
-            lit.span(),
-            format!("unknown `id_type` `{other}` — expected `string`, `integer`, or `uuid`"),
-        )),
-    }
-}
-
-/// Guess the OpenAPI primitive from the id field's type. Anything
-/// unrecognized documents as a string, which is always wire-accurate.
-fn infer_id_type(ty: &Type) -> TokenStream {
-    let Type::Path(type_path) = ty else {
-        return quote! { ::doxa::policy::ResourceIdType::String };
-    };
-    let Some(last) = type_path.path.segments.last() else {
-        return quote! { ::doxa::policy::ResourceIdType::String };
-    };
-
-    match last.ident.to_string().as_str() {
-        "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => {
-            quote! { ::doxa::policy::ResourceIdType::Integer }
-        }
-        "Uuid" => quote! { ::doxa::policy::ResourceIdType::Uuid },
-        _ => quote! { ::doxa::policy::ResourceIdType::String },
-    }
 }

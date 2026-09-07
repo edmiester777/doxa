@@ -140,6 +140,30 @@ fn the_table_carries_the_capability_and_the_category() {
     assert_eq!(read.event_type, Some(EventType::DataAccess.as_static()));
 }
 
+/// The table the derive produced names each action once, which is what
+/// makes the gate's "first row wins" lookup unambiguous. Routes are held
+/// to it — `Subject::SITE_DECLARED` asserts the same thing at build time
+/// for every asset a route guards.
+#[test]
+fn the_generated_table_declares_each_action_once() {
+    assert!(doxa::auth::distinct(SourceAction::ACTIONS));
+}
+
+/// The same check on a hand-written table, which no derive vets. Two
+/// rows over one Cedar action leave the second's capability declared and
+/// never checked — enforcement that reads as real and is not.
+#[test]
+fn a_table_that_repeats_an_action_is_not_distinct() {
+    const REPEATED: &[Action] = &[
+        Action::new("admin_write").event("admin_update"),
+        Action::new("read"),
+        Action::new("admin_write").event("admin_delete"),
+    ];
+
+    assert!(!doxa::auth::distinct(REPEATED));
+    assert!(doxa::auth::distinct(&REPEATED[..2]));
+}
+
 /// Every generated marker is a capability declaration like any other, so
 /// it reaches the catalog without being listed anywhere.
 #[test]

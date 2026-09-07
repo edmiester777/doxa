@@ -35,7 +35,7 @@ audit-sea-orm = ["audit", "doxa-audit/sea-orm"]
 
 # Provider-agnostic OIDC / JWT auth middleware. Enables axum integration
 # and audit support by default.
-auth = ["dep:doxa-auth", "doxa-auth/axum", "doxa-auth/audit"]
+auth = ["dep:doxa-auth", "doxa-auth/axum", "doxa-auth/audit", "doxa-auth/uuid"]
 
 # Cedar-based authorization policy engine (framework-neutral core).
 policy = ["dep:doxa-policy"]
@@ -70,6 +70,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 utoipa = { workspace = true }
+uuid = { workspace = true }
 
 [[example]]
 name = "full_test"
@@ -101,4 +102,8 @@ required-features = ["full"]
 
 [[test]]
 name = "actions"
+required-features = ["full"]
+
+[[test]]
+name = "stateful"
 required-features = ["full"]

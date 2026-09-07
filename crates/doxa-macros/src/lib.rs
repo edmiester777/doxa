@@ -405,8 +405,10 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// `#[resource(id)]` (required, exactly one), `#[resource(attr)]` to
 /// expose a field to policies as `resource.<name>` (`attr = "key"`
 /// renames), and `#[resource(parent = "Folder")]` for `in` checks.
-/// `ID_TYPE` is inferred from the id field's type; override with
-/// `id_type = "uuid"`.
+///
+/// The route's OpenAPI parameter type comes from the key
+/// (`RouteKey::SEGMENTS`), not from here — a resource is reached by
+/// whatever segments the route names, which is not always its own id.
 ///
 /// # Example
 ///
