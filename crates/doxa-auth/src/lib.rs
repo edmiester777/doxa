@@ -39,8 +39,6 @@ pub mod context;
 pub mod provider;
 
 #[cfg(feature = "axum")]
-pub(crate) mod denial;
-#[cfg(feature = "axum")]
 pub mod extractors;
 #[cfg(feature = "axum")]
 pub mod granted;
@@ -50,6 +48,8 @@ pub mod layer;
 pub mod middleware;
 #[cfg(feature = "axum")]
 pub mod openapi;
+#[cfg(feature = "axum")]
+pub(crate) mod record;
 
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};

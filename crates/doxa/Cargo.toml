@@ -78,6 +78,10 @@ name = "denials"
 required-features = ["full"]
 
 [[test]]
+name = "grants"
+required-features = ["full"]
+
+[[test]]
 name = "granted"
 required-features = ["full"]
 

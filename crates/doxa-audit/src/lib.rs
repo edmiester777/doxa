@@ -15,22 +15,31 @@
 //!
 //! ```text
 //! Request flow (with AuditLayer):
-//!   AuditLayer  →  Auth middleware  →  Handler  →  auto-emit
-//!   ┌──────────┐  ┌───────────────┐  ┌──────────┐  ┌──────────┐
-//!   │ create   │  │ actor_sub     │  │ event    │  │ emit     │
-//!   │ builder  │  │ actor_roles   │  │ action   │  │ Allowed  │
-//!   │ inject   │  │ actor_attrs   │  │ resource │  │ (if not  │
-//!   │ metadata │  │ source_ip     │  │ req_body │  │  already │
-//!   └──────────┘  │ user_agent    │  └──────────┘  │  done)   │
-//!                 │ request_id    │                └──────────┘
-//!                 └───────────────┘
+//!
+//!  AuditLayer  →  Auth layer  →   Guard    →  Handler  →  AuditLayer
+//! ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌─────────┐ ┌───────────┐
+//! │ create    │ │ actor_sub │ │ deposits  │ │ req_body│ │ status    │
+//! │ builder   │ │ roles     │ │ a         │ │ summary │ │ outcome   │
+//! │ source_ip │ │ attrs     │ │ Decision: │ │ (its    │ │ duration  │
+//! │ user_agent│ │ tenant_id │ │  event    │ │  own    │ │ fold the  │
+//! │ request_id│ └───────────┘ │  action   │ │  event, │ │ Decision  │
+//! │ method    │               │  resource │ │  if any)│ │ emit      │
+//! │ path      │               └───────────┘ └─────────┘ └───────────┘
+//! └───────────┘
 //! ```
+//!
+//! Only the middle two columns are the application's to write, and the
+//! guard's column is written by the guard — so a handler on the happy
+//! path has nothing to do at all. See [`decision`] for why a guard
+//! deposits rather than sets, and [`builder`] for how the fold arbitrates
+//! between the two.
 //!
 //! `actor_attrs` is a consumer-defined JSON map — the audit crate has
 //! no built-in notion of tenant, project, or any other identity
 //! dimension beyond `sub` and `roles`.
 
 pub mod builder;
+pub mod decision;
 #[cfg(feature = "sea-orm")]
 pub mod entity;
 pub mod event;
@@ -42,6 +51,7 @@ pub mod migration;
 mod sea_orm_impls;
 
 pub use builder::AuditEventBuilder;
+pub use decision::Decision;
 pub use event::{AuditEvent, AuditEventType, AuditOutcome, EventType, Outcome};
 pub use layer::{AuditLayer, AuditService};
 pub use logger::AuditLogger;

@@ -59,8 +59,17 @@ pub enum EventType {
     AuthFailure,
 }
 
-impl AuditEventType for EventType {
-    fn as_str(&self) -> &str {
+impl EventType {
+    /// The persisted string, standing on its own.
+    ///
+    /// [`AuditEventType::as_str`] borrows from `&self`, which a temporary
+    /// cannot outlive — so a caller naming a variant inline
+    /// (`EventType::DataAccess.as_str()`) cannot keep the result. The
+    /// strings are literals, so this hands back the `'static` one
+    /// instead. An application's own event enum wanting the same reach
+    /// can do exactly this: a `const fn` returning the literal, with
+    /// [`AuditEventType`] delegating to it.
+    pub const fn as_static(&self) -> &'static str {
         match self {
             Self::DataAccess => "data_access",
             Self::AdminCreate => "admin_create",
@@ -68,6 +77,12 @@ impl AuditEventType for EventType {
             Self::AdminDelete => "admin_delete",
             Self::AuthFailure => "auth_failure",
         }
+    }
+}
+
+impl AuditEventType for EventType {
+    fn as_str(&self) -> &str {
+        self.as_static()
     }
 }
 

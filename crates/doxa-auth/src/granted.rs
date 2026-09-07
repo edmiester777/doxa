@@ -5,9 +5,19 @@
 //! caller alongside it:
 //!
 //! ```ignore
-//! async fn get(Granted(caller, widget): Granted<Widget>) -> Json<Widget>
-//! async fn list(Granted(caller, scope): Granted<Many<Widget>>) -> Json<Vec<Widget>>
-//! async fn flush(Granted(caller, ()): Granted<Cap<FlushCaches>>) -> StatusCode
+//! async fn get(widget: Granted<Widget>) -> Json<Widget>
+//! async fn list(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>>
+//! async fn flush(_: Granted<Cap<FlushCaches>>) -> StatusCode
+//! ```
+//!
+//! The guard [derefs](std::ops::Deref) to what it authorized, so
+//! `widget.name` reads through it and a `#[tracing::instrument]` span
+//! field can borrow it before the body runs. Take ownership with
+//! [`into_inner`](Granted::into_inner), reach the caller with
+//! [`caller`](Granted::caller), or destructure for both:
+//!
+//! ```ignore
+//! async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode
 //! ```
 //!
 //! The three forms run the same chain and differ only in what the policy
@@ -19,9 +29,21 @@
 //! | `Granted<Many<Widget>>` | what *subset* may they see | a query filter |
 //! | `Granted<Cap<M>>` | may they call this at all | `()` |
 //!
-//! Every refusal leaves through one place, so the log line and the audit
+//! Every verdict leaves through one place, so the log line and the audit
 //! record cannot drift apart the way they did when each guard owned its
 //! own deny branch.
+//!
+//! ## What the handler owes the audit trail
+//!
+//! Nothing. The chain already knows which action it checked, which object
+//! it checked it against, and — from the asset's
+//! [`Granting::event_type`] — which category to file that under, so it
+//! deposits all three and the audit layer folds them into the event after
+//! the response. A handler writes to the event only where it knows
+//! something the guard cannot: a sanitized request body, a response
+//! summary, or a domain event of its own. Whatever it writes wins, in
+//! whatever order it writes it — the fold fills blanks and never
+//! overwrites.
 //!
 //! ## Why the caller comes back
 //!
@@ -290,6 +312,36 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
 }
 
 // ---------------------------------------------------------------------------
+// Call sites
+// ---------------------------------------------------------------------------
+
+/// Route-specific facts the macro bakes in per call site: which segments
+/// carry the key, and which Cedar action the verb implies.
+///
+/// Hand-written routes implement it directly — it is two consts. The site
+/// rides on the form marker rather than on [`Granted`] itself, so a route
+/// names `Granted<One<Widget, __Site>>` and the guard stays a plain pair
+/// of caller and subject that a handler can destructure.
+pub trait GrantSite: Send + Sync + 'static {
+    /// Path parameters feeding the key, in key order. Empty for
+    /// collection and capability routes.
+    const PARAMS: &'static [&'static str];
+    /// Cedar action to authorize, from the HTTP verb.
+    const ACTION: &'static str;
+    /// OpenAPI security scheme the requirement references.
+    const SCHEME: &'static str = "bearer";
+}
+
+/// Site used by hand-written routes: no path parameters, `read`, bearer.
+/// The route macro generates a real one per call site.
+pub struct DefaultSite;
+
+impl GrantSite for DefaultSite {
+    const PARAMS: &'static [&'static str] = &[];
+    const ACTION: &'static str = "read";
+}
+
+// ---------------------------------------------------------------------------
 // Subjects
 // ---------------------------------------------------------------------------
 
@@ -305,13 +357,98 @@ pub enum SubjectForm {
     Capability,
 }
 
+/// The three forms, and the chain that runs them.
+///
+/// Both traits here are unnameable outside this crate, which is what
+/// makes [`authorize`] the only way to reach a policy decision. A raw
+/// chain records nothing, so a second door onto it would be a way to
+/// authorize something and leave no audit row — the failure this module
+/// is built to prevent. There is no such door.
+///
+/// [`Subject`] stays public because it is the bound on [`Granted`] and on
+/// [`authorize`], and a route signature names it. It is sealed rather
+/// than open: the three forms are the three questions a policy can be
+/// asked, and everything asset-specific belongs on [`Granting`].
+mod sealed {
+    use std::borrow::Cow;
+    use std::future::Future;
+
+    use doxa_policy::CapabilityChecker;
+
+    use super::{Refusal, Subject};
+
+    /// Blocks outside implementations of [`Subject`].
+    pub trait Sealed {}
+
+    /// What a subject's chain produced: the value the handler receives,
+    /// alongside the identity the policy decided against.
+    ///
+    /// The identity is not recoverable from the value — a collection
+    /// yields a query filter and a capability yields nothing at all — so
+    /// the chain hands it back rather than have the caller reconstruct
+    /// it. It is the whole of what the audit event needs from an
+    /// authorization, and every form already computes it on the way to a
+    /// verdict.
+    pub struct Authorized<T> {
+        /// What the handler receives.
+        pub loaded: T,
+        /// What was checked: the Cedar action for an instance or
+        /// collection, the capability name for a bare gate.
+        ///
+        /// Not always the route's own `GrantSite::ACTION` — a `Cap<M>`
+        /// route ignores the verb and asks about the capability. Naming
+        /// what was actually checked is what keeps a grant and a refusal
+        /// on the same route describing the same thing.
+        pub action: Cow<'static, str>,
+        /// Cedar entity type the decision concerned.
+        pub resource_type: Cow<'static, str>,
+        /// Cedar entity id the decision concerned.
+        pub resource_id: Cow<'static, str>,
+    }
+
+    /// The decision itself: coarse gate, then whatever the subject is
+    /// about.
+    ///
+    /// Separate from [`Subject`] — which describes what a route
+    /// authorizes — so that describing a subject and *deciding* one are
+    /// not the same capability. This half records nothing, and
+    /// [`authorize`](super::authorize) is the only caller there is.
+    pub trait Chain: Subject {
+        /// Domain event category this subject's routes are filed under,
+        /// for `action`.
+        ///
+        /// Forwards to `Granting::event_type` for the two asset-backed
+        /// forms; a bare capability has no asset to ask, so it declares
+        /// nothing.
+        fn event_type(_action: &str) -> Option<&'static str> {
+            None
+        }
+
+        /// Reach a verdict. Records nothing — that is
+        /// [`authorize`](super::authorize)'s half, and the reason this
+        /// one has no other caller.
+        fn authorize(
+            key: Self::Key,
+            action: &'static str,
+            state: &Self::State,
+            ctx: &Self::Ctx,
+            checker: &dyn CapabilityChecker,
+        ) -> impl Future<Output = Result<Authorized<Self::Loaded>, Refusal<Self::Error>>> + Send;
+    }
+}
+
+use sealed::{Authorized, Chain};
+
 /// What a route authorizes: an object, a collection, or a bare
 /// capability.
 ///
-/// Consumers rarely implement this. `#[derive(PolicyResource)]` emits it
-/// for the instance form, [`Many<R>`] and [`Cap<M>`] carry the other two,
-/// and everything asset-specific lives on [`Granting`] instead.
-pub trait Subject: Send + Sync + 'static {
+/// Sealed — [`One<R>`], [`Many<R>`] and [`Cap<M>`] are the three forms,
+/// and they are the three questions a policy can be asked. Everything
+/// asset-specific lives on [`Granting`], which is the trait to implement.
+///
+/// Named here because it is the bound on [`Granted`] and [`authorize`],
+/// so a route signature and a manual call both mention it.
+pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     /// What the handler receives alongside the caller.
     type Loaded: Send;
     /// Caller shape this subject's chain needs.
@@ -323,6 +460,15 @@ pub trait Subject: Send + Sync + 'static {
     /// Loader failure this subject's chain can raise. [`Cap`] loads
     /// nothing and uses [`Infallible`](std::convert::Infallible).
     type Error: IntoResponse + Send;
+    /// The call site: which segments carry the key, which action to
+    /// check, which security scheme to document.
+    ///
+    /// Each form takes it as a second parameter defaulting to
+    /// [`DefaultSite`], so `One<Widget>` is a subject on its own and the
+    /// macro's generated site slots in as `One<Widget, __Site>`. Carrying
+    /// it here rather than on [`Granted`] is what leaves the guard two
+    /// fields wide.
+    type Site: GrantSite;
 
     /// Which of the three forms this is.
     const FORM: SubjectForm;
@@ -333,20 +479,6 @@ pub trait Subject: Send + Sync + 'static {
 
     /// Permission name for the OpenAPI badge, given the route's action.
     fn permission(action: &str) -> Cow<'static, str>;
-
-    /// Run the chain: coarse gate, then whatever this subject is about.
-    ///
-    /// This is the raw decision and **records nothing** — a denial taken
-    /// through it leaves no audit row. Call
-    /// [`authorize`] instead unless you are implementing this trait; it
-    /// wraps this and records.
-    fn authorize(
-        key: Self::Key,
-        action: &'static str,
-        state: &Self::State,
-        ctx: &Self::Ctx,
-        checker: &dyn CapabilityChecker,
-    ) -> impl Future<Output = Result<Self::Loaded, Refusal<Self::Error>>> + Send;
 }
 
 /// Everything asset-specific: how to load one, which coarse capability
@@ -374,6 +506,23 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
     /// unauthorized caller costs no query. `None` — the default — goes
     /// straight to the instance or scope check.
     fn capability(_action: &str) -> Option<&'static Capability> {
+        None
+    }
+
+    /// Domain event category covering `action` — the `event_type` field
+    /// on the audit event.
+    ///
+    /// Declared once per asset rather than once per route, so every route
+    /// guarding this asset files under the same vocabulary and a verb
+    /// cannot end up disagreeing with the category it was recorded as. It
+    /// is the one part of an audit event a guard cannot work out for
+    /// itself: what counts as a category is the application's to say.
+    ///
+    /// Return the `'static` string a variant of your own event enum
+    /// stands for — `doxa_audit::EventType::as_static` is the shape to
+    /// copy. `None` — the default — leaves the field for the handler to
+    /// name, or empty if it does not.
+    fn event_type(_action: &str) -> Option<&'static str> {
         None
     }
 
@@ -408,7 +557,7 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
 
 /// Authorize one object: load it, then decide with its own attributes in
 /// scope.
-pub struct One<R>(PhantomData<fn() -> R>);
+pub struct One<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 
 /// Authorize the whole collection rather than one member: the policy's
 /// residual becomes a filter the handler applies to its query.
@@ -416,17 +565,34 @@ pub struct One<R>(PhantomData<fn() -> R>);
 /// Costs no policy call at request time — partial evaluation already ran
 /// in [`AuthLayer`](crate::AuthLayer), so this is a lookup into the
 /// session it assembled.
-pub struct Many<R>(PhantomData<fn() -> R>);
+pub struct Many<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 
 /// Authorize a bare capability with no asset behind it.
-pub struct Cap<M>(PhantomData<fn() -> M>);
+pub struct Cap<M, S = DefaultSite>(PhantomData<fn() -> (M, S)>);
 
-impl<R: Granting> Subject for One<R> {
+/// The permission an asset-backed route advertises: the coarse
+/// capability where the asset declares one, and the Cedar action
+/// otherwise.
+///
+/// Shared by the instance and collection forms, which ask the same
+/// question of the same asset — so a listing and a fetch cannot end up
+/// documenting different permissions for the same verb.
+fn asset_permission<R: Granting>(action: &str) -> Cow<'static, str> {
+    match R::capability(action) {
+        Some(cap) => Cow::Borrowed(cap.name),
+        None => Cow::Owned(format!("{}:{action}", R::ENTITY_TYPE)),
+    }
+}
+
+impl<R: Granting, S: GrantSite> sealed::Sealed for One<R, S> {}
+
+impl<R: Granting, S: GrantSite> Subject for One<R, S> {
     type Loaded = R;
     type Ctx = R::Ctx;
     type State = R::State;
     type Key = R::Key;
     type Error = R::Error;
+    type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Instance;
 
@@ -435,10 +601,13 @@ impl<R: Granting> Subject for One<R> {
     }
 
     fn permission(action: &str) -> Cow<'static, str> {
-        match R::capability(action) {
-            Some(cap) => Cow::Borrowed(cap.name),
-            None => Cow::Owned(format!("{}:{action}", R::ENTITY_TYPE)),
-        }
+        asset_permission::<R>(action)
+    }
+}
+
+impl<R: Granting, S: GrantSite> Chain for One<R, S> {
+    fn event_type(action: &str) -> Option<&'static str> {
+        R::event_type(action)
     }
 
     async fn authorize(
@@ -447,7 +616,7 @@ impl<R: Granting> Subject for One<R> {
         state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
-    ) -> Result<R, Refusal<R::Error>> {
+    ) -> Result<Authorized<R>, Refusal<R::Error>> {
         // Coarse gate first: a caller who may not touch this kind of
         // thing at all should not cost a query, and must not be able to
         // tell a missing object from one they may not see.
@@ -465,25 +634,36 @@ impl<R: Granting> Subject for One<R> {
             .check_instance(ctx.tenant().unwrap_or(""), ctx.roles(), action, &entity)
             .await?;
 
-        if allowed {
-            Ok(resource)
-        } else {
-            Err(Refusal::Denied {
+        if !allowed {
+            return Err(Refusal::Denied {
                 action: Cow::Borrowed(action),
                 resource_type: Cow::Borrowed(R::ENTITY_TYPE),
                 resource_id: Cow::Owned(entity.entity_id),
                 reason: "instance denied",
-            })
+            });
         }
+
+        // The loaded row's Cedar id, not the key the route parsed: a
+        // route addressing an object by a bare name decides — and so must
+        // record — the qualified identity the policy actually saw.
+        Ok(Authorized {
+            loaded: resource,
+            action: Cow::Borrowed(action),
+            resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+            resource_id: Cow::Owned(entity.entity_id),
+        })
     }
 }
 
-impl<R: Granting> Subject for Many<R> {
+impl<R: Granting, S: GrantSite> sealed::Sealed for Many<R, S> {}
+
+impl<R: Granting, S: GrantSite> Subject for Many<R, S> {
     type Loaded = R::Filter;
     type Ctx = R::Ctx;
     type State = R::State;
     type Key = ();
     type Error = R::Error;
+    type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Collection;
 
@@ -492,10 +672,13 @@ impl<R: Granting> Subject for Many<R> {
     }
 
     fn permission(action: &str) -> Cow<'static, str> {
-        match R::capability(action) {
-            Some(cap) => Cow::Borrowed(cap.name),
-            None => Cow::Owned(format!("{}:{action}", R::ENTITY_TYPE)),
-        }
+        asset_permission::<R>(action)
+    }
+}
+
+impl<R: Granting, S: GrantSite> Chain for Many<R, S> {
+    fn event_type(action: &str) -> Option<&'static str> {
+        R::event_type(action)
     }
 
     async fn authorize(
@@ -504,30 +687,41 @@ impl<R: Granting> Subject for Many<R> {
         _state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
-    ) -> Result<R::Filter, Refusal<R::Error>> {
+    ) -> Result<Authorized<R::Filter>, Refusal<R::Error>> {
         coarse_gate::<R>(action, ctx, checker).await?;
 
-        if let Some(scope) = R::scope(ctx)? {
-            return Ok(scope);
-        }
+        let scope = match R::scope(ctx)? {
+            Some(scope) => scope,
+            // The policy granted nothing on this asset. Whether that is a
+            // refusal or an empty page is the asset's call.
+            None => R::empty_scope().ok_or(Refusal::Denied {
+                action: Cow::Borrowed(action),
+                resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+                resource_id: Cow::Borrowed("collection"),
+                reason: "no authorized scope",
+            })?,
+        };
 
-        // The policy granted nothing on this asset. Whether that is a
-        // refusal or an empty page is the asset's call.
-        R::empty_scope().ok_or(Refusal::Denied {
+        // The same id the refusal above names, so a listing and a refused
+        // listing sit under one resource in the trail.
+        Ok(Authorized {
+            loaded: scope,
             action: Cow::Borrowed(action),
             resource_type: Cow::Borrowed(R::ENTITY_TYPE),
             resource_id: Cow::Borrowed("collection"),
-            reason: "no authorized scope",
         })
     }
 }
 
-impl<M: Capable> Subject for Cap<M> {
+impl<M: Capable, S: GrantSite> sealed::Sealed for Cap<M, S> {}
+
+impl<M: Capable, S: GrantSite> Subject for Cap<M, S> {
     type Loaded = ();
     type Ctx = CapabilityContext;
     type State = ();
     type Key = ();
     type Error = std::convert::Infallible;
+    type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Capability;
 
@@ -538,37 +732,53 @@ impl<M: Capable> Subject for Cap<M> {
     fn permission(_action: &str) -> Cow<'static, str> {
         Cow::Borrowed(M::CAPABILITY.name)
     }
+}
 
+impl<M: Capable, S: GrantSite> Chain for Cap<M, S> {
     async fn authorize(
         _key: (),
         _action: &'static str,
         _state: &(),
         ctx: &CapabilityContext,
         checker: &dyn CapabilityChecker,
-    ) -> Result<(), Refusal<Self::Error>> {
+    ) -> Result<Authorized<()>, Refusal<Self::Error>> {
         let allowed = checker
             .check(ctx.tenant().unwrap_or(""), ctx.roles(), M::CAPABILITY)
             .await?;
 
-        if allowed {
-            return Ok(());
+        let (resource_type, resource_id) = capability_resource(M::CAPABILITY);
+
+        if !allowed {
+            return Err(Refusal::Denied {
+                action: Cow::Borrowed(M::CAPABILITY.name),
+                resource_type: Cow::Borrowed(resource_type),
+                resource_id: Cow::Borrowed(resource_id),
+                reason: "capability denied",
+            });
         }
 
-        // A capability is granted only when every check passes, so the
-        // first is the one whose denial short-circuits the evaluation.
-        let (resource_type, resource_id) = M::CAPABILITY
-            .checks
-            .first()
-            .map(|check| (check.entity_type, check.entity_id))
-            .unwrap_or(("capability", M::CAPABILITY.name));
-
-        Err(Refusal::Denied {
+        // The capability, not the verb: this chain never asked about the
+        // route's action, and the refusal above names the capability too.
+        Ok(Authorized {
+            loaded: (),
             action: Cow::Borrowed(M::CAPABILITY.name),
             resource_type: Cow::Borrowed(resource_type),
             resource_id: Cow::Borrowed(resource_id),
-            reason: "capability denied",
         })
     }
+}
+
+/// The resource a capability's verdict is about.
+///
+/// A capability is granted only when every one of its checks passes, so
+/// the first is the one whose denial short-circuits the evaluation — and
+/// the one worth naming in the trail. A capability with no checks at all
+/// names itself.
+pub(crate) fn capability_resource(cap: &'static Capability) -> (&'static str, &'static str) {
+    cap.checks
+        .first()
+        .map(|check| (check.entity_type, check.entity_id))
+        .unwrap_or(("capability", cap.name))
 }
 
 /// The coarse capability gate shared by the instance and collection
@@ -589,11 +799,7 @@ async fn coarse_gate<R: Granting>(
         return Ok(());
     }
 
-    let (resource_type, resource_id) = cap
-        .checks
-        .first()
-        .map(|check| (check.entity_type, check.entity_id))
-        .unwrap_or(("capability", cap.name));
+    let (resource_type, resource_id) = capability_resource(cap);
 
     Err(Refusal::Denied {
         action: Cow::Borrowed(cap.name),
@@ -611,53 +817,54 @@ async fn coarse_gate<R: Granting>(
 /// authorized for it.
 ///
 /// Extraction fails with 400 (unparseable key), 401 (no auth context),
-/// 403 (policy denial) or 404 (no such object). A denial is logged and
-/// recorded before the response is built.
-pub struct Granted<T: Subject, S: GrantSite = DefaultSite>(
-    pub T::Ctx,
-    pub T::Loaded,
-    PhantomData<fn() -> S>,
-);
+/// 403 (policy denial) or 404 (no such object). Either verdict reaches
+/// the request's audit event without the handler doing anything; a
+/// denial is additionally logged at `warn`.
+///
+/// A plain pair: the call site is not carried here but on the subject, as
+/// [`Subject::Site`], so the type holds exactly the two things the
+/// handler asked for and both fields are public. `Granted(caller,
+/// widget)` is therefore a pattern a handler can write — in the argument
+/// list, even, since the guard is nothing but those two values.
+pub struct Granted<T: Subject>(pub T::Ctx, pub T::Loaded);
 
-/// Site used by hand-written routes: no path parameters, `read`, bearer.
-/// The route macro generates a real one per call site.
-pub struct DefaultSite;
-
-impl GrantSite for DefaultSite {
-    const PARAMS: &'static [&'static str] = &[];
-    const ACTION: &'static str = "read";
-}
-
-impl<T: Subject, S: GrantSite> Granted<T, S> {
+impl<T: Subject> Granted<T> {
     /// Consume the guard and return just the authorized value.
     pub fn into_inner(self) -> T::Loaded {
         self.1
     }
 
     /// The caller this subject was authorized for.
+    ///
+    /// An inherent method, so it wins method resolution over anything
+    /// [`Deref`](std::ops::Deref) would reach on the subject.
     pub fn caller(&self) -> &T::Ctx {
         &self.0
     }
 }
 
-/// Route-specific facts the macro bakes in per call site: which segments
-/// carry the key, and which Cedar action the verb implies.
+/// Reach the authorized subject without naming it.
 ///
-/// Hand-written routes implement it directly — it is two consts.
-pub trait GrantSite: Send + Sync + 'static {
-    /// Path parameters feeding the key, in key order. Empty for
-    /// collection and capability routes.
-    const PARAMS: &'static [&'static str];
-    /// Cedar action to authorize, from the HTTP verb.
-    const ACTION: &'static str;
-    /// OpenAPI security scheme the requirement references.
-    const SCHEME: &'static str = "bearer";
+/// A guard carries two things, which is normally an argument against
+/// `Deref` — but only one of them is what the route is *about*, and the
+/// caller stays reachable through [`caller`](Granted::caller), an
+/// inherent method that outranks anything found through here.
+///
+/// What it buys is the borrow case, which is most of them: a field read,
+/// or a `#[tracing::instrument]` span field, evaluated before the handler
+/// body can unwrap anything. Without it a consumer has to write an
+/// extension trait whose whole job is to hand back `&self.1`.
+impl<T: Subject> std::ops::Deref for Granted<T> {
+    type Target = T::Loaded;
+
+    fn deref(&self) -> &T::Loaded {
+        &self.1
+    }
 }
 
-impl<T, S, St> axum::extract::FromRequestParts<St> for Granted<T, S>
+impl<T, St> axum::extract::FromRequestParts<St> for Granted<T>
 where
-    T: Subject,
-    S: GrantSite,
+    T: Chain,
     St: Send + Sync,
     T::State: axum::extract::FromRef<St>,
 {
@@ -670,18 +877,18 @@ where
         let ctx = T::Ctx::from_extensions(&parts.extensions)
             .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
 
-        let key = fetch_key::<T, S, St>(parts, state).await?;
+        let key = fetch_key::<T, St>(parts, state).await?;
         let state = <T::State as axum::extract::FromRef<St>>::from_ref(state);
 
         // Same entry point a handler uses, so the refusal is recorded by
         // the same code either way.
-        let loaded = authorize::<T>(key, S::ACTION, &state, &parts.extensions).await?;
-        Ok(Granted(ctx, loaded, PhantomData))
+        let loaded = authorize::<T>(key, T::Site::ACTION, &state, &parts.extensions).await?;
+        Ok(Granted(ctx, loaded))
     }
 }
 
 /// Authorize a subject against the caller and checker already resolved
-/// into `extensions`, recording the refusal if the policy says no.
+/// into `extensions`, recording the verdict either way.
 ///
 /// This is the body of [`Granted`], exposed for a subject the extractor
 /// cannot reach. A guard runs in `FromRequestParts`, which sees no
@@ -691,16 +898,25 @@ where
 /// to a row inside an open transaction, which a [`Granting::State`]
 /// holding a separate connection would not find.
 ///
-/// Prefer this over calling [`Subject::authorize`] directly: that is the
-/// raw chain and records nothing, so a refusal taken through it leaves
-/// no audit row.
+/// This and [`Granted`] are the only ways to reach a policy decision.
+/// The chain underneath is sealed and records nothing, so there is no
+/// third path that authorizes something and leaves no audit row — the
+/// choice of whether a check is auditable was removed rather than
+/// documented.
 ///
-/// Like the extractor, this leaves the audit builder's *resource* alone
-/// on success — an event names one resource, and only the caller knows
-/// whether this is the request's subject or a dependency of it. Stamp it
-/// yourself, guarding on `AuditEventBuilder::has_resource` for the
-/// dependency case.
-pub async fn authorize<T: Subject>(
+/// ## What reaches the audit event
+///
+/// The verdict is *deposited*, not stamped: what was checked, on what,
+/// and under which category, folded into the request's event at emit time
+/// for whatever the handler did not name itself. So a handler that has
+/// its own view of the event simply writes it, in any order, and wins —
+/// there is nothing to call first and nothing to guard on.
+///
+/// One request may authorize several things. The route's own subject is
+/// authorized before the body is even parsed, so it is the one the event
+/// names; a dependency checked later does not displace it. A *refusal*
+/// does, because a request that ends on a denial is about that denial.
+pub async fn authorize<T: Chain>(
     key: T::Key,
     action: &'static str,
     state: &T::State,
@@ -718,7 +934,18 @@ pub async fn authorize<T: Subject>(
         })?;
 
     match T::authorize(key, action, state, &ctx, checker.as_ref()).await {
-        Ok(loaded) => Ok(loaded),
+        Ok(authorized) => {
+            crate::record::grant(
+                extensions,
+                crate::record::Grant {
+                    event_type: T::event_type(action),
+                    action: authorized.action,
+                    resource_type: authorized.resource_type,
+                    resource_id: authorized.resource_id,
+                },
+            );
+            Ok(authorized.loaded)
+        }
         Err(refusal) => {
             record_refusal(&refusal, extensions, ctx.tenant());
             Err(refusal)
@@ -741,9 +968,9 @@ fn record_refusal<E>(refusal: &Refusal<E>, extensions: &Extensions, tenant: Opti
         return;
     };
 
-    crate::denial::record(
+    crate::record::record(
         extensions,
-        crate::denial::Denial {
+        crate::record::Denial {
             tenant,
             action,
             resource_type,
@@ -755,17 +982,19 @@ fn record_refusal<E>(refusal: &Refusal<E>, extensions: &Extensions, tenant: Opti
 
 /// Pull the key's segments out of the route, in the order the site names
 /// them.
-async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
+async fn fetch_key<T: Subject, St: Send + Sync>(
     parts: &mut http::request::Parts,
     state: &St,
 ) -> Result<T::Key, Refusal<T::Error>> {
+    let params_named = <T::Site as GrantSite>::PARAMS;
+
     // A site that names fewer segments than the key parses would have
     // the surplus silently dropped — a folder-scoped route loading an
     // object from another folder. Refuse instead.
-    if S::PARAMS.len() != T::Key::SEGMENTS.len() {
+    if params_named.len() != T::Key::SEGMENTS.len() {
         return Err(Refusal::Auth(AuthError::PolicyFailed(format!(
             "route names {} key segment(s) but the key takes {}",
-            S::PARAMS.len(),
+            params_named.len(),
             T::Key::SEGMENTS.len(),
         ))));
     }
@@ -787,8 +1016,8 @@ async fn fetch_key<T: Subject, S: GrantSite, St: Send + Sync>(
             )))
         })?;
 
-    let mut raw = Vec::with_capacity(S::PARAMS.len());
-    for name in S::PARAMS {
+    let mut raw = Vec::with_capacity(params_named.len());
+    for name in params_named {
         let value = params
             .iter()
             .find(|(param, _)| param == name)
@@ -830,15 +1059,16 @@ fn segment_schema(kind: ResourceIdType) -> utoipa::openapi::RefOr<utoipa::openap
 /// [`RouteKey::SEGMENTS`], never from the positional template list — the
 /// site is authoritative about which segments feed the key, and in what
 /// order.
-impl<T: Subject, S: GrantSite> doxa::DocPathParams for Granted<T, S> {
+impl<T: Subject> doxa::DocPathParams for Granted<T> {
     fn describe(op: &mut utoipa::openapi::path::Operation, _positional: &[&'static str]) {
         use utoipa::openapi::path::{ParameterBuilder, ParameterIn};
         use utoipa::openapi::Required;
 
         let name_of = T::doc_name();
-        let composite = S::PARAMS.len() > 1;
+        let params_named = <T::Site as GrantSite>::PARAMS;
+        let composite = params_named.len() > 1;
 
-        for (segment, kind) in S::PARAMS.iter().zip(T::Key::SEGMENTS) {
+        for (segment, kind) in params_named.iter().zip(T::Key::SEGMENTS) {
             let description = if composite {
                 format!("`{segment}` segment of the {name_of} identifier")
             } else {
@@ -857,24 +1087,27 @@ impl<T: Subject, S: GrantSite> doxa::DocPathParams for Granted<T, S> {
     }
 }
 
-impl<T: Subject, S: GrantSite> doxa::DocOperationSecurity for Granted<T, S> {
+impl<T: Subject> doxa::DocOperationSecurity for Granted<T> {
     fn describe(op: &mut utoipa::openapi::path::Operation) {
         let name_of = T::doc_name();
+        let action = <T::Site as GrantSite>::ACTION;
         let display = match T::FORM {
-            SubjectForm::Instance => format!("{} on {name_of} (instance)", S::ACTION),
-            SubjectForm::Collection => format!("{} on {name_of} (collection)", S::ACTION),
+            SubjectForm::Instance => format!("{action} on {name_of} (instance)"),
+            SubjectForm::Collection => format!("{action} on {name_of} (collection)"),
             SubjectForm::Capability => format!("`{name_of}` capability"),
         };
-        doxa::record_required_permission(op, S::SCHEME, &T::permission(S::ACTION), &display);
+        let scheme = <T::Site as GrantSite>::SCHEME;
+        doxa::record_required_permission(op, scheme, &T::permission(action), &display);
     }
 }
 
-impl<T: Subject, S: GrantSite> doxa::DocOperationContribution for Granted<T, S> {
+impl<T: Subject> doxa::DocOperationContribution for Granted<T> {
     fn contribution() -> doxa::OperationContribution {
         let name_of = T::doc_name();
+        let action = <T::Site as GrantSite>::ACTION;
 
         let denied = match T::FORM {
-            SubjectForm::Instance => format!("Policy denied `{}` on this {name_of}", S::ACTION),
+            SubjectForm::Instance => format!("Policy denied `{action}` on this {name_of}"),
             SubjectForm::Collection => format!("No authorized scope on {name_of}"),
             SubjectForm::Capability => format!("Capability `{name_of}` denied"),
         };

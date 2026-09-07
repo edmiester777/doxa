@@ -15,10 +15,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{
-    Cap, CapabilityContext, FromAuthExtensions, GrantSite, Granted, Granting, Many, One, Refusal,
-    Subject,
-};
+use doxa::auth::{Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -202,13 +199,14 @@ fn parts(
 #[tokio::test]
 async fn a_collection_yields_the_authorized_scope() {
     let (mut parts, _rx) = parts(&["viewer"]);
-    let granted = Granted::<Many<Widget>, Listing>::from_request_parts(&mut parts, &())
-        .await
-        .expect("viewer may list");
+    let Granted(caller, scope) =
+        Granted::<Many<Widget, Listing>>::from_request_parts(&mut parts, &())
+            .await
+            .expect("viewer may list");
 
-    assert_eq!(granted.1, Filter("tenant = acme"));
+    assert_eq!(scope, Filter("tenant = acme"));
     assert_eq!(
-        granted.0.tenant_id.as_deref(),
+        caller.tenant_id.as_deref(),
         Some("acme"),
         "the caller comes back with the value it was authorized against",
     );
@@ -219,7 +217,7 @@ async fn a_collection_yields_the_authorized_scope() {
 #[tokio::test]
 async fn the_coarse_gate_refuses_before_the_scope_lookup() {
     let (mut parts, mut rx) = parts(&["stranger"]);
-    let rejection = Granted::<Many<Widget>, Listing>::from_request_parts(&mut parts, &())
+    let rejection = Granted::<Many<Widget, Listing>>::from_request_parts(&mut parts, &())
         .await
         .err()
         .expect("no capability");
@@ -238,7 +236,7 @@ async fn the_coarse_gate_refuses_before_the_scope_lookup() {
 async fn a_caller_with_no_scope_is_refused_by_default() {
     // `lister` satisfies the capability but `Widget::scope` returns None.
     let (mut parts, mut rx) = parts(&["lister"]);
-    let rejection = Granted::<Many<Widget>, Listing>::from_request_parts(&mut parts, &())
+    let rejection = Granted::<Many<Widget, Listing>>::from_request_parts(&mut parts, &())
         .await
         .err()
         .expect("no scope");
@@ -254,7 +252,7 @@ async fn a_caller_with_no_scope_is_refused_by_default() {
 #[tokio::test]
 async fn empty_scope_can_be_an_empty_page_instead_of_a_refusal() {
     let (mut parts, _rx) = parts(&["stranger"]);
-    let granted = Granted::<Many<Gadget>, Listing>::from_request_parts(&mut parts, &())
+    let granted = Granted::<Many<Gadget, Listing>>::from_request_parts(&mut parts, &())
         .await
         .expect("Gadget opts into an empty page");
 
@@ -266,7 +264,7 @@ async fn empty_scope_can_be_an_empty_page_instead_of_a_refusal() {
 #[tokio::test]
 async fn a_bare_capability_gate_records_its_refusal() {
     let (mut parts, mut rx) = parts(&["stranger"]);
-    let rejection = Granted::<Cap<WidgetsRead>, Listing>::from_request_parts(&mut parts, &())
+    let rejection = Granted::<Cap<WidgetsRead, Listing>>::from_request_parts(&mut parts, &())
         .await
         .err()
         .expect("no capability");
@@ -285,7 +283,7 @@ async fn a_bare_capability_gate_records_its_refusal() {
 /// The instance form needs real path parameters, so it runs through a
 /// router.
 async fn get_widget(roles: &'static [&'static str], path: &str) -> (StatusCode, AuditEvent) {
-    async fn handler(guard: Granted<One<Widget>, GetWidget>) -> String {
+    async fn handler(guard: Granted<One<Widget, GetWidget>>) -> String {
         guard.into_inner().region
     }
 
@@ -365,10 +363,10 @@ async fn a_handler_can_authorize_an_id_from_its_body() {
     assert_eq!(widget.region, "us");
 }
 
-/// The point of routing it through `authorize` rather than
-/// `Subject::authorize`: a refusal is recorded whichever door the check
-/// came in by, so the manual path and the guard path cannot disagree
-/// about whether a denial is auditable.
+/// `authorize` is the only door onto a policy decision — the chain
+/// itself is sealed — so the manual path and the guard path cannot
+/// disagree about whether a denial is auditable. There is no third path
+/// that reaches a verdict and records nothing.
 #[tokio::test]
 async fn a_manual_refusal_is_recorded_like_the_extractors() {
     let (parts, mut rx) = parts(&["viewer"]);
@@ -386,19 +384,27 @@ async fn a_manual_refusal_is_recorded_like_the_extractors() {
     assert_eq!(event.error_message.as_deref(), Some("instance denied"));
 }
 
-/// The raw chain is still reachable for anyone implementing `Subject`,
-/// and still records nothing — which is why `authorize` exists.
+/// A grant is recorded through the same door, so a handler authorizing
+/// an id no extractor could see owes the audit trail nothing either.
 #[tokio::test]
-async fn the_raw_chain_records_nothing() {
+async fn a_manual_grant_is_recorded_like_the_extractors() {
     let (parts, mut rx) = parts(&["viewer"]);
-    let ctx = CapabilityContext::from_extensions(&parts.extensions).expect("ctx");
-    let checker: Arc<dyn CapabilityChecker> = Arc::new(RegionChecker);
 
-    let refused = One::<Widget>::authorize(2, "read", &(), &ctx, checker.as_ref()).await;
+    doxa::auth::authorize::<One<Widget>>(1, "read", &(), &parts.extensions)
+        .await
+        .expect("region us is granted");
 
-    assert!(matches!(refused, Err(Refusal::Denied { .. })));
-    assert!(
-        rx.try_recv().is_err(),
-        "`Subject::authorize` is the decision alone — recording is `authorize`'s job",
-    );
+    // Nothing else touched the event, so the deposit is all of it. The
+    // layer would do this after the response.
+    parts
+        .extensions
+        .get::<AuditEventBuilder>()
+        .expect("the harness installed one")
+        .auto_emit();
+
+    let event = rx.try_recv().expect("the grant is recorded");
+    assert_eq!(event.outcome, Outcome::Allowed);
+    assert_eq!(event.action, "read");
+    assert_eq!(event.resource_type.as_deref(), Some("Widget"));
+    assert_eq!(event.resource_id.as_deref(), Some("1"));
 }

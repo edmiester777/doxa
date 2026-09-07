@@ -47,6 +47,42 @@ async fn get_document(
 }
 ```
 
+### Decisions deposited by a guard
+
+An authorization guard reaches its verdict before the handler runs, so it must not use the setters above — the last call wins between two of them, and the guard would pre-empt a handler that has not spoken yet. It deposits a `Decision` instead:
+
+```rust
+use doxa_audit::Decision;
+
+audit.record_decision(
+    Decision::granted("read", "Document", &id).with_event_type(EventType::DataAccess),
+);
+```
+
+The deposit is folded into the event at emit time, filling only fields nothing else named — so order stops mattering and the handler always wins. `doxa-auth`'s `Granted<T>` does exactly this, which is why a guarded route's handler writes nothing to the builder at all.
+
+Two rules break the tie when there is one:
+
+- **Between two deposits, the first stands.** A route's own subject is authorized before its body is parsed, so a dependency named in that body does not displace it.
+- **A refusal displaces a grant, and its `Denied` outcome overrides everything.** A request that ends on a denial is about that denial, and must never reach the trail looking allowed.
+
+`Decision::denied(...)` carries both, plus `EventType::AuthFailure` and the reason as the event's error text. Pair it with `settle(status)`, which emits only when no `AuditLayer` is in the stack to do it later.
+
+### Terminals inside a request record rather than send
+
+Emitting *takes* the builder. Called from a handler or middleware that runs under an `AuditLayer`, that lands before the response exists — `http_status` is never stamped, `duration_ms` stops at the call, and anything fallible afterwards is already recorded as a success.
+
+So under a layer, `emit`, `emit_allowed`, `emit_denied`, `emit_error` and `emit_permission_denied` record their outcome and return; the layer's `auto_emit` sends the same event moments later with the status and duration intact. Whatever you wanted recorded is recorded — only the timing changes, and the call itself becomes redundant rather than harmful.
+
+Two consequences:
+
+- A deferred emit does not freeze the builder, so a later write still lands. One event, sent at the end, carrying everything anyone knew about it.
+- The response's outcome is applied afterwards and wins. An error variant annotated `outcome = "allowed"` lands on the event even where a handler had assumed worse — that annotation is the author declaring the failure benign, and it gets the final say.
+
+A deposited `Decision` is the one thing the response cannot override, and only for its outcome. A policy refusal is not an opinion about how the request went; it is the event the trail exists for. Masking it in the response is legitimate and common — answering 404 rather than 403 so a caller cannot probe for what exists — and none of that unmakes the refusal. The client is told nothing; the trail is told everything.
+
+With no `AuditLayer` in the stack, every terminal sends immediately, exactly as before.
+
 ### Custom event types
 
 Define domain-specific event vocabularies:
@@ -117,6 +153,7 @@ their audit trail; drop the ones yours never uses.
 |------|---------|
 | `AuditLogger` | Channel sender for emitting events |
 | `AuditEventBuilder` | Stateful builder for constructing events (Arc-backed, clone-safe) |
+| `Decision` | An authorization verdict a guard deposits, folded in at emit time |
 | `AuditEvent` | Complete audit event record |
 | `AuditEventType` | Trait for custom event-type enums |
 | `EventType` | Reference implementation (DataAccess, AdminCreate, AdminUpdate, etc.) |

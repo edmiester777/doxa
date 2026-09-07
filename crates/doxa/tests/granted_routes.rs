@@ -86,10 +86,11 @@ async fn get_widget(widget: Granted<Widget>) -> String {
     widget.into_inner().region
 }
 
-/// Two path parameters, so the key segment has to be named.
+/// Two path parameters, so the key segment has to be named — and the
+/// guard is destructured in the argument list, which the macro has to
+/// see through to reach the type it rewrites.
 #[delete("/folders/{fid}/widgets/{id}", tag = "Widgets")]
-async fn drop_widget(#[key("id")] widget: Granted<Widget>) -> StatusCode {
-    let _ = widget.into_inner();
+async fn drop_widget(#[key("id")] Granted(_, _widget): Granted<Widget>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
@@ -585,11 +586,7 @@ async fn a_site_that_names_too_few_segments_is_refused() {
     use axum::extract::FromRequestParts;
     use axum::response::IntoResponse;
 
-    let rejection =
-        Granted::<doxa::auth::One<Widget>, doxa::auth::DefaultSite>::from_request_parts(
-            &mut parts,
-            &(),
-        )
+    let rejection = Granted::<doxa::auth::One<Widget>>::from_request_parts(&mut parts, &())
         .await
         .err()
         .expect("the site names no segments but the key takes one");

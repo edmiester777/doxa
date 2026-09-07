@@ -13,7 +13,10 @@
 //! ```
 //!
 //! becomes a `GrantSite` impl carrying `PARAMS = ["id"]` / `ACTION =
-//! "read"`, with the argument rewritten to `Granted<One<Widget>, __Site>`.
+//! "read"`, with the argument rewritten to `Granted<One<Widget, __Site>>`.
+//! The site rides on the subject rather than on `Granted` itself, which is
+//! what leaves the guard a two-field pair a handler can destructure.
+//!
 //! The annotation may be omitted only when the route has exactly one path
 //! parameter — then there is nothing to choose, and the macro verifies
 //! that rather than guessing.
@@ -129,34 +132,55 @@ fn subject_arg(ty: &Type) -> Option<&Type> {
     }
 }
 
-/// The mode wrapper the subject already names, if any.
-fn subject_mode(ty: &Type) -> Option<String> {
+/// The mode wrapper the subject already names, with the number of
+/// arguments it carries — two of them means the site is spelled out by
+/// hand and there is nothing here to generate.
+fn subject_mode(ty: &Type) -> Option<(String, usize)> {
     let Type::Path(type_path) = ty else {
         return None;
     };
     let last = type_path.path.segments.last()?;
     let name = last.ident.to_string();
-    matches!(name.as_str(), "One" | "Many" | "Cap").then_some(name)
+    if !matches!(name.as_str(), "One" | "Many" | "Cap") {
+        return None;
+    }
+    let arity = match &last.arguments {
+        PathArguments::AngleBracketed(args) => args.args.len(),
+        _ => 0,
+    };
+    Some((name, arity))
 }
 
-/// Wrap the subject in `One<…>`, the instance form's mode marker.
-fn wrap_in_one(ty: &mut Type) {
-    let Type::Path(type_path) = ty else { return };
-    let Some(last) = type_path.path.segments.last_mut() else {
-        return;
+/// The subject named inside `Granted<…>`, to write through.
+fn subject_arg_mut(ty: &mut Type) -> Option<&mut Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
     };
+    let last = type_path.path.segments.last_mut()?;
     let PathArguments::AngleBracketed(args) = &mut last.arguments else {
-        return;
+        return None;
     };
-    if let Some(GenericArgument::Type(inner)) = args.args.first_mut() {
-        let subject = inner.clone();
-        *inner = syn::parse_quote!(::doxa::auth::One<#subject>);
+    match args.args.first_mut()? {
+        GenericArgument::Type(inner) => Some(inner),
+        _ => None,
     }
 }
 
-/// Append the site marker as a second type argument.
-fn append_site(ty: &mut Type, marker: &Ident) {
-    let Type::Path(type_path) = ty else { return };
+/// Name the site on the subject. A subject with no mode wrapper of its
+/// own means the instance form, so it gains one on the way in — the site
+/// is the wrapper's second argument either way.
+fn site_subject(ty: &mut Type, marker: &Ident, wrap: bool) {
+    let Some(inner) = subject_arg_mut(ty) else {
+        return;
+    };
+
+    if wrap {
+        let subject = inner.clone();
+        *inner = syn::parse_quote!(::doxa::auth::One<#subject, #marker>);
+        return;
+    }
+
+    let Type::Path(type_path) = inner else { return };
     let Some(last) = type_path.path.segments.last_mut() else {
         return;
     };
@@ -222,14 +246,30 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             if let Some((_, span)) = &annotation {
                 return Err(syn::Error::new(
                     *span,
-                    "this `Granted<…>` already names a site — drop `#[key(...)]` \
-                     or the second type argument",
+                    "`Granted<…>` takes one type argument — the subject, which names \
+                     its own site as `One<Widget, MySite>`",
                 ));
             }
             continue;
         }
 
         let mode = subject_arg(&pat_type.ty).and_then(subject_mode);
+
+        // A subject that spells out its own site was written by hand.
+        // Leave it alone, and refuse an annotation that would contradict
+        // the site already named.
+        if mode.as_ref().is_some_and(|(_, arity)| *arity >= 2) {
+            if let Some((_, span)) = &annotation {
+                return Err(syn::Error::new(
+                    *span,
+                    "this subject already names a site — drop `#[key(...)]` \
+                     or the site argument",
+                ));
+            }
+            continue;
+        }
+
+        let mode = mode.map(|(name, _)| name);
         // Only the instance form reads segments out of the route.
         let takes_key = !matches!(mode.as_deref(), Some("Many") | Some("Cap"));
 
@@ -326,10 +366,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
 
         // A bare `Granted<Widget>` means the instance form; the mode
         // marker is what the extractor actually dispatches on.
-        if takes_key && mode.is_none() {
-            wrap_in_one(&mut pat_type.ty);
-        }
-        append_site(&mut pat_type.ty, &marker);
+        site_subject(&mut pat_type.ty, &marker, mode.is_none());
     }
 
     Ok(items)
@@ -380,8 +417,8 @@ mod tests {
             "{items}"
         );
         assert!(
-            sig.contains(":: doxa :: auth :: One < Widget >"),
-            "the bare subject is wrapped in the instance mode marker: {sig}"
+            sig.contains(":: doxa :: auth :: One < Widget , __doxa_grant_site_get_widget_w >"),
+            "the bare subject is wrapped in the instance mode marker, carrying the site: {sig}"
         );
     }
 
@@ -464,6 +501,10 @@ mod tests {
         assert!(
             !sig.contains("One <"),
             "an explicit mode marker is left alone: {sig}"
+        );
+        assert!(
+            sig.contains("Many < Widget , __doxa_grant_site_list_widgets_w >"),
+            "the site lands inside the mode marker the subject already named: {sig}"
         );
     }
 
@@ -572,12 +613,29 @@ mod tests {
             "get",
             &["id"],
             quote! {
-                async fn get_widget(#[key("id")] w: Granted<One<Widget>, MySite>) {}
+                async fn get_widget(#[key("id")] w: Granted<One<Widget, MySite>>) {}
             },
         )
         .expect_err("already sited");
 
         assert!(error.contains("already names a site"), "{error}");
+    }
+
+    /// A hand-written site is left exactly as it stands — no marker
+    /// generated, no second one appended behind the first.
+    #[test]
+    fn a_subject_that_names_its_own_site_is_left_alone() {
+        let (items, sig) = run(
+            "get",
+            &["id"],
+            quote! {
+                async fn get_widget(w: Granted<One<Widget, MySite>>) {}
+            },
+        )
+        .expect("rewrites");
+
+        assert!(items.is_empty(), "nothing generated: {items}");
+        assert!(sig.contains("One < Widget , MySite >"), "{sig}");
     }
 
     #[test]

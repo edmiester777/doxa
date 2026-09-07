@@ -25,7 +25,7 @@ use doxa_policy::{AuthError, CapabilityChecker, Capable};
 
 use crate::claims::Claims;
 use crate::context::{AuthContext, CapabilityContext};
-use crate::denial::{self, Denial};
+use crate::record::{self, Denial};
 
 /// Extracts the authenticated user context. Returns 401 if missing.
 #[derive(Debug, Clone)]
@@ -174,17 +174,9 @@ where
             return Ok(Require(PhantomData));
         }
 
-        // A capability is granted only when every check passes, so the
-        // first one is the one whose denial short-circuits the
-        // evaluation — it is the one worth naming in the trail. A
-        // capability with no checks at all names itself.
-        let (resource_type, resource_id) = M::CAPABILITY
-            .checks
-            .first()
-            .map(|check| (check.entity_type, check.entity_id))
-            .unwrap_or(("capability", M::CAPABILITY.name));
+        let (resource_type, resource_id) = crate::granted::capability_resource(M::CAPABILITY);
 
-        denial::record(
+        record::record(
             &parts.extensions,
             Denial {
                 tenant: ctx.tenant_id.as_deref(),

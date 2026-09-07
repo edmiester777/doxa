@@ -107,7 +107,10 @@ where
     }
 
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-        let builder = AuditEventBuilder::new(self.logger.clone());
+        // `layered`, not `new`: a guard that refuses the request must
+        // leave the emission to the code below rather than take the
+        // builder before the response exists.
+        let builder = AuditEventBuilder::layered(self.logger.clone());
         builder.set_request_metadata(req.headers());
         if let Some(ConnectInfo(addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
             builder.set_source_ip_fallback(*addr);
