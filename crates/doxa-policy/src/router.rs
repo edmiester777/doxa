@@ -312,7 +312,7 @@ mod tests {
                 description: "list models",
                 checks: &[CapabilityCheck {
                     action: "read_model",
-                    entity_type: "ModelCollection",
+                    entity_type: "WidgetCollection",
                     entity_id: $entity_id,
                 }],
             }
@@ -326,7 +326,7 @@ mod tests {
                 description: "edit models",
                 checks: &[CapabilityCheck {
                     action: "write_model",
-                    entity_type: "ModelCollection",
+                    entity_type: "WidgetCollection",
                     entity_id: $entity_id,
                 }],
             }
@@ -341,12 +341,12 @@ mod tests {
                 checks: &[
                     CapabilityCheck {
                         action: "read_model",
-                        entity_type: "ModelCollection",
+                        entity_type: "WidgetCollection",
                         entity_id: $entity_id,
                     },
                     CapabilityCheck {
                         action: "write_model",
-                        entity_type: "ModelCollection",
+                        entity_type: "WidgetCollection",
                         entity_id: $entity_id,
                     },
                 ],
@@ -360,7 +360,7 @@ mod tests {
             permit(
                 principal in Role::"viewer",
                 action == Action::"read_model",
-                resource == ModelCollection::"router_t1"
+                resource == WidgetCollection::"router_t1"
             );
         "#;
         let router = build_stub_router(policy);
@@ -383,7 +383,7 @@ mod tests {
             permit(
                 principal in Role::"viewer",
                 action == Action::"read_model",
-                resource == ModelCollection::"router_t2"
+                resource == WidgetCollection::"router_t2"
             );
         "#;
         let router = build_stub_router(policy);
@@ -458,12 +458,12 @@ mod tests {
             permit(
                 principal in Role::"viewer",
                 action == Action::"read_model",
-                resource == ModelCollection::"router_t6"
+                resource == WidgetCollection::"router_t6"
             );
             permit(
                 principal in Role::"editor",
                 action == Action::"write_model",
-                resource == ModelCollection::"router_t6"
+                resource == WidgetCollection::"router_t6"
             );
         "#;
         let router = build_stub_router(policy);
