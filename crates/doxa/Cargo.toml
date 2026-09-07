@@ -120,3 +120,7 @@ required-features = ["full"]
 [[test]]
 name = "stateful"
 required-features = ["full"]
+
+[[test]]
+name = "authorize_loaded"
+required-features = ["full"]
