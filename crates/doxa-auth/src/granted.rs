@@ -53,10 +53,18 @@
 //! context over directly. Which context it is comes from the asset's
 //! [`Subject::Ctx`], so a route that only needs tenant + roles never
 //! names the consumer's session and claim types at all.
+//!
+//! The typed context is shared rather than copied — [`AuthLayer`] builds
+//! one per request and every reader after that holds an `Arc` of it — so
+//! a handler taking both a guard and an `Auth<S, C>` pays for the
+//! assembled session once.
+//!
+//! [`AuthLayer`]: crate::AuthLayer
 
 use std::borrow::Cow;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::response::{IntoResponse, Response};
@@ -77,10 +85,16 @@ use crate::context::{AuthContext, CapabilityContext};
 /// A caller shape recoverable from request extensions.
 ///
 /// Implemented for [`CapabilityContext`] (tenant + roles, no consumer
-/// generics) and for [`AuthContext<S, C>`] (claims + resolved session).
-/// An asset picks one as its [`Subject::Ctx`]; a collection asset needs
-/// the typed form, because the authorized scope lives in the session the
-/// policy assembled.
+/// generics) and for `Arc<`[`AuthContext<S, C>`]`>` (claims + resolved
+/// session). An asset picks one as its [`Subject::Ctx`]; a collection
+/// asset needs the typed form, because the authorized scope lives in the
+/// session the policy assembled.
+///
+/// The typed form is behind an `Arc` because recovering it is a move,
+/// not a borrow — the guard hands the context to the handler, so it has
+/// to own one. `AuthLayer` builds it once per request and every reader
+/// after that costs a refcount bump. Field access reads straight
+/// through, so `ctx.claims.sub()` is unchanged.
 pub trait FromAuthExtensions: Clone + Send + Sync + 'static {
     /// Recover the context, or `None` when the auth layer never ran.
     fn from_extensions(extensions: &Extensions) -> Option<Self>;
@@ -106,13 +120,13 @@ impl FromAuthExtensions for CapabilityContext {
     }
 }
 
-impl<S, C> FromAuthExtensions for AuthContext<S, C>
+impl<S, C> FromAuthExtensions for Arc<AuthContext<S, C>>
 where
-    S: Clone + Send + Sync + 'static,
-    C: Claims + Clone,
+    S: Send + Sync + 'static,
+    C: Claims,
 {
     fn from_extensions(extensions: &Extensions) -> Option<Self> {
-        extensions.get::<AuthContext<S, C>>().cloned()
+        extensions.get::<Arc<AuthContext<S, C>>>().cloned()
     }
 
     fn tenant(&self) -> Option<&str> {
@@ -649,13 +663,16 @@ fn declared<R: Granting>(action: &str) -> Option<&'static Action> {
     R::ACTIONS.iter().find(|declared| declared.name == action)
 }
 
-/// Everything asset-specific: which actions it permits and what each one
-/// costs, how to load one, and what the caller's authorized subset looks
-/// like.
+/// Everything asset-specific about reaching one object: which actions
+/// the asset permits and what each one costs, and how to load one.
 ///
 /// One impl per asset serves every route that guards it. The route
 /// supplies only what is route-specific — which segments carry the key,
 /// and which action the verb implies.
+///
+/// Listing is [`Scoping`], a separate trait, because not every asset can
+/// be listed — a staged batch or a singleton is reached by name and by
+/// nothing else. Splitting them is what lets the compiler say so.
 pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
     /// Identifying values [`load`](Self::load) needs.
     type Key: RouteKey;
@@ -668,13 +685,11 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
     /// Loader failure. Reaches the client through its own
     /// `IntoResponse`, so any audit outcome it attaches survives.
     type Error: IntoResponse + Send;
-    /// The caller's authorized subset, as this asset's queries take it.
-    type Filter: Send;
 
     /// Every action this asset permits, and what each one costs.
     ///
     /// The vocabulary, not a hint: an action absent from here is refused
-    /// before anything is loaded and before [`scope`](Self::scope) is
+    /// before anything is loaded and before [`Scoping::scope`] is
     /// consulted, so a route that names one an asset does not declare
     /// cannot fall through to an unchecked grant. Routes are held to it at
     /// compile time — see [`Subject::SITE_DECLARED`].
@@ -694,6 +709,20 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
         state: &Self::State,
         ctx: &Self::Ctx,
     ) -> impl Future<Output = Result<Option<Self>, Self::Error>> + Send;
+}
+
+/// An asset a caller can be granted a *subset* of, rather than one
+/// object at a time.
+///
+/// [`Many<R>`] requires it, so `Granted<Many<Widget>>` does not compile
+/// unless listing a widget is a thing the asset says it supports.
+/// Without the split every asset declared a `Filter` whether or not it
+/// had a listing route, and a collection guard over one that did not
+/// answered 403 at runtime — the right status for what is really a
+/// category error the compiler could have caught.
+pub trait Scoping: Granting {
+    /// The caller's authorized subset, as this asset's queries take it.
+    type Filter: Send;
 
     /// The caller's authorized scope on this asset for `action`, read out
     /// of the session the policy already assembled.
@@ -707,9 +736,7 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
     /// capability on the [`Action`] row are the whole of what separates
     /// listing an asset from bulk-deleting it. An impl that ignores the
     /// action grants the same subset to both.
-    fn scope(_action: &str, _ctx: &Self::Ctx) -> Result<Option<Self::Filter>, AuthError> {
-        Ok(None)
-    }
+    fn scope(action: &str, ctx: &Self::Ctx) -> Result<Option<Self::Filter>, AuthError>;
 
     /// The scope to use when the policy granted this caller nothing.
     ///
@@ -733,6 +760,10 @@ pub struct One<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 /// Costs no policy call at request time — partial evaluation already ran
 /// in [`AuthLayer`](crate::AuthLayer), so this is a lookup into the
 /// session it assembled.
+///
+/// Requires [`Scoping`] rather than [`Granting`]: an asset that cannot
+/// be listed does not implement it, and this form will not compile
+/// against one.
 pub struct Many<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 
 /// Authorize a bare capability with no asset behind it.
@@ -859,9 +890,9 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
     }
 }
 
-impl<R: Granting, S: GrantSite> sealed::Sealed for Many<R, S> {}
+impl<R: Scoping, S: GrantSite> sealed::Sealed for Many<R, S> {}
 
-impl<R: Granting, S: GrantSite> Subject for Many<R, S> {
+impl<R: Scoping, S: GrantSite> Subject for Many<R, S> {
     type Loaded = R::Filter;
     type Ctx = R::Ctx;
     type State = R::State;
@@ -890,7 +921,7 @@ impl<R: Granting, S: GrantSite> Subject for Many<R, S> {
     }
 }
 
-impl<R: Granting, S: GrantSite> Chain for Many<R, S> {
+impl<R: Scoping, S: GrantSite> Chain for Many<R, S> {
     fn event_type(action: &str) -> Option<&'static str> {
         declared::<R>(action).and_then(|declared| declared.event_type)
     }
@@ -1005,7 +1036,7 @@ pub(crate) fn capability_resource(cap: &'static Capability) -> (&'static str, &'
 /// Refusing an undeclared action here is what makes [`Granting::ACTIONS`]
 /// a vocabulary rather than a lookup table. A collection route runs no
 /// instance check, so without this an action the asset never heard of
-/// would reach [`Granting::scope`] and be answered with whatever subset
+/// would reach [`Scoping::scope`] and be answered with whatever subset
 /// that returns.
 async fn gate<R: Granting>(
     action: &'static str,

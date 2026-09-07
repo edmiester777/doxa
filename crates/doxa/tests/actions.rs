@@ -14,7 +14,9 @@ use axum::extract::FromRequestParts;
 use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use doxa::audit::EventType;
-use doxa::auth::{Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One};
+use doxa::auth::{
+    Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
+};
 use doxa::policy::{AuthError, Capability, CapabilityChecker, Capable, ResourceEntity};
 use doxa::{Actions, PolicyResource, ToSchema};
 use serde::Serialize;
@@ -54,7 +56,6 @@ impl Granting for Source {
     type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
-    type Filter = &'static str;
 
     /// The one line that wires the vocabulary to the asset.
     const ACTIONS: &'static [Action] = SourceAction::ACTIONS;
@@ -66,6 +67,10 @@ impl Granting for Source {
     ) -> Result<Option<Self>, StatusCode> {
         Ok(Some(Source { id }))
     }
+}
+
+impl Scoping for Source {
+    type Filter = &'static str;
 
     fn scope(action: &str, _ctx: &CapabilityContext) -> Result<Option<&'static str>, AuthError> {
         Ok(match action {

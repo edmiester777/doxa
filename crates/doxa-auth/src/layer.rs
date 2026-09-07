@@ -408,6 +408,12 @@ where
     //    generic over the consumer's `S` / `C`. The typed
     //    `AuthContext<S, C>` stays available for handlers that want
     //    claim-level access.
+    //
+    //    Behind an `Arc` because every extractor that reaches it takes it
+    //    by value: `Auth<S, C>` and each `Granted<T>` on the handler. The
+    //    session is whatever the consumer's policy extension assembled —
+    //    a per-resource grant map, typically — so deep-copying it once
+    //    per guard is the one avoidable cost on the request path.
     let cap_ctx = CapabilityContext {
         tenant_id: claims.scope().map(str::to_owned),
         roles: claims.roles().to_vec(),
@@ -416,11 +422,11 @@ where
     if let Some(checker) = checker {
         request.extensions_mut().insert(checker);
     }
-    request.extensions_mut().insert(AuthContext {
+    request.extensions_mut().insert(Arc::new(AuthContext {
         claims,
         session,
         is_admin: false,
-    });
+    }));
 
     Ok(request)
 }
@@ -544,10 +550,11 @@ mod tests {
         let state = make_state("good");
         let svc = build_service(state, |req| {
             // Assert AuthContext is in extensions and carries the
-            // expected claims.
+            // expected claims. Shared, so every reader after this one
+            // pays a refcount bump rather than a copy of the session.
             let ctx = req
                 .extensions()
-                .get::<AuthContext<(), OidcClaims>>()
+                .get::<Arc<AuthContext<(), OidcClaims>>>()
                 .expect("AuthContext present");
             assert_eq!(ctx.claims.sub, "test-sub");
             assert_eq!(ctx.claims.scope.as_deref(), Some("tenant-1"));

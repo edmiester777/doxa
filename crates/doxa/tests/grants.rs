@@ -17,7 +17,7 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, EventType, Outcome};
-use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many};
+use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -53,7 +53,6 @@ impl Granting for Widget {
     type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
-    type Filter = ();
 
     /// Declared once for the asset, so every route guarding a widget
     /// files under the same vocabulary and no verb can disagree with the
@@ -73,6 +72,10 @@ impl Granting for Widget {
             name: "sprocket".into(),
         }))
     }
+}
+
+impl Scoping for Widget {
+    type Filter = ();
 
     fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
         Ok(Some(()))

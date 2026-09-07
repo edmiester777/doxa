@@ -51,7 +51,6 @@ impl Granting for Widget {
     type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
-    type Filter = ();
 
     const ACTIONS: &'static [Action] = &[Action::new("read")];
 
