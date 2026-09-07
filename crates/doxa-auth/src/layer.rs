@@ -84,13 +84,26 @@ mod audit_support {
             }))
         }
 
-        /// Emit a terminal auth-failure event if the session is active.
-        pub fn emit_failure(&mut self, action: &str, error: &str) {
+        /// Record a terminal auth-failure event if the session is active.
+        ///
+        /// Takes the builder out of the session so a pipeline that fails
+        /// twice records once, and so
+        /// [`take_with_actor`](Self::take_with_actor) cannot then hand a
+        /// spent builder downstream.
+        ///
+        /// The event is *settled*, not emitted: under an
+        /// [`AuditLayer`](doxa_audit::AuditLayer) the outcome is recorded
+        /// and the layer sends it after the response, with the real status
+        /// and a duration measured through it. Only when this session
+        /// built its own builder — an [`AuthState`] logger with no
+        /// `AuditLayer` above it — is there nobody else to send it, and
+        /// then `status` is what the rejection is about to return.
+        pub fn emit_failure(&mut self, action: &str, error: &str, status: u16) {
             if let Some(builder) = self.0.take() {
                 builder.set_event(EventType::AuthFailure, action);
                 builder.set_outcome(Outcome::Denied);
                 builder.set_error(error);
-                builder.emit();
+                builder.settle(status);
             }
         }
 
@@ -131,7 +144,7 @@ mod audit_support {
             Self
         }
 
-        pub fn emit_failure(&mut self, _action: &str, _error: &str) {}
+        pub fn emit_failure(&mut self, _action: &str, _error: &str, _status: u16) {}
 
         pub fn take_with_actor<C: Claims>(&mut self, _claims: &C) -> Option<()> {
             None
@@ -291,6 +304,16 @@ where
     }
 }
 
+/// Status the pipeline is about to reject with.
+///
+/// Read off the error rather than assumed, so a `PolicyFailed` is
+/// recorded as the 500 it renders as and not as another 401. Only ever
+/// used when no [`AuditLayer`](doxa_audit::AuditLayer) is in the stack to
+/// take the status off the real response.
+fn rejection_status(error: &AuthError) -> u16 {
+    doxa::__private::HasApiMetadata::api_status(error)
+}
+
 /// Body of the auth pipeline. Returns the modified [`Request<Body>`] (with
 /// [`AuthContext`] injected into extensions) on success; the caller is
 /// responsible for invoking the inner service.
@@ -316,18 +339,20 @@ where
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| {
+            let error = AuthError::MissingCredentials;
             tracing::warn!("missing or malformed Authorization header");
             audit.emit_failure(
                 "missing_credentials",
                 "Missing or malformed Authorization header",
+                rejection_status(&error),
             );
-            AuthError::MissingCredentials
+            error
         })?;
 
     // 2. Stage 1 — cryptographic credential validation.
     let minimal = auth.validator.validate(token).await.inspect_err(|e| {
         tracing::warn!(error = %e, "credential validation failed");
-        audit.emit_failure("invalid_token", &e.to_string());
+        audit.emit_failure("invalid_token", &e.to_string(), rejection_status(e));
     })?;
 
     // 3. Stage 2 — enrich into consumer-defined claims.
@@ -341,7 +366,7 @@ where
                 AuthError::TokenInactive => "token_inactive",
                 _ => "claim_resolution_failed",
             };
-            audit.emit_failure(action, &e.to_string());
+            audit.emit_failure(action, &e.to_string(), rejection_status(e));
         })?;
 
     // Record scope on the parent request span for log correlation. The
@@ -359,7 +384,11 @@ where
         .await
         .inspect_err(|e| {
             tracing::warn!(error = %e, "policy resolution failed");
-            audit.emit_failure("policy_resolution_failed", &e.to_string());
+            audit.emit_failure(
+                "policy_resolution_failed",
+                &e.to_string(),
+                rejection_status(e),
+            );
         })?;
 
     // Stamp actor info onto the builder, pass it downstream via
@@ -579,6 +608,12 @@ mod tests {
         assert_eq!(event.http_method.as_deref(), Some("GET"));
         assert_eq!(event.http_path.as_deref(), Some("/streams/orders/status"));
         assert_eq!(event.source_ip.as_deref(), Some("198.51.100.7"));
+        assert_eq!(
+            event.http_status,
+            Some(401),
+            "with no layer above it the pipeline settles the event itself, \
+             at the status the rejection is about to return",
+        );
     }
 
     #[cfg(feature = "audit")]
@@ -620,6 +655,12 @@ mod tests {
         assert_eq!(event.http_method.as_deref(), Some("GET"));
         assert_eq!(event.http_path.as_deref(), Some("/widgets/42"));
         assert_eq!(event.source_ip.as_deref(), Some("203.0.113.9"));
+        assert_eq!(
+            event.http_status,
+            Some(401),
+            "the pipeline stands aside for the layer, which reads the \
+             status off the response rather than predicting it",
+        );
     }
 
     #[cfg(feature = "audit")]

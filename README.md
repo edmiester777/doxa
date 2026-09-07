@@ -515,6 +515,32 @@ The split is natural: routes registered *before* the layers get auth + audit; ro
 
 **Outcome propagation is automatic.** When an `ApiError` is returned, its `outcome` attribute (from example 2) is attached to the response and the layer reads it. Handlers only need `emit_denied`/`emit_error` for non-`ApiError` error paths.
 
+**A guarded route needs none of this.** `Granted<T>` already resolved which action it checked and which object it checked against, so it deposits both on the request's event and the layer folds them in after the response. Declare the category once on the asset and the handler writes nothing at all:
+
+```rust
+impl Granting for Document {
+    // …
+
+    /// One mapping for every route that guards a document, so a verb
+    /// can't end up filed under the wrong category.
+    fn event_type(action: &str) -> Option<&'static str> {
+        Some(match action {
+            "delete" => EventType::AdminDelete.as_static(),
+            _ => EventType::DataAccess.as_static(),
+        })
+    }
+}
+
+#[get("/documents/{id}")]
+async fn get_document(doc: Granted<Document>) -> Json<Document> {
+    Json(doc.into_inner())
+    // event_type = data_access, action = read, resource = Document/<id>,
+    // outcome, status and duration from the layer. Nothing to call.
+}
+```
+
+A refusal takes the same path, so the grant and the denial name the same action and the same resource. What follows is the unguarded case — a route with no `Granted` on it, or a handler that knows something the guard cannot. Anything set here wins over the deposit, in any order:
+
 ```rust
 use axum::{extract::Path, Extension, Json};
 use doxa::audit::{AuditEventBuilder, EventType};
@@ -613,7 +639,11 @@ let audited = OpenApiRouter::new()
     .layer(AuditLayer::new(audit_logger));
 ```
 
-`AuditLayer` creates the builder first. Auth stamps actor info. Your custom middleware can inspect it, enrich it, or emit early to short-circuit. If the denylist middleware calls `emit_permission_denied`, the auto-emit after the response is a no-op.
+`AuditLayer` creates the builder first. Auth stamps actor info. Your custom middleware can inspect it, enrich it, or record a terminal outcome and short-circuit.
+
+**A terminal called inside the request records; it doesn't send.** Emitting *takes* the builder, so a call from a handler or middleware would land before the response exists — costing `http_status`, truncating `duration_ms`, and vouching for anything fallible that came after it. When an `AuditLayer` owns the builder, `emit`, `emit_denied`, `emit_error` and friends record their outcome and leave the sending to the layer's auto-emit moments later. Nothing is lost and the timing is right, so the denylist middleware above gets its event *with* the 403 it returned.
+
+Without an `AuditLayer` in the stack there is nobody else to send it, and those calls emit exactly as they always did.
 
 ### 14. Custom audit event types
 
