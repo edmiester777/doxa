@@ -15,7 +15,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One};
+use doxa::auth::{Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -59,9 +59,13 @@ impl Granting for Widget {
     type Error = StatusCode;
     type Filter = Filter;
 
-    fn capability(_action: &str) -> Option<&'static Capability> {
-        Some(&WIDGETS_READ)
-    }
+    const ACTIONS: &'static [Action] = &[
+        Action::new("read").capability(&WIDGETS_READ),
+        // Behind the same coarse capability as `read`, so the only thing
+        // separating listing widgets from bulk-purging them is what
+        // `scope` makes of the action.
+        Action::new("purge").capability(&WIDGETS_READ),
+    ];
 
     async fn load(
         id: u32,
@@ -84,11 +88,16 @@ impl Granting for Widget {
     /// A real impl reads the session the policy assembled. This one keys
     /// off a role so a test can produce a caller who clears the coarse
     /// gate but has no scope.
-    fn scope(ctx: &CapabilityContext) -> Result<Option<Filter>, AuthError> {
-        Ok(if ctx.roles.iter().any(|r| r == "viewer") {
-            Some(Filter("tenant = acme"))
-        } else {
-            None
+    ///
+    /// A collection route runs no instance check, so an impl that ignored
+    /// the action would hand a purge the same rows it hands a listing.
+    fn scope(action: &str, ctx: &CapabilityContext) -> Result<Option<Filter>, AuthError> {
+        if !ctx.roles.iter().any(|r| r == "viewer") {
+            return Ok(None);
+        }
+        Ok(match action {
+            "purge" => None,
+            _ => Some(Filter("tenant = acme")),
         })
     }
 }
@@ -108,6 +117,8 @@ impl Granting for Gadget {
     type State = ();
     type Error = StatusCode;
     type Filter = Filter;
+
+    const ACTIONS: &'static [Action] = &[Action::new("read")];
 
     async fn load(
         _id: u32,
@@ -134,6 +145,14 @@ struct Listing;
 impl GrantSite for Listing {
     const PARAMS: &'static [&'static str] = &[];
     const ACTION: &'static str = "read";
+}
+
+/// The same collection asked about under a different action, which is the
+/// only difference between these two routes.
+struct Purging;
+impl GrantSite for Purging {
+    const PARAMS: &'static [&'static str] = &[];
+    const ACTION: &'static str = "purge";
 }
 
 // ---- policy stub ------------------------------------------------------------
@@ -210,6 +229,55 @@ async fn a_collection_yields_the_authorized_scope() {
         Some("acme"),
         "the caller comes back with the value it was authorized against",
     );
+}
+
+/// Two collection routes over one asset, differing only in the action.
+///
+/// The coarse capability is the same for both, and a collection form runs
+/// no instance check, so if the action did not reach
+/// [`Granting::scope`](doxa::auth::Granting::scope) a caller cleared to
+/// list widgets would be cleared to purge them.
+#[tokio::test]
+async fn the_scope_is_per_action_not_per_asset() {
+    let (mut listing, _rx) = parts(&["viewer"]);
+    Granted::<Many<Widget, Listing>>::from_request_parts(&mut listing, &())
+        .await
+        .expect("a viewer may list");
+
+    let (mut purging, mut rx) = parts(&["viewer"]);
+    let rejection = Granted::<Many<Widget, Purging>>::from_request_parts(&mut purging, &())
+        .await
+        .err()
+        .expect("the same viewer may not purge");
+
+    assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
+    let event = rx.try_recv().expect("recorded");
+    assert_eq!(event.action, "purge");
+    assert_eq!(event.error_message.as_deref(), Some("no authorized scope"));
+}
+
+/// An action the asset never declared is refused before anything is
+/// loaded and before `scope` is consulted.
+///
+/// A route cannot reach this — `Subject::SITE_DECLARED` fails the build
+/// first — but a handler authorizing an action it assembled at runtime
+/// can, and that is the path where a collection would otherwise be
+/// answered with a filter no policy ever approved.
+#[tokio::test]
+async fn an_undeclared_action_is_refused_rather_than_scoped() {
+    let (parts, mut rx) = parts(&["viewer"]);
+
+    let refused = doxa::auth::authorize::<Many<Widget>>((), "raed", &(), &parts.extensions)
+        .await
+        .err()
+        .expect("Widget declares no `raed`");
+
+    assert_eq!(refused.into_response().status(), StatusCode::FORBIDDEN);
+    let event = rx.try_recv().expect("recorded");
+    assert_eq!(event.outcome, Outcome::Denied);
+    assert_eq!(event.action, "raed");
+    assert_eq!(event.resource_type.as_deref(), Some("Widget"));
+    assert_eq!(event.error_message.as_deref(), Some("action not declared"));
 }
 
 /// The coarse gate runs first, so a caller without the capability never

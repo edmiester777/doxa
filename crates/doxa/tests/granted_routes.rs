@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tower::ServiceExt;
 
-use doxa::auth::{Cap, CapabilityContext, Granted, Granting, Many};
+use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -54,9 +54,10 @@ impl Granting for Widget {
     type Error = StatusCode;
     type Filter = ();
 
-    fn capability(_action: &str) -> Option<&'static Capability> {
-        Some(&WIDGETS_READ)
-    }
+    const ACTIONS: &'static [Action] = &[
+        Action::new("read").capability(&WIDGETS_READ),
+        Action::new("delete").capability(&WIDGETS_READ),
+    ];
 
     async fn load(
         id: u32,
@@ -72,7 +73,7 @@ impl Granting for Widget {
         })
     }
 
-    fn scope(_ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
+    fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
         Ok(Some(()))
     }
 }
@@ -457,6 +458,8 @@ impl Granting for Filed {
     type State = ();
     type Error = StatusCode;
     type Filter = ();
+
+    const ACTIONS: &'static [Action] = &[Action::new("read")];
 
     async fn load(
         (folder, id): (String, u32),

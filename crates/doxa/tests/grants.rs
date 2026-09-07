@@ -17,7 +17,7 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, EventType, Outcome};
-use doxa::auth::{Cap, CapabilityContext, Granted, Granting, Many};
+use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -58,12 +58,10 @@ impl Granting for Widget {
     /// Declared once for the asset, so every route guarding a widget
     /// files under the same vocabulary and no verb can disagree with the
     /// category it was recorded as.
-    fn event_type(action: &str) -> Option<&'static str> {
-        Some(match action {
-            "delete" => EventType::AdminDelete.as_static(),
-            _ => EventType::DataAccess.as_static(),
-        })
-    }
+    const ACTIONS: &'static [Action] = &[
+        Action::new("read").event(EventType::DataAccess.as_static()),
+        Action::new("delete").event(EventType::AdminDelete.as_static()),
+    ];
 
     async fn load(
         id: u32,
@@ -76,7 +74,7 @@ impl Granting for Widget {
         }))
     }
 
-    fn scope(_ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
+    fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
         Ok(Some(()))
     }
 }

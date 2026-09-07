@@ -11,7 +11,7 @@ keywords = ["axum", "openapi", "auth", "cedar", "doxa"]
 categories = ["web-programming::http-server", "authentication"]
 
 [features]
-default = ["docs", "macros", "docs-scalar"]
+default = ["docs", "macros", "docs-scalar", "policy-catalog"]
 
 # OpenAPI documentation, Scalar UI hosting, and the core doxa-docs
 # surface (ApiDocBuilder, MountDocsExt, ProblemDetails, etc.).
@@ -43,8 +43,14 @@ policy = ["dep:doxa-policy"]
 # Policy with axum HTTP surface (POST /check, POST /test).
 policy-axum = ["policy", "doxa-policy/axum"]
 
+# Self-registering capability catalog, so `doxa::policy::capabilities()`
+# answers without a hand-maintained list. On by default, and a no-op
+# unless `policy` is also on. Turn it off for a target that objects to a
+# life-before-main constructor per declaration.
+policy-catalog = ["doxa-policy?/catalog"]
+
 # Everything.
-full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "policy-axum"]
+full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "policy-axum", "policy-catalog"]
 
 [dependencies]
 doxa-docs = { workspace = true, optional = true }
@@ -87,4 +93,12 @@ required-features = ["full"]
 
 [[test]]
 name = "granted_routes"
+required-features = ["full"]
+
+[[test]]
+name = "catalog"
+required-features = ["full"]
+
+[[test]]
+name = "actions"
 required-features = ["full"]

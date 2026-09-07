@@ -515,20 +515,19 @@ The split is natural: routes registered *before* the layers get auth + audit; ro
 
 **Outcome propagation is automatic.** When an `ApiError` is returned, its `outcome` attribute (from example 2) is attached to the response and the layer reads it. Handlers only need `emit_denied`/`emit_error` for non-`ApiError` error paths.
 
-**A guarded route needs none of this.** `Granted<T>` already resolved which action it checked and which object it checked against, so it deposits both on the request's event and the layer folds them in after the response. Declare the category once on the asset and the handler writes nothing at all:
+**A guarded route needs none of this.** `Granted<T>` already resolved which action it checked and which object it checked against, so it deposits both on the request's event and the layer folds them in after the response. The category sits beside the action in the asset's `ACTIONS` table, and the handler writes nothing at all:
 
 ```rust
 impl Granting for Document {
     // …
 
-    /// One mapping for every route that guards a document, so a verb
-    /// can't end up filed under the wrong category.
-    fn event_type(action: &str) -> Option<&'static str> {
-        Some(match action {
-            "delete" => EventType::AdminDelete.as_static(),
-            _ => EventType::DataAccess.as_static(),
-        })
-    }
+    /// Every action a document permits, declared once for every route
+    /// that guards one — so a verb can't end up filed under the wrong
+    /// category, and one this table omits is refused outright.
+    const ACTIONS: &'static [Action] = &[
+        Action::new("read").event(EventType::DataAccess.as_static()),
+        Action::new("delete").event(EventType::AdminDelete.as_static()),
+    ];
 }
 
 #[get("/documents/{id}")]
@@ -539,7 +538,28 @@ async fn get_document(doc: Granted<Document>) -> Json<Document> {
 }
 ```
 
-A refusal takes the same path, so the grant and the denial name the same action and the same resource. What follows is the unguarded case — a route with no `Granted` on it, or a handler that knows something the guard cannot. Anything set here wins over the deposit, in any order:
+A refusal takes the same path, so the grant and the denial name the same action and the same resource.
+
+**Or derive the table.** An action also needs a capability to gate it, a description for the catalog and the OpenAPI badge, and a sentinel resource for the coarse check — all of which follow from the variant and the enum it sits in. `#[derive(Actions)]` writes them, and `#[action(…)]` appears only where a default is wrong:
+
+```rust
+#[derive(Actions)]
+pub enum DocumentAction {
+    /// List and view documents.
+    #[action(event = "data_access")]
+    Read,
+    /// Remove documents.
+    #[action(event = "admin_delete")]
+    Delete,
+}
+
+impl Granting for Document {
+    const ACTIONS: &'static [Action] = DocumentAction::ACTIONS;
+    // …
+}
+```
+
+That generates the `document.read` and `document.delete` capabilities — descriptions taken from the doc comments — as markers under `document_action::`, usable as `Granted<Cap<document_action::Delete>>` like any other. Each registers itself, so `doxa::policy::capabilities()` lists them without anything maintaining a list. What follows is the unguarded case — a route with no `Granted` on it, or a handler that knows something the guard cannot. Anything set here wins over the deposit, in any order:
 
 ```rust
 use axum::{extract::Path, Extension, Json};

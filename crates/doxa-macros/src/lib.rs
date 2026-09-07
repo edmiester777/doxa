@@ -186,6 +186,7 @@
 
 use proc_macro::TokenStream;
 
+mod actions;
 mod api_error;
 mod capability;
 mod grant;
@@ -422,6 +423,59 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(PolicyResource, attributes(resource))]
 pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
     policy_resource::expand(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Declare an asset's action vocabulary — every action it permits, and
+/// what each one costs — as one enum.
+///
+/// Emits a capability marker per variant (each registering itself in the
+/// catalog, exactly as `#[capability]` does), the `ACTIONS` table that
+/// `Granting` requires, and `ALL` / `as_static` so the enum is usable as
+/// a value.
+///
+/// Everything but the audit category is defaulted off the enum's own
+/// name, so `#[action(…)]` appears only where a default is wrong:
+///
+/// | | Default | Override |
+/// |---|---|---|
+/// | Cedar action | `snake_case` of the variant | `#[action(name = …)]` |
+/// | capability | `{prefix}.{action}` | `#[action(capability = …)]` |
+/// | description | the variant's doc comment | `#[action(description = …)]` |
+/// | resource noun | enum name less `Action`/`Actions` | `#[actions(resource = …)]` |
+/// | capability prefix | `snake_case` of the resource | `#[actions(prefix = …)]` |
+/// | check entity type | `{Resource}Collection` | `#[actions(entity_type = …)]` |
+/// | check entity id | `"collection"` | `#[actions(entity_id = …)]` |
+///
+/// The audit category has no default: what counts as one is the
+/// application's to say, which is why `doxa_audit::AuditEventType` is a
+/// trait rather than an enum.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Actions)]
+/// pub enum SourceAction {
+///     /// List and view data source definitions.
+///     #[action(event = "data_access")]
+///     Read,
+///     /// Remove data source definitions.
+///     #[action(event = "admin_delete")]
+///     Delete,
+///     /// Nothing coarse to check — the instance decides.
+///     #[action(instance_only)]
+///     Ping,
+/// }
+///
+/// impl Granting for Source {
+///     const ACTIONS: &'static [Action] = SourceAction::ACTIONS;
+///     // …
+/// }
+/// ```
+#[proc_macro_derive(Actions, attributes(actions, action))]
+pub fn derive_actions(input: TokenStream) -> TokenStream {
+    actions::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

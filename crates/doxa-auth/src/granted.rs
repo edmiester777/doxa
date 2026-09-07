@@ -36,8 +36,8 @@
 //! ## What the handler owes the audit trail
 //!
 //! Nothing. The chain already knows which action it checked, which object
-//! it checked it against, and — from the asset's
-//! [`Granting::event_type`] — which category to file that under, so it
+//! it checked it against, and — from the [`Action`] row in the asset's
+//! [`Granting::ACTIONS`] — which category to file that under, so it
 //! deposits all three and the audit layer folds them into the event after
 //! the response. A handler writes to the event only where it knows
 //! something the guard cannot: a sanitized request body, a response
@@ -417,7 +417,7 @@ mod sealed {
         /// Domain event category this subject's routes are filed under,
         /// for `action`.
         ///
-        /// Forwards to `Granting::event_type` for the two asset-backed
+        /// Read off the asset's `Action` row for the two asset-backed
         /// forms; a bare capability has no asset to ask, so it declares
         /// nothing.
         fn event_type(_action: &str) -> Option<&'static str> {
@@ -473,6 +473,16 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     /// Which of the three forms this is.
     const FORM: SubjectForm;
 
+    /// Compile-time proof that this subject permits the action its
+    /// [`Site`](Self::Site) names.
+    ///
+    /// Forced where the extractor is instantiated, so a route whose
+    /// [`GrantSite::ACTION`] is missing from its asset's
+    /// [`Granting::ACTIONS`] fails to build rather than 403-ing the first
+    /// time someone exercises it.
+    #[doc(hidden)]
+    const SITE_DECLARED: ();
+
     /// What this subject is about, for documentation prose — the Cedar
     /// entity type for a resource, the capability name for a bare gate.
     fn doc_name() -> Cow<'static, str>;
@@ -481,8 +491,127 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     fn permission(action: &str) -> Cow<'static, str>;
 }
 
-/// Everything asset-specific: how to load one, which coarse capability
-/// covers an action, and what the caller's authorized subset looks like.
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+/// What one action costs on one asset.
+///
+/// A row in [`Granting::ACTIONS`], which is the whole vocabulary of what
+/// may be done to an asset and the only place any of it is declared: the
+/// coarse capability, the audit category, and the existence of the action
+/// at all come off this one row, so they cannot drift apart the way three
+/// separate `match` arms could.
+///
+/// Built in a `const`:
+///
+/// ```
+/// # use doxa_auth::granted::Action;
+/// # use doxa_policy::{Capability, CapabilityCheck};
+/// # const SOURCES_READ: Capability = Capability {
+/// #     name: "sources.read",
+/// #     description: "Read sources",
+/// #     checks: &[CapabilityCheck {
+/// #         action: "read_source",
+/// #         entity_type: "SourceCollection",
+/// #         entity_id: "collection",
+/// #     }],
+/// # };
+/// const ACTIONS: &[Action] = &[
+///     Action::new("read_source")
+///         .capability(&SOURCES_READ)
+///         .event("data_access"),
+///     Action::new("ping"),
+/// ];
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Action {
+    /// Cedar action name, as a route's [`GrantSite::ACTION`] names it.
+    pub name: &'static str,
+    /// Coarse capability covering it, checked before any load so an
+    /// unauthorized caller costs no query.
+    pub capability: Option<&'static Capability>,
+    /// Domain event category routes using this action are filed under —
+    /// the `event_type` field on the audit event.
+    ///
+    /// The one part of an audit event a guard cannot work out for itself:
+    /// what counts as a category is the application's to say. Declaring
+    /// it beside the action rather than per route is what stops a verb
+    /// disagreeing with the category it was recorded as.
+    pub event_type: Option<&'static str>,
+}
+
+impl Action {
+    /// An action with no coarse capability and no audit category: the
+    /// instance check alone decides it.
+    pub const fn new(name: &'static str) -> Self {
+        Action {
+            name,
+            capability: None,
+            event_type: None,
+        }
+    }
+
+    /// Gate this action behind a capability, checked before any load.
+    pub const fn capability(mut self, capability: &'static Capability) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    /// File this action's audit events under `event_type`.
+    ///
+    /// Pass the `'static` string a variant of your own event enum stands
+    /// for — `doxa_audit::EventType::as_static` is the shape to copy.
+    pub const fn event(mut self, event_type: &'static str) -> Self {
+        self.event_type = Some(event_type);
+        self
+    }
+}
+
+/// `&str` equality in a const context, which `==` is not.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Whether `actions` permits `name`.
+///
+/// `const`, so a route can prove at build time that the action it names is
+/// one its asset declares — which is what [`Subject::SITE_DECLARED`] does
+/// for every route the macro generates.
+pub const fn declares(actions: &[Action], name: &str) -> bool {
+    let mut i = 0;
+    while i < actions.len() {
+        if str_eq(actions[i].name, name) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The row covering `action`, or `None` if the asset does not permit it.
+///
+/// Deliberately not a [`Granting`] method: the gate reads the table
+/// directly, so no override can put the capability an action is checked
+/// against out of step with whether that action exists.
+fn declared<R: Granting>(action: &str) -> Option<&'static Action> {
+    R::ACTIONS.iter().find(|declared| declared.name == action)
+}
+
+/// Everything asset-specific: which actions it permits and what each one
+/// costs, how to load one, and what the caller's authorized subset looks
+/// like.
 ///
 /// One impl per asset serves every route that guards it. The route
 /// supplies only what is route-specific — which segments carry the key,
@@ -502,29 +631,22 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
     /// The caller's authorized subset, as this asset's queries take it.
     type Filter: Send;
 
-    /// Coarse capability covering `action`, run before any load so an
-    /// unauthorized caller costs no query. `None` — the default — goes
-    /// straight to the instance or scope check.
-    fn capability(_action: &str) -> Option<&'static Capability> {
-        None
-    }
-
-    /// Domain event category covering `action` — the `event_type` field
-    /// on the audit event.
+    /// Every action this asset permits, and what each one costs.
     ///
-    /// Declared once per asset rather than once per route, so every route
-    /// guarding this asset files under the same vocabulary and a verb
-    /// cannot end up disagreeing with the category it was recorded as. It
-    /// is the one part of an audit event a guard cannot work out for
-    /// itself: what counts as a category is the application's to say.
+    /// The vocabulary, not a hint: an action absent from here is refused
+    /// before anything is loaded and before [`scope`](Self::scope) is
+    /// consulted, so a route that names one an asset does not declare
+    /// cannot fall through to an unchecked grant. Routes are held to it at
+    /// compile time — see [`Subject::SITE_DECLARED`].
     ///
-    /// Return the `'static` string a variant of your own event enum
-    /// stands for — `doxa_audit::EventType::as_static` is the shape to
-    /// copy. `None` — the default — leaves the field for the handler to
-    /// name, or empty if it does not.
-    fn event_type(_action: &str) -> Option<&'static str> {
-        None
-    }
+    /// ```
+    /// # use doxa_auth::granted::Action;
+    /// const ACTIONS: &[Action] = &[
+    ///     Action::new("read_source").event("data_access"),
+    ///     Action::new("delete_source").event("admin_delete"),
+    /// ];
+    /// ```
+    const ACTIONS: &'static [Action];
 
     /// Fetch one object, or `None` if there is no such thing.
     fn load(
@@ -533,13 +655,19 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
         ctx: &Self::Ctx,
     ) -> impl Future<Output = Result<Option<Self>, Self::Error>> + Send;
 
-    /// The caller's authorized scope on this asset, read out of the
-    /// session the policy already assembled.
+    /// The caller's authorized scope on this asset for `action`, read out
+    /// of the session the policy already assembled.
     ///
     /// `Ok(None)` means the policy granted nothing here, which
     /// [`empty_scope`](Self::empty_scope) then turns into a refusal or an
     /// empty page.
-    fn scope(_ctx: &Self::Ctx) -> Result<Option<Self::Filter>, AuthError> {
+    ///
+    /// The action is supplied because a collection route runs no
+    /// instance check — there is no instance yet — so this and the
+    /// capability on the [`Action`] row are the whole of what separates
+    /// listing an asset from bulk-deleting it. An impl that ignores the
+    /// action grants the same subset to both.
+    fn scope(_action: &str, _ctx: &Self::Ctx) -> Result<Option<Self::Filter>, AuthError> {
         Ok(None)
     }
 
@@ -578,7 +706,7 @@ pub struct Cap<M, S = DefaultSite>(PhantomData<fn() -> (M, S)>);
 /// question of the same asset — so a listing and a fetch cannot end up
 /// documenting different permissions for the same verb.
 fn asset_permission<R: Granting>(action: &str) -> Cow<'static, str> {
-    match R::capability(action) {
+    match declared::<R>(action).and_then(|declared| declared.capability) {
         Some(cap) => Cow::Borrowed(cap.name),
         None => Cow::Owned(format!("{}:{action}", R::ENTITY_TYPE)),
     }
@@ -595,6 +723,10 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Instance;
+    const SITE_DECLARED: () = assert!(
+        declares(R::ACTIONS, S::ACTION),
+        "this route's action is missing from the asset's `Granting::ACTIONS`",
+    );
 
     fn doc_name() -> Cow<'static, str> {
         Cow::Borrowed(R::ENTITY_TYPE)
@@ -607,7 +739,7 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
 
 impl<R: Granting, S: GrantSite> Chain for One<R, S> {
     fn event_type(action: &str) -> Option<&'static str> {
-        R::event_type(action)
+        declared::<R>(action).and_then(|declared| declared.event_type)
     }
 
     async fn authorize(
@@ -617,10 +749,10 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
     ) -> Result<Authorized<R>, Refusal<R::Error>> {
-        // Coarse gate first: a caller who may not touch this kind of
-        // thing at all should not cost a query, and must not be able to
-        // tell a missing object from one they may not see.
-        coarse_gate::<R>(action, ctx, checker).await?;
+        // Gate first: a caller who may not touch this kind of thing at
+        // all should not cost a query, and must not be able to tell a
+        // missing object from one they may not see.
+        gate::<R>(action, ctx, checker).await?;
 
         let resource = R::load(key, state, ctx)
             .await
@@ -666,6 +798,10 @@ impl<R: Granting, S: GrantSite> Subject for Many<R, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Collection;
+    const SITE_DECLARED: () = assert!(
+        declares(R::ACTIONS, S::ACTION),
+        "this route's action is missing from the asset's `Granting::ACTIONS`",
+    );
 
     fn doc_name() -> Cow<'static, str> {
         Cow::Borrowed(R::ENTITY_TYPE)
@@ -678,7 +814,7 @@ impl<R: Granting, S: GrantSite> Subject for Many<R, S> {
 
 impl<R: Granting, S: GrantSite> Chain for Many<R, S> {
     fn event_type(action: &str) -> Option<&'static str> {
-        R::event_type(action)
+        declared::<R>(action).and_then(|declared| declared.event_type)
     }
 
     async fn authorize(
@@ -688,9 +824,9 @@ impl<R: Granting, S: GrantSite> Chain for Many<R, S> {
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
     ) -> Result<Authorized<R::Filter>, Refusal<R::Error>> {
-        coarse_gate::<R>(action, ctx, checker).await?;
+        gate::<R>(action, ctx, checker).await?;
 
-        let scope = match R::scope(ctx)? {
+        let scope = match R::scope(action, ctx)? {
             Some(scope) => scope,
             // The policy granted nothing on this asset. Whether that is a
             // refusal or an empty page is the asset's call.
@@ -724,6 +860,9 @@ impl<M: Capable, S: GrantSite> Subject for Cap<M, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Capability;
+    // Nothing to hold to a vocabulary: this form ignores the route's
+    // action and asks about the capability itself.
+    const SITE_DECLARED: () = ();
 
     fn doc_name() -> Cow<'static, str> {
         Cow::Borrowed(M::CAPABILITY.name)
@@ -781,22 +920,40 @@ pub(crate) fn capability_resource(cap: &'static Capability) -> (&'static str, &'
         .unwrap_or(("capability", cap.name))
 }
 
-/// The coarse capability gate shared by the instance and collection
-/// chains. A no-op for assets that declare no capability.
-async fn coarse_gate<R: Granting>(
-    action: &str,
+/// The gate both asset-backed chains pass through before they load or
+/// scope anything: is this action one the asset permits, and if it is
+/// gated behind a capability, does the caller hold it?
+///
+/// Refusing an undeclared action here is what makes [`Granting::ACTIONS`]
+/// a vocabulary rather than a lookup table. A collection route runs no
+/// instance check, so without this an action the asset never heard of
+/// would reach [`Granting::scope`] and be answered with whatever subset
+/// that returns.
+async fn gate<R: Granting>(
+    action: &'static str,
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
-) -> Result<(), Refusal<R::Error>> {
-    let Some(cap) = R::capability(action) else {
-        return Ok(());
+) -> Result<&'static Action, Refusal<R::Error>> {
+    let Some(declared) = declared::<R>(action) else {
+        return Err(Refusal::Denied {
+            action: Cow::Borrowed(action),
+            resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+            // Nothing is loaded yet, and for a collection nothing will
+            // be: the refusal is about the action, not about an object.
+            resource_id: Cow::Borrowed("*"),
+            reason: "action not declared",
+        });
+    };
+
+    let Some(cap) = declared.capability else {
+        return Ok(declared);
     };
 
     if checker
         .check(ctx.tenant().unwrap_or(""), ctx.roles(), cap)
         .await?
     {
-        return Ok(());
+        return Ok(declared);
     }
 
     let (resource_type, resource_id) = capability_resource(cap);
@@ -874,6 +1031,10 @@ where
         parts: &mut http::request::Parts,
         state: &St,
     ) -> Result<Self, Self::Rejection> {
+        // Forces the assertion that the site's action is one the asset
+        // declares. Costs nothing at runtime; fails the build if not.
+        let () = T::SITE_DECLARED;
+
         let ctx = T::Ctx::from_extensions(&parts.extensions)
             .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
 
