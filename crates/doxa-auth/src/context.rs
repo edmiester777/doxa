@@ -9,7 +9,7 @@
 //!
 //! - `S` — the resolved session output produced by
 //!   [`Policy<S>`](doxa_policy::Policy). Consumers choose whatever session
-//!   shape their service needs (a query-engine `SessionConfig`, a rate-limit
+//!   shape their service needs (a set of allowed resources, a rate-limit
 //!   token, an OAuth scope set, …). `S = ()` is a reasonable default for
 //!   services that don't need a session beyond the identity.
 //! - `C` — the consumer-defined claim type implementing [`Claims`]. Deployments

@@ -26,8 +26,8 @@ use crate::error::AuthError;
 ///
 /// The type parameter `T` is the session output type — determined by the
 /// [`PolicyExtension`](crate::extension::PolicyExtension) in use. For
-/// example, a query-engine consumer might produce a `SessionConfig`-style
-/// struct holding allowed-resource sets and forced filters; an API gateway
+/// example, a query-engine consumer might produce a struct holding
+/// allowed-resource sets and forced filters; an API gateway
 /// consumer might produce a rate-limit token; a feature-flag service might
 /// produce a `HashMap<String, bool>` of feature toggles.
 #[async_trait]
