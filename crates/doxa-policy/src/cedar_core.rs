@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cached::{Cached, TimedCache};
+use cached::stores::TimedSizedCache;
+use cached::Cached;
 use cedar_policy::{Authorizer, Context, Decision, Entities, PolicySet, Request};
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -46,15 +47,26 @@ pub(crate) struct CedarStore {
 /// Default per-tenant cache TTL when no override is supplied.
 pub const DEFAULT_TENANT_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// Default number of tenants held at once.
+///
+/// Generous enough that a typical deployment never reaches it, and a
+/// ceiling either way: a tenant's artifacts are held by the cache, so an
+/// unbounded one grows with every tenant the process has ever served
+/// rather than with the ones it is serving.
+pub const DEFAULT_TENANT_CACHE_CAPACITY: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // Tenant store cache — shareable between CedarPolicy and PolicyRouter
 // ---------------------------------------------------------------------------
 
-/// Shareable cache of per-tenant Cedar artifacts with a configurable TTL.
+/// Shareable cache of per-tenant Cedar artifacts, bounded by both age and
+/// count.
 ///
-/// Construct via [`TenantStoreCache::with_ttl`] (or [`Default`] for the
-/// [`DEFAULT_TENANT_CACHE_TTL`]). Cheap to clone — the inner state is an
-/// [`Arc`], so a single cache can be shared across both
+/// Construct via [`TenantStoreCache::with_ttl`],
+/// [`with_capacity_and_ttl`](TenantStoreCache::with_capacity_and_ttl), or
+/// [`Default`] for [`DEFAULT_TENANT_CACHE_TTL`] and
+/// [`DEFAULT_TENANT_CACHE_CAPACITY`]. Cheap to clone — the inner state is
+/// an [`Arc`], so a single cache can be shared across both
 /// [`CedarPolicy`](crate::policy::cedar::CedarPolicy) and
 /// [`PolicyRouter`](crate::router::PolicyRouter) to avoid double-loading
 /// the same tenant through two different entry points.
@@ -62,24 +74,82 @@ pub const DEFAULT_TENANT_CACHE_TTL: Duration = Duration::from_secs(300);
 /// Misses load through the supplied [`SharedPolicyStore`]; only successful
 /// loads are cached so transient store errors are retried on the next
 /// request.
+///
+/// ## What the bound is for
+///
+/// Expiry alone does not reclaim anything: nothing sweeps, so an entry is
+/// only dropped when its key is next touched. A tenant seen once and
+/// never again would be held for the life of the process. The count bound
+/// evicts least-recently-used entries, so memory tracks the working set.
+///
+/// [`len`](Self::len) against [`capacity`](Self::capacity) is how you tell
+/// whether the bound is biting — a cache pinned at capacity is evicting
+/// tenants it is about to be asked for again, and wants raising.
+///
+/// ## One load per tenant
+///
+/// Concurrent misses for the same tenant wait for the first rather than
+/// each running their own. A load is three round-trips to the store, so
+/// without this a TTL expiry under load costs a burst of identical
+/// queries — worst exactly when the process is busiest. Different tenants
+/// still load concurrently.
 #[derive(Clone)]
 pub struct TenantStoreCache {
-    inner: Arc<Mutex<TimedCache<String, Arc<CedarStore>>>>,
+    inner: Arc<Mutex<TimedSizedCache<String, Arc<CedarStore>>>>,
+    /// One gate per tenant currently being loaded, dropped as soon as
+    /// nobody is waiting on it — so this tracks concurrent misses, not
+    /// tenants.
+    loading: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     ttl: Duration,
+    capacity: usize,
 }
 
 impl TenantStoreCache {
-    /// Build a cache with the given TTL.
+    /// Build a cache with the given TTL and the default capacity.
     pub fn with_ttl(ttl: Duration) -> Self {
+        Self::with_capacity_and_ttl(DEFAULT_TENANT_CACHE_CAPACITY, ttl)
+    }
+
+    /// Build a cache holding at most `capacity` tenants, each for `ttl`.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is zero. A cache that can hold nothing would reload
+    /// the tenant on every request, which is never what was meant.
+    pub fn with_capacity_and_ttl(capacity: usize, ttl: Duration) -> Self {
+        assert!(
+            capacity > 0,
+            "a TenantStoreCache holding no tenants would reload on every request",
+        );
         Self {
-            inner: Arc::new(Mutex::new(TimedCache::with_lifespan(ttl))),
+            inner: Arc::new(Mutex::new(TimedSizedCache::with_size_and_lifespan(
+                capacity, ttl,
+            ))),
+            loading: Arc::new(Mutex::new(HashMap::new())),
             ttl,
+            capacity,
         }
     }
 
     /// The TTL this cache was constructed with.
     pub fn ttl(&self) -> Duration {
         self.ttl
+    }
+
+    /// The most tenants this cache will hold at once.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// How many tenants it is holding now, expired entries included —
+    /// they occupy a slot until evicted.
+    pub async fn len(&self) -> usize {
+        self.inner.lock().await.cache_size()
+    }
+
+    /// Whether it is holding nothing.
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
     }
 
     /// Drop every entry.
@@ -92,30 +162,79 @@ impl TenantStoreCache {
         self.inner.lock().await.cache_remove(&tenant_id.to_string());
     }
 
+    /// A live entry, if there is one. Never holds the lock across an
+    /// await — a single mutex in front of every policy check must not be
+    /// held over I/O.
+    async fn get(&self, tenant_id: &str) -> Option<Arc<CedarStore>> {
+        self.inner
+            .lock()
+            .await
+            .cache_get(&tenant_id.to_string())
+            .map(Arc::clone)
+    }
+
     /// Look up (or load, on miss) the tenant's store.
     pub(crate) async fn get_or_load(
         &self,
         store: &SharedPolicyStore,
         tenant_id: &str,
     ) -> Result<Arc<CedarStore>, AuthError> {
-        {
-            let mut guard = self.inner.lock().await;
-            if let Some(hit) = guard.cache_get(&tenant_id.to_string()) {
-                return Ok(Arc::clone(hit));
-            }
+        if let Some(hit) = self.get(tenant_id).await {
+            return Ok(hit);
         }
-        let loaded = load_tenant_store(store, tenant_id).await?;
-        self.inner
-            .lock()
-            .await
-            .cache_set(tenant_id.to_string(), Arc::clone(&loaded));
-        Ok(loaded)
+
+        // Take this tenant's gate. Whoever gets it does the load; the
+        // rest queue here rather than issuing their own.
+        let gate = {
+            let mut loading = self.loading.lock().await;
+            Arc::clone(
+                loading
+                    .entry(tenant_id.to_owned())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let permit = gate.lock().await;
+
+        let result = match self.get(tenant_id).await {
+            // Someone loaded it while we queued, which is the whole
+            // point — take theirs.
+            Some(hit) => Ok(hit),
+            None => match load_tenant_store(store, tenant_id).await {
+                Ok(loaded) => {
+                    self.inner
+                        .lock()
+                        .await
+                        .cache_set(tenant_id.to_string(), Arc::clone(&loaded));
+                    Ok(loaded)
+                }
+                // Deliberately not cached: a transient store failure
+                // should be retried, not remembered.
+                Err(error) => Err(error),
+            },
+        };
+
+        drop(permit);
+        self.retire(&gate, tenant_id).await;
+        result
+    }
+
+    /// Drop a tenant's gate once nobody else holds it, so the map tracks
+    /// in-flight loads rather than growing with every tenant ever seen.
+    ///
+    /// The count is only meaningful under the lock, which is also the
+    /// only place a new reference can be taken: two means the map's and
+    /// ours, so no waiter is left to hand it to.
+    async fn retire(&self, gate: &Arc<Mutex<()>>, tenant_id: &str) {
+        let mut loading = self.loading.lock().await;
+        if Arc::strong_count(gate) <= 2 {
+            loading.remove(tenant_id);
+        }
     }
 }
 
 impl Default for TenantStoreCache {
     fn default() -> Self {
-        Self::with_ttl(DEFAULT_TENANT_CACHE_TTL)
+        Self::with_capacity_and_ttl(DEFAULT_TENANT_CACHE_CAPACITY, DEFAULT_TENANT_CACHE_TTL)
     }
 }
 
@@ -498,4 +617,241 @@ fn build_role_parents<E: PolicyExtension>(
             }))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use cedar_policy::PolicySet;
+
+    use super::*;
+    use crate::store::PolicyStore;
+
+    /// A store that counts loads, and can be made slow so concurrent
+    /// misses genuinely overlap.
+    struct CountingStore {
+        loads: AtomicUsize,
+        delay: Duration,
+        fail: bool,
+    }
+
+    impl CountingStore {
+        fn new() -> Arc<Self> {
+            Arc::new(CountingStore {
+                loads: AtomicUsize::new(0),
+                delay: Duration::ZERO,
+                fail: false,
+            })
+        }
+
+        fn slow(delay: Duration) -> Arc<Self> {
+            Arc::new(CountingStore {
+                loads: AtomicUsize::new(0),
+                delay,
+                fail: false,
+            })
+        }
+
+        fn failing() -> Arc<Self> {
+            Arc::new(CountingStore {
+                loads: AtomicUsize::new(0),
+                delay: Duration::ZERO,
+                fail: true,
+            })
+        }
+
+        fn loads(&self) -> usize {
+            self.loads.load(Ordering::SeqCst)
+        }
+
+        async fn tick(&self) -> Result<(), AuthError> {
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            if self.fail {
+                return Err(AuthError::PolicyFailed("store unavailable".into()));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl PolicyStore for CountingStore {
+        async fn list_resources(&self, _: &str) -> Result<HashMap<String, Vec<String>>, AuthError> {
+            Ok(HashMap::new())
+        }
+
+        async fn load_policy_set(&self, _: &str) -> Result<PolicySet, AuthError> {
+            // The first of the three calls, so it is the one that counts
+            // a load and the one that fails.
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.tick().await?;
+            Ok(PolicySet::new())
+        }
+
+        async fn load_entity_jsons(&self, _: &str) -> Result<Vec<Value>, AuthError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn shared(store: &Arc<CountingStore>) -> SharedPolicyStore {
+        Arc::clone(store) as SharedPolicyStore
+    }
+
+    #[tokio::test]
+    async fn a_hit_does_not_reach_the_store() {
+        let store = CountingStore::new();
+        let cache = TenantStoreCache::default();
+
+        for _ in 0..5 {
+            cache.get_or_load(&shared(&store), "acme").await.unwrap();
+        }
+
+        assert_eq!(store.loads(), 1);
+        assert_eq!(cache.len().await, 1);
+    }
+
+    /// The bound is the point: an unbounded cache holds every tenant the
+    /// process has ever served, because nothing sweeps expired entries.
+    #[tokio::test]
+    async fn the_capacity_bound_evicts() {
+        let store = CountingStore::new();
+        let cache = TenantStoreCache::with_capacity_and_ttl(2, Duration::from_secs(300));
+
+        for tenant in ["a", "b", "c", "d"] {
+            cache.get_or_load(&shared(&store), tenant).await.unwrap();
+        }
+
+        assert_eq!(cache.capacity(), 2);
+        assert!(cache.len().await <= 2, "held more than it was allowed");
+        assert_eq!(store.loads(), 4);
+
+        // `a` was evicted, so it loads again rather than being served
+        // stale.
+        cache.get_or_load(&shared(&store), "a").await.unwrap();
+        assert_eq!(store.loads(), 5);
+    }
+
+    #[tokio::test]
+    async fn an_expired_entry_reloads() {
+        let store = CountingStore::new();
+        let cache = TenantStoreCache::with_capacity_and_ttl(8, Duration::from_millis(30));
+
+        cache.get_or_load(&shared(&store), "acme").await.unwrap();
+        assert_eq!(store.loads(), 1);
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        cache.get_or_load(&shared(&store), "acme").await.unwrap();
+        assert_eq!(store.loads(), 2);
+    }
+
+    /// A load is three round-trips to the store. Without the gate, a TTL
+    /// expiry under load costs one burst of those per concurrent
+    /// request — worst exactly when the process is busiest.
+    #[tokio::test]
+    async fn concurrent_misses_load_once() {
+        let store = CountingStore::slow(Duration::from_millis(50));
+        let cache = TenantStoreCache::default();
+
+        let waiters: Vec<_> = (0..16)
+            .map(|_| {
+                let cache = cache.clone();
+                let store = shared(&store);
+                tokio::spawn(async move { cache.get_or_load(&store, "acme").await.map(|_| ()) })
+            })
+            .collect();
+
+        for waiter in waiters {
+            waiter.await.unwrap().unwrap();
+        }
+
+        assert_eq!(store.loads(), 1, "one loader, fifteen waiters");
+    }
+
+    /// Different tenants must not queue behind each other — the gate is
+    /// per tenant, not one lock over the cache.
+    #[tokio::test]
+    async fn different_tenants_still_load_concurrently() {
+        let store = CountingStore::slow(Duration::from_millis(50));
+        let cache = TenantStoreCache::default();
+
+        let started = std::time::Instant::now();
+        let waiters: Vec<_> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|tenant| {
+                let cache = cache.clone();
+                let store = shared(&store);
+                tokio::spawn(async move { cache.get_or_load(&store, tenant).await.map(|_| ()) })
+            })
+            .collect();
+
+        for waiter in waiters {
+            waiter.await.unwrap().unwrap();
+        }
+
+        assert_eq!(store.loads(), 4);
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "four 50ms loads took {:?} — they serialized",
+            started.elapsed(),
+        );
+    }
+
+    /// The gate map tracks in-flight loads. If it were keyed by tenant
+    /// for the life of the process it would be the unbounded growth the
+    /// capacity bound exists to prevent, moved one map across.
+    #[tokio::test]
+    async fn the_gate_map_does_not_grow_with_tenants() {
+        let store = CountingStore::new();
+        let cache = TenantStoreCache::default();
+
+        for tenant in ["a", "b", "c", "d", "e"] {
+            cache.get_or_load(&shared(&store), tenant).await.unwrap();
+        }
+
+        assert!(
+            cache.loading.lock().await.is_empty(),
+            "gates outlived their loads",
+        );
+    }
+
+    /// A transient store failure is retried rather than remembered, and
+    /// takes its gate with it.
+    #[tokio::test]
+    async fn a_failed_load_is_not_cached() {
+        let store = CountingStore::failing();
+        let cache = TenantStoreCache::default();
+
+        assert!(cache.get_or_load(&shared(&store), "acme").await.is_err());
+        assert!(cache.get_or_load(&shared(&store), "acme").await.is_err());
+
+        assert_eq!(store.loads(), 2, "the failure was cached");
+        assert!(cache.is_empty().await);
+        assert!(cache.loading.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalidate_drops_one_tenant_and_flush_drops_all() {
+        let store = CountingStore::new();
+        let cache = TenantStoreCache::default();
+
+        cache.get_or_load(&shared(&store), "a").await.unwrap();
+        cache.get_or_load(&shared(&store), "b").await.unwrap();
+        assert_eq!(cache.len().await, 2);
+
+        cache.invalidate("a").await;
+        assert_eq!(cache.len().await, 1);
+
+        cache.flush().await;
+        assert!(cache.is_empty().await);
+    }
+
+    #[test]
+    #[should_panic(expected = "reload on every request")]
+    fn a_zero_capacity_cache_is_refused() {
+        let _ = TenantStoreCache::with_capacity_and_ttl(0, DEFAULT_TENANT_CACHE_TTL);
+    }
 }
