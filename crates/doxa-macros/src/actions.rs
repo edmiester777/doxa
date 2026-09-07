@@ -117,6 +117,9 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let mut rows = Vec::new();
     let mut arms = Vec::new();
     let mut all = Vec::new();
+    // Cedar action name -> the variant that claimed it, so a repeat can
+    // point at both ends.
+    let mut claimed: Vec<(String, Ident)> = Vec::new();
 
     for variant in &data.variants {
         if !matches!(variant.fields, Fields::Unit) {
@@ -133,6 +136,25 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             Some(lit) => lit.value(),
             None => snake_case(&ident.to_string()),
         };
+
+        // A coarse gate has only the action to decide on, so two rows
+        // naming one action are not two permissions — the first shadows
+        // the second, and the second's capability is never checked
+        // despite looking enforced. Reject it here, where the span can
+        // name the variant; `doxa::auth::distinct` catches the same
+        // mistake in a hand-written table.
+        if let Some((_, first)) = claimed.iter().find(|(name, _)| name == &action) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{first}` already declares the action `{action}`, so this row \
+                     would never be reached. A coarse gate cannot tell two \
+                     capabilities over one action apart: give them different \
+                     actions, or keep one",
+                ),
+            ));
+        }
+        claimed.push((action.clone(), ident.clone()));
 
         arms.push(quote!(Self::#ident => #action));
         all.push(quote!(Self::#ident));
@@ -453,6 +475,40 @@ mod tests {
         })
         .expect_err("actions carry no data");
         assert!(err.to_string().contains("unit variant"));
+    }
+
+    /// Two rows over one Cedar action would leave the second's
+    /// capability declared, catalogued, and never checked.
+    #[test]
+    fn a_repeated_action_is_refused() {
+        let err = expand(quote! {
+            enum EntityAction {
+                #[action(name = "admin_write")]
+                Write,
+                #[action(name = "admin_write")]
+                Delete,
+            }
+        })
+        .expect_err("one action, two rows");
+        let message = err.to_string();
+        assert!(message.contains("`Write` already declares"), "{message}");
+        assert!(message.contains("admin_write"), "{message}");
+    }
+
+    /// The collision is on the Cedar action, not the variant name, so
+    /// two differently-named variants that default to one action are the
+    /// same mistake.
+    #[test]
+    fn a_repeat_through_defaults_is_refused() {
+        let err = expand(quote! {
+            enum WidgetAction {
+                Read,
+                #[action(name = "read")]
+                View,
+            }
+        })
+        .expect_err("both spell `read`");
+        assert!(err.to_string().contains("`Read` already declares"));
     }
 
     #[test]

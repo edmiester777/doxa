@@ -203,7 +203,7 @@ async fn the_bare_form_authorizes_through_the_route_macro() {
 // ---- and the guard documents itself -----------------------------------------
 
 /// The instance form declares the path parameter with the schema its
-/// `ID_TYPE` implies — the site is authoritative, not the template's
+/// key implies — the site is authoritative, not the template's
 /// positional list.
 #[test]
 fn the_instance_form_documents_its_key() {

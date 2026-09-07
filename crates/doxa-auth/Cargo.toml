@@ -11,7 +11,7 @@ keywords = ["auth", "oidc", "jwt", "axum", "cedar"]
 categories = ["authentication", "web-programming::http-server"]
 
 [features]
-default = ["axum", "audit"]
+default = ["axum", "audit", "uuid"]
 # Optional axum integration: enables the auth middleware, the `Auth`
 # extractor, and the `IntoResponse` impl on `AuthError`. Disable this
 # feature to use the framework-neutral pieces of the crate (Claims,
@@ -22,6 +22,10 @@ axum = ["dep:axum", "dep:doxa", "dep:tower", "dep:utoipa", "doxa-policy/axum"]
 # `AuditLogger` handle carried on `AuthState`. Disable to drop
 # `doxa-audit` entirely from the dep graph.
 audit = ["dep:doxa-audit"]
+# `RouteKey` / `KeySegment` for `uuid::Uuid`, so a `{id}` segment that
+# is a UUID binds without a newtype. Disable to drop `uuid` from the
+# dep graph; `audit` pulls it in regardless.
+uuid = ["dep:uuid"]
 
 [dependencies]
 doxa-policy = { workspace = true }
@@ -44,6 +48,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true, optional = true }
 utoipa = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }

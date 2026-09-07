@@ -219,6 +219,14 @@ scalar_key!(i64, ResourceIdType::Integer);
 scalar_key!(u32, ResourceIdType::Integer);
 scalar_key!(u64, ResourceIdType::Integer);
 
+// Both halves of the pair are foreign, so a consumer whose rows are
+// keyed by UUID — most of them — cannot write this impl and has to
+// wrap the type. Declaring it here is what keeps `{id}` a `Uuid` in
+// the handler and `format: uuid` in the generated OpenAPI without a
+// newtype in between.
+#[cfg(feature = "uuid")]
+scalar_key!(uuid::Uuid, ResourceIdType::Uuid);
+
 macro_rules! tuple_key {
     ($($name:ident @ $index:tt),+) => {
         impl<$($name: KeySegment),+> RouteKey for ($($name,)+) {
@@ -473,13 +481,15 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     /// Which of the three forms this is.
     const FORM: SubjectForm;
 
-    /// Compile-time proof that this subject permits the action its
-    /// [`Site`](Self::Site) names.
+    /// Compile-time proof that this subject's action table is coherent
+    /// and permits the action its [`Site`](Self::Site) names.
     ///
     /// Forced where the extractor is instantiated, so a route whose
     /// [`GrantSite::ACTION`] is missing from its asset's
-    /// [`Granting::ACTIONS`] fails to build rather than 403-ing the first
-    /// time someone exercises it.
+    /// [`Granting::ACTIONS`] — or whose asset names one action twice, so
+    /// that the gate would silently use whichever row came first — fails
+    /// to build rather than being discovered the first time someone
+    /// exercises it.
     #[doc(hidden)]
     const SITE_DECLARED: ();
 
@@ -600,7 +610,37 @@ pub const fn declares(actions: &[Action], name: &str) -> bool {
     false
 }
 
+/// Whether every row in `actions` names a different action.
+///
+/// A repeated name is always a mistake, and a quiet one: the gate takes
+/// the first row it matches, so the second row's capability and audit
+/// category are simply never used. That reads as a capability being
+/// enforced when it is not — the failure mode this module exists to make
+/// impossible — so a route guarding such an asset fails the build rather
+/// than picking one. See [`Subject::SITE_DECLARED`].
+///
+/// Two capabilities over one Cedar action cannot be told apart by a
+/// coarse gate, which has only the action to go on. Where they really are
+/// different permissions, they need different actions; where they are
+/// not, one of them is redundant.
+pub const fn distinct(actions: &[Action]) -> bool {
+    let mut i = 0;
+    while i < actions.len() {
+        let mut j = i + 1;
+        while j < actions.len() {
+            if str_eq(actions[i].name, actions[j].name) {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// The row covering `action`, or `None` if the asset does not permit it.
+///
+/// Takes the first match; [`distinct`] is what makes that unambiguous.
 ///
 /// Deliberately not a [`Granting`] method: the gate reads the table
 /// directly, so no override can put the capability an action is checked
@@ -696,7 +736,33 @@ pub struct One<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 pub struct Many<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 
 /// Authorize a bare capability with no asset behind it.
+///
+/// Reads nothing out of the router, so it mounts on any state — see
+/// [`NoState`].
 pub struct Cap<M, S = DefaultSite>(PhantomData<fn() -> (M, S)>);
+
+/// [`Subject::State`] for a form that reads nothing from the router.
+///
+/// The extractor needs `Subject::State: FromRef<St>` to reach a loader's
+/// state, and [`Cap`] has no loader — but the bound is on the impl, so it
+/// still has to hold. Naming `()` would mean every stateful router owed
+/// an `impl FromRef<AppState> for ()`, which is not a thing a consumer
+/// should have to write and which the orphan rule makes awkward anyway.
+/// This is a local type, so one blanket impl covers every router state
+/// there will ever be.
+///
+/// Deliberately not [`Clone`]: axum's reflexive `impl<T: Clone>
+/// FromRef<T> for T` would then overlap the blanket below at `St =
+/// NoState`. Nothing needs to clone a zero-sized marker, and
+/// [`Default`] covers the one way there is to build it.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct NoState;
+
+impl<St> axum::extract::FromRef<St> for NoState {
+    fn from_ref(_: &St) -> Self {
+        NoState
+    }
+}
 
 /// The permission an asset-backed route advertises: the coarse
 /// capability where the asset declares one, and the Cedar action
@@ -723,10 +789,16 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Instance;
-    const SITE_DECLARED: () = assert!(
-        declares(R::ACTIONS, S::ACTION),
-        "this route's action is missing from the asset's `Granting::ACTIONS`",
-    );
+    const SITE_DECLARED: () = {
+        assert!(
+            distinct(R::ACTIONS),
+            "`Granting::ACTIONS` names one action twice; the later row never runs",
+        );
+        assert!(
+            declares(R::ACTIONS, S::ACTION),
+            "this route's action is missing from the asset's `Granting::ACTIONS`",
+        );
+    };
 
     fn doc_name() -> Cow<'static, str> {
         Cow::Borrowed(R::ENTITY_TYPE)
@@ -798,10 +870,16 @@ impl<R: Granting, S: GrantSite> Subject for Many<R, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Collection;
-    const SITE_DECLARED: () = assert!(
-        declares(R::ACTIONS, S::ACTION),
-        "this route's action is missing from the asset's `Granting::ACTIONS`",
-    );
+    const SITE_DECLARED: () = {
+        assert!(
+            distinct(R::ACTIONS),
+            "`Granting::ACTIONS` names one action twice; the later row never runs",
+        );
+        assert!(
+            declares(R::ACTIONS, S::ACTION),
+            "this route's action is missing from the asset's `Granting::ACTIONS`",
+        );
+    };
 
     fn doc_name() -> Cow<'static, str> {
         Cow::Borrowed(R::ENTITY_TYPE)
@@ -854,7 +932,7 @@ impl<M: Capable, S: GrantSite> sealed::Sealed for Cap<M, S> {}
 impl<M: Capable, S: GrantSite> Subject for Cap<M, S> {
     type Loaded = ();
     type Ctx = CapabilityContext;
-    type State = ();
+    type State = NoState;
     type Key = ();
     type Error = std::convert::Infallible;
     type Site = S;
@@ -877,7 +955,7 @@ impl<M: Capable, S: GrantSite> Chain for Cap<M, S> {
     async fn authorize(
         _key: (),
         _action: &'static str,
-        _state: &(),
+        _state: &NoState,
         ctx: &CapabilityContext,
         checker: &dyn CapabilityChecker,
     ) -> Result<Authorized<()>, Refusal<Self::Error>> {

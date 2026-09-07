@@ -32,12 +32,6 @@ pub trait PolicyResource: Send + Sync + Sized + 'static {
     /// Cedar entity type (e.g. `"Widget"`).
     const ENTITY_TYPE: &'static str;
 
-    /// How the id appears in the OpenAPI path parameter.
-    const ID_TYPE: ResourceIdType = ResourceIdType::String;
-
-    /// Type this resource's id parses from in a URL path segment.
-    type Id: std::str::FromStr + Send;
-
     /// This instance's id, as Cedar and the audit trail see it.
     fn resource_id(&self) -> String;
 
