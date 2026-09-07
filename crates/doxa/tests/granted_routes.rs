@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tower::ServiceExt;
 
-use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many};
+use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -52,7 +52,6 @@ impl Granting for Widget {
     type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
-    type Filter = ();
 
     const ACTIONS: &'static [Action] = &[
         Action::new("read").capability(&WIDGETS_READ),
@@ -72,6 +71,10 @@ impl Granting for Widget {
             _ => None,
         })
     }
+}
+
+impl Scoping for Widget {
+    type Filter = ();
 
     fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
         Ok(Some(()))
@@ -452,12 +455,14 @@ struct Filed {
     id: String,
 }
 
+// No `Scoping` impl: a filed widget is reached by folder and id, and
+// there is no route that lists them. `Granted<Many<Filed>>` therefore
+// does not compile, which is the point of the split.
 impl Granting for Filed {
     type Key = (String, u32);
     type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
-    type Filter = ();
 
     const ACTIONS: &'static [Action] = &[Action::new("read")];
 

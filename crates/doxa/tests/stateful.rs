@@ -23,7 +23,7 @@ use serde::Serialize;
 use serde_json::json;
 use tower::ServiceExt;
 
-use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many};
+use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -91,7 +91,6 @@ impl Granting for Document {
     type Ctx = CapabilityContext;
     type State = Store;
     type Error = StatusCode;
-    type Filter = &'static str;
 
     const ACTIONS: &'static [Action] = &[Action::new("read").capability(&DOCUMENTS_READ)];
 
@@ -102,6 +101,10 @@ impl Granting for Document {
     ) -> Result<Option<Self>, StatusCode> {
         Ok((id == store.known).then_some(Document { id }))
     }
+}
+
+impl Scoping for Document {
+    type Filter = &'static str;
 
     fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<&'static str>, AuthError> {
         Ok(Some("tenant = acme"))

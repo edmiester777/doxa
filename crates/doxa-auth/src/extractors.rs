@@ -28,12 +28,18 @@ use crate::context::{AuthContext, CapabilityContext};
 use crate::record::{self, Denial};
 
 /// Extracts the authenticated user context. Returns 401 if missing.
+///
+/// Yields the shared context [`AuthLayer`](crate::AuthLayer) built for
+/// the request rather than a copy of it, so pairing this with a guard on
+/// the same handler costs one refcount bump instead of a second deep
+/// copy of the assembled session. `Auth(ctx)` still reads
+/// `ctx.claims` / `ctx.session` directly, through the `Arc`.
 #[derive(Debug, Clone)]
-pub struct Auth<S: Clone + Send + Sync + 'static, C: Claims>(pub AuthContext<S, C>);
+pub struct Auth<S: Send + Sync + 'static, C: Claims>(pub Arc<AuthContext<S, C>>);
 
 impl<S, C, ST> axum::extract::FromRequestParts<ST> for Auth<S, C>
 where
-    S: Clone + Send + Sync + 'static,
+    S: Send + Sync + 'static,
     C: Claims,
     ST: Send + Sync,
 {
@@ -42,7 +48,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &ST) -> Result<Self, Self::Rejection> {
         parts
             .extensions
-            .get::<AuthContext<S, C>>()
+            .get::<Arc<AuthContext<S, C>>>()
             .cloned()
             .map(Auth)
             .ok_or(AuthError::MissingCredentials)

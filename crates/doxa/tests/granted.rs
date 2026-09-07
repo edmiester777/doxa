@@ -15,7 +15,9 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One};
+use doxa::auth::{
+    Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
+};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
 };
@@ -57,7 +59,6 @@ impl Granting for Widget {
     type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
-    type Filter = Filter;
 
     const ACTIONS: &'static [Action] = &[
         Action::new("read").capability(&WIDGETS_READ),
@@ -84,6 +85,10 @@ impl Granting for Widget {
             _ => None,
         })
     }
+}
+
+impl Scoping for Widget {
+    type Filter = Filter;
 
     /// A real impl reads the session the policy assembled. This one keys
     /// off a role so a test can produce a caller who clears the coarse
@@ -116,7 +121,6 @@ impl Granting for Gadget {
     type Ctx = CapabilityContext;
     type State = ();
     type Error = StatusCode;
-    type Filter = Filter;
 
     const ACTIONS: &'static [Action] = &[Action::new("read")];
 
@@ -125,6 +129,16 @@ impl Granting for Gadget {
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
+        Ok(None)
+    }
+}
+
+impl Scoping for Gadget {
+    type Filter = Filter;
+
+    /// Grants nothing, ever — which `empty_scope` below then turns into
+    /// an empty page rather than a refusal.
+    fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<Filter>, AuthError> {
         Ok(None)
     }
 
@@ -235,7 +249,7 @@ async fn a_collection_yields_the_authorized_scope() {
 ///
 /// The coarse capability is the same for both, and a collection form runs
 /// no instance check, so if the action did not reach
-/// [`Granting::scope`](doxa::auth::Granting::scope) a caller cleared to
+/// [`Scoping::scope`](doxa::auth::Scoping::scope) a caller cleared to
 /// list widgets would be cleared to purge them.
 #[tokio::test]
 async fn the_scope_is_per_action_not_per_asset() {
@@ -475,4 +489,94 @@ async fn a_manual_grant_is_recorded_like_the_extractors() {
     assert_eq!(event.action, "read");
     assert_eq!(event.resource_type.as_deref(), Some("Widget"));
     assert_eq!(event.resource_id.as_deref(), Some("1"));
+}
+
+// ---- the caller is shared, not copied ---------------------------------------
+
+/// A session the policy assembled. Deliberately **not** `Clone`: the
+/// context is behind an `Arc`, so nothing on the request path copies it,
+/// and requiring `Clone` here would have been the tell that something
+/// did.
+#[derive(Debug)]
+struct Session {
+    grants: Vec<&'static str>,
+}
+
+/// An asset whose scope comes out of that session, which is the reason
+/// the typed context exists at all.
+#[derive(Debug, Clone, Serialize, ToSchema, PolicyResource)]
+#[resource(entity_type = "Ledger")]
+struct Ledger {
+    #[resource(id)]
+    id: u32,
+}
+
+impl Granting for Ledger {
+    type Key = u32;
+    type Ctx = Arc<doxa::auth::AuthContext<Session, doxa::auth::OidcClaims>>;
+    type State = ();
+    type Error = StatusCode;
+
+    const ACTIONS: &'static [Action] = &[Action::new("read")];
+
+    async fn load(id: u32, _state: &(), _ctx: &Self::Ctx) -> Result<Option<Self>, StatusCode> {
+        Ok(Some(Ledger { id }))
+    }
+}
+
+impl Scoping for Ledger {
+    type Filter = &'static str;
+
+    fn scope(_action: &str, ctx: &Self::Ctx) -> Result<Option<&'static str>, AuthError> {
+        // Straight through the `Arc` — the field access is unchanged by
+        // the sharing.
+        Ok(ctx.session.grants.first().copied())
+    }
+}
+
+fn typed_parts() -> axum::http::request::Parts {
+    let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(Arc::new(doxa::auth::AuthContext {
+            claims: doxa::auth::OidcClaims {
+                sub: "u-1".into(),
+                scope: Some("acme".into()),
+                roles: vec!["viewer".into()],
+            },
+            session: Session {
+                grants: vec!["tenant = acme"],
+            },
+            is_admin: false,
+        }));
+    let checker: Arc<dyn CapabilityChecker> = Arc::new(RegionChecker);
+    request.extensions_mut().insert(checker);
+    request.into_parts().0
+}
+
+/// A guard and an `Auth` extractor on one handler reach the *same*
+/// context allocation.
+///
+/// This is the pairing that motivated the shared context: a listing
+/// route takes the guard for its scope and `Auth` for the claims, and
+/// each used to deep-copy the assembled session on the way in — a cost
+/// that scaled with how much the policy had granted.
+#[tokio::test]
+async fn a_guard_and_an_auth_extractor_share_one_context() {
+    let mut parts = typed_parts();
+
+    let guard = Granted::<Many<Ledger, Listing>>::from_request_parts(&mut parts, &())
+        .await
+        .expect("the session grants a scope");
+    let doxa::auth::Auth(auth) =
+        doxa::auth::Auth::<Session, doxa::auth::OidcClaims>::from_request_parts(&mut parts, &())
+            .await
+            .expect("the layer left a context");
+
+    assert_eq!(guard.1, "tenant = acme", "read through the Arc");
+    assert_eq!(auth.claims.sub, "u-1");
+    assert!(
+        Arc::ptr_eq(guard.caller(), &auth),
+        "one allocation, however many readers",
+    );
 }
