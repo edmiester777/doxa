@@ -33,6 +33,28 @@
 //! record cannot drift apart the way they did when each guard owned its
 //! own deny branch.
 //!
+//! ## When the guard cannot see it
+//!
+//! A guard runs in `FromRequestParts`, before the body exists. For what a
+//! handler finds in that body there are two more doors, both recording
+//! exactly as the guard does:
+//!
+//! | Door | For |
+//! |------|-----|
+//! | [`authorize::<One<R>>`](authorize) | an id the handler parsed, loaded through [`Granting::State`] |
+//! | [`AuthorizeLoaded`] | an object the handler already holds, or one inside its open transaction |
+//!
+//! ```ignore
+//! // the route's own subject, where no extractor could reach it
+//! let widget = find_widget(&txn, tenant, &name).await?
+//!     .authorize("read", &parts.extensions).await?;
+//!
+//! // something its body merely refers to: this route's guard already
+//! // answered the coarse question, and it was a different one
+//! let folder = find_folder(&txn, tenant, &body.folder).await?
+//!     .authorize_dependency("read", &parts.extensions).await?;
+//! ```
+//!
 //! ## What the handler owes the audit trail
 //!
 //! Nothing. The chain already knows which action it checked, which object
@@ -381,11 +403,11 @@ pub enum SubjectForm {
 
 /// The three forms, and the chain that runs them.
 ///
-/// Both traits here are unnameable outside this crate, which is what
-/// makes [`authorize`] the only way to reach a policy decision. A raw
-/// chain records nothing, so a second door onto it would be a way to
-/// authorize something and leave no audit row — the failure this module
-/// is built to prevent. There is no such door.
+/// Both traits here are unnameable outside this crate. A raw chain
+/// records nothing, so a door onto it would be a way to authorize
+/// something and leave no audit row — the failure this module is built to
+/// prevent. There is no such door: every entry point that reaches a
+/// verdict goes on to record it.
 ///
 /// [`Subject`] stays public because it is the bound on [`Granted`] and on
 /// [`authorize`], and a route signature names it. It is sealed rather
@@ -1029,30 +1051,41 @@ pub(crate) fn capability_resource(cap: &'static Capability) -> (&'static str, &'
         .unwrap_or(("capability", cap.name))
 }
 
+/// The asset's own row for this action, or a refusal.
+///
+/// What makes [`Granting::ACTIONS`] a vocabulary rather than a lookup
+/// table: an action absent from it is refused before anything else runs.
+/// A collection route performs no instance check, so without this an
+/// action the asset never heard of would reach [`Scoping::scope`] and be
+/// answered with whatever subset that returns.
+///
+/// Every door checks it — [`gate`] on the way to a capability, and
+/// [`AuthorizeLoaded`] on a resource that is already in hand — so an
+/// undeclared action is refused identically however the check was
+/// reached.
+fn declared_action<R: Granting>(
+    action: &'static str,
+) -> Result<&'static Action, Refusal<R::Error>> {
+    declared::<R>(action).ok_or(Refusal::Denied {
+        action: Cow::Borrowed(action),
+        resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+        // The refusal is about the action, not about an object: for a
+        // collection there will never be one, and for a resource already
+        // loaded the asset does not admit the verb being asked about.
+        resource_id: Cow::Borrowed("*"),
+        reason: "action not declared",
+    })
+}
+
 /// The gate both asset-backed chains pass through before they load or
 /// scope anything: is this action one the asset permits, and if it is
 /// gated behind a capability, does the caller hold it?
-///
-/// Refusing an undeclared action here is what makes [`Granting::ACTIONS`]
-/// a vocabulary rather than a lookup table. A collection route runs no
-/// instance check, so without this an action the asset never heard of
-/// would reach [`Scoping::scope`] and be answered with whatever subset
-/// that returns.
 async fn gate<R: Granting>(
     action: &'static str,
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
 ) -> Result<&'static Action, Refusal<R::Error>> {
-    let Some(declared) = declared::<R>(action) else {
-        return Err(Refusal::Denied {
-            action: Cow::Borrowed(action),
-            resource_type: Cow::Borrowed(R::ENTITY_TYPE),
-            // Nothing is loaded yet, and for a collection nothing will
-            // be: the refusal is about the action, not about an object.
-            resource_id: Cow::Borrowed("*"),
-            reason: "action not declared",
-        });
-    };
+    let declared = declared_action::<R>(action)?;
 
     let Some(cap) = declared.capability else {
         return Ok(declared);
@@ -1162,17 +1195,20 @@ where
 ///
 /// This is the body of [`Granted`], exposed for a subject the extractor
 /// cannot reach. A guard runs in `FromRequestParts`, which sees no
-/// request body, so an id named in a payload — a pipeline referring to
-/// its source, a query naming the models it reads — can only be
-/// authorized from inside the handler that parsed it. The same applies
-/// to a row inside an open transaction, which a [`Granting::State`]
-/// holding a separate connection would not find.
+/// request body, so an id named in a payload — one object referring to
+/// another, or a request naming everything it means to touch — can only
+/// be authorized from inside the handler that parsed it.
 ///
-/// This and [`Granted`] are the only ways to reach a policy decision.
-/// The chain underneath is sealed and records nothing, so there is no
-/// third path that authorizes something and leaves no audit row — the
-/// choice of whether a check is auditable was removed rather than
-/// documented.
+/// Like [`Granted`], it *loads* through [`Granting::State`] before
+/// deciding. When the object is already in hand — or lives in a
+/// transaction that state cannot see — reach for [`AuthorizeLoaded`]
+/// instead, which decides without loading.
+///
+/// This, [`Granted`] and [`AuthorizeLoaded`] are the only ways to reach a
+/// policy decision, and all three record through the same path. The chain
+/// underneath is sealed and records nothing, so there is no fourth that
+/// authorizes something and leaves no audit row — the choice of whether a
+/// check is auditable was removed rather than documented.
 ///
 /// ## What reaches the audit event
 ///
@@ -1192,16 +1228,7 @@ pub async fn authorize<T: Chain>(
     state: &T::State,
     extensions: &Extensions,
 ) -> Result<T::Loaded, Refusal<T::Error>> {
-    let ctx =
-        T::Ctx::from_extensions(extensions).ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
-    let checker = extensions
-        .get::<std::sync::Arc<dyn CapabilityChecker>>()
-        .cloned()
-        .ok_or_else(|| {
-            Refusal::Auth(AuthError::PolicyFailed(
-                "capability checker not configured on AuthLayer".into(),
-            ))
-        })?;
+    let (ctx, checker) = caller_and_checker::<T::Ctx, T::Error>(extensions)?;
 
     match T::authorize(key, action, state, &ctx, checker.as_ref()).await {
         Ok(authorized) => {
@@ -1221,6 +1248,210 @@ pub async fn authorize<T: Chain>(
             Err(refusal)
         }
     }
+}
+
+/// Recover the caller and the checker the auth layer put in extensions.
+///
+/// Shared by every door so that a request reaching one without an
+/// [`AuthLayer`](crate::AuthLayer) above it fails the same way whichever
+/// door it was.
+fn caller_and_checker<C: FromAuthExtensions, E>(
+    extensions: &Extensions,
+) -> Result<(C, Arc<dyn CapabilityChecker>), Refusal<E>> {
+    let ctx = C::from_extensions(extensions).ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
+
+    let checker = extensions
+        .get::<Arc<dyn CapabilityChecker>>()
+        .cloned()
+        .ok_or_else(|| {
+            Refusal::Auth(AuthError::PolicyFailed(
+                "capability checker not configured on AuthLayer".into(),
+            ))
+        })?;
+
+    Ok((ctx, checker))
+}
+
+/// Authorize an object the handler already has.
+///
+/// [`Granted`] and [`authorize`] both *load* before they decide, through
+/// [`Granting::State`]. That is right for an id the route names, and
+/// wrong for two cases a handler hits as soon as it authorizes anything
+/// it read out of a request body:
+///
+/// - **The row is not visible to `State`.** It lives in a transaction the
+///   handler has open and has not committed — an object declaring a
+///   relationship to one the same request just wrote. A loader on the
+///   state's own connection would not find it, and the request would be
+///   answered `404` for something it had in hand.
+/// - **The row is already loaded.** Resolving it a second time to decide
+///   about it is a query bought for nothing.
+///
+/// Implemented for every [`Granting`] asset, so there is nothing to write
+/// per asset — the vocabulary in [`Granting::ACTIONS`] and the identity
+/// from [`PolicyResource`] are all this needs, and both already exist.
+///
+/// ```ignore
+/// let folder = find_folder(&txn, tenant, &body.folder)
+///     .await?
+///     .ok_or(Error::NoSuchFolder)?
+///     .authorize_dependency("read", &parts.extensions)
+///     .await?;
+/// ```
+///
+/// ## Which of the two
+///
+/// [`authorize`](Self::authorize) is the whole check, the same one
+/// `Granted<One<R>>` runs: the coarse capability gate, then the instance
+/// check. Reach for it when nothing has gated this route — a handler
+/// authorizing its own subject because no extractor could see it.
+///
+/// [`authorize_dependency`](Self::authorize_dependency) runs the instance
+/// check alone, for an object the *route's own guard* has already cleared
+/// the coarse question for. Re-asking it there is not merely redundant,
+/// it is wrong: a caller who may write a widget naming a folder they may
+/// read would be refused because they may not *list* folders, which is a
+/// different question from the one the route is about.
+///
+/// Both refuse an action absent from [`Granting::ACTIONS`], and both
+/// record — through the same path the guard does, so a decision reached
+/// here is indistinguishable in the trail from one the extractor reached.
+///
+/// ## What reaches the audit event
+///
+/// The same deposit [`authorize`] makes, with the same precedence: the
+/// route's own subject is authorized before the body is parsed, so it is
+/// the one the event names and a dependency checked afterwards does not
+/// displace it. A refusal displaces a grant, because a request that ends
+/// on a denial is about that denial.
+pub trait AuthorizeLoaded: Granting {
+    /// Coarse gate, then instance check, on an object already in hand.
+    ///
+    /// Returns the object, so an unauthorized binding never exists:
+    ///
+    /// ```ignore
+    /// let widget = find_widget(&txn, tenant, name)
+    ///     .await?
+    ///     .authorize("read", &parts.extensions)
+    ///     .await?;
+    /// ```
+    fn authorize(
+        self,
+        action: &'static str,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Self, Refusal<Self::Error>>> + Send;
+
+    /// Instance check only, for an object this route's guard has already
+    /// cleared the coarse question for.
+    ///
+    /// Skips the capability gate *and nothing else* — the action must
+    /// still be one the asset declares, and the policy must still permit
+    /// it on this object. See [the trait docs](Self#which-of-the-two) for
+    /// why the coarse question is the wrong one to ask about a dependency.
+    fn authorize_dependency(
+        self,
+        action: &'static str,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Self, Refusal<Self::Error>>> + Send;
+}
+
+/// Blanket, and therefore the only implementation there can be: an asset
+/// cannot override [`AuthorizeLoaded::authorize`] into something that
+/// decides differently — or does not decide at all — because coherence
+/// leaves no room for a second impl.
+impl<R: Granting> AuthorizeLoaded for R {
+    async fn authorize(
+        self,
+        action: &'static str,
+        extensions: &Extensions,
+    ) -> Result<Self, Refusal<R::Error>> {
+        decide(self, action, extensions, Coarse::Check).await
+    }
+
+    async fn authorize_dependency(
+        self,
+        action: &'static str,
+        extensions: &Extensions,
+    ) -> Result<Self, Refusal<R::Error>> {
+        decide(self, action, extensions, Coarse::Skip).await
+    }
+}
+
+/// Whether the capability gate runs, which is the only thing the two
+/// methods of [`AuthorizeLoaded`] differ by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Coarse {
+    Check,
+    Skip,
+}
+
+/// The body of both [`AuthorizeLoaded`] methods, and the third door onto
+/// a decision — recording through the same path as the other two.
+async fn decide<R: Granting>(
+    resource: R,
+    action: &'static str,
+    extensions: &Extensions,
+    coarse: Coarse,
+) -> Result<R, Refusal<R::Error>> {
+    let (ctx, checker) = caller_and_checker::<R::Ctx, R::Error>(extensions)?;
+
+    match verdict::<R>(&resource, action, &ctx, checker.as_ref(), coarse).await {
+        Ok((declared, entity_id)) => {
+            crate::record::grant(
+                extensions,
+                crate::record::Grant {
+                    event_type: declared.event_type,
+                    action: Cow::Borrowed(action),
+                    resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+                    resource_id: Cow::Owned(entity_id),
+                },
+            );
+            Ok(resource)
+        }
+        Err(refusal) => {
+            record_refusal(&refusal, extensions, ctx.tenant());
+            Err(refusal)
+        }
+    }
+}
+
+/// The decision itself, split out for the same reason the sealed chain is
+/// split from [`authorize`]: this half records nothing, so there is one
+/// place a verdict becomes an audit row rather than one per door.
+///
+/// Hands back the object's Cedar id rather than recomputing it — the
+/// qualified identity the policy actually saw, which is not always what
+/// the handler used to find the row.
+async fn verdict<R: Granting>(
+    resource: &R,
+    action: &'static str,
+    ctx: &R::Ctx,
+    checker: &dyn CapabilityChecker,
+    coarse: Coarse,
+) -> Result<(&'static Action, String), Refusal<R::Error>> {
+    let declared = match coarse {
+        Coarse::Check => gate::<R>(action, ctx, checker).await?,
+        // Still the asset's vocabulary, just not its capability: a
+        // dependency is exempt from the coarse question, not from the
+        // rule that an asset only permits what it declares.
+        Coarse::Skip => declared_action::<R>(action)?,
+    };
+
+    let entity = ResourceEntity::of(resource);
+    let allowed = checker
+        .check_instance(ctx.tenant().unwrap_or(""), ctx.roles(), action, &entity)
+        .await?;
+
+    if !allowed {
+        return Err(Refusal::Denied {
+            action: Cow::Borrowed(action),
+            resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+            resource_id: Cow::Owned(entity.entity_id),
+            reason: "instance denied",
+        });
+    }
+
+    Ok((declared, entity.entity_id))
 }
 
 /// The one place a denial is recorded, whichever door the check came in
