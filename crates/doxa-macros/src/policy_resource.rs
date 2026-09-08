@@ -150,7 +150,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         quote! { __parents.push((#entity, ::std::string::ToString::to_string(&self.#field))); }
     });
 
-    let scoped = scoped_impl(ident, key.as_ref(), scope.as_ref())?;
+    let scoped = scoped_impl(ident, key.as_ref(), scope.as_ref(), &attrs)?;
 
     // Not a field: the tenant is a fact about the request, so there may
     // be no column to read and a nullable one would answer a different
@@ -208,6 +208,7 @@ fn scoped_impl(
     ident: &Ident,
     key: Option<&(Ident, Type)>,
     scope: Option<&Ident>,
+    attrs: &[(String, Ident)],
 ) -> Result<TokenStream> {
     let (key, scope) =
         match (key, scope) {
@@ -241,6 +242,19 @@ fn scoped_impl(
     let key_column = column_variant(key_field);
     let scope_column = column_variant(scope);
 
+    // The attributes a policy may name, paired with the columns they sit
+    // in. Written from the same `#[resource(attr)]` fields that build
+    // `cedar_attrs`, so a policy cannot mention an attribute the filter
+    // half has never heard of.
+    //
+    // An attribute from `attrs_with` is absent by construction: it is a
+    // fact computed about the row rather than a column on it, so there is
+    // nothing to put in a `WHERE` clause and the fallthrough refuses it.
+    let attr_columns = attrs.iter().map(|(key, field)| {
+        let column = column_variant(field);
+        quote!(#key => ::std::option::Option::Some(Column::#column),)
+    });
+
     Ok(quote! {
         #[automatically_derived]
         impl ::doxa::policy::ScopedRow for #ident {
@@ -254,6 +268,17 @@ fn scoped_impl(
             const SCOPE_COLUMN:
                 <Entity as ::doxa::policy::__private::sea_orm::EntityTrait>::Column =
                 Column::#scope_column;
+
+            fn column_for_attr(
+                __attr: &str,
+            ) -> ::std::option::Option<
+                <Entity as ::doxa::policy::__private::sea_orm::EntityTrait>::Column,
+            > {
+                match __attr {
+                    #(#attr_columns)*
+                    _ => ::std::option::Option::None,
+                }
+            }
         }
     })
 }
@@ -542,6 +567,45 @@ mod tests {
         assert!(out.contains("type Key = String"), "{out}");
         assert!(out.contains("Column :: Name"), "{out}");
         assert!(out.contains("Column :: CompanyId"), "{out}");
+    }
+
+    /// The attributes a policy may name resolve to the columns they sit
+    /// in, so a residual mentioning `resource.region` can become a `WHERE`
+    /// clause. Written from the same fields as `cedar_attrs`, which is
+    /// what stops a policy referring to an attribute the filter half
+    /// cannot see.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn cedar_attributes_resolve_to_their_columns() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Connection")]
+            struct Model {
+                #[resource(id, attr, key)]
+                name: String,
+                #[resource(attr = "region")]
+                region_code: String,
+                #[resource(scope)]
+                company_id: String,
+            }
+        });
+
+        assert!(out.contains("fn column_for_attr"), "{out}");
+        assert!(
+            out.contains(r#""name" => :: std :: option :: Option :: Some (Column :: Name)"#),
+            "{out}",
+        );
+        // The Cedar name, not the field name: a renamed attribute has to
+        // resolve by what the policy calls it.
+        assert!(
+            out.contains(
+                r#""region" => :: std :: option :: Option :: Some (Column :: RegionCode)"#
+            ),
+            "{out}",
+        );
+        // The scope column is not an attribute and gets no entry: a policy
+        // naming it would be filtering on the tenant, which every lookup
+        // already confines.
+        assert!(!out.contains("Some (Column :: CompanyId)"), "{out}");
     }
 
     /// The route's key and the Cedar id answer different questions, so a

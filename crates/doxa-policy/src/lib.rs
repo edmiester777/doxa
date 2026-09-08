@@ -25,6 +25,7 @@
 //! | [`uid`] | Cedar entity UID builder with input validation |
 //! | [`resource`] | [`PolicyResource`] — instance-level resource identity |
 //! | `scoped` | `ScopedRow` — SeaORM lookup confined to an owner, and `DbLoadError` for when it fails (needs `sea-orm`; not linked, as the module is absent without it) |
+//! | `residual` | `condition_from_residual` — a policy's leftover `when` clause as a SeaORM `Condition`, so a grant is one query rather than a query and a loop (needs `sea-orm`) |
 
 pub mod capability;
 pub mod cedar_core;
@@ -38,6 +39,9 @@ pub mod uid;
 
 #[cfg(feature = "axum")]
 pub mod http;
+
+#[cfg(feature = "sea-orm")]
+pub mod residual;
 
 #[cfg(feature = "sea-orm")]
 pub mod scoped;
@@ -75,6 +79,8 @@ pub use cedar_core::{TenantStoreCache, DEFAULT_TENANT_CACHE_CAPACITY, DEFAULT_TE
 pub use error::AuthError;
 pub use extension::{PolicyExtension, ResourceAccess};
 pub use policy::Policy;
+#[cfg(feature = "sea-orm")]
+pub use residual::condition_from_residual;
 pub use resource::{PolicyResource, ResourceEntity, ResourceIdType};
 pub use router::{AccessDecision, PolicyRouter};
 #[cfg(feature = "sea-orm")]

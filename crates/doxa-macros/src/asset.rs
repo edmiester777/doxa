@@ -8,6 +8,11 @@
 //! Only `ACTIONS` is a fact about this asset, and the attribute takes it
 //! as one word.
 //!
+//! `ctx` and `error` override the profile for the asset that genuinely
+//! differs — a loader answering 409 on an ambiguous name, or a `Scoping`
+//! impl that needs the assembled session to read the policy's residual —
+//! without the rest of the service restating anything.
+//!
 //! ```ignore
 //! #[doxa::asset(profile = AppGrants, actions = WidgetAction)]
 //! pub struct WidgetByName;
@@ -44,6 +49,8 @@ struct Args {
     by_primary_key: bool,
     /// Loader failure, overriding the profile's.
     error: Option<Type>,
+    /// Caller shape, overriding the profile's.
+    ctx: Option<Type>,
     /// A loader to call instead of `ScopedRow::load_scoped`.
     load_with: Option<Path>,
     /// `list = tenant`: emit a `Scoping` confined to the caller's tenant.
@@ -87,13 +94,15 @@ impl Parse for Args {
                 out.list = Some(which);
             } else if key == "error" {
                 out.error = Some(input.parse()?);
+            } else if key == "ctx" {
+                out.ctx = Some(input.parse()?);
             } else if key == "load_with" {
                 out.load_with = Some(input.parse()?);
             } else {
                 return Err(syn::Error::new(
                     key.span(),
                     "unknown `asset` option; expected `profile`, `actions`, `row`, `key`, \
-                     `list`, `error` or `load_with`",
+                     `list`, `ctx`, `error` or `load_with`",
                 ));
             }
 
@@ -162,6 +171,17 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let error = match &args.error {
         Some(error) => quote!(#error),
         None => quote!(<#profile as ::doxa::auth::GrantProfile>::Error),
+    };
+
+    // The caller shape is the profile's, and overridable for the one asset
+    // that needs a different one. A `Scoping` impl reading the policy's
+    // residual needs the assembled session rather than tenant + roles, and
+    // without this the whole application would have to switch context types
+    // to give one asset a filter — or that asset would drop the attribute
+    // and write `Granting` out by hand.
+    let ctx = match &args.ctx {
+        Some(ctx) => quote!(#ctx),
+        None => quote!(<#profile as ::doxa::auth::GrantProfile>::Ctx),
     };
 
     // The loader is the one generated item that needs the ORM, so it is
@@ -256,7 +276,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         impl ::doxa::auth::Granting for #name {
             type Row = #row;
             type Key = #key;
-            type Ctx = <#profile as ::doxa::auth::GrantProfile>::Ctx;
+            type Ctx = #ctx;
             type State = <#profile as ::doxa::auth::GrantProfile>::State;
             type Error = #error;
 
@@ -317,6 +337,38 @@ mod tests {
         );
         assert!(
             out.contains("< WidgetAction as :: doxa :: auth :: ActionTable > :: ACTIONS"),
+            "{out}",
+        );
+    }
+
+    /// The one asset that needs a different caller shape says so, and the
+    /// rest of the application keeps the profile's.
+    ///
+    /// `Scoping` reading the policy's residual needs the assembled session,
+    /// not tenant + roles. Without an override, giving one asset a filter
+    /// would mean changing the context type of every asset in the service.
+    #[test]
+    fn an_asset_may_override_the_callers_shape() {
+        let out = expand_ok(
+            quote!(
+                profile = AppGrants,
+                actions = WidgetAction,
+                ctx = std::sync::Arc<AuthContext<Session, Claims>>,
+                load_with = load
+            ),
+            quote!(
+                pub struct Source;
+            ),
+        );
+
+        assert!(
+            out.contains("type Ctx = std :: sync :: Arc < AuthContext < Session , Claims > >"),
+            "{out}",
+        );
+        // The rest still comes off the profile: an override is one item,
+        // not an escape from the profile.
+        assert!(
+            out.contains("type State = < AppGrants as :: doxa :: auth :: GrantProfile > :: State"),
             "{out}",
         );
     }

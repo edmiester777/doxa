@@ -23,7 +23,7 @@
 use std::future::Future;
 
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, PrimaryKeyTrait,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, PrimaryKeyTrait,
     QueryFilter, Select, Value,
 };
 
@@ -72,19 +72,70 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
     /// Column carrying the owner every lookup is confined to.
     const SCOPE_COLUMN: <Self::Entity as EntityTrait>::Column;
 
+    /// The column a policy means by `resource.<attr>`.
+    ///
+    /// A residual is written against the Cedar attributes the row exposes
+    /// — `resource.region == "us"` — and turning one into a `WHERE` clause
+    /// needs the column behind that name. `#[derive(PolicyResource)]`
+    /// writes this from the same `#[resource(attr)]` fields it builds
+    /// [`cedar_attrs`](crate::PolicyResource::cedar_attrs) from, so the
+    /// attributes a policy can mention and the columns they resolve to are
+    /// one list rather than two that drift.
+    ///
+    /// The default answers `None` for everything, which
+    /// [`condition_from_residual`](crate::condition_from_residual) treats
+    /// as untranslatable and therefore refuses. That is the safe default:
+    /// a row whose attributes have no columns cannot have a policy
+    /// condition pushed into its query, and the alternative to refusing is
+    /// a filter *wider* than the policy authorized.
+    fn column_for_attr(_attr: &str) -> Option<<Self::Entity as EntityTrait>::Column> {
+        None
+    }
+
     /// One row, or `None` if `scope` holds no such key.
     ///
     /// Built on [`scoped`](Self::scoped) rather than filtering from
     /// scratch, so the instance lookup cannot drift from the listing.
-    fn load_scoped(
+    ///
+    /// Generic over the connection rather than taking a
+    /// [`DatabaseConnection`](sea_orm::DatabaseConnection), so the same
+    /// derived lookup serves a handler that has a transaction open. That is
+    /// not a convenience: a pool cannot see rows the request has written
+    /// and not committed, so a loader pinned to one would answer `None` for
+    /// an object the caller is holding — and the route would 404 on
+    /// something it just created. Every lookup here takes `&C` for that
+    /// reason.
+    fn load_scoped<C: ConnectionTrait>(
         key: Self::Key,
-        db: &DatabaseConnection,
+        db: &C,
         scope: impl Into<Value> + Send,
     ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
         // Built outside the async block so the future captures a plain
         // `Select` rather than the `impl Into<Value>` type parameter.
         let query = Self::scoped(scope).filter(Self::KEY_COLUMN.eq(key));
         async move { query.one(db).await }
+    }
+
+    /// Every row in `scope` whose key is one of `keys`, in one query.
+    ///
+    /// The lookup a request naming several objects at once wants — a body
+    /// referring to three sources by name. Done a key at a time it is three
+    /// round trips and, if each one is then authorized on its own, three
+    /// policy evaluations; done here it is one `IN` and one filter.
+    ///
+    /// Absent keys are simply absent from the result: this answers *which
+    /// of these exist in scope*, and the caller compares what came back
+    /// against what it asked for. Confinement is [`scoped`](Self::scoped)'s,
+    /// so a key belonging to another owner is missing for the same reason a
+    /// key that does not exist is — the caller cannot tell which, and that
+    /// is the property this trait exists to hold.
+    fn load_all_scoped<C: ConnectionTrait>(
+        keys: impl IntoIterator<Item = Self::Key> + Send,
+        db: &C,
+        scope: impl Into<Value> + Send,
+    ) -> impl Future<Output = Result<Vec<Self>, DbErr>> + Send {
+        let query = Self::scoped(scope).filter(Self::KEY_COLUMN.is_in(keys));
+        async move { query.all(db).await }
     }
 
     /// One row by primary key, still confined to `scope`.
@@ -102,9 +153,9 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
     /// and that difference confirms the row exists. Every lookup on this
     /// trait takes the scope for that reason, and this one is here so the
     /// id route does not have to be written out to get it.
-    fn load_by_id(
+    fn load_by_id<C: ConnectionTrait>(
         id: PrimaryKeyOf<Self>,
-        db: &DatabaseConnection,
+        db: &C,
         scope: impl Into<Value> + Send,
     ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
         let query = Self::Entity::find_by_id(id).filter(Self::SCOPE_COLUMN.eq(scope));
