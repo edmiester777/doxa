@@ -518,7 +518,7 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[derive(Actions)]
-/// pub enum SourceAction {
+/// pub enum WidgetAction {
 ///     /// List and view data source definitions.
 ///     #[action(event = EventType::DataAccess.as_static())]
 ///     Read,
@@ -531,7 +531,7 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 /// }
 ///
 /// impl Granting for Source {
-///     const ACTIONS: &'static [Action] = SourceAction::ACTIONS;
+///     const ACTIONS: &'static [Action] = WidgetAction::ACTIONS;
 ///     // …
 /// }
 /// ```
@@ -583,7 +583,7 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// vocabulary is a fact about this asset.
 ///
 /// ```ignore
-/// #[doxa::asset(profile = AppGrants, actions = SourceAction)]
+/// #[doxa::asset(profile = AppGrants, actions = WidgetAction)]
 /// pub struct Source { /* … */ }
 /// ```
 ///
@@ -594,8 +594,8 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// match:
 ///
 /// ```ignore
-/// #[doxa::asset(row = Source, key = Uuid, profile = AppGrants, actions = SourceAction)]
-/// pub struct SourceById;
+/// #[doxa::asset(row = Source, key = Uuid, profile = AppGrants, actions = WidgetAction)]
+/// pub struct WidgetById;
 /// ```
 ///
 /// | Option | Default |
@@ -603,13 +603,23 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// | `profile` | required — the application's `GrantProfile` |
 /// | `actions` | required — the enum deriving `Actions` |
 /// | `row` | `Self` |
-/// | `key` | `<Row as ScopedRow>::Key` |
+/// | `key` | `<Row as ScopedRow>::Key`; `key = pk` for the primary key |
+/// | `list` | none — `list = tenant` adds a tenant-confined `Scoping` |
 /// | `error` | the profile's |
 /// | `load_with` | `ScopedRow::load_scoped`, confined to the caller's tenant |
 ///
-/// Listing stays hand-written: `Scoping::scope` reads the session the
-/// policy assembled, which is the one part of an asset that is genuinely
-/// the application's logic rather than its wiring.
+/// `key = pk` is a word rather than a type because it selects a different
+/// lookup, not just a different key: `ScopedRow::load_by_id`, which keeps
+/// the scope filter that a hand-written `Entity::find_by_id(id).one(db)`
+/// silently drops.
+///
+/// `list = tenant` names its filter for the same reason. The generated
+/// `Scoping` confines the listing to the caller's tenant and applies **no
+/// other policy condition** — it is not the policy's residual, which is
+/// per-row and which this cannot see. An asset that needs the residual
+/// writes `Scoping` itself, and without `list` there is no impl at all, so
+/// `Granted<Many<…>>` over an asset that never asked to be listed does not
+/// compile.
 #[proc_macro_attribute]
 pub fn asset(args: TokenStream, item: TokenStream) -> TokenStream {
     asset::expand(args.into(), item.into())

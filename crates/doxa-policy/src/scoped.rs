@@ -23,9 +23,13 @@
 use std::future::Future;
 
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, QueryFilter, Select,
-    Value,
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, PrimaryKeyTrait,
+    QueryFilter, Select, Value,
 };
+
+/// The value a row's primary key takes, for [`ScopedRow::load_by_id`].
+pub type PrimaryKeyOf<R> =
+    <<<R as ScopedRow>::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType;
 
 /// A row one key resolves to, within one scope column.
 ///
@@ -83,6 +87,30 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
         async move { query.one(db).await }
     }
 
+    /// One row by primary key, still confined to `scope`.
+    ///
+    /// The sibling of [`load_scoped`](Self::load_scoped), for the route
+    /// that addresses the same table by its id rather than by
+    /// [`KEY_COLUMN`](Self::KEY_COLUMN).
+    ///
+    /// It exists because the obvious hand-written version is wrong in a
+    /// way that passes every test. `Entity::find_by_id(id).one(db)` is
+    /// what a primary-key lookup looks like, and it ignores the scope
+    /// entirely: a caller naming another tenant's id gets that tenant's
+    /// row. An instance check will usually still refuse it — but by then
+    /// the route has answered `403` where it would have answered `404`,
+    /// and that difference confirms the row exists. Every lookup on this
+    /// trait takes the scope for that reason, and this one is here so the
+    /// id route does not have to be written out to get it.
+    fn load_by_id(
+        id: PrimaryKeyOf<Self>,
+        db: &DatabaseConnection,
+        scope: impl Into<Value> + Send,
+    ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
+        let query = Self::Entity::find_by_id(id).filter(Self::SCOPE_COLUMN.eq(scope));
+        async move { query.one(db).await }
+    }
+
     /// Every row `scope` owns, as a `Select` the caller pages.
     fn scoped(scope: impl Into<Value>) -> Select<Self::Entity> {
         Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope))
@@ -106,8 +134,8 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
 ///     type Error = DbLoadError;
 /// }
 ///
-/// #[doxa::asset(row = Model, profile = AppGrants, actions = SourceAction)]
-/// pub struct SourceByName;
+/// #[doxa::asset(row = Model, profile = AppGrants, actions = WidgetAction)]
+/// pub struct WidgetByName;
 /// ```
 ///
 /// The loader `#[asset]` writes ends in `?`, so the only requirement this
