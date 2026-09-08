@@ -17,7 +17,10 @@
 //!   like any `#[capability]` and namable as `Granted<Cap<…>>`.
 //! - One `Action` const per variant, registered so `doxa::auth::actions()`
 //!   can answer without a hand-maintained list.
-//! - `SourceAction::ACTIONS`, the table `Granting::ACTIONS` wants.
+//! - `impl ActionTable for SourceAction`, holding the table
+//!   `Granting::ACTIONS` wants, plus `SourceAction::ACTIONS` forwarding to
+//!   it. The inherent const is what the one-line wiring names; the trait is
+//!   what code generic over a vocabulary can bound on.
 //! - `SourceAction::ALL` and `as_static`, so the enum is usable as a
 //!   value too.
 //!
@@ -306,10 +309,19 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
         #(#consts)*
 
+        impl ::doxa::auth::ActionTable for #enum_name {
+            const ACTIONS: &'static [::doxa::auth::Action] = &[#(#rows),*];
+        }
+
         impl #enum_name {
             /// Every action this asset permits, as `Granting::ACTIONS`
             /// takes it.
-            pub const ACTIONS: &'static [::doxa::auth::Action] = &[#(#rows),*];
+            ///
+            /// The same table as `ActionTable::ACTIONS` and not a copy of
+            /// it, spelled without the trait so the common wiring needs no
+            /// import.
+            pub const ACTIONS: &'static [::doxa::auth::Action] =
+                <Self as ::doxa::auth::ActionTable>::ACTIONS;
 
             /// Every variant, in declaration order.
             pub const ALL: &'static [Self] = &[#(#all),*];
@@ -630,6 +642,36 @@ mod tests {
         assert!(
             widgets.contains("_DOXA_ACTION_WidgetAction_Read"),
             "{widgets}"
+        );
+    }
+
+    /// The table lands in the trait impl, and the inherent const forwards
+    /// to it rather than repeating the array. Two arrays would be two
+    /// tables, and a generic caller and a direct one could disagree about
+    /// what the asset permits.
+    #[test]
+    fn the_table_is_a_trait_impl_the_inherent_const_forwards_to() {
+        let out = expand_ok(quote! {
+            pub enum SourceAction { Read }
+        });
+
+        assert!(
+            out.contains("impl :: doxa :: auth :: ActionTable for SourceAction"),
+            "{out}",
+        );
+        assert!(
+            out.contains(
+                "pub const ACTIONS : & 'static [:: doxa :: auth :: Action] = \
+                 < Self as :: doxa :: auth :: ActionTable > :: ACTIONS"
+            ),
+            "{out}",
+        );
+        // The rows are gathered into an array exactly once. A second one
+        // would be the inherent const having been left as a copy.
+        assert_eq!(
+            out.matches("& [_DOXA_ACTION_SourceAction_Read]").count(),
+            1,
+            "{out}",
         );
     }
 

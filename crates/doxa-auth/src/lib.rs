@@ -85,9 +85,9 @@ pub use extractors::{Auth, BearerScheme, Require, SchemeName};
 pub use granted::actions;
 #[cfg(feature = "axum")]
 pub use granted::{
-    authorize, declares, distinct, Action, AuthorizeLoaded, Cap, DeclaredAction, DefaultSite,
-    Denial, FromAuthExtensions, GrantSite, Granted, Granting, KeyError, KeySegment, Many, NoState,
-    One, Refusal, RouteKey, Scoping, Subject, SubjectForm,
+    authorize, declares, distinct, Action, ActionTable, AuthorizeLoaded, Cap, DeclaredAction,
+    DefaultSite, Denial, FromAuthExtensions, GrantSite, Granted, Granting, KeyError, KeySegment,
+    Many, NoState, One, Refusal, RouteKey, Scoping, Subject, SubjectForm,
 };
 #[cfg(feature = "axum")]
 pub use layer::{AuthLayer, AuthService};

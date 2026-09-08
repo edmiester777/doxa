@@ -15,7 +15,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use doxa::audit::EventType;
 use doxa::auth::{
-    Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
+    Action, ActionTable, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
 };
 use doxa::policy::{AuthError, Capability, CapabilityChecker, Capable, ResourceEntity, ResourceId};
 use doxa::{capability, Actions, PolicyResource, ToSchema};
@@ -193,6 +193,31 @@ fn the_table_carries_the_capability_and_the_category() {
 #[test]
 fn the_generated_table_declares_each_action_once() {
     assert!(doxa::auth::distinct(SourceAction::ACTIONS));
+}
+
+/// The vocabulary is reachable without naming the enum, which is what the
+/// bound is for: a startup seeding Cedar's action entities, or anything
+/// else downstream of an asset it was handed rather than one it imports.
+///
+/// The inherent const is the same table and not a copy — `assert!(ptr::eq)`
+/// rather than `assert_eq!`, because two arrays holding equal rows would
+/// let a generic caller and a direct one disagree later.
+#[test]
+fn the_vocabulary_is_reachable_through_the_bound() {
+    fn names<A: ActionTable>() -> Vec<&'static str> {
+        A::ACTIONS.iter().map(|action| action.name).collect()
+    }
+
+    assert_eq!(
+        names::<SourceAction>(),
+        ["read", "delete", "run_query", "archive", "ping"],
+        "declaration order, which is the order the gate scans",
+    );
+
+    assert!(std::ptr::eq(
+        <SourceAction as ActionTable>::ACTIONS,
+        SourceAction::ACTIONS,
+    ));
 }
 
 /// The same check on a hand-written table, which no derive vets. Two
