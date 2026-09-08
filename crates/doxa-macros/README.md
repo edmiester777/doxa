@@ -172,6 +172,7 @@ pub struct Model {
 | `id_with` | Method producing the Cedar id, when no single field is it |
 | `attrs_with` | Method producing attributes no field backs |
 | `tenant_parent` | Entity type this resource is `in` by virtue of the request rather than of any column |
+| `filter` | A condition every query carries on top of the scope — repeatable, `AND`ed (needs `sea-orm`) |
 
 | Field role | Description |
 |------------|-------------|
@@ -179,9 +180,27 @@ pub struct Model {
 | `attr` | Expose as `resource.<field>` to policies |
 | `parent = "Type"` | This field holds the id of a parent entity |
 | `key` | The value a route's key segment matches (needs `sea-orm`) |
+| `key(Name, …)` | This column takes part in the named lookups (needs `sea-orm`) |
 | `scope` | The column every query is confined to (needs `sea-orm`) |
 
 With the `sea-orm` feature, `scope` emits a `ScopedTable` impl — the confinement column, plus the column behind each Cedar attribute so a policy residual can be translated — and `key` adds `ScopedRow` on top of it. Marking only `scope` is a table nothing addresses by a column: it can still be listed, still have a residual read against it, and still take `key = pk`, because a primary key belongs to the table rather than to a route. The key and the Cedar id are deliberately independent, so a row addressed by `{id}` and the same row addressed by `{name}` stay one Cedar entity reached two ways.
+
+Bare `key` is the *unnamed* lookup, and there is one per struct. A row reached three ways runs out of it, so name them instead — a column may carry several names, and several columns may carry one, which makes a composite key and a column serving two routes the same declaration:
+
+```rust
+#[resource(entity_type = "Version", filter = Column::DeletedAt.is_null())]
+pub struct Model {
+    #[sea_orm(primary_key)]                         pub id: Uuid,
+    #[resource(id, key(FindByDataset, FindByPair))] pub dataset: String,
+    #[resource(key(FindByPair))]                    pub version: i64,
+    #[resource(scope)]                              pub tenant_id: String,
+    pub deleted_at: Option<DateTimeUtc>,
+}
+```
+
+Each name emits a `Lookup` marker; a composite also gets a key struct — `FindByPairKey`, with a field per column and the `RouteKey` impl that parses it out of the route's path segments. A struct rather than a tuple, because every hand-written call site builds the key by position and two segments of the same type transpose silently. Route parsing stays positional in declaration order, since path segments are. A single-column lookup keys on the bare scalar.
+
+`filter` is spliced rather than interpreted, so it is whatever SeaORM accepts. It hangs on the table, which is what makes it unforgettable: the key lookup, the id lookup, the listing and the residual filter all inherit it, and a soft delete applied to three of those four is not a compile error but a deleted row coming back on the fourth.
 
 ### `#[derive(Actions)]`
 
@@ -244,6 +263,7 @@ pub struct WidgetById;
 | `profile` | The application's `GrantProfile`, supplying `Ctx` / `State` / `Source` / `Error` |
 | `actions` | The `#[derive(Actions)]` enum holding the vocabulary |
 | `key` | Route key type, or `pk` for the row's own identifier (default: `<Row as FetchByKey<State>>::Key`) |
+| `with` | A named `Lookup` to reach the row through — carries the row and the key, so `row` is implied |
 | `load_with` | A loader to call instead of `FetchByKey::fetch` |
 | `source` | Where the loader's state comes from, and therefore what it is (default: the profile's) |
 | `ctx` / `error` | Override the profile, for the one asset that genuinely differs |
@@ -252,6 +272,15 @@ pub struct WidgetById;
 `key = pk` rather than a hand-written primary-key loader, because the obvious version is wrong in a way that passes every test: `Entity::find_by_id(id).one(db)` drops the tenant filter, and an instance check that then refuses it has already answered `403` where it would have answered `404` — confirming the row exists.
 
 It calls `FetchById`, not `FetchByKey`, so it is reachable from a row marked `#[resource(scope)]` and nothing else. That is the case it most needs to cover: a table whose name route resolves through logic has no key column to mark, and would otherwise be left writing out the very lookup this exists to replace.
+
+`with` is for the row reached more ways than `FetchByKey` and `FetchById` can spell between them. Those two are facets of the row, so a row gets one of each; a version addressed by uuid, by name and by `(dataset, version)` runs out. `#[resource(key(FindByPair))]` emits a marker per named way in, and `with = FindByPair` selects one — carrying the row and the key with it, so nothing else is restated:
+
+```rust
+#[asset(with = FindByPair, profile = AppGrants, actions = VersionAction)]
+pub struct VersionByPair;
+```
+
+A named lookup is handed the same `&str` scope as an unnamed one, so it buys a second way in rather than a way out. Reach for it before `load_with`, which does not.
 
 `load_with` is the same trade one level up, and the difference is one argument. `FetchByKey::fetch` is handed a `&str` scope and nothing else — that is the guarantee, not a thin signature, because a lookup that cannot see the caller cannot ignore the caller's tenant. `load_with` is handed the whole `Ctx`, which is what makes a role-dependent lookup expressible *and* what makes confinement yours to write.
 

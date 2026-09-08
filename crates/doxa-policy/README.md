@@ -156,6 +156,28 @@ Every fetch takes the scope and every implementation owes it — a key belonging
 
 The three-way split is deliberate: a key is a fact about a *route*, an id and a subset are facts about the *collection*. A row addressed by no key column still has an owner, so it implements `FetchById` and `FetchSubset` and is refused, at compile time, only for the route it cannot serve.
 
+### When a row has more ways in than that
+
+Those three are facets of a row, so a row gets one of each. A dataset version has three ways in — a uuid, a dataset name, and a `(dataset, version)` pair — and the surplus used to become an `#[asset(load_with = …)]`, which is the one door that gives up the scope guarantee. So the row with the most ways in was the row most likely to lose it.
+
+`Lookup` makes each one a named type instead. `Self` is a marker carrying the row, the key and the query together, and `fetch` takes the same `&str` scope and nothing else that `FetchByKey` does — a second way in, not a way out:
+
+```rust
+use doxa_policy::fetch::Lookup;
+
+impl Lookup<Catalog> for FindByPair {
+    type Row = Version;
+    type Key = FindByPairKey;
+    type Error = Infallible;
+
+    async fn fetch(key: FindByPairKey, src: &Catalog, scope: &str)
+        -> Result<Option<Version>, Infallible>
+    { /* … confined to `scope`, as every fetch is */ }
+}
+```
+
+Reach for it when you run out of the three, not before.
+
 ### And in SQL, where most rows are
 
 Behind the `sea-orm` feature, two traits cover the half of authorization that happens in SQL. They are one *answer* to the above rather than the question — `fetch_from_scoped!` bridges them, and `#[derive(PolicyResource)]` emits it.
@@ -185,6 +207,19 @@ let rows = Model::load_all_scoped(names, &txn, "acme").await?;   // one IN, one 
 ```
 
 They are separate because a scope is a fact about the *table* and a key is a fact about a *route*: two routes reach one table by different keys, and a table addressed by no column at all still has an owner. Such a table can still be listed, and still be reached by id — a primary key belongs to the table, so `load_by_id` sits on `ScopedTable` and asks nothing of `KEY_COLUMN`.
+
+`scoped_lookup!` writes a named `Lookup` over the same table, for the ways in that `ScopedRow`'s single key column cannot spell. A composite gets a key struct with a field per column, because every hand-written call site builds the key by position and two segments of the same type transpose silently:
+
+```rust
+doxa_policy::scoped_lookup!(pub FindByPair as FindByPairKey for Model {
+    dataset: String => Column::Dataset,
+    version: i64    => Column::Version,
+});
+
+let key = FindByPairKey { dataset: "sales".into(), version: 3 };
+```
+
+`ScopedTable::table_condition` is a condition every query carries on top of the scope — the soft-delete tombstone being the case it exists for. It hangs on the table so the key lookup, the id lookup, the listing and the residual filter all inherit it; applied by hand to three of those four, the symptom is not a compile error but a deleted row coming back on the fourth. `#[derive(PolicyResource)]` writes it from `#[resource(filter = …)]`, splicing the expression rather than interpreting it.
 
 `condition_from_residual` closes the loop. When a policy's `when` clause cannot be fully evaluated — because it names an attribute of a resource that was withheld — Cedar returns a residual, and this turns it into a `Condition` the query carries:
 
@@ -221,7 +256,9 @@ The column behind each attribute comes from `ScopedTable::column_for_attr`, whic
 | `TenantStoreCache` | Per-tenant parsed policy + entity cache, bounded and TTL'd |
 | `Fetch` / `FetchByKey` / `FetchById` | The scoped lookups a route needs, in terms no backend owns |
 | `FetchSubset` | The subset of a collection one scope owns, as that collection's queries take it |
+| `Lookup` | One *named* way into a row, for the row that has more ways in than the three above |
 | `ScopedTable` / `ScopedRow` | The scope column a query is confined to, and the key a route reaches one row by (`sea-orm`) |
+| `scoped_lookup!` | A named `Lookup` over a `ScopedTable`, with a key struct for a composite (`sea-orm`) |
 | `condition_from_residual` | A policy's leftover `when` clause as a SeaORM `Condition` (`sea-orm`) |
 | `DbLoadError` | A load that failed for a reason the caller had nothing to do with (`sea-orm`) |
 

@@ -10,6 +10,12 @@
 //! Only `ACTIONS` is a fact about this asset, and the attribute takes it
 //! as one word.
 //!
+//! `with` names a [`Lookup`] instead — one of the markers
+//! `#[resource(key(Name))]` emits, for the row reached more ways than
+//! `FetchByKey` and `FetchById` can spell between them. A marker carries
+//! its row and its key, so `with = FindByPair` needs no `row =` beside it
+//! and two assets over one row cannot come to name different rows.
+//!
 //! `ctx`, `error` and `source` override the profile for the asset that
 //! genuinely differs — a loader answering 409 on an ambiguous name, a
 //! `Scoping` impl that needs the assembled session to read the policy's
@@ -63,6 +69,7 @@
 //! [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
 //! [`FetchByKey`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.FetchByKey.html
 //! [`FetchById`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.FetchById.html
+//! [`Lookup`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.Lookup.html
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -93,6 +100,9 @@ struct Args {
     /// Where the loader's state comes from, overriding the profile's. The
     /// state follows it, so `source = Extension<Txn>` is also `State = Txn`.
     source: Option<Type>,
+    /// A named `Lookup` to reach the row through, rather than the row's
+    /// own unnamed one. Carries the row with it, so `row` is implied.
+    with: Option<Path>,
     /// A loader to call instead of the row's own fetch.
     load_with: Option<Path>,
     /// `list = tenant`: emit a `Scoping` confined to the caller's tenant.
@@ -140,13 +150,15 @@ impl Parse for Args {
                 out.ctx = Some(input.parse()?);
             } else if key == "source" {
                 out.source = Some(input.parse()?);
+            } else if key == "with" {
+                out.with = Some(input.parse()?);
             } else if key == "load_with" {
                 out.load_with = Some(input.parse()?);
             } else {
                 return Err(syn::Error::new(
                     key.span(),
                     "unknown `asset` option; expected `profile`, `actions`, `row`, `key`, \
-                     `list`, `ctx`, `source`, `error` or `load_with`",
+                     `with`, `list`, `ctx`, `source`, `error` or `load_with`",
                 ));
             }
 
@@ -192,11 +204,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         )
     })?;
 
-    let row = match &args.row {
-        Some(row) => quote!(#row),
-        None => quote!(Self),
-    };
-
     if args.by_primary_key {
         if let Some(key) = &args.key {
             return Err(syn::Error::new(
@@ -206,11 +213,35 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     }
 
+    // Both are answers to "how is this row reached", and a descriptor has
+    // one way in. Silently preferring either would mean a declaration that
+    // names a lookup and does not use it.
+    if let (Some(with), Some(_)) = (&args.with, &args.load_with) {
+        return Err(syn::Error::new(
+            with.span(),
+            "`with` and `load_with` are two answers to how this asset loads: `with` names a \
+             lookup that already knows the query, `load_with` replaces it entirely",
+        ));
+    }
+    if let Some(with) = &args.with {
+        if args.by_primary_key {
+            return Err(syn::Error::new(
+                with.span(),
+                "`with` names the lookup, and a lookup already says which columns it matches: \
+                 `key = pk` would be a second, different way in",
+            ));
+        }
+    }
+
     // The source and the state move together: naming a source is naming
     // where the loader's handle comes from, and the handle it yields is
     // then what the loader gets. Letting them be set apart would allow a
     // profile whose `State` no source produces, which is a type error
     // stated in two places instead of one.
+    //
+    // Resolved before the row, because a named lookup is reached *through*
+    // the state — one lookup serves every connection type — and carries the
+    // row with it.
     let (source, state) = match &args.source {
         Some(source) => (
             quote!(#source),
@@ -222,10 +253,22 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         ),
     };
 
-    let key = match (&args.key, args.by_primary_key) {
-        (Some(key), _) => quote!(#key),
-        (None, true) => quote!(<#row as ::doxa::policy::FetchById<#state>>::Id),
-        (None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::Key),
+    // A marker means "this row, by these columns", so naming one is naming
+    // the row too — and two lookups over one row cannot come to disagree
+    // about which row that is. An explicit `row` still wins, for the
+    // descriptor whose lookup produces a type it wants to call something
+    // else.
+    let row = match (&args.row, &args.with) {
+        (Some(row), _) => quote!(#row),
+        (None, Some(with)) => quote!(<#with as ::doxa::policy::Lookup<#state>>::Row),
+        (None, None) => quote!(Self),
+    };
+
+    let key = match (&args.key, &args.with, args.by_primary_key) {
+        (Some(key), _, _) => quote!(#key),
+        (None, Some(with), _) => quote!(<#with as ::doxa::policy::Lookup<#state>>::Key),
+        (None, None, true) => quote!(<#row as ::doxa::policy::FetchById<#state>>::Id),
+        (None, None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::Key),
     };
 
     let error = match &args.error {
@@ -261,10 +304,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             // `key = pk` on a row that declares no key column: an
             // identifier belongs to the collection, so the id route asks
             // nothing of `#[resource(key)]`.
-            let lookup = if args.by_primary_key {
-                quote!(<#row as ::doxa::policy::FetchById<#state>>::fetch_by_id)
-            } else {
-                quote!(<#row as ::doxa::policy::FetchByKey<#state>>::fetch)
+            let lookup = match (&args.with, args.by_primary_key) {
+                (Some(with), _) => quote!(<#with as ::doxa::policy::Lookup<#state>>::fetch),
+                (None, true) => quote!(<#row as ::doxa::policy::FetchById<#state>>::fetch_by_id),
+                (None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::fetch),
             };
             quote! {
                 async fn load(
@@ -674,6 +717,99 @@ mod tests {
             "{out}",
         );
         assert!(!out.contains(":: fetch (key"), "{out}");
+    }
+
+    /// A marker means "this row, by these columns", so naming a lookup
+    /// names the row too — and the key comes off the same place. That is
+    /// what leaves `with = …` as the entire declaration.
+    #[test]
+    fn with_takes_the_row_and_the_key_off_the_lookup() {
+        let out = expand_ok(
+            quote!(
+                with = FindByPair,
+                profile = AppGrants,
+                actions = VersionAction
+            ),
+            quote!(
+                pub struct VersionByPair;
+            ),
+        );
+
+        assert!(
+            out.contains("type Row = < FindByPair as :: doxa :: policy :: Lookup <"),
+            "{out}",
+        );
+        assert!(
+            out.contains("type Key = < FindByPair as :: doxa :: policy :: Lookup <"),
+            "{out}",
+        );
+        assert!(out.contains(":: fetch (key , state , scope)"), "{out}",);
+        // Still confined: `with` changes which columns are matched, not
+        // whether the caller's tenant is.
+        assert!(out.contains("tenant (ctx)"), "{out}");
+    }
+
+    /// Both are answers to "how is this row reached", and silently
+    /// preferring one would mean a declaration naming a lookup it never
+    /// uses.
+    #[test]
+    fn with_and_load_with_together_are_refused() {
+        let message = expand_err(
+            quote!(
+                with = FindByPair,
+                load_with = find_it,
+                profile = AppGrants,
+                actions = VersionAction
+            ),
+            quote!(
+                pub struct VersionByPair;
+            ),
+        );
+
+        assert!(message.contains("two answers"), "{message}");
+    }
+
+    /// A lookup already says which columns it matches, so `key = pk` beside
+    /// it is a second and different way in.
+    #[test]
+    fn with_and_key_pk_together_are_refused() {
+        let message = expand_err(
+            quote!(
+                with = FindByPair,
+                key = pk,
+                profile = AppGrants,
+                actions = VersionAction
+            ),
+            quote!(
+                pub struct VersionByPair;
+            ),
+        );
+
+        assert!(message.contains("already says which columns"), "{message}");
+    }
+
+    /// An explicit `row` still wins, for the descriptor whose lookup
+    /// produces a type it wants to call something else.
+    #[test]
+    fn an_explicit_row_wins_over_the_lookups() {
+        let out = expand_ok(
+            quote!(
+                row = Version,
+                with = FindByPair,
+                profile = AppGrants,
+                actions = VersionAction
+            ),
+            quote!(
+                pub struct VersionByPair;
+            ),
+        );
+
+        assert!(out.contains("type Row = Version ;"), "{out}");
+        // The key is still the lookup's: only the row was overridden.
+        assert!(
+            out.contains("type Key = < FindByPair as :: doxa :: policy :: Lookup <"),
+            "{out}",
+        );
     }
 
     /// `key = pk` says what the key is, so a type beside it is a second

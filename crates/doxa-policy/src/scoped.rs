@@ -33,7 +33,7 @@
 use std::future::Future;
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, PrimaryKeyTrait,
+    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, PrimaryKeyTrait,
     QueryFilter, Select, Value,
 };
 
@@ -106,9 +106,36 @@ pub trait ScopedTable: Sized + Send + FromQueryResult {
         None
     }
 
+    /// A condition every query against this table carries, on top of the
+    /// scope.
+    ///
+    /// For a fact about which rows are *real* rather than about who owns
+    /// them — the soft-delete tombstone being the whole of the motivating
+    /// case. `#[derive(PolicyResource)]` writes it from
+    /// `#[resource(live_if_null = …)]`.
+    ///
+    /// It sits here, on the table, because that is what makes it
+    /// unforgettable. A soft delete applied by hand has to be applied in
+    /// four places — the key lookup, the id lookup, the listing, and the
+    /// residual filter — and the failure mode is not a compile error but a
+    /// deleted row that comes back on whichever of the four was missed.
+    /// Every one of those builds on [`scoped`](Self::scoped) or on
+    /// [`load_by_id`](Self::load_by_id), and both fold this in.
+    ///
+    /// `None` — the default — is no extra condition at all, rather than an
+    /// empty [`Condition`], so a table that has no such fact pays nothing
+    /// and its SQL is unchanged.
+    fn table_condition() -> Option<Condition> {
+        None
+    }
+
     /// Every row `scope` owns, as a `Select` the caller pages.
     fn scoped(scope: impl Into<Value>) -> Select<Self::Entity> {
-        Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope))
+        let query = Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope));
+        match Self::table_condition() {
+            Some(condition) => query.filter(condition),
+            None => query,
+        }
     }
 
     /// One row by primary key, still confined to `scope`.
@@ -141,7 +168,14 @@ pub trait ScopedTable: Sized + Send + FromQueryResult {
         db: &C,
         scope: impl Into<Value> + Send,
     ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
+        // Not built on `scoped`, because `find_by_id` is a different
+        // starting `Select` — so [`table_condition`](Self::table_condition)
+        // is folded in here by hand rather than inherited.
         let query = Self::Entity::find_by_id(id).filter(Self::SCOPE_COLUMN.eq(scope));
+        let query = match Self::table_condition() {
+            Some(condition) => query.filter(condition),
+            None => query,
+        };
         async move { query.one(db).await }
     }
 }
@@ -360,6 +394,142 @@ macro_rules! fetch_from_scoped {
                 >,
             > + Send {
                 <$row as $crate::ScopedRow>::load_scoped(key, src, scope.to_owned())
+            }
+        }
+    };
+}
+
+/// Declare a named [`Lookup`](crate::fetch::Lookup) over a
+/// [`ScopedTable`]: one marker type, one key, and the columns it matches.
+///
+/// `#[derive(PolicyResource)]` emits this for every `#[resource(key(Name))]`
+/// on the struct, so a derived row needs nothing. It is exported for the
+/// table whose [`ScopedTable`] impl is hand-written.
+///
+/// The lookup declares the marker as well as the impl, because the two are
+/// one thing — a marker with no impl means nothing, and an impl needs
+/// somewhere to hang. `#[derive(DeriveEntityModel)]` introduces `Entity` and
+/// `Column` beside the model the same way.
+///
+/// ```ignore
+/// // one column: the key is the value, not a one-field struct
+/// doxa_policy::scoped_lookup!(pub FindByName for Model {
+///     name: String => Column::Name,
+/// });
+///
+/// // several: the key is a struct of the same name, declared here too
+/// doxa_policy::scoped_lookup!(pub FindByPair as FindByPairKey for Model {
+///     dataset: String => Column::Dataset,
+///     version: i64    => Column::Version,
+/// });
+///
+/// let key = FindByPairKey { dataset: "sales".into(), version: 3 };
+/// ```
+///
+/// The composite key is a struct rather than a tuple because every
+/// hand-written call site builds it by position, and two segments of the
+/// same type swap silently. `#[derive(PolicyResource)]` additionally writes
+/// the `RouteKey` impl that parses it out of a route's path segments — this
+/// macro does not, because that trait belongs to `doxa-auth` and this crate
+/// does not depend on it.
+///
+/// Every arm builds on [`ScopedTable::scoped`], so the scope filter and any
+/// [`table_condition`](ScopedTable::table_condition) come along and a named
+/// lookup cannot drift from the listing. That is the same reason
+/// [`ScopedRow::load_scoped`] is written that way.
+///
+/// The field names on the left are bindings for the key's parts, and are
+/// there to make the declaration readable rather than to be matched against
+/// anything — `macro_rules` hygiene keeps them from colliding with the
+/// generated function's own `key`, `src` and `scope`, so a column genuinely
+/// called `scope` is fine.
+#[cfg(feature = "sea-orm")]
+#[macro_export]
+macro_rules! scoped_lookup {
+    // One column. Separate arm because a single-segment route key is a
+    // `String`, not a `(String,)` — `RouteKey` is implemented for the
+    // former, and a one-tuple would be a key no route could parse.
+    (
+        $(#[$meta:meta])*
+        $vis:vis $name:ident for $row:ty { $field:ident : $ty:ty => $column:expr $(,)? }
+    ) => {
+        $(#[$meta])*
+        $vis struct $name;
+
+        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::Lookup<C> for $name {
+            type Row = $row;
+            type Key = $ty;
+            type Error = $crate::__private::sea_orm::DbErr;
+
+            fn fetch(
+                key: Self::Key,
+                src: &C,
+                scope: &str,
+            ) -> impl ::core::future::Future<
+                Output = ::core::result::Result<
+                    ::core::option::Option<$row>,
+                    $crate::__private::sea_orm::DbErr,
+                >,
+            > + Send {
+                use $crate::__private::sea_orm::{ColumnTrait as _, QueryFilter as _};
+
+                // Built outside the async block, so the future captures a
+                // plain `Select` rather than the borrow of `scope`.
+                let query = <$row as $crate::ScopedTable>::scoped(scope.to_owned());
+                let $field = key;
+                let query = query.filter($column.eq($field));
+                async move { query.one(src).await }
+            }
+        }
+    };
+    // Several columns. The key is a generated struct with named fields
+    // rather than a tuple: a two-`String` tuple bound the wrong way round
+    // parses cleanly and loads the wrong row, and every hand-written call
+    // site — a job, an `authorize` from inside a handler — builds that
+    // tuple by position. Named fields make the swap unwritable.
+    //
+    // Route parsing stays positional, because path segments are; the
+    // declaration order below is the segment order. What the struct removes
+    // is the hazard everywhere *except* the route.
+    (
+        $(#[$meta:meta])*
+        $vis:vis $name:ident as $key:ident for $row:ty {
+            $($field:ident : $ty:ty => $column:expr),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis struct $name;
+
+        #[doc = ::core::concat!("The key [`", ::core::stringify!($name), "`] matches on.")]
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        $vis struct $key {
+            $(
+                #[allow(missing_docs)]
+                pub $field: $ty,
+            )+
+        }
+
+        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::Lookup<C> for $name {
+            type Row = $row;
+            type Key = $key;
+            type Error = $crate::__private::sea_orm::DbErr;
+
+            fn fetch(
+                key: Self::Key,
+                src: &C,
+                scope: &str,
+            ) -> impl ::core::future::Future<
+                Output = ::core::result::Result<
+                    ::core::option::Option<$row>,
+                    $crate::__private::sea_orm::DbErr,
+                >,
+            > + Send {
+                use $crate::__private::sea_orm::{ColumnTrait as _, QueryFilter as _};
+
+                let query = <$row as $crate::ScopedTable>::scoped(scope.to_owned());
+                let $key { $($field,)+ } = key;
+                let query = query $(.filter($column.eq($field)))+;
+                async move { query.one(src).await }
             }
         }
     };

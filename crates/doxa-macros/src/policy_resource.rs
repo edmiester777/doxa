@@ -28,13 +28,29 @@
 //! a row that is not in a table implements [`fetch`] directly and gets the
 //! same generated `Granting`.
 //!
+//! `#[resource(key)]` is the unnamed lookup and there is one per struct,
+//! which runs out for a row reached three ways. `#[resource(key(Name))]`
+//! names one instead: a column may carry several names and several columns
+//! may carry one, so a composite key and a column serving two routes are
+//! the same declaration. Each name emits a `Lookup` marker through
+//! `scoped_lookup!`, and a composite additionally gets a key struct with a
+//! field per column — plus the `RouteKey` impl for it, which is written
+//! here rather than in that macro because the trait belongs to `doxa-auth`
+//! and `doxa-policy` does not depend on it.
+//!
+//! `#[resource(filter = …)]` is a condition every query carries on top of
+//! the scope, spliced rather than interpreted. It hangs on the table so
+//! that the key lookup, the id lookup, the listing and the residual filter
+//! all inherit it — a soft delete applied to three of those four is not a
+//! compile error, it is a deleted row coming back on the fourth.
+//!
 //! [`ScopedTable`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedTable.html
 //! [`ScopedRow`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedRow.html
 //! [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, LitStr, Result, Type};
+use syn::{Data, DeriveInput, Expr, Fields, Ident, LitStr, Result, Type};
 
 /// Role a field plays in the generated impls.
 enum Role {
@@ -42,8 +58,16 @@ enum Role {
     Attr(String),
     Parent(LitStr),
     Key,
+    /// One column of the named lookup `#[resource(key(Name))]` declares.
+    /// A field may carry several, and several fields may carry the same
+    /// one — which is how a column serves more than one way in, and how a
+    /// composite key is spelled.
+    NamedKey(Ident),
     Scope,
 }
+
+/// The columns one named lookup matches, in declaration order.
+type NamedLookup = (Ident, Vec<(Ident, Type)>);
 
 /// Container-level `#[resource(…)]`.
 struct Container {
@@ -54,6 +78,10 @@ struct Container {
     attrs_with: Option<Ident>,
     /// Entity type this resource is `in` by virtue of the request.
     tenant_parent: Option<LitStr>,
+    /// Conditions every query against this table carries, on top of the
+    /// scope. Spliced verbatim and `AND`ed, so they are whatever SeaORM
+    /// accepts rather than a vocabulary this derive has to keep up with.
+    filters: Vec<Expr>,
 }
 
 pub fn expand(input: TokenStream) -> Result<TokenStream> {
@@ -80,6 +108,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let mut attrs: Vec<(String, Ident)> = Vec::new();
     let mut parents: Vec<(LitStr, Ident)> = Vec::new();
     let mut key: Option<(Ident, Type)> = None;
+    let mut named: Vec<NamedLookup> = Vec::new();
     let mut scope: Option<Ident> = None;
 
     for field in &fields.named {
@@ -101,11 +130,31 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                     if key.is_some() {
                         return Err(syn::Error::new_spanned(
                             field,
-                            "only one field may be marked `#[resource(key)]`: a lookup matches \
-                             one column, and a second route to the same row is its own descriptor",
+                            "only one field may be marked `#[resource(key)]`: the unnamed lookup \
+                             matches one column. For a composite key, or for a second way into \
+                             the same row, name them — `#[resource(key(FindByPair))]` on each \
+                             column that takes part",
                         ));
                     }
                     key = Some((name.clone(), field.ty.clone()));
+                }
+                Role::NamedKey(lookup) => {
+                    let columns = match named.iter_mut().find(|(existing, _)| *existing == lookup) {
+                        Some((_, columns)) => columns,
+                        None => {
+                            named.push((lookup.clone(), Vec::new()));
+                            &mut named.last_mut().expect("just pushed").1
+                        }
+                    };
+                    if columns.iter().any(|(column, _)| *column == name) {
+                        return Err(syn::Error::new(
+                            lookup.span(),
+                            "this column is already part of that lookup; naming it twice would \
+                             match it against itself and widen the key by a segment no route \
+                             supplies",
+                        ));
+                    }
+                    columns.push((name.clone(), field.ty.clone()));
                 }
                 Role::Scope => {
                     if scope.is_some() {
@@ -161,7 +210,14 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         quote! { __parents.push((#entity, ::std::string::ToString::to_string(&self.#field))); }
     });
 
-    let scoped = scoped_impl(ident, key.as_ref(), scope.as_ref(), &attrs)?;
+    let scoped = scoped_impl(
+        ident,
+        key.as_ref(),
+        &named,
+        scope.as_ref(),
+        &container.filters,
+        &attrs,
+    )?;
 
     // Not a field: the tenant is a fact about the request, so there may
     // be no column to read and a nullable one would answer a different
@@ -227,20 +283,43 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 fn scoped_impl(
     ident: &Ident,
     key: Option<&(Ident, Type)>,
+    named: &[NamedLookup],
     scope: Option<&Ident>,
+    filters: &[Expr],
     attrs: &[(String, Ident)],
 ) -> Result<TokenStream> {
-    let scope =
-        match (key, scope) {
-            (None, None) => return Ok(quote!()),
-            (Some((field, _)), None) => return Err(syn::Error::new(
-                field.span(),
-                "a key with no scope column would look up across every owner, so a caller could \
-                 reach another tenant's row by naming it: mark the owning column \
-                 `#[resource(scope)]`",
-            )),
-            (_, Some(scope)) => scope,
-        };
+    let scope = match scope {
+        Some(scope) => scope,
+        None => {
+            // Every one of these needs the owning column, and each is worth
+            // its own diagnosis: they are three different things a struct
+            // can ask for that all resolve to "mark the scope".
+            if let Some((field, _)) = key {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "a key with no scope column would look up across every owner, so a caller \
+                     could reach another tenant's row by naming it: mark the owning column \
+                     `#[resource(scope)]`",
+                ));
+            }
+            if let Some((lookup, _)) = named.first() {
+                return Err(syn::Error::new(
+                    lookup.span(),
+                    "a named lookup with no scope column would look up across every owner, so a \
+                     caller could reach another tenant's row by naming it: mark the owning \
+                     column `#[resource(scope)]`",
+                ));
+            }
+            if let Some(filter) = filters.first() {
+                return Err(syn::Error::new_spanned(
+                    filter,
+                    "`filter` is a condition on the generated `ScopedTable`, which is what a \
+                     scope column produces: mark the owning column `#[resource(scope)]`",
+                ));
+            }
+            return Ok(quote!());
+        }
+    };
 
     if !cfg!(feature = "sea-orm") {
         return Err(syn::Error::new(
@@ -293,6 +372,68 @@ fn scoped_impl(
         None => quote!(::doxa::policy::fetch_from_scoped!(#ident);),
     };
 
+    // One marker type per named lookup, each carrying its own key and its
+    // own columns. The macro builds every one on `ScopedTable::scoped`, so
+    // they all inherit the scope filter and the conditions below — a second
+    // way into a row cannot be a way around either.
+    let lookups = named.iter().map(|(lookup, columns)| {
+        let entries = columns.iter().map(|(field, ty)| {
+            let column = column_variant(field);
+            quote!(#field: #ty => Column::#column)
+        });
+        let doc = format!(
+            "Reaches [`{ident}`] by {}, within the row's own scope.",
+            columns
+                .iter()
+                .map(|(field, _)| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(" + "),
+        );
+
+        // A single column keeps the bare scalar for its key — the same
+        // shape `#[resource(key)]` produces, so a one-segment route reads
+        // identically whether its lookup was named or not. Only a composite
+        // needs a struct, and only a composite gets one.
+        if columns.len() == 1 {
+            return quote! {
+                ::doxa::policy::scoped_lookup!(
+                    #[doc = #doc]
+                    #[automatically_derived]
+                    pub #lookup for #ident { #(#entries),* }
+                );
+            };
+        }
+
+        let key = Ident::new(&format!("{lookup}Key"), lookup.span());
+        let route_key = route_key_impl(&key, columns);
+
+        quote! {
+            ::doxa::policy::scoped_lookup!(
+                #[doc = #doc]
+                #[automatically_derived]
+                pub #lookup as #key for #ident { #(#entries),* }
+            );
+
+            #route_key
+        }
+    });
+
+    // Spliced rather than interpreted: `filter` takes whatever SeaORM would
+    // accept in a `filter(…)` call, so there is no operator vocabulary here
+    // to fall behind the one SeaORM actually has.
+    let table_condition = (!filters.is_empty()).then(|| {
+        quote! {
+            fn table_condition() -> ::std::option::Option<
+                ::doxa::policy::__private::sea_orm::Condition,
+            > {
+                ::std::option::Option::Some(
+                    ::doxa::policy::__private::sea_orm::Condition::all()
+                        #(.add(#filters))*
+                )
+            }
+        }
+    });
+
     Ok(quote! {
         #[automatically_derived]
         impl ::doxa::policy::ScopedTable for #ident {
@@ -312,12 +453,66 @@ fn scoped_impl(
                     _ => ::std::option::Option::None,
                 }
             }
+
+            #table_condition
         }
 
         #row
 
         #fetch
+
+        #(#lookups)*
     })
+}
+
+/// The `RouteKey` impl for a composite lookup's generated key struct.
+///
+/// Emitted here rather than by `scoped_lookup!` because [`RouteKey`] lives
+/// in `doxa-auth`, and `doxa-policy` — where that macro is defined, and
+/// which spells its own paths with `$crate` so it works standalone — does
+/// not depend on it. The derive already assumes the `doxa` facade, so
+/// naming both halves of it costs nothing new.
+///
+/// Only a composite reaches this. A single-column lookup keys on the bare
+/// scalar, which already has a `RouteKey` impl.
+///
+/// [`RouteKey`]: https://docs.rs/doxa-auth/latest/doxa_auth/granted/trait.RouteKey.html
+fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
+    let kinds = columns
+        .iter()
+        .map(|(_, ty)| quote!(<#ty as ::doxa::auth::KeySegment>::KIND));
+
+    // Positional, and the position is the order the columns were declared
+    // in. Path segments arrive in route order and there is nothing in them
+    // to match a field name against, so this is where the ordering still
+    // has to be got right — which is why the struct exists for every *other*
+    // call site.
+    let fields = columns.iter().enumerate().map(|(index, (field, ty))| {
+        quote! {
+            #field: {
+                let __raw = __segments.get(#index).copied().unwrap_or_default();
+                <#ty as ::doxa::auth::KeySegment>::parse_segment(__raw).ok_or_else(|| {
+                    ::doxa::auth::KeyError {
+                        position: #index,
+                        raw: ::std::borrow::ToOwned::to_owned(__raw),
+                    }
+                })?
+            }
+        }
+    });
+
+    quote! {
+        #[automatically_derived]
+        impl ::doxa::auth::RouteKey for #key {
+            const SEGMENTS: &'static [::doxa::policy::ResourceIdType] = &[#(#kinds),*];
+
+            fn parse(
+                __segments: &[&str],
+            ) -> ::std::result::Result<Self, ::doxa::auth::KeyError> {
+                ::std::result::Result::Ok(Self { #(#fields),* })
+            }
+        }
+    }
 }
 
 /// `company_id` -> `CompanyId`, matching the `Column` variant
@@ -345,6 +540,7 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
     let mut id_with = None;
     let mut attrs_with = None;
     let mut tenant_parent = None;
+    let mut filters = Vec::new();
 
     for attr in &input.attrs {
         if !attr.path().is_ident("resource") {
@@ -363,9 +559,16 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
             } else if meta.path.is_ident("tenant_parent") {
                 tenant_parent = Some(meta.value()?.parse::<LitStr>()?);
                 Ok(())
+            } else if meta.path.is_ident("filter") {
+                // Repeatable, and `AND`ed. Two conditions written as two
+                // `filter`s rather than one `.and()` chain is the same
+                // query and a shorter diff when one of them changes.
+                filters.push(meta.value()?.parse::<Expr>()?);
+                Ok(())
             } else {
-                Err(meta
-                    .error("expected `entity_type`, `id_with`, `attrs_with` or `tenant_parent`"))
+                Err(meta.error(
+                    "expected `entity_type`, `id_with`, `attrs_with`, `tenant_parent` or `filter`",
+                ))
             }
         })?;
     }
@@ -382,6 +585,7 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
         id_with,
         attrs_with,
         tenant_parent,
+        filters,
     })
 }
 
@@ -416,14 +620,34 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
                 roles.push(Role::Parent(meta.value()?.parse::<LitStr>()?));
                 Ok(())
             } else if meta.path.is_ident("key") {
-                roles.push(Role::Key);
+                // Bare `key` is the unnamed lookup, one column and one per
+                // struct. `key(A, B)` enrols this column in the named
+                // lookups `A` and `B` — so one column can serve several
+                // ways in, and several columns can compose one key.
+                if meta.input.peek(syn::token::Paren) {
+                    let names;
+                    syn::parenthesized!(names in meta.input);
+                    let names = names
+                        .parse_terminated(<Ident as syn::parse::Parse>::parse, syn::Token![,])?;
+                    if names.is_empty() {
+                        return Err(meta.error(
+                            "`key(…)` names the lookups this column takes part in, so it needs \
+                             at least one; bare `key` is the unnamed one",
+                        ));
+                    }
+                    roles.extend(names.into_iter().map(Role::NamedKey));
+                } else {
+                    roles.push(Role::Key);
+                }
                 Ok(())
             } else if meta.path.is_ident("scope") {
                 roles.push(Role::Scope);
                 Ok(())
             } else {
-                Err(meta
-                    .error("expected `id`, `attr`, `parent = \"EntityType\"`, `key` or `scope`"))
+                Err(meta.error(
+                    "expected `id`, `attr`, `parent = \"EntityType\"`, `key`, `key(Lookup, …)` \
+                     or `scope`",
+                ))
             }
         })?;
     }
@@ -689,6 +913,240 @@ mod tests {
             out.contains("to_string (& self . qualified_name ())"),
             "{out}"
         );
+    }
+
+    /// The feature this exists for: one column takes part in two lookups,
+    /// so a row reached both by `dataset` and by `(dataset, version)` keeps
+    /// both instead of giving one up to `load_with`.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn a_column_may_take_part_in_several_named_lookups() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Version")]
+            struct Model {
+                #[resource(id)]
+                id: Uuid,
+                #[resource(key(FindByDataset, FindByPair))]
+                dataset: String,
+                #[resource(key(FindByPair))]
+                version: i64,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        // One column, two lookups, and the pair keeps both of its columns.
+        // The single-column one keys on the bare scalar and so declares no
+        // key struct; the composite names one.
+        assert!(
+            out.contains(
+                "scoped_lookup ! (# [doc = \"Reaches [`Model`] by `dataset`, within the row's \
+                 own scope.\"] # [automatically_derived] pub FindByDataset for Model { dataset \
+                 : String => Column :: Dataset })"
+            ),
+            "{out}",
+        );
+        assert!(
+            out.contains(
+                "pub FindByPair as FindByPairKey for Model { dataset : String => Column :: \
+                 Dataset , version : i64 => Column :: Version }"
+            ),
+            "{out}",
+        );
+    }
+
+    /// A composite key is a struct, so it needs the `RouteKey` impl that
+    /// parses it out of path segments — which a tuple got for free from the
+    /// blanket impls in `doxa-auth`.
+    ///
+    /// It is emitted here rather than by `scoped_lookup!` because that macro
+    /// lives in `doxa-policy`, which does not depend on `doxa-auth`.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn a_composite_key_gets_its_route_parsing() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Version")]
+            struct Model {
+                #[resource(id)]
+                id: Uuid,
+                #[resource(key(FindByPair))]
+                dataset: String,
+                #[resource(key(FindByPair))]
+                version: i64,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        assert!(
+            out.contains("impl :: doxa :: auth :: RouteKey for FindByPairKey"),
+            "{out}",
+        );
+        // One segment kind per column, in declaration order.
+        assert!(
+            out.contains(
+                "SEGMENTS : & 'static [:: doxa :: policy :: ResourceIdType] = & [< String as :: \
+                 doxa :: auth :: KeySegment > :: KIND , < i64 as :: doxa :: auth :: KeySegment > \
+                 :: KIND]"
+            ),
+            "{out}",
+        );
+    }
+
+    /// A single-column lookup keys on the scalar, which already has a
+    /// `RouteKey` impl — so there is nothing to declare and nothing that
+    /// would drag `doxa-auth` into a policy-only consumer's expansion.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn a_single_column_lookup_declares_no_key_struct() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Version")]
+            struct Model {
+                #[resource(id, key(FindByName))]
+                name: String,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        assert!(out.contains("pub FindByName for Model"), "{out}");
+        assert!(!out.contains("FindByNameKey"), "{out}");
+        assert!(!out.contains("doxa :: auth"), "{out}");
+    }
+
+    /// A named lookup is enough on its own: a row with no unnamed key still
+    /// gets its listing and its id route, and no `ScopedRow`.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn named_lookups_need_no_unnamed_one() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Version")]
+            struct Model {
+                #[resource(id)]
+                id: Uuid,
+                #[resource(key(FindByPair))]
+                dataset: String,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        assert!(out.contains("pub FindByPair for Model"), "{out}");
+        assert!(out.contains("fetch_from_scoped ! (Model)"), "{out}");
+        assert!(
+            !out.contains("impl :: doxa :: policy :: ScopedRow for Model"),
+            "{out}",
+        );
+    }
+
+    /// Naming the same column twice in one lookup would match it against
+    /// itself and add a key segment no route supplies.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn one_column_twice_in_one_lookup_is_refused() {
+        let message = expand_err(quote! {
+            #[resource(entity_type = "Version")]
+            struct Model {
+                #[resource(id, key(FindByPair, FindByPair))]
+                dataset: String,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        assert!(message.contains("already part of that lookup"), "{message}");
+    }
+
+    /// A named lookup is a lookup, so it needs an owner for the same reason
+    /// the unnamed one does.
+    #[test]
+    fn a_named_lookup_without_a_scope_is_refused() {
+        let message = expand_err(quote! {
+            #[resource(entity_type = "Version")]
+            struct Model {
+                #[resource(id, key(FindByName))]
+                name: String,
+            }
+        });
+
+        assert!(message.contains("across every owner"), "{message}");
+    }
+
+    #[test]
+    fn an_empty_key_list_is_refused() {
+        let message = expand_err(quote! {
+            #[resource(entity_type = "Version")]
+            struct Model {
+                #[resource(id, key())]
+                name: String,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        assert!(message.contains("at least one"), "{message}");
+    }
+
+    /// `filter` is spliced, not interpreted: whatever SeaORM accepts goes
+    /// through, so there is no operator vocabulary here to fall behind.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn filters_become_one_table_condition() {
+        let out = expand_ok(quote! {
+            #[resource(
+                entity_type = "Version",
+                filter = Column::DeletedAt.is_null(),
+                filter = Column::Status.eq("active"),
+            )]
+            struct Model {
+                #[resource(id)]
+                id: Uuid,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        assert!(out.contains("fn table_condition ()"), "{out}");
+        assert!(
+            out.contains(
+                "Condition :: all () . add (Column :: DeletedAt . is_null ()) . add (Column :: \
+                 Status . eq (\"active\"))"
+            ),
+            "{out}",
+        );
+    }
+
+    /// No `filter`, no override — so a table that has no such fact keeps
+    /// the default and its SQL is unchanged.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn without_a_filter_there_is_no_table_condition() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Widget")]
+            struct Model {
+                #[resource(id, key)]
+                name: String,
+                #[resource(scope)]
+                tenant_id: String,
+            }
+        });
+
+        assert!(!out.contains("table_condition"), "{out}");
+    }
+
+    /// The condition lives on `ScopedTable`, which is what a scope column
+    /// produces — so asking for one without the other has no impl to hang.
+    #[test]
+    fn a_filter_without_a_scope_is_refused() {
+        let message = expand_err(quote! {
+            #[resource(entity_type = "Widget", filter = Column::DeletedAt.is_null())]
+            struct Model {
+                #[resource(id)]
+                name: String,
+            }
+        });
+
+        assert!(message.contains("`#[resource(scope)]`"), "{message}");
     }
 
     #[cfg(not(feature = "sea-orm"))]
