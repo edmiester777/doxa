@@ -9,10 +9,14 @@
 
 #![cfg(feature = "full")]
 
-use doxa::policy::{PolicyResource, ScopedRow};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use doxa::policy::{DbLoadError, PolicyResource, ScopedRow};
 use doxa::PolicyResource;
 use sea_orm::entity::prelude::*;
-use sea_orm::{DatabaseBackend, IdenStatic, MockDatabase, QueryTrait, Transaction};
+use sea_orm::{
+    DatabaseBackend, DatabaseConnection, IdenStatic, MockDatabase, QueryTrait, Transaction,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(
@@ -182,6 +186,71 @@ async fn a_row_out_of_scope_is_indistinguishable_from_a_miss() {
 
     assert_eq!(wrong_tenant, None);
     assert_eq!(wrong_tenant, no_such_row);
+}
+
+// ---- the error --------------------------------------------------------------
+
+/// A loader shaped as `Granting::load` is, so the `?` below is the one an
+/// asset actually writes. Its whole body is the conversion this section is
+/// about: without [`DbLoadError`] the application supplies its own error
+/// and this line is a `map_err`.
+async fn load(
+    name: &str,
+    db: &DatabaseConnection,
+    tenant: &str,
+) -> Result<Option<Model>, DbLoadError> {
+    Ok(Model::load_scoped(name.to_owned(), db, tenant).await?)
+}
+
+#[tokio::test]
+async fn a_query_that_fails_converts_on_the_question_mark() {
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_errors([DbErr::Custom(
+            r#"relation "connections" does not exist"#.to_owned(),
+        )])
+        .into_connection();
+
+    let error = load("primary", &db, "acme")
+        .await
+        .expect_err("the query failed");
+
+    assert!(matches!(error, DbLoadError::Failed));
+}
+
+/// The 500 branch is the one nobody reviews, so what it says is pinned
+/// here. A `DbErr` names the statement and the columns in it; none of that
+/// may reach the client, and the type holds nothing that could.
+#[tokio::test]
+async fn the_failure_tells_the_client_nothing_about_the_database() {
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_errors([DbErr::Custom(
+            r#"relation "connections" does not exist"#.to_owned(),
+        )])
+        .into_connection();
+
+    let error = load("primary", &db, "acme")
+        .await
+        .expect_err("the query failed");
+
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = String::from_utf8(bytes.to_vec()).expect("utf-8");
+
+    for leaked in ["connections", "relation", "does not exist"] {
+        assert!(
+            !body.contains(leaked),
+            "{leaked:?} reached the client: {body}"
+        );
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("an envelope");
+    assert_eq!(json["status"], 500);
+    assert_eq!(json["code"], "load_failed");
+    assert_eq!(json["message"], "could not load the requested resource");
 }
 
 /// The route's key and the Cedar id answer different questions. Here the
