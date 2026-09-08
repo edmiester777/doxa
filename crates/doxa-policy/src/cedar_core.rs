@@ -378,13 +378,20 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
             .map(|resource| resource_entity_json(extension, tenant_id, resource))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Cedar refuses two entries for one UID, so a resource the store
-        // also persists has to be folded into the stored entry rather than
-        // added beside it — and folding is a merge of the raw JSON. That is
-        // the only case that re-parses; everything else clones the set the
-        // tenant load already parsed.
+        // Cedar refuses two entries for one UID, so a UID that appears
+        // twice has to be folded into one entry rather than added beside
+        // itself — and folding is a merge of the raw JSON. Two sources of a
+        // collision, and both have to be caught: the store already persists
+        // an entity for a resource being injected live, or the caller named
+        // one object twice, which a request body does whenever two names
+        // resolve to one row. That is the only case that re-parses;
+        // everything else clones the set the tenant load already parsed.
+        let mut seen: HashSet<String> = HashSet::with_capacity(injected.len());
         let overlaps = injected.iter().any(|entity| {
-            entity_uid_of(entity).is_ok_and(|uid| store.stored_uids.contains(&uid.to_string()))
+            entity_uid_of(entity).is_ok_and(|uid| {
+                let uid = uid.to_string();
+                store.stored_uids.contains(&uid) || !seen.insert(uid)
+            })
         });
 
         // `.partial()` makes an absent resource entity dereference to a Cedar
