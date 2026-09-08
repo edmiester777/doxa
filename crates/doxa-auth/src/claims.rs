@@ -45,10 +45,27 @@ pub trait Claims: Clone + Send + Sync + 'static {
 
     /// Policy partition key. The library forwards this into
     /// [`Policy::resolve`](doxa_policy::Policy::resolve) as the
-    /// `scope` parameter. Deployments that evaluate one global policy set
-    /// should return `None`; multi-tenant deployments return whichever
-    /// field represents the tenancy boundary (tenant id, organization id,
+    /// `scope` parameter. Multi-tenant deployments return whichever field
+    /// represents the tenancy boundary (tenant id, organization id,
     /// workspace id, …).
+    ///
+    /// ## `None` is not "one global policy set"
+    ///
+    /// A partition is what the policy store is keyed by, so there is no
+    /// evaluation to run without one:
+    /// [`PolicyRouter`](doxa_policy::PolicyRouter) refuses every check on
+    /// an absent scope rather than falling back to a shared set, and every
+    /// guard in [`granted`](crate::granted) reaches the policy through it.
+    /// `None` therefore denies the request, which is the safe direction for
+    /// a claim whose tenancy mapping is missing — but it is a poor way to
+    /// spell "this deployment has one tenant".
+    ///
+    /// A single-tenant deployment returns a constant instead — `Some("default")`,
+    /// or whatever the operator configured — so its policies, entities and
+    /// audit rows are all filed under a partition that exists. Same for a
+    /// bypass or dev mode with no token to read a claim from: the tenant it
+    /// acts as is a deployment decision, and the layer that builds the
+    /// synthetic claims is where that decision belongs.
     fn scope(&self) -> Option<&str> {
         None
     }

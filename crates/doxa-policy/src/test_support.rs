@@ -185,9 +185,6 @@ pub(crate) struct SessionFlags {
     pub is_admin: bool,
     /// Widget ids the session recorded a `read_widget` grant for.
     pub allowed: Vec<String>,
-    /// Tenant the session was resolved under, when the session is the
-    /// authority for it.
-    pub tenant: Option<String>,
 }
 
 /// Extension whose session is a decision rather than a description —
@@ -259,10 +256,6 @@ impl PolicyExtension for SessionExtension {
         // else is `None`, and reaches the policy.
         (action == "read_widget" && resource.entity_type == "Widget")
             .then(|| session.allowed.iter().any(|id| id == &resource.entity_id))
-    }
-
-    fn session_tenant<'a>(&self, session: &'a Self::SessionOutput) -> Option<&'a str> {
-        session.tenant.as_deref()
     }
 }
 

@@ -242,14 +242,21 @@ pub trait PolicyExtension: Send + Sync {
     // What the assembled session already knows
     // -----------------------------------------------------------------
     //
-    // The three below are read by
+    // The two below are read by
     // [`SessionChecker`](crate::session::SessionChecker), which is the
     // per-request bridge from a guard to this policy. They exist because
     // the session an extension assembles is frequently a *decision*, not
     // just a description: an allow-list resolved up front answers some
     // questions outright, and re-asking Cedar can only agree with it more
-    // slowly. Every one defaults to "the session says nothing", so an
-    // extension that does not model any of this is unaffected.
+    // slowly. Both default to "the session says nothing", so an extension
+    // that does not model any of this is unaffected.
+    //
+    // What is deliberately not here is the tenant. That is the auth
+    // layer's, through [`FromAuthExtensions::tenant`], and a deployment
+    // whose callers carry no tenant claim configures the layer to supply
+    // one. An extension answering it too would be a second source for a
+    // value already settled, and the two would eventually disagree about
+    // which partition a request was decided in.
 
     /// Whether this session bypasses policy entirely.
     ///
@@ -282,27 +289,6 @@ pub trait PolicyExtension: Send + Sync {
         _action: &str,
         _resource: &crate::ResourceEntity,
     ) -> Option<bool> {
-        None
-    }
-
-    /// The tenant this session is confined to, when the session is a
-    /// better source for it than the caller's claims.
-    ///
-    /// Returning `None` — the default — means the tenant the guard passed
-    /// in stands. Override when the session is populated on a path the
-    /// claims are not: an auth-disabled bypass mode, or a service
-    /// principal whose tenancy is resolved rather than asserted. The two
-    /// agree for an ordinary authenticated caller, and where they do not,
-    /// this is the one that decided what the session contains.
-    ///
-    /// `None` and `Some("")` are different answers, and the difference
-    /// matters. `None` defers; `Some("")` says the session names no tenant,
-    /// which [`SessionChecker`](crate::session::SessionChecker) refuses
-    /// rather than evaluating. An extension whose rule is "the tenant is
-    /// the session's, full stop" wants the latter, and writes it as
-    /// `Some(session.tenant.as_deref().unwrap_or(""))` — deferring there
-    /// would quietly evaluate against a tenant the session never resolved.
-    fn session_tenant<'a>(&self, _session: &'a Self::SessionOutput) -> Option<&'a str> {
         None
     }
 }
