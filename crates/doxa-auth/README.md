@@ -131,6 +131,26 @@ let folders = Folder::load_all_scoped(body.folders, &txn, tenant).await?
     .authorize_all_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions).await?;
 ```
 
+### Where there is no request at all
+
+A background job, a queue consumer and a scheduled task decide the same things a route does, and the chain never needed a request — it reads a caller, a checker and a state, all of which a worker has. `OffRequest` is somewhere to put them:
+
+```rust
+let work = OffRequest::new(caller, checker, logger).actor("job:reindex");
+
+let dataset = work
+    .authorize::<One<DatasetByName>>(name, "read", &db)
+    .await?;
+```
+
+The state is passed rather than extracted — `LoaderSource` and the `FromRequestParts` half of the guard are the request's business, and a worker already holds its connection.
+
+The logger is not optional, and that is the point. Assembling the extensions by hand works, but a verdict is deposited only if an audit builder is present and the deposit returns quietly if it is not — so a worker that builds two of the three things a chain reads authorizes successfully and records nothing. There is no constructor here that omits it. Refusals settle themselves and dropping the handle emits the rest, so nothing has to be remembered.
+
+Where the caller comes from is yours: an inherited snapshot of whoever queued the work, a service principal, or a re-resolved session are all just a `FromAuthExtensions`, and which is right depends on whether authority captured at enqueue should still hold at run time.
+
+This is a claim about that door only. An `AuthLayer` with no `AuditLayer` above it and no logger of its own still inserts no builder, and guards under it still record nothing.
+
 ## Key types
 
 | Type | Purpose |
@@ -146,6 +166,7 @@ let folders = Folder::load_all_scoped(body.folders, &txn, tenant).await?
 | `Action` | One row of `Granting::ACTIONS`: capability, audit category, existence |
 | `AuthorizeLoaded` / `AuthorizeLoadedAll` | Authorize objects the handler already holds |
 | `AuthorizeScope` | The query filter, for a handler building its own query |
+| `OffRequest<C>` | The same chain outside a request, with the audit event it records to (`audit`) |
 | `AuthState` | Middleware state (validator + resolver + policy + optional audit) |
 | `AuthLayer` | Tower layer implementing the auth pipeline |
 | `TokenValidator` | Trait for IdP token validation |
