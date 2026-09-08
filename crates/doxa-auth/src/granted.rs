@@ -43,17 +43,29 @@
 //! |------|-----|
 //! | [`authorize::<One<R>>`](authorize) | an id the handler parsed, loaded through [`Granting::State`] |
 //! | [`AuthorizeLoaded`] | an object the handler already holds, or one inside its open transaction |
+//! | [`AuthorizeScope`] / [`Scoped`] | *several* objects it is about to query for, as a filter |
 //!
 //! ```ignore
 //! // the route's own subject, where no extractor could reach it
 //! let widget = find_widget(&txn, tenant, &name).await?
-//!     .authorize(widget_action::Read, &parts.extensions).await?;
+//!     .authorize::<WidgetByName, _>(widget_action::Read, &parts.extensions).await?;
 //!
 //! // something its body merely refers to: this route's guard already
 //! // answered the coarse question, and it was a different one
 //! let folder = find_folder(&txn, tenant, &body.folder).await?
-//!     .authorize_dependency(folder_action::Read, &parts.extensions).await?;
+//!     .authorize_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions).await?;
+//!
+//! // several of them, decided once and pushed into the query rather than
+//! // asked row by row
+//! let scope = FolderByName::authorize_scope_dependency(
+//!     folder_action::Read, &parts.extensions,
+//! )?;
+//! let folders = scope.filter(Column::Name.is_in(body.folders)).all(&txn).await?;
 //! ```
+//!
+//! The turbofish on the first two is the *descriptor* — the asset whose
+//! vocabulary governs the check — because a row does not imply one. See
+//! [`AuthorizeLoaded`](AuthorizeLoaded#naming-the-descriptor).
 //!
 //! The action is a type rather than a string — one of the markers
 //! `#[derive(Actions)]` emits — so an asset that does not permit it fails
@@ -381,7 +393,7 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
 /// // never constructed.
 /// let folder = find_folder(&txn, tenant, name)
 ///     .await?
-///     .authorize_dependency(folder_action::Read, &parts.extensions)
+///     .authorize_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions)
 ///     .await?;
 /// ```
 #[derive(Debug)]
@@ -1577,7 +1589,7 @@ fn caller_and_checker<C: FromAuthExtensions>(
 /// - **The row is already loaded.** Resolving it a second time to decide
 ///   about it is a query bought for nothing.
 ///
-/// Implemented for every [`Granting`] asset, so there is nothing to write
+/// Implemented for every [`PolicyResource`], so there is nothing to write
 /// per asset — the vocabulary in [`Granting::ACTIONS`] and the identity
 /// from [`PolicyResource`] are all this needs, and both already exist.
 ///
@@ -1585,9 +1597,24 @@ fn caller_and_checker<C: FromAuthExtensions>(
 /// let folder = find_folder(&txn, tenant, &body.folder)
 ///     .await?
 ///     .ok_or(Error::NoSuchFolder)?
-///     .authorize_dependency(folder_action::Read, &parts.extensions)
+///     .authorize_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions)
 ///     .await?;
 /// ```
+///
+/// ## Naming the descriptor
+///
+/// The turbofish is the asset whose vocabulary and capability govern the
+/// decision — not the row, which is the value the method is called on.
+/// They are usually the same type and it reads as `::<Folder, _>`; they
+/// come apart when one table is addressed two ways, and then the choice is
+/// a real one, because each descriptor carries its own
+/// [`ACTIONS`](Granting::ACTIONS).
+///
+/// It cannot be inferred. A descriptor knows its row, but a row does not
+/// know its descriptors — there may be several — so leaving it out would
+/// mean picking whichever impl existed today and breaking every call site
+/// the day a second one was added. The load-through door names it the same
+/// way, as `authorize::<One<R>>`.
 ///
 /// ## Which of the two
 ///
@@ -1614,7 +1641,7 @@ fn caller_and_checker<C: FromAuthExtensions>(
 /// the one the event names and a dependency checked afterwards does not
 /// displace it. A refusal displaces a grant, because a request that ends
 /// on a denial is about that denial.
-pub trait AuthorizeLoaded: Granting {
+pub trait AuthorizeLoaded: PolicyResource {
     /// Coarse gate, then instance check, on an object already in hand.
     ///
     /// Returns the object, so an unauthorized binding never exists:
@@ -1622,7 +1649,7 @@ pub trait AuthorizeLoaded: Granting {
     /// ```ignore
     /// let widget = find_widget(&txn, tenant, name)
     ///     .await?
-    ///     .authorize(widget_action::Read, &parts.extensions)
+    ///     .authorize::<WidgetByName, _>(widget_action::Read, &parts.extensions)
     ///     .await?;
     /// ```
     ///
@@ -1656,7 +1683,7 @@ pub trait AuthorizeLoaded: Granting {
     /// }
     ///
     /// # let extensions = http::Extensions::new();
-    /// let _ = Widget.authorize(Read, &extensions);
+    /// let _ = Widget.authorize::<Widget, _>(Read, &extensions);
     /// ```
     ///
     /// Name one it does not, and the same call will not build:
@@ -1688,9 +1715,9 @@ pub trait AuthorizeLoaded: Granting {
     ///
     /// # let extensions = http::Extensions::new();
     /// // error: this action is missing from the asset's `Granting::ACTIONS`
-    /// let _ = Widget.authorize(Purge, &extensions);
+    /// let _ = Widget.authorize::<Widget, _>(Purge, &extensions);
     /// ```
-    fn authorize<A: DeclaredAction>(
+    fn authorize<R: Granting<Row = Self>, A: DeclaredAction>(
         self,
         action: A,
         extensions: &Extensions,
@@ -1704,9 +1731,49 @@ pub trait AuthorizeLoaded: Granting {
     /// it on this object. See [the trait docs](Self#which-of-the-two) for
     /// why the coarse question is the wrong one to ask about a dependency.
     ///
+    /// This is also where the descriptor stops being a formality. The row
+    /// below is reached by a unit struct rather than by itself — the shape
+    /// an entity crate forces, since a row in one crate cannot name the
+    /// application's caller or vocabulary in another — and the vocabulary
+    /// governing the check is the descriptor's:
+    ///
+    /// ```
+    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::CapabilityContext;
+    /// # use doxa_policy::PolicyResource;
+    /// # use std::convert::Infallible;
+    /// # struct Widget;
+    /// # impl PolicyResource for Widget {
+    /// #     const ENTITY_TYPE: &'static str = "Widget";
+    /// #     fn resource_id(&self) -> String { String::new() }
+    /// # }
+    /// struct WidgetById;
+    ///
+    /// impl Granting for WidgetById {
+    ///     type Row = Widget;
+    /// #     type Key = String;
+    /// #     type Ctx = CapabilityContext;
+    /// #     type State = ();
+    /// #     type Error = Infallible;
+    ///     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #         -> Result<Option<Widget>, Infallible> { Ok(None) }
+    ///     // …
+    /// }
+    ///
+    /// # struct Read;
+    /// # impl DeclaredAction for Read {
+    /// #     const ACTION: &'static str = "read";
+    /// # }
+    /// # let extensions = http::Extensions::new();
+    /// let _ = Widget.authorize_dependency::<WidgetById, _>(Read, &extensions);
+    /// ```
+    ///
     /// In particular the vocabulary check is not skipped, and it is the
     /// same build-time one, so the dependency form is not a way around
-    /// it:
+    /// it. The only difference from the call above is the action named,
+    /// which is what makes this a test of the vocabulary rather than of
+    /// the turbofish:
     ///
     /// ```compile_fail
     /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
@@ -1718,15 +1785,16 @@ pub trait AuthorizeLoaded: Granting {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
     /// #     fn resource_id(&self) -> String { String::new() }
     /// # }
-    /// # impl Granting for Widget {
-    /// #     type Row = Self;
+    /// # struct WidgetById;
+    /// # impl Granting for WidgetById {
+    /// #     type Row = Widget;
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
     /// #     type Error = Infallible;
     /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
     /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
-    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
+    /// #         -> Result<Option<Widget>, Infallible> { Ok(None) }
     /// # }
     /// # struct Purge;
     /// # impl DeclaredAction for Purge {
@@ -1734,9 +1802,9 @@ pub trait AuthorizeLoaded: Granting {
     /// # }
     /// # let extensions = http::Extensions::new();
     /// // error: this action is missing from the asset's `Granting::ACTIONS`
-    /// let _ = Widget.authorize_dependency(Purge, &extensions);
+    /// let _ = Widget.authorize_dependency::<WidgetById, _>(Purge, &extensions);
     /// ```
-    fn authorize_dependency<A: DeclaredAction>(
+    fn authorize_dependency<R: Granting<Row = Self>, A: DeclaredAction>(
         self,
         action: A,
         extensions: &Extensions,
@@ -1747,12 +1815,20 @@ pub trait AuthorizeLoaded: Granting {
 /// cannot override [`AuthorizeLoaded::authorize`] into something that
 /// decides differently — or does not decide at all — because coherence
 /// leaves no room for a second impl.
-impl<R: Granting<Row = R>> AuthorizeLoaded for R {
+///
+/// Implemented for the *row* rather than for the descriptor, which is what
+/// keeps the call a method and the loader's `?` in front of it. The
+/// descriptor is named on the method instead, because a row does not imply
+/// one: [`Granting::Row`] is a separate associated type precisely so two
+/// descriptors can address the same table, and picking whichever impl
+/// happened to exist would silently change vocabulary the day a second one
+/// was written.
+impl<T: PolicyResource> AuthorizeLoaded for T {
     // Written as `-> impl Future` rather than `async fn` so the proof is
     // discharged when the method is *called*, not when the future is
     // first polled. A caller who names an action their asset does not
     // permit gets the error at the call site, awaited or not.
-    fn authorize<A: DeclaredAction>(
+    fn authorize<R: Granting<Row = Self>, A: DeclaredAction>(
         self,
         _action: A,
         extensions: &Extensions,
@@ -1761,13 +1837,292 @@ impl<R: Granting<Row = R>> AuthorizeLoaded for R {
         decide::<R>(self, A::ACTION, extensions, Coarse::Check)
     }
 
-    fn authorize_dependency<A: DeclaredAction>(
+    fn authorize_dependency<R: Granting<Row = Self>, A: DeclaredAction>(
         self,
         _action: A,
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Self, Denial>> + Send {
         let () = Declares::<R, A>::PROOF;
         decide::<R>(self, A::ACTION, extensions, Coarse::Skip)
+    }
+}
+
+/// Authorize a *subset* of an asset the handler will query itself.
+///
+/// [`AuthorizeLoaded`] decides about rows already in hand, one at a time.
+/// That is the right shape for a row the handler holds and the wrong one
+/// for a request naming several — a body referring to three sources by
+/// name is three instance checks, and each rebuilds the policy's entity set
+/// before evaluating. This asks the other question: *which rows may this
+/// caller see*, answered once, as a filter the handler ANDs into its own
+/// query.
+///
+/// The filter is [`Scoping::Filter`], so what it costs to apply is the
+/// asset's business — a `Select` for a SeaORM row, something else for
+/// another store — and the rows a caller may not see never leave the
+/// database.
+///
+/// ```ignore
+/// // one query, inside the handler's own transaction
+/// let scope = SourceByName::authorize_scope_dependency(
+///     source_action::Read, &parts.extensions,
+/// )?;
+/// let sources = scope.filter(Column::Name.is_in(body.sources)).all(&txn).await?;
+/// ```
+///
+/// ## Which of the two
+///
+/// [`authorize_scope`](Self::authorize_scope) is the whole check, the one
+/// `Granted<Many<R>>` runs: the coarse capability, then the scope. Reach
+/// for it when nothing has gated this route.
+///
+/// [`authorize_scope_dependency`](Self::authorize_scope_dependency) drops
+/// the coarse gate, for an asset the route merely *refers* to. The reason
+/// is [`AuthorizeLoaded`]'s: the coarse question on a dependency is the
+/// wrong question. A caller who may write a widget naming folders they may
+/// read would be refused because they may not *list* folders.
+///
+/// It is also the only one of the four doors that reaches a verdict without
+/// awaiting. There is no policy call to make — partial evaluation ran in
+/// [`AuthLayer`](crate::AuthLayer) and the scope is a lookup into the
+/// session it assembled — so once the coarse gate is gone, nothing is left
+/// to await, and a filter can be built in the middle of assembling a query.
+///
+/// Both hold the action to the asset's vocabulary at build time, and both
+/// record, exactly as the other doors do.
+pub trait AuthorizeScope: Scoping {
+    /// Coarse gate, then the caller's authorized subset.
+    fn authorize_scope<A: DeclaredAction>(
+        action: A,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Self::Filter, Denial>> + Send;
+
+    /// The caller's authorized subset, for an asset this route's own guard
+    /// has already cleared the coarse question for.
+    ///
+    /// Skips the capability gate *and nothing else* — the action must still
+    /// be one the asset declares, and the scope is still the one the policy
+    /// assembled.
+    fn authorize_scope_dependency<A: DeclaredAction>(
+        action: A,
+        extensions: &Extensions,
+    ) -> Result<Self::Filter, Denial>;
+}
+
+/// Blanket for the same reason [`AuthorizeLoaded`]'s is: an asset supplies
+/// the scope, through [`Scoping`], and cannot supply a way of reaching one
+/// that records nothing.
+impl<R: Scoping> AuthorizeScope for R {
+    fn authorize_scope<A: DeclaredAction>(
+        _action: A,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Self::Filter, Denial>> + Send {
+        let () = Declares::<R, A>::PROOF;
+        gated_scope::<R>(A::ACTION, extensions)
+    }
+
+    fn authorize_scope_dependency<A: DeclaredAction>(
+        _action: A,
+        extensions: &Extensions,
+    ) -> Result<Self::Filter, Denial> {
+        let () = Declares::<R, A>::PROOF;
+        dependency_scope::<R>(A::ACTION, extensions).map(|(_, filter)| filter)
+    }
+}
+
+/// [`AuthorizeScope::authorize_scope_dependency`]'s body, handing back the
+/// caller as well so [`Scoped`] does not have to recover it a second time.
+fn dependency_scope<R: Scoping>(
+    action: &'static str,
+    extensions: &Extensions,
+) -> Result<(R::Ctx, R::Filter), Denial> {
+    // The checker is recovered and dropped on purpose: this path makes no
+    // policy call, but a route reaching it without an `AuthLayer` above it
+    // is misconfigured, and it should fail the way every other door fails
+    // rather than quietly answering from an empty session.
+    let (ctx, _) = caller_and_checker::<R::Ctx>(extensions)?;
+
+    let reached = declared_action::<R>(action)
+        .and_then(|declared| Ok((declared, subset::<R>(action, &ctx)?)));
+
+    let filter = record_scope::<R>(reached, action, &ctx, extensions)?;
+    Ok((ctx, filter))
+}
+
+/// [`AuthorizeScope::authorize_scope`]'s body, split out so the trait
+/// method can discharge its proof before the future is polled.
+async fn gated_scope<R: Scoping>(
+    action: &'static str,
+    extensions: &Extensions,
+) -> Result<R::Filter, Denial> {
+    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
+
+    let reached = match gate::<R>(action, &ctx, checker.as_ref()).await {
+        Ok(declared) => subset::<R>(action, &ctx).map(|filter| (declared, filter)),
+        Err(denial) => Err(denial),
+    };
+
+    record_scope::<R>(reached, action, &ctx, extensions)
+}
+
+/// The scope itself, with the asset's answer for a caller who was granted
+/// nothing. Records nothing — [`record_scope`] is that half.
+fn subset<R: Scoping>(action: &'static str, ctx: &R::Ctx) -> Result<R::Filter, Denial> {
+    match R::scope(action, ctx)? {
+        Some(filter) => Ok(filter),
+        // The policy granted nothing on this asset. Whether that is a
+        // refusal or an empty page is the asset's call, exactly as it is
+        // for a collection route.
+        None => R::empty_scope().ok_or(Denial::Denied {
+            action: Cow::Borrowed(action),
+            resource_type: Cow::Borrowed(entity_type::<R>()),
+            resource_id: Cow::Borrowed("collection"),
+            reason: "no authorized scope",
+        }),
+    }
+}
+
+/// Deposit the verdict, whichever way it went.
+///
+/// The id is `collection`, as [`Many`]'s chain records — what was decided
+/// is a subset of an asset, not anything about a row, and a listing and a
+/// filtered dependency over the same asset should sit under one resource in
+/// the trail.
+fn record_scope<R: Scoping>(
+    reached: Result<(&'static Action, R::Filter), Denial>,
+    action: &'static str,
+    ctx: &R::Ctx,
+    extensions: &Extensions,
+) -> Result<R::Filter, Denial> {
+    match reached {
+        Ok((declared, filter)) => {
+            crate::record::grant(
+                extensions,
+                crate::record::Grant {
+                    event_type: declared.event_type,
+                    action: Cow::Borrowed(action),
+                    resource_type: Cow::Borrowed(entity_type::<R>()),
+                    resource_id: Cow::Borrowed("collection"),
+                },
+            );
+            Ok(filter)
+        }
+        Err(denial) => {
+            record_denial(&denial, extensions, ctx.tenant());
+            Err(denial)
+        }
+    }
+}
+
+/// A dependency's authorized subset, extracted rather than asked for.
+///
+/// [`AuthorizeScope::authorize_scope_dependency`] with the call moved into
+/// the signature, for the common case where the handler knows before it
+/// runs which asset its body will refer to:
+///
+/// ```ignore
+/// async fn create(
+///     Granted(caller, pipeline): Granted<One<Pipeline>>,
+///     sources: Scoped<SourceByName, source_action::Read>,
+///     Json(body): Json<NewPipeline>,
+/// ) -> Result<StatusCode, Error> {
+///     let txn = db.begin().await?;
+///     let named = sources.filter(Column::Name.is_in(body.sources)).all(&txn).await?;
+///     // …
+/// }
+/// ```
+///
+/// Everything it needs is in extensions, so unlike [`Granted`] it reads
+/// nothing out of the router and mounts on any state — there is no loader
+/// here, and therefore no [`Granting::State`] to reach through `FromRef`.
+///
+/// What it deliberately does *not* hold is the connection. The transaction
+/// this filter is meant to run inside is opened in the handler body, after
+/// every extractor has finished, so the extractor carries the authorization
+/// and the handler supplies the connection at the point of use. An
+/// extractor that tried to own both would be back to querying the pool,
+/// which is the thing this whole path exists to avoid.
+///
+/// Named fields rather than [`Granted`]'s pair: the action rides along as a
+/// type parameter, so a tuple struct would have a third element that is
+/// nothing but [`PhantomData`] and would spoil
+/// the destructuring the pair form exists for.
+pub struct Scoped<R: Scoping, A: DeclaredAction> {
+    /// The caller the subset was computed for.
+    pub caller: R::Ctx,
+    /// The authorized subset, as this asset's queries take it.
+    pub filter: R::Filter,
+    _action: PhantomData<fn() -> A>,
+}
+
+impl<R: Scoping, A: DeclaredAction> Scoped<R, A> {
+    /// Consume the guard and return just the filter.
+    pub fn into_inner(self) -> R::Filter {
+        self.filter
+    }
+
+    /// The caller this subset was computed for.
+    pub fn caller(&self) -> &R::Ctx {
+        &self.caller
+    }
+}
+
+/// Reach the filter without naming it, so a query builds straight off the
+/// guard.
+impl<R: Scoping, A: DeclaredAction> std::ops::Deref for Scoped<R, A> {
+    type Target = R::Filter;
+
+    fn deref(&self) -> &R::Filter {
+        &self.filter
+    }
+}
+
+impl<R, A, St> FromRequestParts<St> for Scoped<R, A>
+where
+    R: Scoping,
+    A: DeclaredAction,
+    St: Send + Sync,
+{
+    type Rejection = Denial;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        _state: &St,
+    ) -> Result<Self, Self::Rejection> {
+        // Forces the assertion that the action is one the asset declares.
+        // Costs nothing at runtime; fails the build if not.
+        let () = Declares::<R, A>::PROOF;
+
+        let (caller, filter) = dependency_scope::<R>(A::ACTION, &parts.extensions)?;
+
+        Ok(Scoped {
+            caller,
+            filter,
+            _action: PhantomData,
+        })
+    }
+}
+
+impl<R: Scoping, A: DeclaredAction> doxa::DocOperationSecurity for Scoped<R, A> {
+    fn describe(op: &mut utoipa::openapi::path::Operation) {
+        let display = format!("{} on {} (subset)", A::ACTION, entity_type::<R>());
+        doxa::record_required_permission(
+            op,
+            DefaultSite::SCHEME,
+            &asset_permission::<R>(A::ACTION),
+            &display,
+        );
+    }
+}
+
+impl<R: Scoping, A: DeclaredAction> doxa::DocOperationContribution for Scoped<R, A> {
+    fn contribution() -> doxa::OperationContribution {
+        doxa::OperationContribution::new()
+            .with_response(doxa::ResponseContribution::unauthorized())
+            .with_response(doxa::ResponseContribution::new(
+                "403",
+                format!("No authorized scope on {}", entity_type::<R>()),
+            ))
     }
 }
 

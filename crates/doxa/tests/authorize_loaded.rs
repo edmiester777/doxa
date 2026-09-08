@@ -177,7 +177,7 @@ async fn the_authorized_object_comes_back() {
     let (parts, _rx) = parts(&["sources.read"]);
 
     let authorized = source("us")
-        .authorize(ReadSource, &parts.extensions)
+        .authorize::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect("holds the capability, and the region is granted");
 
@@ -192,7 +192,7 @@ async fn the_coarse_gate_still_runs() {
     let (parts, _rx) = parts(&[]);
 
     let refusal = source("us")
-        .authorize(ReadSource, &parts.extensions)
+        .authorize::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect_err("does not hold sources.read");
 
@@ -226,7 +226,7 @@ async fn a_dependency_skips_the_coarse_gate() {
     let (parts, _rx) = parts(&[]);
 
     let authorized = source("us")
-        .authorize_dependency(ReadSource, &parts.extensions)
+        .authorize_dependency::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect("the instance check is the only one that applies");
 
@@ -240,7 +240,7 @@ async fn a_dependency_is_still_held_to_the_instance_check() {
     let (parts, _rx) = parts(&["sources.read"]);
 
     let refusal = source("eu")
-        .authorize_dependency(ReadSource, &parts.extensions)
+        .authorize_dependency::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect_err("the region is not granted");
 
@@ -271,8 +271,8 @@ async fn a_dependency_is_still_held_to_the_instance_check() {
 /// error message they produce is also on show.
 ///
 /// ```ignore
-/// source("us").authorize(Purge, &parts.extensions).await
-/// source("us").authorize_dependency(Purge, &parts.extensions).await
+/// source("us").authorize::<Source, _>(Purge, &parts.extensions).await
+/// source("us").authorize_dependency::<Source, _>(Purge, &parts.extensions).await
 /// ```
 ///
 /// This is the whole of what the typed action bought. Before it, both
@@ -293,7 +293,7 @@ async fn an_unauthenticated_request_reaches_no_verdict() {
     let extensions = axum::http::Extensions::new();
 
     let refusal = source("us")
-        .authorize_dependency(ReadSource, &extensions)
+        .authorize_dependency::<Source, _>(ReadSource, &extensions)
         .await
         .expect_err("nothing installed a caller");
 
@@ -313,7 +313,7 @@ async fn a_grant_is_recorded_like_the_guard_would() {
     let (parts, mut rx) = parts(&["sources.read"]);
 
     source("us")
-        .authorize(ReadSource, &parts.extensions)
+        .authorize::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect("granted");
 
@@ -337,7 +337,7 @@ async fn a_dependency_grant_is_recorded_too() {
     let (parts, mut rx) = parts(&[]);
 
     source("us")
-        .authorize_dependency(ReadSource, &parts.extensions)
+        .authorize_dependency::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect("granted");
 
@@ -357,14 +357,14 @@ async fn a_dependency_does_not_displace_the_route_s_own_subject() {
     let (parts, mut rx) = parts(&["sources.read"]);
 
     source("us")
-        .authorize(ReadSource, &parts.extensions)
+        .authorize::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect("the route's subject");
     Source {
         name: "replica".to_owned(),
         region: "us".to_owned(),
     }
-    .authorize_dependency(ReadSource, &parts.extensions)
+    .authorize_dependency::<Source, _>(ReadSource, &parts.extensions)
     .await
     .expect("something its body referred to");
 
@@ -385,14 +385,14 @@ async fn a_refused_dependency_displaces_the_grant() {
     let (parts, mut rx) = parts(&["sources.read"]);
 
     source("us")
-        .authorize(ReadSource, &parts.extensions)
+        .authorize::<Source, _>(ReadSource, &parts.extensions)
         .await
         .expect("the route's subject");
     Source {
         name: "replica".to_owned(),
         region: "eu".to_owned(),
     }
-    .authorize_dependency(ReadSource, &parts.extensions)
+    .authorize_dependency::<Source, _>(ReadSource, &parts.extensions)
     .await
     .expect_err("the region is not granted");
 
