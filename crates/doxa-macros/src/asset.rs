@@ -9,8 +9,8 @@
 //! as one word.
 //!
 //! ```ignore
-//! #[doxa::asset(profile = AppGrants, actions = SourceAction)]
-//! pub struct SourceByName;
+//! #[doxa::asset(profile = AppGrants, actions = WidgetAction)]
+//! pub struct WidgetByName;
 //! ```
 //!
 //! The struct is left exactly as written. That is the whole reason this
@@ -40,10 +40,14 @@ struct Args {
     actions: Option<Path>,
     /// Route key. `<Row as ScopedRow>::Key` when absent.
     key: Option<Type>,
+    /// `key = pk`: the row's primary key rather than its key column.
+    by_primary_key: bool,
     /// Loader failure, overriding the profile's.
     error: Option<Type>,
     /// A loader to call instead of `ScopedRow::load_scoped`.
     load_with: Option<Path>,
+    /// `list = tenant`: emit a `Scoping` confined to the caller's tenant.
+    list: Option<Ident>,
 }
 
 impl Parse for Args {
@@ -61,7 +65,26 @@ impl Parse for Args {
             } else if key == "actions" {
                 out.actions = Some(input.parse()?);
             } else if key == "key" {
-                out.key = Some(input.parse()?);
+                // `pk` is a word rather than a type because it names a
+                // *lookup*, not a key type: the type follows from the
+                // row's primary key, and the loader changes with it.
+                if input.peek(syn::Ident) && input.fork().parse::<Ident>()? == "pk" {
+                    input.parse::<Ident>()?;
+                    out.by_primary_key = true;
+                } else {
+                    out.key = Some(input.parse()?);
+                }
+            } else if key == "list" {
+                let which: Ident = input.parse()?;
+                if which != "tenant" {
+                    return Err(syn::Error::new(
+                        which.span(),
+                        "expected `list = tenant`. The generated listing is confined to the \
+                         caller's tenant and applies no other policy condition, so it says so \
+                         at the call site; anything finer is a hand-written `Scoping`",
+                    ));
+                }
+                out.list = Some(which);
             } else if key == "error" {
                 out.error = Some(input.parse()?);
             } else if key == "load_with" {
@@ -70,7 +93,7 @@ impl Parse for Args {
                 return Err(syn::Error::new(
                     key.span(),
                     "unknown `asset` option; expected `profile`, `actions`, `row`, `key`, \
-                     `error` or `load_with`",
+                     `list`, `error` or `load_with`",
                 ));
             }
 
@@ -121,9 +144,19 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         None => quote!(Self),
     };
 
-    let key = match &args.key {
-        Some(key) => quote!(#key),
-        None => quote!(<#row as ::doxa::policy::ScopedRow>::Key),
+    if args.by_primary_key {
+        if let Some(key) = &args.key {
+            return Err(syn::Error::new(
+                key.span(),
+                "`key = pk` already says what the key is: the row's primary key",
+            ));
+        }
+    }
+
+    let key = match (&args.key, args.by_primary_key) {
+        (Some(key), _) => quote!(#key),
+        (None, true) => quote!(::doxa::policy::PrimaryKeyOf<#row>),
+        (None, false) => quote!(<#row as ::doxa::policy::ScopedRow>::Key),
     };
 
     let error = match &args.error {
@@ -145,22 +178,29 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     #path(key, state, ctx).await
                 }
             },
-            None if cfg!(feature = "sea-orm") => quote! {
-                async fn load(
-                    key: Self::Key,
-                    state: &Self::State,
-                    ctx: &Self::Ctx,
-                ) -> ::std::result::Result<::std::option::Option<Self::Row>, Self::Error> {
-                    use ::doxa::auth::FromAuthExtensions as _;
-                    // Every lookup is confined to the caller's tenant, so a
-                    // key belonging to someone else answers `None` exactly as
-                    // a key that does not exist would.
-                    let scope = ::doxa::auth::FromAuthExtensions::tenant(ctx).unwrap_or_default();
-                    ::std::result::Result::Ok(
-                        <#row as ::doxa::policy::ScopedRow>::load_scoped(key, state, scope).await?,
-                    )
+            None if cfg!(feature = "sea-orm") => {
+                let lookup = if args.by_primary_key {
+                    quote!(load_by_id)
+                } else {
+                    quote!(load_scoped)
+                };
+                quote! {
+                    async fn load(
+                        key: Self::Key,
+                        state: &Self::State,
+                        ctx: &Self::Ctx,
+                    ) -> ::std::result::Result<::std::option::Option<Self::Row>, Self::Error> {
+                        // Every lookup is confined to the caller's tenant, so a
+                        // key belonging to someone else answers `None` exactly as
+                        // a key that does not exist would.
+                        let scope = ::doxa::auth::FromAuthExtensions::tenant(ctx)
+                            .unwrap_or_default();
+                        ::std::result::Result::Ok(
+                            <#row as ::doxa::policy::ScopedRow>::#lookup(key, state, scope).await?,
+                        )
+                    }
                 }
-            },
+            }
             None => return Err(syn::Error::new(
                 name.span(),
                 "`asset` writes the loader from `ScopedRow`, which needs the `sea-orm` feature \
@@ -168,8 +208,50 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             )),
         };
 
+    // Listing, and only the tenant-confined kind. `Scoping::scope` is
+    // meant to carry the policy's residual, which is a per-row condition
+    // this cannot see — so the option names its filter rather than
+    // implying it is that. An asset needing the residual writes `Scoping`
+    // itself, and the compiler asks for it the moment a route says
+    // `Many<…>`.
+    let scoping = match &args.list {
+        None => quote!(),
+        Some(_) if !cfg!(feature = "sea-orm") => {
+            return Err(syn::Error::new(
+                name.span(),
+                "`list = tenant` builds the listing from `ScopedRow`, which needs the `sea-orm` \
+                 feature on `doxa-macros`. Enable it, or write `Scoping` by hand",
+            ))
+        }
+        Some(_) => quote! {
+            impl ::doxa::auth::Scoping for #name {
+                type Filter = ::doxa::policy::__private::sea_orm::Select<
+                    <#row as ::doxa::policy::ScopedRow>::Entity,
+                >;
+
+                fn scope(
+                    _action: &str,
+                    ctx: &Self::Ctx,
+                ) -> ::std::result::Result<
+                    ::std::option::Option<Self::Filter>,
+                    ::doxa::policy::AuthError,
+                > {
+                    // The coarse capability already decided whether this
+                    // caller may list at all; what is left is which rows,
+                    // and that is the tenant.
+                    let scope = ::doxa::auth::FromAuthExtensions::tenant(ctx).unwrap_or_default();
+                    ::std::result::Result::Ok(::std::option::Option::Some(
+                        <#row as ::doxa::policy::ScopedRow>::scoped(scope),
+                    ))
+                }
+            }
+        },
+    };
+
     Ok(quote! {
         #item
+
+        #scoping
 
         impl ::doxa::auth::Granting for #name {
             type Row = #row;
@@ -208,7 +290,7 @@ mod tests {
         let out = expand_ok(
             quote!(
                 profile = AppGrants,
-                actions = SourceAction,
+                actions = WidgetAction,
                 load_with = load
             ),
             quote!(
@@ -234,7 +316,7 @@ mod tests {
             "{out}",
         );
         assert!(
-            out.contains("< SourceAction as :: doxa :: auth :: ActionTable > :: ACTIONS"),
+            out.contains("< WidgetAction as :: doxa :: auth :: ActionTable > :: ACTIONS"),
             "{out}",
         );
     }
@@ -247,16 +329,16 @@ mod tests {
         let out = expand_ok(
             quote!(
                 profile = AppGrants,
-                actions = SourceAction,
+                actions = WidgetAction,
                 load_with = load
             ),
             quote!(
-                pub struct SourceById;
+                pub struct WidgetById;
             ),
         );
 
-        assert!(out.contains("pub struct SourceById ;"), "{out}");
-        assert!(!out.contains("SourceById ("), "no newtype: {out}");
+        assert!(out.contains("pub struct WidgetById ;"), "{out}");
+        assert!(!out.contains("WidgetById ("), "no newtype: {out}");
     }
 
     /// A second key over one row names the row rather than wrapping it,
@@ -267,12 +349,12 @@ mod tests {
             quote!(
                 row = Source,
                 profile = AppGrants,
-                actions = SourceAction,
+                actions = WidgetAction,
                 key = Uuid,
                 load_with = load
             ),
             quote!(
-                pub struct SourceById;
+                pub struct WidgetById;
             ),
         );
 
@@ -287,7 +369,7 @@ mod tests {
     #[test]
     fn the_default_loader_is_the_scoped_one() {
         let out = expand_ok(
-            quote!(profile = AppGrants, actions = SourceAction),
+            quote!(profile = AppGrants, actions = WidgetAction),
             quote!(
                 pub struct Source;
             ),
@@ -304,7 +386,7 @@ mod tests {
     #[test]
     fn without_the_orm_the_error_names_the_feature() {
         let message = expand_err(
-            quote!(profile = AppGrants, actions = SourceAction),
+            quote!(profile = AppGrants, actions = WidgetAction),
             quote!(
                 pub struct Source;
             ),
@@ -323,7 +405,7 @@ mod tests {
                 load_with = find_by_name
             ),
             quote!(
-                pub struct ModelByName;
+                pub struct GadgetByName;
             ),
         );
 
@@ -341,7 +423,7 @@ mod tests {
                 load_with = find_by_name
             ),
             quote!(
-                pub struct ModelByName;
+                pub struct GadgetByName;
             ),
         );
 
@@ -353,7 +435,7 @@ mod tests {
     #[test]
     fn the_profile_and_the_vocabulary_are_both_required() {
         assert!(expand_err(
-            quote!(actions = SourceAction),
+            quote!(actions = WidgetAction),
             quote!(
                 pub struct Source;
             )
@@ -368,10 +450,120 @@ mod tests {
         .contains("`actions = …`"),);
     }
 
+    /// `pk` changes the lookup, not just the key type — which is why it
+    /// is a word rather than `key = Uuid`. The generated call is
+    /// `load_by_id`, whose default body keeps the scope filter that a
+    /// hand-written `find_by_id` drops.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn key_pk_selects_the_scoped_primary_key_lookup() {
+        let out = expand_ok(
+            quote!(
+                row = Widget,
+                key = pk,
+                profile = AppGrants,
+                actions = WidgetAction
+            ),
+            quote!(
+                pub struct WidgetById;
+            ),
+        );
+
+        assert!(
+            out.contains("type Key = :: doxa :: policy :: PrimaryKeyOf < Widget >"),
+            "{out}",
+        );
+        assert!(out.contains("load_by_id (key , state , scope)"), "{out}");
+    }
+
+    /// `key = pk` says what the key is, so a type beside it is a second
+    /// answer to the same question.
+    #[test]
+    fn key_pk_and_a_key_type_together_are_refused() {
+        let message = expand_err(
+            quote!(
+                key = pk,
+                key = Uuid,
+                profile = AppGrants,
+                actions = WidgetAction
+            ),
+            quote!(
+                pub struct WidgetById;
+            ),
+        );
+
+        assert!(
+            message.contains("already says what the key is"),
+            "{message}"
+        );
+    }
+
+    /// Listing is opt-in and names its filter. The generated `Scoping`
+    /// applies the tenant and no other policy condition, so `list = tenant`
+    /// rather than a bare `list` — the call site says which listing this
+    /// is, and an asset needing the policy's residual writes its own.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn list_tenant_emits_a_tenant_confined_scoping() {
+        let out = expand_ok(
+            quote!(
+                row = Widget,
+                profile = AppGrants,
+                actions = WidgetAction,
+                list = tenant
+            ),
+            quote!(
+                pub struct WidgetByName;
+            ),
+        );
+
+        assert!(
+            out.contains("impl :: doxa :: auth :: Scoping for WidgetByName"),
+            "{out}",
+        );
+        assert!(out.contains("scoped (scope)"), "{out}");
+    }
+
+    /// No `list`, no `Scoping` — so `Granted<Many<…>>` over an asset that
+    /// did not ask for a listing does not compile, which is the split
+    /// `Scoping` exists for.
+    #[test]
+    fn without_list_there_is_no_scoping() {
+        let out = expand_ok(
+            quote!(
+                profile = AppGrants,
+                actions = WidgetAction,
+                load_with = load
+            ),
+            quote!(
+                pub struct WidgetByName;
+            ),
+        );
+
+        assert!(!out.contains("Scoping"), "{out}");
+    }
+
+    #[test]
+    fn a_listing_that_is_not_the_tenant_is_refused() {
+        let message = expand_err(
+            quote!(
+                profile = AppGrants,
+                actions = WidgetAction,
+                list = everything
+            ),
+            quote!(
+                pub struct WidgetByName;
+            ),
+        );
+
+        assert!(message.contains("expected `list = tenant`"), "{message}");
+        assert!(message.contains("hand-written `Scoping`"), "{message}");
+    }
+
     #[test]
     fn an_unknown_option_names_the_ones_there_are() {
         let message = expand_err(
-            quote!(profile = AppGrants, actions = SourceAction, lookup = Thing),
+            quote!(profile = AppGrants, actions = WidgetAction, lookup = Thing),
             quote!(
                 pub struct Source;
             ),
@@ -384,7 +576,7 @@ mod tests {
     #[test]
     fn a_function_is_refused() {
         let message = expand_err(
-            quote!(profile = AppGrants, actions = SourceAction),
+            quote!(profile = AppGrants, actions = WidgetAction),
             quote!(
                 fn source() {}
             ),

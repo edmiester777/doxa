@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize, ToSchema, PolicyResource,
 )]
-#[sea_orm(table_name = "sources")]
-#[resource(entity_type = "Source")]
+#[sea_orm(table_name = "widgets")]
+#[resource(entity_type = "Widget")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
@@ -46,11 +46,11 @@ pub enum Relation {}
 impl ActiveModelBehavior for ActiveModel {}
 
 #[derive(Debug, Clone, Copy, Actions)]
-#[actions(resource = "Source", prefix = "sources")]
-pub enum SourceAction {
-    /// List and view data sources.
+#[actions(resource = "Widget", prefix = "widgets")]
+pub enum WidgetAction {
+    /// List and view data widgets.
     Read,
-    /// Remove data sources.
+    /// Remove data widgets.
     Delete,
 }
 
@@ -67,29 +67,19 @@ impl GrantProfile for AppGrants {
 // ---- the assets -------------------------------------------------------------
 
 /// The whole declaration. The key and the loader come off the row's
-/// `ScopedRow`; the caller, state and error come off the profile.
-#[asset(row = Model, profile = AppGrants, actions = SourceAction)]
-pub struct SourceByName;
+/// `ScopedRow`; the caller, state and error come off the profile. `list`
+/// adds the collection route's `Scoping`, confined to the tenant.
+#[asset(row = Model, profile = AppGrants, actions = WidgetAction, list = tenant)]
+pub struct WidgetByName;
 
-/// The same row on a second route key. A unit struct, not a newtype —
-/// which is the point of the whole arrangement. The primary key is not
-/// what `#[resource(key)]` named, so this one supplies its own lookup.
-#[asset(
-    row = Model,
-    key = Uuid,
-    profile = AppGrants,
-    actions = SourceAction,
-    load_with = by_id
-)]
-pub struct SourceById;
-
-async fn by_id(
-    id: Uuid,
-    db: &DatabaseConnection,
-    _ctx: &CapabilityContext,
-) -> Result<Option<Model>, DbLoadError> {
-    Ok(Entity::find_by_id(id).one(db).await?)
-}
+/// The same row on a second route key: a unit struct, not a newtype.
+///
+/// `key = pk` rather than `key = Uuid, load_with = …`, and the difference
+/// is not brevity. Written out, a primary-key lookup is
+/// `Entity::find_by_id(id).one(db)` — which drops the tenant filter, and
+/// nothing in the type system asks for it back.
+#[asset(row = Model, key = pk, profile = AppGrants, actions = WidgetAction)]
+pub struct WidgetById;
 
 // `Row` defaulting to `Self` — the attribute written on the row itself —
 // is covered by the macro's own tests. It needs the row and the profile to
@@ -115,9 +105,9 @@ fn the_profile_supplies_the_caller_state_and_error() {
         );
     }
 
-    same::<<SourceByName as Granting>::Ctx, <AppGrants as GrantProfile>::Ctx>();
-    same::<<SourceByName as Granting>::State, <AppGrants as GrantProfile>::State>();
-    same::<<SourceByName as Granting>::Error, <AppGrants as GrantProfile>::Error>();
+    same::<<WidgetByName as Granting>::Ctx, <AppGrants as GrantProfile>::Ctx>();
+    same::<<WidgetByName as Granting>::State, <AppGrants as GrantProfile>::State>();
+    same::<<WidgetByName as Granting>::Error, <AppGrants as GrantProfile>::Error>();
 }
 
 /// The key is the one the row declared through `#[resource(key)]`, so the
@@ -130,27 +120,27 @@ fn the_key_comes_off_the_row() {
     {
     }
 
-    key_is_the_scoped_one::<SourceByName>();
+    key_is_the_scoped_one::<WidgetByName>();
 }
 
 /// The vocabulary is the enum's table, and the same one either route sees.
 #[test]
 fn both_descriptors_carry_the_same_vocabulary() {
     assert!(std::ptr::eq(
-        <SourceByName as Granting>::ACTIONS,
-        <SourceAction as ActionTable>::ACTIONS,
+        <WidgetByName as Granting>::ACTIONS,
+        <WidgetAction as ActionTable>::ACTIONS,
     ));
     assert!(std::ptr::eq(
-        <SourceById as Granting>::ACTIONS,
-        <SourceByName as Granting>::ACTIONS,
+        <WidgetById as Granting>::ACTIONS,
+        <WidgetByName as Granting>::ACTIONS,
     ));
 }
 
 /// The reason `Row` is a separate associated type rather than `Self`.
 ///
 /// Both routes reach one row, so there is one `PolicyResource` impl and
-/// one Cedar identity. Were `SourceById` a newtype it would carry its own
-/// forwarding, and a policy granting on `Source::"primary"` could silently
+/// one Cedar identity. Were `WidgetById` a newtype it would carry its own
+/// forwarding, and a policy granting on `Widget::"primary"` could silently
 /// fail to govern the route that reached the same row by id — a grant that
 /// does not apply, with nothing to see in the logs.
 #[test]
@@ -159,8 +149,8 @@ fn one_row_reached_two_ways_has_one_cedar_identity() {
         <A::Row as PolicyResource>::ENTITY_TYPE
     }
 
-    assert_eq!(entity_type::<SourceByName>(), "Source");
-    assert_eq!(entity_type::<SourceById>(), entity_type::<SourceByName>());
+    assert_eq!(entity_type::<WidgetByName>(), "Widget");
+    assert_eq!(entity_type::<WidgetById>(), entity_type::<WidgetByName>());
 
     let row = Model {
         id: Uuid::nil(),
@@ -183,7 +173,7 @@ fn row() -> Model {
 fn caller(tenant: &str) -> CapabilityContext {
     CapabilityContext {
         tenant_id: Some(tenant.to_owned()),
-        roles: vec!["sources.read".to_owned()],
+        roles: vec!["widgets.read".to_owned()],
     }
 }
 
@@ -196,7 +186,7 @@ async fn the_generated_loader_confines_the_lookup_to_the_caller_s_tenant() {
         .append_query_results([vec![row()]])
         .into_connection();
 
-    let found = <SourceByName as Granting>::load("primary".to_owned(), &db, &caller("acme"))
+    let found = <WidgetByName as Granting>::load("primary".to_owned(), &db, &caller("acme"))
         .await
         .expect("query runs");
 
@@ -208,6 +198,49 @@ async fn the_generated_loader_confines_the_lookup_to_the_caller_s_tenant() {
         sql.contains("acme"),
         "the tenant is not in the query: {sql}"
     );
+}
+
+/// `key = pk` is scoped too, which is the whole reason it exists as an
+/// option rather than as three lines in the application.
+///
+/// The tenant predicate is asserted rather than the whole statement,
+/// because what matters is that it is there at all: without it a caller
+/// naming another tenant's id reaches that tenant's row, and the route
+/// answers 403 where it would have answered 404 — which confirms the row
+/// exists.
+#[tokio::test]
+async fn the_primary_key_lookup_is_confined_to_the_tenant_too() {
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_results([Vec::<Model>::new()])
+        .into_connection();
+
+    <WidgetById as Granting>::load(Uuid::nil(), &db, &caller("acme"))
+        .await
+        .expect("query runs");
+
+    let log = db.into_transaction_log();
+    let sql = format!("{:?}", log[0]);
+    assert!(
+        sql.contains("tenant_id"),
+        "a primary-key lookup that ignores the scope: {sql}",
+    );
+    assert!(sql.contains("acme"), "{sql}");
+}
+
+/// `list = tenant` yields the listing `Select`, filtered the same way the
+/// instance lookup is — so what a caller may page and what they may fetch
+/// one of are the same set.
+#[test]
+fn the_generated_listing_is_confined_to_the_same_tenant() {
+    use doxa::auth::Scoping;
+    use sea_orm::QueryTrait;
+
+    let filter = <WidgetByName as Scoping>::scope("read", &caller("acme"))
+        .expect("scoping runs")
+        .expect("the tenant is always a scope");
+
+    let sql = filter.build(DatabaseBackend::Postgres).to_string();
+    assert!(sql.contains(r#""widgets"."tenant_id" = 'acme'"#), "{sql}");
 }
 
 /// A caller with no tenant scopes to the empty string rather than to
@@ -223,7 +256,7 @@ async fn a_caller_without_a_tenant_matches_nothing() {
         roles: Vec::new(),
     };
 
-    let found = <SourceByName as Granting>::load("primary".to_owned(), &db, &ctx)
+    let found = <WidgetByName as Granting>::load("primary".to_owned(), &db, &ctx)
         .await
         .expect("query runs");
 
@@ -238,7 +271,7 @@ async fn a_failed_query_becomes_the_profile_s_error() {
         .append_query_errors([DbErr::Custom("connection reset".to_owned())])
         .into_connection();
 
-    let error = <SourceByName as Granting>::load("primary".to_owned(), &db, &caller("acme"))
+    let error = <WidgetByName as Granting>::load("primary".to_owned(), &db, &caller("acme"))
         .await
         .expect_err("the query failed");
 
@@ -270,14 +303,14 @@ impl CapabilityChecker for Allow {
     }
 }
 
-struct GetSource;
-impl doxa::auth::GrantSite for GetSource {
+struct GetWidget;
+impl doxa::auth::GrantSite for GetWidget {
     const PARAMS: &'static [&'static str] = &["name"];
     const ACTION: &'static str = "read";
 }
 
-struct DeleteSource;
-impl doxa::auth::GrantSite for DeleteSource {
+struct DeleteWidget;
+impl doxa::auth::GrantSite for DeleteWidget {
     const PARAMS: &'static [&'static str] = &["name"];
     const ACTION: &'static str = "delete";
 }
@@ -290,20 +323,20 @@ async fn call<S>(
 ) -> axum::http::Response<axum::body::Body>
 where
     S: doxa::auth::GrantSite,
-    Granted<One<SourceByName, S>>: axum::extract::FromRequestParts<DatabaseConnection>,
+    Granted<One<WidgetByName, S>>: axum::extract::FromRequestParts<DatabaseConnection>,
 {
     use tower::ServiceExt;
 
-    async fn handler(guard: Granted<One<SourceByName, GetSource>>) -> String {
+    async fn handler(guard: Granted<One<WidgetByName, GetWidget>>) -> String {
         guard.into_inner().name
     }
-    async fn deleting(guard: Granted<One<SourceByName, DeleteSource>>) -> String {
+    async fn deleting(guard: Granted<One<WidgetByName, DeleteWidget>>) -> String {
         guard.into_inner().name
     }
 
     let app = axum::Router::new()
-        .route("/sources/{name}", axum::routing::get(handler))
-        .route("/sources/{name}", axum::routing::delete(deleting))
+        .route("/widgets/{name}", axum::routing::get(handler))
+        .route("/widgets/{name}", axum::routing::delete(deleting))
         .layer(axum::middleware::from_fn(
             move |mut request: axum::http::Request<axum::body::Body>,
                   next: axum::middleware::Next| async move {
@@ -327,7 +360,7 @@ where
     app.oneshot(
         axum::http::Request::builder()
             .method(method)
-            .uri("/sources/primary")
+            .uri("/widgets/primary")
             .body(axum::body::Body::empty())
             .unwrap(),
     )
@@ -345,7 +378,7 @@ async fn a_route_guards_the_asset_the_attribute_wired() {
         .append_query_results([vec![row()]])
         .into_connection();
 
-    let response = call::<GetSource>(db, &["sources.read"]).await;
+    let response = call::<GetWidget>(db, &["widgets.read"]).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -355,13 +388,13 @@ async fn a_route_guards_the_asset_the_attribute_wired() {
 }
 
 /// The guard still refuses what the vocabulary does not cover — the
-/// capability `SourceAction::Delete` declared, which this caller lacks.
+/// capability `WidgetAction::Delete` declared, which this caller lacks.
 #[tokio::test]
 async fn an_action_the_caller_does_not_hold_is_refused() {
     let db = MockDatabase::new(DatabaseBackend::Postgres)
         .append_query_results([vec![row()]])
         .into_connection();
 
-    let response = call::<DeleteSource>(db, &["sources.read"]).await;
+    let response = call::<DeleteWidget>(db, &["widgets.read"]).await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

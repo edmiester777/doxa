@@ -746,8 +746,8 @@ pub fn actions() -> Vec<&'static Action> {
 
 /// An asset's action vocabulary, as a bound rather than an inherent const.
 ///
-/// `#[derive(Actions)]` has always emitted `SourceAction::ACTIONS`, and for
-/// the ordinary wiring — `const ACTIONS = SourceAction::ACTIONS;` — that is
+/// `#[derive(Actions)]` has always emitted `WidgetAction::ACTIONS`, and for
+/// the ordinary wiring — `const ACTIONS = WidgetAction::ACTIONS;` — that is
 /// enough, because a path substitution resolves an inherent const as
 /// readily as a trait one. The derive still emits it, and this trait is
 /// where the array now lives.
@@ -755,7 +755,7 @@ pub fn actions() -> Vec<&'static Action> {
 /// The bound is for the code that cannot name the enum: something generic
 /// over the vocabulary it authorizes against, or a startup seeding Cedar's
 /// action entities from whatever tables it was handed. Neither can write
-/// `SourceAction::` at all.
+/// `WidgetAction::` at all.
 ///
 /// ```
 /// # use doxa_auth::granted::{Action, ActionTable};
@@ -764,12 +764,12 @@ pub fn actions() -> Vec<&'static Action> {
 ///     A::ACTIONS.iter().map(|action| action.name).collect()
 /// }
 ///
-/// enum SourceAction {}
-/// impl ActionTable for SourceAction {
+/// enum WidgetAction {}
+/// impl ActionTable for WidgetAction {
 ///     const ACTIONS: &'static [Action] = &[Action::new("read"), Action::new("delete")];
 /// }
 ///
-/// assert_eq!(names::<SourceAction>(), ["read", "delete"]);
+/// assert_eq!(names::<WidgetAction>(), ["read", "delete"]);
 /// ```
 ///
 /// It also moves the diagnosis. A type with no vocabulary passed where one
@@ -943,9 +943,9 @@ pub trait GrantProfile: Send + Sync + 'static {
 /// a newtype:
 ///
 /// ```ignore
-/// pub struct SourceById;
+/// pub struct WidgetById;
 ///
-/// impl Granting for SourceById {
+/// impl Granting for WidgetById {
 ///     type Row = Source;      // same Cedar entity as the by-name route
 ///     type Key = Uuid;
 ///     // …

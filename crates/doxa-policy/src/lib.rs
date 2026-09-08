@@ -78,7 +78,7 @@ pub use policy::Policy;
 pub use resource::{PolicyResource, ResourceEntity, ResourceIdType};
 pub use router::{AccessDecision, PolicyRouter};
 #[cfg(feature = "sea-orm")]
-pub use scoped::{DbLoadError, ScopedRow};
+pub use scoped::{DbLoadError, PrimaryKeyOf, ScopedRow};
 pub use store::{PolicyStore, SharedPolicyStore};
 
 /// Re-exported so `#[derive(PolicyResource)]`'s generated [`ScopedRow`]
