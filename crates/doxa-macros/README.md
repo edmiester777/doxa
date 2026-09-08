@@ -181,7 +181,7 @@ pub struct Model {
 | `key` | The value a route's key segment matches (needs `sea-orm`) |
 | `scope` | The column every query is confined to (needs `sea-orm`) |
 
-With the `sea-orm` feature, `scope` emits a `ScopedTable` impl — the confinement column, plus the column behind each Cedar attribute so a policy residual can be translated — and `key` adds `ScopedRow` on top of it. Marking only `scope` is a table nothing addresses by a column: it can still be listed and still have a residual read against it. The key and the Cedar id are deliberately independent, so a row addressed by `{id}` and the same row addressed by `{name}` stay one Cedar entity reached two ways.
+With the `sea-orm` feature, `scope` emits a `ScopedTable` impl — the confinement column, plus the column behind each Cedar attribute so a policy residual can be translated — and `key` adds `ScopedRow` on top of it. Marking only `scope` is a table nothing addresses by a column: it can still be listed, still have a residual read against it, and still take `key = pk`, because a primary key belongs to the table rather than to a route. The key and the Cedar id are deliberately independent, so a row addressed by `{id}` and the same row addressed by `{name}` stay one Cedar entity reached two ways.
 
 ### `#[derive(Actions)]`
 
@@ -248,11 +248,13 @@ pub struct WidgetById;
 
 `key = pk` rather than a hand-written primary-key loader, because the obvious version is wrong in a way that passes every test: `Entity::find_by_id(id).one(db)` drops the tenant filter, and an instance check that then refuses it has already answered `403` where it would have answered `404` — confirming the row exists.
 
+It calls `ScopedTable::load_by_id`, not `ScopedRow`, so it is reachable from a row marked `#[resource(scope)]` and nothing else. That is the case it most needs to cover: a table whose name route resolves through logic has no key column to mark, and would otherwise be left writing out the very lookup this exists to replace.
+
 ## Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `sea-orm` | no | Emit the `ScopedRow` half of `#[derive(PolicyResource)]` — the loader built from `#[resource(key)]` and `#[resource(scope)]` |
+| `sea-orm` | no | Emit the `ScopedTable` / `ScopedRow` half of `#[derive(PolicyResource)]` — the loader built from `#[resource(scope)]` and `#[resource(key)]` |
 
 Off by default so the derive costs no ORM dependency for consumers that only need Cedar identity. With it off, using either role is an error naming the feature rather than a missing impl at the call site. Through the `doxa` facade it is reached as `policy-sea-orm`.
 

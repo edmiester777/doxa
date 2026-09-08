@@ -433,15 +433,20 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # The loader (`policy-sea-orm`)
 ///
-/// On a SeaORM `Model`, `#[resource(key)]` and `#[resource(scope)]`
-/// additionally emit a `ScopedRow` impl — the query a route runs before it
-/// can decide anything. `key` is the column the route's path segment
-/// matches; `scope` is the column every lookup is confined to, so a key
-/// belonging to another owner is indistinguishable from one that does not
-/// exist.
+/// On a SeaORM `Model`, `#[resource(scope)]` emits a `ScopedTable` impl
+/// and `#[resource(key)]` adds `ScopedRow` on top of it — the query a route
+/// runs before it can decide anything. `key` is the column the route's path
+/// segment matches; `scope` is the column every lookup is confined to, so a
+/// key belonging to another owner is indistinguishable from one that does
+/// not exist.
 ///
-/// The two are independent of the Cedar id: a row reached by `{model_id}`
-/// and the same row reached by `{name}` are one entity with two loaders.
+/// `scope` alone is a table no column addresses — a name resolved through
+/// logic rather than matched — and it is not the lesser half: listing, a
+/// residual read and the primary-key lookup all live on `ScopedTable`, so
+/// such a table still takes `list = tenant` and `key = pk`.
+///
+/// Both are independent of the Cedar id: a row reached by `{model_id}` and
+/// the same row reached by `{name}` are one entity with two loaders.
 ///
 /// ```ignore
 /// #[derive(DeriveEntityModel, PolicyResource)]
@@ -609,9 +614,11 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// | `load_with` | `ScopedRow::load_scoped`, confined to the caller's tenant |
 ///
 /// `key = pk` is a word rather than a type because it selects a different
-/// lookup, not just a different key: `ScopedRow::load_by_id`, which keeps
+/// lookup, not just a different key: `ScopedTable::load_by_id`, which keeps
 /// the scope filter that a hand-written `Entity::find_by_id(id).one(db)`
-/// silently drops.
+/// silently drops. It reads `ScopedTable` and not `ScopedRow` deliberately
+/// — a primary key belongs to the table — so a row that declares no
+/// `#[resource(key)]` still has an id route.
 ///
 /// `list = tenant` names its filter for the same reason. The generated
 /// `Scoping` confines the listing to the caller's tenant and applies **no

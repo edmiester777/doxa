@@ -4,9 +4,10 @@
 //! Five of `Granting`'s six items are not decisions. `Ctx`, `State` and
 //! `Error` belong to the application and are the same for every asset in
 //! it; `Key` and `load` are the lookup the row already declares through
-//! [`ScopedRow`]; `Row` is `Self` unless the attribute says otherwise.
-//! Only `ACTIONS` is a fact about this asset, and the attribute takes it
-//! as one word.
+//! [`ScopedRow`] — or, for `key = pk`, through [`ScopedTable`], which is
+//! why the id route reaches a row that declares no key column at all;
+//! `Row` is `Self` unless the attribute says otherwise. Only `ACTIONS` is
+//! a fact about this asset, and the attribute takes it as one word.
 //!
 //! `ctx` and `error` override the profile for the asset that genuinely
 //! differs — a loader answering 409 on an ambiguous name, or a `Scoping`
@@ -27,6 +28,7 @@
 //! Cedar identity.
 //!
 //! [`ScopedRow`]: https://docs.rs/doxa-policy/latest/doxa_policy/trait.ScopedRow.html
+//! [`ScopedTable`]: https://docs.rs/doxa-policy/latest/doxa_policy/trait.ScopedTable.html
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -45,7 +47,10 @@ struct Args {
     actions: Option<Path>,
     /// Route key. `<Row as ScopedRow>::Key` when absent.
     key: Option<Type>,
-    /// `key = pk`: the row's primary key rather than its key column.
+    /// `key = pk`: the row's primary key rather than its key column, and
+    /// `ScopedTable::load_by_id` rather than `ScopedRow::load_scoped`.
+    /// Asks nothing of `#[resource(key)]`, so a row that declares no key
+    /// column still has an id route.
     by_primary_key: bool,
     /// Loader failure, overriding the profile's.
     error: Option<Type>,
@@ -187,56 +192,62 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     // The loader is the one generated item that needs the ORM, so it is
     // the one gated on the feature. Without it the attribute still writes
     // the five associated items and asks only for `load_with`.
-    let load =
-        match &args.load_with {
-            Some(path) => quote! {
+    let load = match &args.load_with {
+        Some(path) => quote! {
+            async fn load(
+                key: Self::Key,
+                state: &Self::State,
+                ctx: &Self::Ctx,
+            ) -> ::std::result::Result<::std::option::Option<Self::Row>, Self::Error> {
+                #path(key, state, ctx).await
+            }
+        },
+        None if cfg!(feature = "sea-orm") => {
+            // `load_by_id` is a `ScopedTable` method and `load_scoped`
+            // a `ScopedRow` one, so the trait is part of the choice
+            // rather than a constant around it. That is the whole
+            // reach of `key = pk` on a row that declares no key
+            // column: a primary key belongs to the table, so the id
+            // route asks nothing of `#[resource(key)]`.
+            let lookup = if args.by_primary_key {
+                quote!(<#row as ::doxa::policy::ScopedTable>::load_by_id)
+            } else {
+                quote!(<#row as ::doxa::policy::ScopedRow>::load_scoped)
+            };
+            quote! {
                 async fn load(
                     key: Self::Key,
                     state: &Self::State,
                     ctx: &Self::Ctx,
                 ) -> ::std::result::Result<::std::option::Option<Self::Row>, Self::Error> {
-                    #path(key, state, ctx).await
-                }
-            },
-            None if cfg!(feature = "sea-orm") => {
-                let lookup = if args.by_primary_key {
-                    quote!(load_by_id)
-                } else {
-                    quote!(load_scoped)
-                };
-                quote! {
-                    async fn load(
-                        key: Self::Key,
-                        state: &Self::State,
-                        ctx: &Self::Ctx,
-                    ) -> ::std::result::Result<::std::option::Option<Self::Row>, Self::Error> {
-                        // Every lookup is confined to the caller's tenant, so a
-                        // key belonging to someone else answers `None` exactly as
-                        // a key that does not exist would.
-                        //
-                        // A caller with no tenant has no scope to be confined
-                        // to, and the answer is that nothing is there. Defaulting
-                        // to the empty string instead would issue a real query
-                        // for `scope = ''` — which finds nothing on any sane
-                        // schema, and is a row somebody could create on the
-                        // wrong one.
-                        let ::std::option::Option::Some(scope) =
-                            ::doxa::auth::FromAuthExtensions::tenant(ctx)
-                        else {
-                            return ::std::result::Result::Ok(::std::option::Option::None);
-                        };
-                        ::std::result::Result::Ok(
-                            <#row as ::doxa::policy::ScopedRow>::#lookup(key, state, scope).await?,
-                        )
-                    }
+                    // Every lookup is confined to the caller's tenant, so a
+                    // key belonging to someone else answers `None` exactly as
+                    // a key that does not exist would.
+                    //
+                    // A caller with no tenant has no scope to be confined
+                    // to, and the answer is that nothing is there. Defaulting
+                    // to the empty string instead would issue a real query
+                    // for `scope = ''` — which finds nothing on any sane
+                    // schema, and is a row somebody could create on the
+                    // wrong one.
+                    let ::std::option::Option::Some(scope) =
+                        ::doxa::auth::FromAuthExtensions::tenant(ctx)
+                    else {
+                        return ::std::result::Result::Ok(::std::option::Option::None);
+                    };
+                    ::std::result::Result::Ok(#lookup(key, state, scope).await?)
                 }
             }
-            None => return Err(syn::Error::new(
+        }
+        None => {
+            return Err(syn::Error::new(
                 name.span(),
-                "`asset` writes the loader from `ScopedRow`, which needs the `sea-orm` feature \
-                 on `doxa-macros`. Enable it, or supply `load_with = <fn>`",
-            )),
-        };
+                "`asset` writes the loader from `ScopedRow` — or from `ScopedTable`, for \
+                 `key = pk` — which needs the `sea-orm` feature on `doxa-macros`. Enable it, \
+                 or supply `load_with = <fn>`",
+            ))
+        }
+    };
 
     // Listing, and only the tenant-confined kind. `Scoping::scope` is
     // meant to carry the policy's residual, which is a per-row condition
@@ -526,6 +537,12 @@ mod tests {
     /// is a word rather than `key = Uuid`. The generated call is
     /// `load_by_id`, whose default body keeps the scope filter that a
     /// hand-written `find_by_id` drops.
+    ///
+    /// The trait it is qualified with is asserted too, and is not
+    /// incidental: `ScopedTable` is the half a row gets from
+    /// `#[resource(scope)]` alone, so naming `ScopedRow` here would put
+    /// the id route out of reach of every table that declares no key
+    /// column — and back into a hand-written `find_by_id`.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn key_pk_selects_the_scoped_primary_key_lookup() {
@@ -545,7 +562,13 @@ mod tests {
             out.contains("type Key = :: doxa :: policy :: PrimaryKeyOf < Widget >"),
             "{out}",
         );
-        assert!(out.contains("load_by_id (key , state , scope)"), "{out}");
+        assert!(
+            out.contains(
+                "< Widget as :: doxa :: policy :: ScopedTable > :: load_by_id \
+                 (key , state , scope)"
+            ),
+            "{out}",
+        );
     }
 
     /// `key = pk` says what the key is, so a type beside it is a second
