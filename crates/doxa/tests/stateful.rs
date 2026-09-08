@@ -23,7 +23,7 @@ use serde::Serialize;
 use serde_json::json;
 use tower::ServiceExt;
 
-use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
+use doxa::auth::{Action, Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
@@ -91,6 +91,7 @@ impl Granting for Document {
     type Key = uuid::Uuid;
     type Ctx = CapabilityContext;
     type State = Store;
+    type Source = FromState<Store>;
     type Error = StatusCode;
 
     const ACTIONS: &'static [Action] = &[Action::new("read").capability(&DOCUMENTS_READ)];

@@ -223,7 +223,9 @@ That yields the `widgets.read` and `widgets.delete` capabilities as markers unde
 
 ### `#[asset]`
 
-Writes the `Granting` impl. Five of its six items are not decisions — `Ctx`, `State` and `Error` belong to the application and are stated once on a `GrantProfile`; `Key` and `load` are the lookup the row already declared through `ScopedRow`. Only the vocabulary is a fact about this asset.
+Writes the `Granting` impl. Six of its seven items are not decisions — `Ctx`, `State`, `Source` and `Error` belong to the application and are stated once on a `GrantProfile`; `Key` and `load` are the lookup the row already declared through `FetchByKey`. Only the vocabulary is a fact about this asset.
+
+Nothing it writes names a backend. `FetchByKey` / `FetchById` / `FetchSubset` are `doxa-policy`'s and know about no ORM, so the declarations below read the same whether the row is a SeaORM model or a document behind an HTTP API. `#[derive(PolicyResource)]` answers those traits for a SeaORM model; anything else answers them itself.
 
 ```rust
 #[asset(row = Model, profile = AppGrants, actions = WidgetAction, list = tenant)]
@@ -239,16 +241,23 @@ pub struct WidgetById;
 | Key | Description |
 |-----|-------------|
 | `row` | The row this descriptor reaches (default: `Self`) |
-| `profile` | The application's `GrantProfile`, supplying `Ctx` / `State` / `Error` |
+| `profile` | The application's `GrantProfile`, supplying `Ctx` / `State` / `Source` / `Error` |
 | `actions` | The `#[derive(Actions)]` enum holding the vocabulary |
-| `key` | Route key type, or `pk` for the row's primary key (default: `<Row as ScopedRow>::Key`) |
-| `load_with` | A loader to call instead of `ScopedRow::load_scoped` |
+| `key` | Route key type, or `pk` for the row's own identifier (default: `<Row as FetchByKey<State>>::Key`) |
+| `load_with` | A loader to call instead of `FetchByKey::fetch` |
+| `source` | Where the loader's state comes from, and therefore what it is (default: the profile's) |
 | `ctx` / `error` | Override the profile, for the one asset that genuinely differs |
 | `list = tenant` | Also emit a `Scoping` impl confined to the caller's tenant |
 
 `key = pk` rather than a hand-written primary-key loader, because the obvious version is wrong in a way that passes every test: `Entity::find_by_id(id).one(db)` drops the tenant filter, and an instance check that then refuses it has already answered `403` where it would have answered `404` — confirming the row exists.
 
-It calls `ScopedTable::load_by_id`, not `ScopedRow`, so it is reachable from a row marked `#[resource(scope)]` and nothing else. That is the case it most needs to cover: a table whose name route resolves through logic has no key column to mark, and would otherwise be left writing out the very lookup this exists to replace.
+It calls `FetchById`, not `FetchByKey`, so it is reachable from a row marked `#[resource(scope)]` and nothing else. That is the case it most needs to cover: a table whose name route resolves through logic has no key column to mark, and would otherwise be left writing out the very lookup this exists to replace.
+
+`load_with` is the same trade one level up, and the difference is one argument. `FetchByKey::fetch` is handed a `&str` scope and nothing else — that is the guarantee, not a thin signature, because a lookup that cannot see the caller cannot ignore the caller's tenant. `load_with` is handed the whole `Ctx`, which is what makes a role-dependent lookup expressible *and* what makes confinement yours to write.
+
+Both halves are real. Use it when the lookup genuinely needs more than the scope, and write the tenant filter: a `load_with` that takes `_ctx` and means it compiles, passes its tests, and serves one tenant's rows to another — through the capability gate and the instance check, recorded in the trail as a legitimate grant. Nothing else about the chain changes: the coarse gate still runs first and costs no load, the instance check still runs on whatever came back, and the verdict still names the row's Cedar identity.
+
+`source` is what the loader is handed and where it comes from, which move together. `source = Extension<Txn>` means the guard extracts the request's transaction and `load` receives `&Txn` — the case a router-state loader cannot serve, since a pool does not see rows the request has written and not committed.
 
 ## Features
 

@@ -15,7 +15,8 @@ use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use doxa::audit::EventType;
 use doxa::auth::{
-    Action, ActionTable, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
+    Action, ActionTable, Cap, CapabilityContext, FromState, GrantSite, Granted, Granting, Many,
+    One, Scoping,
 };
 use doxa::policy::{AuthError, Capability, CapabilityChecker, Capable, ResourceEntity, ResourceId};
 use doxa::{capability, Actions, PolicyResource, ToSchema};
@@ -79,6 +80,7 @@ impl Granting for Source {
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     /// The one line that wires the vocabulary to the asset.

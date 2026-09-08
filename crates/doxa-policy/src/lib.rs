@@ -25,6 +25,7 @@
 //! | [`error`] | [`AuthError`] enum (no HTTP response mapping) |
 //! | [`uid`] | Cedar entity UID builder with input validation |
 //! | [`resource`] | [`PolicyResource`] — instance-level resource identity |
+//! | [`fetch`] | [`Fetch`] / [`FetchByKey`] / [`FetchById`] / [`FetchSubset`] — the scoped lookups a route needs, in terms no backend owns |
 //! | `scoped` | `ScopedTable` / `ScopedRow` — the column a SeaORM query is confined to, and the key a route reaches one row by, plus `DbLoadError` for when the lookup fails (needs `sea-orm`; not linked, as the module is absent without it) |
 //! | `residual` | `condition_from_residual` — a policy's leftover `when` clause as a SeaORM `Condition`, so a grant is one query rather than a query and a loop (needs `sea-orm`) |
 
@@ -32,6 +33,7 @@ pub mod capability;
 pub mod cedar_core;
 pub mod error;
 pub mod extension;
+pub mod fetch;
 pub mod policy;
 pub mod resource;
 pub mod router;
@@ -80,6 +82,7 @@ pub use capability::{Capability, CapabilityCheck, CapabilityChecker, Capable, Re
 pub use cedar_core::{TenantStoreCache, DEFAULT_TENANT_CACHE_CAPACITY, DEFAULT_TENANT_CACHE_TTL};
 pub use error::AuthError;
 pub use extension::{PolicyExtension, ResourceAccess};
+pub use fetch::{Fetch, FetchById, FetchByKey, FetchSubset};
 pub use policy::Policy;
 #[cfg(feature = "sea-orm")]
 pub use residual::condition_from_residual;

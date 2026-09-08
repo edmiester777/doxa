@@ -17,7 +17,7 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, EventType, Outcome};
-use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
+use doxa::auth::{Action, Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
@@ -53,6 +53,7 @@ impl Granting for Widget {
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     /// Declared once for the asset, so every route guarding a widget

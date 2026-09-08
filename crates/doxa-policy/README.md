@@ -125,9 +125,40 @@ Use with `doxa-auth`'s `Require<WidgetsRead>` extractor for runtime enforcement 
 
 `entity_id` also takes the bare word `tenant` — `entity_id = tenant` — for a gate whose resource *is* the caller's partition rather than a named object. With the `catalog` feature (on by default) every declaration registers itself, so `capabilities()` returns the full set, sorted by name, without a hand-maintained list.
 
-### Loading the row, and pushing the policy into the query
+### Loading the row
 
-Behind the `sea-orm` feature, two traits cover the half of authorization that happens in SQL.
+`fetch` states the lookups a route needs in terms no backend owns: a key, a source to ask, and the scope the answer must be confined to. `#[asset]` is written against these, so what it generates is the same whether the row is in Postgres, behind an HTTP control plane, or in a map.
+
+```rust
+use doxa_policy::fetch::{Fetch, FetchByKey, FetchSubset};
+
+impl Fetch<Catalog> for Widget {
+    type Error = Infallible;
+}
+
+impl FetchByKey<Catalog> for Widget {
+    type Key = String;
+
+    async fn fetch(key: String, src: &Catalog, scope: &str) -> Result<Option<Self>, Infallible> {
+        // The scope is not advisory: a widget owned by someone else is
+        // absent, not refused.
+        Ok(src.get(&key).filter(|w| w.tenant == scope).cloned())
+    }
+}
+
+impl FetchSubset for Widget {
+    type Filter = String;
+    fn subset(scope: &str) -> String { scope.to_owned() }
+}
+```
+
+Every fetch takes the scope and every implementation owes it — a key belonging to another owner must answer `None` exactly as a key that does not exist would, so a route cannot confirm another tenant's object by answering `403` where it would otherwise answer `404`.
+
+The three-way split is deliberate: a key is a fact about a *route*, an id and a subset are facts about the *collection*. A row addressed by no key column still has an owner, so it implements `FetchById` and `FetchSubset` and is refused, at compile time, only for the route it cannot serve.
+
+### And in SQL, where most rows are
+
+Behind the `sea-orm` feature, two traits cover the half of authorization that happens in SQL. They are one *answer* to the above rather than the question — `fetch_from_scoped!` bridges them, and `#[derive(PolicyResource)]` emits it.
 
 `ScopedTable` names the column that says whose rows these are. Every query built from it carries that column, so another owner's row is **absent** rather than refused — which is what lets a route answer `404` instead of confirming the object exists with a `403`. It carries the two lookups that need nothing else: the listing, and the row addressed by the primary key the table already has. `ScopedRow` adds the key one route matches on, and the two lookups that read it. Every method has a default body, so an impl is three lines:
 
@@ -188,6 +219,8 @@ The column behind each attribute comes from `ScopedTable::column_for_attr`, whic
 | `AccessDecision` | Allow/Deny result with reason |
 | `CedarPolicy` | Generic Cedar implementation of the `Policy` trait |
 | `TenantStoreCache` | Per-tenant parsed policy + entity cache, bounded and TTL'd |
+| `Fetch` / `FetchByKey` / `FetchById` | The scoped lookups a route needs, in terms no backend owns |
+| `FetchSubset` | The subset of a collection one scope owns, as that collection's queries take it |
 | `ScopedTable` / `ScopedRow` | The scope column a query is confined to, and the key a route reaches one row by (`sea-orm`) |
 | `condition_from_residual` | A policy's leftover `when` clause as a SeaORM `Condition` (`sea-orm`) |
 | `DbLoadError` | A load that failed for a reason the caller had nothing to do with (`sea-orm`) |

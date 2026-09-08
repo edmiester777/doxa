@@ -86,9 +86,9 @@ pub use granted::actions;
 #[cfg(feature = "axum")]
 pub use granted::{
     authorize, declares, distinct, Action, ActionTable, AuthorizeLoaded, AuthorizeLoadedAll,
-    AuthorizeScope, Cap, DeclaredAction, DefaultSite, Denial, FromAuthExtensions, GrantProfile,
-    GrantSite, Granted, Granting, KeyError, KeySegment, Many, NoState, One, Refusal, RouteKey,
-    Scoped, Scoping, Subject, SubjectForm,
+    AuthorizeScope, Cap, DeclaredAction, DefaultSite, Denial, FromAuthExtensions, FromState,
+    GrantProfile, GrantSite, Granted, Granting, KeyError, KeySegment, LoaderSource, Many, NoState,
+    One, Refusal, RouteKey, Scoped, Scoping, Subject, SubjectForm,
 };
 #[cfg(feature = "axum")]
 pub use layer::{AuthLayer, AuthService};

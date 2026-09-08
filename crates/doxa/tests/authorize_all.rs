@@ -25,7 +25,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLogger, Outcome};
-use doxa::auth::{Action, AuthorizeLoadedAll, CapabilityContext, DeclaredAction, Denial, Granting};
+use doxa::auth::{
+    Action, AuthorizeLoadedAll, CapabilityContext, DeclaredAction, Denial, FromState, Granting,
+};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, ResourceEntity, ResourceId,
 };
@@ -62,6 +64,7 @@ impl Granting for SourceByName {
     type Key = String;
     type Ctx = CapabilityContext;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     const ACTIONS: &'static [Action] = &[Action::new("read_source")
