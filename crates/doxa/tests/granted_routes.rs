@@ -48,6 +48,7 @@ struct Widget {
 }
 
 impl Granting for Widget {
+    type Row = Self;
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
@@ -459,6 +460,7 @@ struct Filed {
 // there is no route that lists them. `Granted<Many<Filed>>` therefore
 // does not compile, which is the point of the split.
 impl Granting for Filed {
+    type Row = Self;
     type Key = (String, u32);
     type Ctx = CapabilityContext;
     type State = ();

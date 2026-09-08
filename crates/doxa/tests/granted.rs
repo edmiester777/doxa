@@ -55,6 +55,7 @@ struct Widget {
 struct Filter(&'static str);
 
 impl Granting for Widget {
+    type Row = Self;
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
@@ -117,6 +118,7 @@ struct Gadget {
 }
 
 impl Granting for Gadget {
+    type Row = Self;
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
@@ -512,6 +514,7 @@ struct Ledger {
 }
 
 impl Granting for Ledger {
+    type Row = Self;
     type Key = u32;
     type Ctx = Arc<doxa::auth::AuthContext<Session, doxa::auth::OidcClaims>>;
     type State = ();

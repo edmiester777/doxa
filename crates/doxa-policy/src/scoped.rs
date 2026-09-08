@@ -97,20 +97,22 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
 /// [`DbErr`] in the log — and no application-specific decision inside it,
 /// which is why every consumer had been writing the same twenty lines.
 ///
+/// Named once, on the application's profile, and every asset inherits it:
+///
 /// ```ignore
-/// impl Granting for Model {
+/// impl GrantProfile for AppGrants {
+///     type Ctx = Caller;
 ///     type State = DatabaseConnection;
 ///     type Error = DbLoadError;
-///
-///     async fn load(
-///         name: String,
-///         db: &DatabaseConnection,
-///         ctx: &CapabilityContext,
-///     ) -> Result<Option<Self>, DbLoadError> {
-///         Ok(Self::load_scoped(name, db, ctx.tenant().unwrap_or_default()).await?)
-///     }
 /// }
+///
+/// #[doxa::asset(row = Model, profile = AppGrants, actions = SourceAction)]
+/// pub struct SourceByName;
 /// ```
+///
+/// The loader `#[asset]` writes ends in `?`, so the only requirement this
+/// type places on an application that substitutes its own error is
+/// `From<DbErr>`.
 ///
 /// A row the caller may not see is not this: [`ScopedRow::load_scoped`]
 /// answers `Ok(None)` for a key in another scope exactly as it does for a

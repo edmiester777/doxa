@@ -49,6 +49,7 @@ struct Widget {
 }
 
 impl Granting for Widget {
+    type Row = Self;
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();

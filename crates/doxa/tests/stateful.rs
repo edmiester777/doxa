@@ -85,6 +85,7 @@ struct Document {
 }
 
 impl Granting for Document {
+    type Row = Self;
     /// The whole point: `uuid::Uuid` directly, with no local newtype
     /// standing between the route segment and the loader.
     type Key = uuid::Uuid;

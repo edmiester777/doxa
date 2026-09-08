@@ -47,6 +47,7 @@ struct Widget {
 /// No coarse capability, so the chain goes straight to the instance
 /// check — this file is about what an *instance* denial records.
 impl Granting for Widget {
+    type Row = Self;
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
