@@ -10,9 +10,14 @@
 //! The usual response is a per-request checker written by hand, closing
 //! over the session and delegating everything else. [`SessionChecker`] is
 //! that object, written once. What it asks the session comes off the
-//! [`PolicyExtension`] — [`session_is_admin`], [`decide_from_session`] and
-//! [`session_tenant`] — so the shortcuts stay the extension's to define
-//! while the wiring stops being the consumer's to write.
+//! [`PolicyExtension`] — [`session_is_admin`] and [`decide_from_session`]
+//! — so the shortcuts stay the extension's to define while the wiring
+//! stops being the consumer's to write.
+//!
+//! The tenant is not among them. It arrives from the guard, which read it
+//! from the auth layer, and a deployment whose callers carry no tenant
+//! claim configures that layer to supply one rather than teaching the
+//! policy a second place to look.
 //!
 //! ```ignore
 //! let checker = SessionChecker::new(Arc::clone(&router), session.clone());
@@ -25,7 +30,6 @@
 //!
 //! [`session_is_admin`]: PolicyExtension::session_is_admin
 //! [`decide_from_session`]: PolicyExtension::decide_from_session
-//! [`session_tenant`]: PolicyExtension::session_tenant
 
 use std::sync::Arc;
 
@@ -48,9 +52,8 @@ use crate::router::PolicyRouter;
 /// 2. [`PolicyExtension::decide_from_session`] — the session's own verdict
 ///    for this `(action, resource)`, when it holds one. Instance checks
 ///    only; a capability is not a pair the session enumerated.
-/// 3. The tenant, from [`PolicyExtension::session_tenant`] if the extension
-///    offers one, otherwise the one the guard passed. Empty is a refusal
-///    rather than an evaluation against no tenant.
+/// 3. The tenant the guard passed. Empty is a refusal rather than an
+///    evaluation against no tenant.
 /// 4. The router.
 pub struct SessionChecker<E: PolicyExtension> {
     router: Arc<PolicyRouter<E>>,
@@ -72,15 +75,6 @@ impl<E: PolicyExtension + 'static> SessionChecker<E> {
     pub fn into_extension(self) -> Arc<dyn CapabilityChecker> {
         Arc::new(self)
     }
-
-    /// The tenant every check runs within: the extension's, or the one the
-    /// caller supplied.
-    fn tenant<'a>(&'a self, supplied: &'a str) -> &'a str {
-        self.router
-            .extension()
-            .session_tenant(&self.session)
-            .unwrap_or(supplied)
-    }
 }
 
 #[async_trait::async_trait]
@@ -98,11 +92,10 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for SessionChecker<E> {
         // collection or a singleton, which is not one of the resources
         // `assemble_session` enumerated, so the session has no recorded
         // verdict to offer.
-        let tenant = self.tenant(tenant_id);
-        if tenant.is_empty() {
+        if tenant_id.is_empty() {
             return Ok(false);
         }
-        self.router.check_capability(tenant, roles, cap).await
+        self.router.check_capability(tenant_id, roles, cap).await
     }
 
     async fn check_instance(
@@ -119,13 +112,12 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for SessionChecker<E> {
         if let Some(decided) = extension.decide_from_session(&self.session, action, resource) {
             return Ok(decided);
         }
-        let tenant = self.tenant(tenant_id);
-        if tenant.is_empty() {
+        if tenant_id.is_empty() {
             return Ok(false);
         }
         Ok(self
             .router
-            .check_instance(tenant, roles, action, resource)
+            .check_instance(tenant_id, roles, action, resource)
             .await?
             .allowed)
     }
@@ -159,12 +151,11 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for SessionChecker<E> {
             .collect();
 
         if !pending.is_empty() {
-            let tenant = self.tenant(tenant_id);
-            let decided = if tenant.is_empty() {
+            let decided = if tenant_id.is_empty() {
                 vec![false; pending.len()]
             } else {
                 self.router
-                    .check_instance_many(tenant, roles, action, &pending)
+                    .check_instance_many(tenant_id, roles, action, &pending)
                     .await?
                     .into_iter()
                     .map(|decision| decision.allowed)
@@ -281,21 +272,32 @@ mod tests {
             .expect("checker ok"));
     }
 
-    /// The extension's tenant wins over the supplied one — the case an
-    /// auth-disabled bypass produces, where only the session is populated.
+    /// The tenant is the guard's and the extension has no say in it, so a
+    /// caller who arrives without one is refused however much the session
+    /// holds. A deployment whose callers carry no tenant claim gives the
+    /// auth layer a default; it does not teach the policy a second place to
+    /// look, which is how the two would come to disagree about which
+    /// partition a request was decided in.
     #[tokio::test]
-    async fn the_extension_may_name_the_tenant_itself() {
+    async fn a_populated_session_does_not_supply_a_missing_tenant() {
         let checker = checker(SessionFlags {
-            tenant: Some("acme".into()),
+            allowed: vec!["w-1".into()],
             ..SessionFlags::default()
         });
 
         assert!(
-            checker
+            !checker
                 .check_instance("", &[], "write_widget", &widget("w-1"))
                 .await
                 .expect("checker ok"),
-            "an empty supplied tenant must not refuse when the session names one",
+            "an absent tenant is a refusal, not something the session fills in",
+        );
+        assert!(
+            checker
+                .check_instance("acme", &[], "write_widget", &widget("w-1"))
+                .await
+                .expect("checker ok"),
+            "and the same call with a tenant reaches the policy",
         );
     }
 
