@@ -744,6 +744,48 @@ pub fn actions() -> Vec<&'static Action> {
     all
 }
 
+/// An asset's action vocabulary, as a bound rather than an inherent const.
+///
+/// `#[derive(Actions)]` has always emitted `SourceAction::ACTIONS`, and for
+/// the ordinary wiring — `const ACTIONS = SourceAction::ACTIONS;` — that is
+/// enough, because a path substitution resolves an inherent const as
+/// readily as a trait one. The derive still emits it, and this trait is
+/// where the array now lives.
+///
+/// The bound is for the code that cannot name the enum: something generic
+/// over the vocabulary it authorizes against, or a startup seeding Cedar's
+/// action entities from whatever tables it was handed. Neither can write
+/// `SourceAction::` at all.
+///
+/// ```
+/// # use doxa_auth::granted::{Action, ActionTable};
+/// /// Every action, whichever vocabulary declared it.
+/// fn names<A: ActionTable>() -> Vec<&'static str> {
+///     A::ACTIONS.iter().map(|action| action.name).collect()
+/// }
+///
+/// enum SourceAction {}
+/// impl ActionTable for SourceAction {
+///     const ACTIONS: &'static [Action] = &[Action::new("read"), Action::new("delete")];
+/// }
+///
+/// assert_eq!(names::<SourceAction>(), ["read", "delete"]);
+/// ```
+///
+/// It also moves the diagnosis. A type with no vocabulary passed where one
+/// is wanted fails as ``no associated item named `ACTIONS` `` somewhere
+/// inside a macro expansion; with the bound the error names this trait and
+/// the type that does not implement it.
+///
+/// The supertraits are the ones [`Granting`] already imposes on the asset,
+/// so a type parameterized by its vocabulary carries them without adding
+/// any of its own.
+pub trait ActionTable: Send + Sync + 'static {
+    /// Every action this vocabulary permits, as [`Granting::ACTIONS`]
+    /// takes it.
+    const ACTIONS: &'static [Action];
+}
+
 /// A type standing for one Cedar action.
 ///
 /// Actions are named by string almost everywhere — [`Action::new`] takes
