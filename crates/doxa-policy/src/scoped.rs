@@ -8,11 +8,13 @@
 //!
 //! The same reasoning splits this module's own two traits.
 //! [`ScopedTable`] is what the table owes — the column that says whose
-//! rows these are, and what its Cedar attributes mean in SQL — and
-//! [`ScopedRow`] adds the key one route matches on. A table reached by a
-//! name that no column holds still has an owner, so it can still be
-//! listed and still have a policy's residual read against it; requiring a
-//! key would have meant inventing one.
+//! rows these are, what its Cedar attributes mean in SQL, and the lookups
+//! that need nothing beyond those: the listing, and the row addressed by
+//! the primary key the table already has. [`ScopedRow`] adds the key one
+//! route matches on, and the two lookups that read it. A table reached by
+//! a name that no column holds still has an owner, so it can still be
+//! listed, still have a policy's residual read against it, and still be
+//! reached by id; requiring a key would have meant inventing one.
 //!
 //! Nothing here names an application type. [`Granting`] needs a caller
 //! shape, a state type and an error of the application's choosing — none
@@ -35,7 +37,7 @@ use sea_orm::{
     QueryFilter, Select, Value,
 };
 
-/// The value a row's primary key takes, for [`ScopedRow::load_by_id`].
+/// The value a row's primary key takes, for [`ScopedTable::load_by_id`].
 pub type PrimaryKeyOf<R> =
     <<<R as ScopedTable>::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType;
 
@@ -53,8 +55,8 @@ pub type PrimaryKeyOf<R> =
 /// different keys; a table addressed by no key at all — a name resolved
 /// through logic rather than matched against a column — still has an owner
 /// and still has attributes a policy names. Splitting them is what lets
-/// that table be listed and have its residual read, without inventing a
-/// key column for it to hold.
+/// that table be listed, have its residual read and be reached by its
+/// primary key, without inventing a key column for it to hold.
 ///
 /// # Example
 ///
@@ -108,6 +110,40 @@ pub trait ScopedTable: Sized + Send + FromQueryResult {
     fn scoped(scope: impl Into<Value>) -> Select<Self::Entity> {
         Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope))
     }
+
+    /// One row by primary key, still confined to `scope`.
+    ///
+    /// The lookup for a route that addresses the table by its id. It sits
+    /// here rather than on [`ScopedRow`] because it reads nothing a key
+    /// would supply — a primary key belongs to the table, not to a route —
+    /// so a table addressed by no key column has an id route all the same.
+    ///
+    /// It exists because the obvious hand-written version is wrong in a
+    /// way that passes every test. `Entity::find_by_id(id).one(db)` is
+    /// what a primary-key lookup looks like, and it ignores the scope
+    /// entirely: a caller naming another tenant's id gets that tenant's
+    /// row. An instance check will usually still refuse it — but by then
+    /// the route has answered `403` where it would have answered `404`,
+    /// and that difference confirms the row exists. Every lookup in this
+    /// module takes the scope for that reason, and this one is here so the
+    /// id route does not have to be written out to get it.
+    ///
+    /// Generic over the connection rather than taking a
+    /// [`DatabaseConnection`](sea_orm::DatabaseConnection), so the same
+    /// derived lookup serves a handler that has a transaction open. That is
+    /// not a convenience: a pool cannot see rows the request has written
+    /// and not committed, so a loader pinned to one would answer `None` for
+    /// an object the caller is holding — and the route would 404 on
+    /// something it just created. Every lookup here takes `&C` for that
+    /// reason.
+    fn load_by_id<C: ConnectionTrait>(
+        id: PrimaryKeyOf<Self>,
+        db: &C,
+        scope: impl Into<Value> + Send,
+    ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
+        let query = Self::Entity::find_by_id(id).filter(Self::SCOPE_COLUMN.eq(scope));
+        async move { query.one(db).await }
+    }
 }
 
 /// A row one key resolves to, within its table's scope.
@@ -140,14 +176,8 @@ pub trait ScopedRow: ScopedTable {
     /// Built on [`scoped`](Self::scoped) rather than filtering from
     /// scratch, so the instance lookup cannot drift from the listing.
     ///
-    /// Generic over the connection rather than taking a
-    /// [`DatabaseConnection`](sea_orm::DatabaseConnection), so the same
-    /// derived lookup serves a handler that has a transaction open. That is
-    /// not a convenience: a pool cannot see rows the request has written
-    /// and not committed, so a loader pinned to one would answer `None` for
-    /// an object the caller is holding — and the route would 404 on
-    /// something it just created. Every lookup here takes `&C` for that
-    /// reason.
+    /// Generic over the connection for the reason
+    /// [`load_by_id`](ScopedTable::load_by_id) gives.
     fn load_scoped<C: ConnectionTrait>(
         key: Self::Key,
         db: &C,
@@ -179,30 +209,6 @@ pub trait ScopedRow: ScopedTable {
     ) -> impl Future<Output = Result<Vec<Self>, DbErr>> + Send {
         let query = Self::scoped(scope).filter(Self::KEY_COLUMN.is_in(keys));
         async move { query.all(db).await }
-    }
-
-    /// One row by primary key, still confined to `scope`.
-    ///
-    /// The sibling of [`load_scoped`](Self::load_scoped), for the route
-    /// that addresses the same table by its id rather than by
-    /// [`KEY_COLUMN`](Self::KEY_COLUMN).
-    ///
-    /// It exists because the obvious hand-written version is wrong in a
-    /// way that passes every test. `Entity::find_by_id(id).one(db)` is
-    /// what a primary-key lookup looks like, and it ignores the scope
-    /// entirely: a caller naming another tenant's id gets that tenant's
-    /// row. An instance check will usually still refuse it — but by then
-    /// the route has answered `403` where it would have answered `404`,
-    /// and that difference confirms the row exists. Every lookup on this
-    /// trait takes the scope for that reason, and this one is here so the
-    /// id route does not have to be written out to get it.
-    fn load_by_id<C: ConnectionTrait>(
-        id: PrimaryKeyOf<Self>,
-        db: &C,
-        scope: impl Into<Value> + Send,
-    ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
-        let query = Self::Entity::find_by_id(id).filter(Self::SCOPE_COLUMN.eq(scope));
-        async move { query.one(db).await }
     }
 }
 

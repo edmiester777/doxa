@@ -129,7 +129,7 @@ Use with `doxa-auth`'s `Require<WidgetsRead>` extractor for runtime enforcement 
 
 Behind the `sea-orm` feature, two traits cover the half of authorization that happens in SQL.
 
-`ScopedTable` names the column that says whose rows these are. Every query built from it carries that column, so another owner's row is **absent** rather than refused — which is what lets a route answer `404` instead of confirming the object exists with a `403`. `ScopedRow` adds the key one route matches on; every method has a default body, so an impl is three lines:
+`ScopedTable` names the column that says whose rows these are. Every query built from it carries that column, so another owner's row is **absent** rather than refused — which is what lets a route answer `404` instead of confirming the object exists with a `403`. It carries the two lookups that need nothing else: the listing, and the row addressed by the primary key the table already has. `ScopedRow` adds the key one route matches on, and the two lookups that read it. Every method has a default body, so an impl is three lines:
 
 ```rust
 use doxa_policy::{ScopedRow, ScopedTable};
@@ -144,13 +144,16 @@ impl ScopedRow for Model {
     const KEY_COLUMN: Column = Column::Name;
 }
 
+// ScopedTable — neither of these reads the key column
 let page = Model::scoped("acme").paginate(&db, 50);
+let byid = Model::load_by_id(id, &txn, "acme").await?;           // still scoped
+
+// ScopedRow
 let row  = Model::load_scoped("orders".into(), &txn, "acme").await?;
 let rows = Model::load_all_scoped(names, &txn, "acme").await?;   // one IN, one filter
-let byid = Model::load_by_id(id, &txn, "acme").await?;           // still scoped
 ```
 
-They are separate because a scope is a fact about the *table* and a key is a fact about a *route*: two routes reach one table by different keys, and a table addressed by no column at all still has an owner and can still be listed.
+They are separate because a scope is a fact about the *table* and a key is a fact about a *route*: two routes reach one table by different keys, and a table addressed by no column at all still has an owner. Such a table can still be listed, and still be reached by id — a primary key belongs to the table, so `load_by_id` sits on `ScopedTable` and asks nothing of `KEY_COLUMN`.
 
 `condition_from_residual` closes the loop. When a policy's `when` clause cannot be fully evaluated — because it names an attribute of a resource that was withheld — Cedar returns a residual, and this turns it into a `Condition` the query carries:
 

@@ -86,6 +86,63 @@ pub struct WidgetById;
 // be able to see each other, which is exactly what a separate entity crate
 // prevents, so the descriptor form above is the one worth exercising here.
 
+/// The row the two traits were split for: an owner, and no key column.
+///
+/// Its name route resolves through logic — a bare `orders` tried against
+/// every namespace — so there is nothing to mark `#[resource(key)]` with.
+/// Marking `name` anyway would generate a lookup that silently picks one
+/// of several rows. So it has `ScopedTable` and no `ScopedRow`, and the
+/// asset below is what that has to leave reachable.
+pub mod keyless {
+    use super::*;
+
+    #[derive(
+        Clone,
+        Debug,
+        PartialEq,
+        Eq,
+        DeriveEntityModel,
+        Serialize,
+        Deserialize,
+        ToSchema,
+        PolicyResource,
+    )]
+    #[sea_orm(table_name = "models")]
+    #[resource(entity_type = "DataModel")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        #[resource(id)]
+        pub id: Uuid,
+
+        /// Not a key: no column match reaches this row by name.
+        pub name: String,
+
+        #[resource(parent = "Tenant", scope)]
+        pub tenant_id: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// `key = pk` and `list = tenant` on a row with no key column.
+///
+/// This declaration is the regression test. `load_by_id` reads the scope
+/// column and the primary key and nothing else, so it belongs to
+/// `ScopedTable`; were it on `ScopedRow`, this line would not compile and
+/// the id route here would go back to a hand-written
+/// `find_by_id().filter(tenant_id)` — the one `key = pk` exists to stop.
+#[asset(
+    row = keyless::Model,
+    key = pk,
+    profile = AppGrants,
+    actions = WidgetAction,
+    list = tenant
+)]
+pub struct DataModelById;
+
 // ---- what the attribute worked out ------------------------------------------
 
 /// The three application types are the profile's, not restated per asset.
@@ -215,6 +272,27 @@ async fn the_primary_key_lookup_is_confined_to_the_tenant_too() {
         .into_connection();
 
     <WidgetById as Granting>::load(Uuid::nil(), &db, &caller("acme"))
+        .await
+        .expect("query runs");
+
+    let log = db.into_transaction_log();
+    let sql = format!("{:?}", log[0]);
+    assert!(
+        sql.contains("tenant_id"),
+        "a primary-key lookup that ignores the scope: {sql}",
+    );
+    assert!(sql.contains("acme"), "{sql}");
+}
+
+/// And it is scoped on the row that has no key column either, which is the
+/// case that had no id route at all while `load_by_id` sat on `ScopedRow`.
+#[tokio::test]
+async fn a_row_with_no_key_column_still_has_a_scoped_id_route() {
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_results([Vec::<keyless::Model>::new()])
+        .into_connection();
+
+    <DataModelById as Granting>::load(Uuid::nil(), &db, &caller("acme"))
         .await
         .expect("query runs");
 
