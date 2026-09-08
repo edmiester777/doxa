@@ -243,13 +243,17 @@ fn the_generated_listing_is_confined_to_the_same_tenant() {
     assert!(sql.contains(r#""widgets"."tenant_id" = 'acme'"#), "{sql}");
 }
 
-/// A caller with no tenant scopes to the empty string rather than to
-/// everything — the lookup still runs, and still matches nothing.
+/// A caller with no tenant has no scope to be confined to, so the answer
+/// is that nothing is there — without a query being issued at all.
+///
+/// The alternative is defaulting the scope to the empty string, which runs
+/// a real `WHERE tenant_id = ''`. That finds nothing on any sane schema,
+/// and is a row somebody could create on the wrong one.
 #[tokio::test]
-async fn a_caller_without_a_tenant_matches_nothing() {
-    let db = MockDatabase::new(DatabaseBackend::Postgres)
-        .append_query_results([Vec::<Model>::new()])
-        .into_connection();
+async fn a_caller_without_a_tenant_reaches_nothing() {
+    // Deliberately empty: an appended result would let a query pass
+    // unnoticed, and this asserts that none is issued.
+    let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
 
     let ctx = CapabilityContext {
         tenant_id: None,
@@ -258,9 +262,26 @@ async fn a_caller_without_a_tenant_matches_nothing() {
 
     let found = <WidgetByName as Granting>::load("primary".to_owned(), &db, &ctx)
         .await
-        .expect("query runs");
+        .expect("no tenant is not an error, it is an absence");
 
     assert_eq!(found, None);
+}
+
+/// The same for the listing half: no tenant is no scope, which the
+/// collection guard turns into a refusal rather than a page of whatever
+/// sits under the empty string.
+#[test]
+fn a_listing_without_a_tenant_grants_no_scope() {
+    use doxa::auth::Scoping;
+
+    let ctx = CapabilityContext {
+        tenant_id: None,
+        roles: Vec::new(),
+    };
+
+    assert!(<WidgetByName as Scoping>::scope("widgets.read", &ctx)
+        .expect("not an error")
+        .is_none(),);
 }
 
 /// A failed query converts through the profile's error, so the asset owes

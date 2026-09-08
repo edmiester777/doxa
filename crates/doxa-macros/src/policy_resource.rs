@@ -12,13 +12,17 @@
 //! method for those, so one awkward attribute does not push a whole type
 //! back to a hand-written impl.
 //!
-//! With the `sea-orm` feature, `#[resource(key)]` and `#[resource(scope)]`
-//! emit a [`ScopedRow`] impl as well — the query half, which is the rest
-//! of what a route needs before it can decide anything. The key and the
-//! Cedar id are deliberately independent: a row addressed by `{model_id}`
-//! and the same row addressed by `{name}` are one Cedar entity reached two
-//! ways.
+//! With the `sea-orm` feature, `#[resource(scope)]` emits a
+//! [`ScopedTable`] impl — the column every query is confined to, and the
+//! column behind each Cedar attribute — and `#[resource(key)]` adds
+//! [`ScopedRow`] on top of it, the lookup a route reaches one row by.
+//! Marking only the scope is a table nothing addresses by a column, which
+//! can still be listed and still have a policy's residual read against it.
+//! The key and the Cedar id are deliberately independent: a row addressed
+//! by `{model_id}` and the same row addressed by `{name}` are one Cedar
+//! entity reached two ways.
 //!
+//! [`ScopedTable`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedTable.html
 //! [`ScopedRow`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedRow.html
 
 use proc_macro2::TokenStream;
@@ -194,7 +198,16 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     })
 }
 
-/// The `ScopedRow` half, when the struct marked both a key and a scope.
+/// The SeaORM half: `ScopedTable` from the scope column, and `ScopedRow`
+/// on top of it when the struct also marked a key.
+///
+/// The two are emitted separately because the struct can supply one
+/// without the other. A scope column and no key is a table whose rows have
+/// an owner but which no route addresses by a column — a name resolved
+/// through logic, an id that means nothing to a policy — and it still
+/// wants listing and still wants its attributes to have columns. A key
+/// with no scope is the reverse and is refused: it would look up across
+/// every owner.
 ///
 /// `Entity` and `Column` are named unqualified because `DeriveEntityModel`
 /// puts them beside the `Model` this derive is sitting on. That is the
@@ -210,7 +223,7 @@ fn scoped_impl(
     scope: Option<&Ident>,
     attrs: &[(String, Ident)],
 ) -> Result<TokenStream> {
-    let (key, scope) =
+    let scope =
         match (key, scope) {
             (None, None) => return Ok(quote!()),
             (Some((field, _)), None) => return Err(syn::Error::new(
@@ -219,27 +232,17 @@ fn scoped_impl(
                  reach another tenant's row by naming it: mark the owning column \
                  `#[resource(scope)]`",
             )),
-            (None, Some(field)) => {
-                return Err(syn::Error::new(
-                    field.span(),
-                    "`scope` narrows a lookup and there is none to narrow: mark the column the \
-                 route's key matches `#[resource(key)]`",
-                ))
-            }
-            (Some(key), Some(scope)) => (key, scope),
+            (_, Some(scope)) => scope,
         };
-
-    let (key_field, key_ty) = key;
 
     if !cfg!(feature = "sea-orm") {
         return Err(syn::Error::new(
-            key_field.span(),
-            "`#[resource(key)]` and `#[resource(scope)]` generate a SeaORM `ScopedRow` impl, \
-             which needs the `policy-sea-orm` feature on `doxa`",
+            scope.span(),
+            "`#[resource(scope)]` generates a SeaORM `ScopedTable` impl, which needs the \
+             `policy-sea-orm` feature on `doxa`",
         ));
     }
 
-    let key_column = column_variant(key_field);
     let scope_column = column_variant(scope);
 
     // The attributes a policy may name, paired with the columns they sit
@@ -255,15 +258,24 @@ fn scoped_impl(
         quote!(#key => ::std::option::Option::Some(Column::#column),)
     });
 
+    let row = key.map(|(key_field, key_ty)| {
+        let key_column = column_variant(key_field);
+        quote! {
+            #[automatically_derived]
+            impl ::doxa::policy::ScopedRow for #ident {
+                type Key = #key_ty;
+
+                const KEY_COLUMN:
+                    <Entity as ::doxa::policy::__private::sea_orm::EntityTrait>::Column =
+                    Column::#key_column;
+            }
+        }
+    });
+
     Ok(quote! {
         #[automatically_derived]
-        impl ::doxa::policy::ScopedRow for #ident {
+        impl ::doxa::policy::ScopedTable for #ident {
             type Entity = Entity;
-            type Key = #key_ty;
-
-            const KEY_COLUMN:
-                <Entity as ::doxa::policy::__private::sea_orm::EntityTrait>::Column =
-                Column::#key_column;
 
             const SCOPE_COLUMN:
                 <Entity as ::doxa::policy::__private::sea_orm::EntityTrait>::Column =
@@ -280,6 +292,8 @@ fn scoped_impl(
                 }
             }
         }
+
+        #row
     })
 }
 
@@ -519,19 +533,38 @@ mod tests {
         assert!(message.contains("across every owner"), "{message}");
     }
 
+    /// A scope with no key is a table nothing addresses by a column — a
+    /// name resolved through logic rather than matched. It still has an
+    /// owner, so it still gets the listing and the attribute columns; what
+    /// it does not get is a lookup, because there is no key to look up by.
+    #[cfg(feature = "sea-orm")]
     #[test]
-    fn a_scope_without_a_key_is_refused() {
-        let message = expand_err(quote! {
+    fn a_scope_without_a_key_is_a_table_and_not_a_lookup() {
+        let out = expand_ok(quote! {
             #[resource(entity_type = "Widget")]
             struct Model {
                 #[resource(id)]
                 name: String,
+                #[resource(attr)]
+                region: String,
                 #[resource(scope)]
                 company_id: String,
             }
         });
 
-        assert!(message.contains("none to narrow"), "{message}");
+        assert!(
+            out.contains("impl :: doxa :: policy :: ScopedTable for Model"),
+            "{out}",
+        );
+        assert!(out.contains("Column :: CompanyId"), "{out}");
+        assert!(
+            out.contains(r#""region" => :: std :: option :: Option :: Some (Column :: Region)"#),
+            "a table without a key still resolves its policy attributes: {out}",
+        );
+        assert!(
+            !out.contains("impl :: doxa :: policy :: ScopedRow for Model"),
+            "no key means no lookup: {out}",
+        );
     }
 
     #[test]
@@ -545,6 +578,7 @@ mod tests {
         });
 
         assert!(!out.contains("ScopedRow"), "{out}");
+        assert!(!out.contains("ScopedTable"), "{out}");
     }
 
     #[cfg(feature = "sea-orm")]
@@ -560,6 +594,10 @@ mod tests {
             }
         });
 
+        assert!(
+            out.contains("impl :: doxa :: policy :: ScopedTable for Model"),
+            "{out}"
+        );
         assert!(
             out.contains("impl :: doxa :: policy :: ScopedRow for Model"),
             "{out}"

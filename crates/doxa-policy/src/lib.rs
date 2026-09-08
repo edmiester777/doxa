@@ -21,10 +21,11 @@
 //! | [`extension`] | [`PolicyExtension`] trait + [`ResourceAccess`] / [`ResourceGrants`](extension::ResourceGrants) |
 //! | [`store`] | [`PolicyStore`] trait — pluggable storage backend |
 //! | [`router`] | [`PolicyRouter`] — centralized slow-path PEP |
+//! | [`session`] | [`SessionChecker`] — the router bound to one caller's assembled session, so a guard's check can be answered from it |
 //! | [`error`] | [`AuthError`] enum (no HTTP response mapping) |
 //! | [`uid`] | Cedar entity UID builder with input validation |
 //! | [`resource`] | [`PolicyResource`] — instance-level resource identity |
-//! | `scoped` | `ScopedRow` — SeaORM lookup confined to an owner, and `DbLoadError` for when it fails (needs `sea-orm`; not linked, as the module is absent without it) |
+//! | `scoped` | `ScopedTable` / `ScopedRow` — the column a SeaORM query is confined to, and the key a route reaches one row by, plus `DbLoadError` for when the lookup fails (needs `sea-orm`; not linked, as the module is absent without it) |
 //! | `residual` | `condition_from_residual` — a policy's leftover `when` clause as a SeaORM `Condition`, so a grant is one query rather than a query and a loop (needs `sea-orm`) |
 
 pub mod capability;
@@ -34,6 +35,7 @@ pub mod extension;
 pub mod policy;
 pub mod resource;
 pub mod router;
+pub mod session;
 pub mod store;
 pub mod uid;
 
@@ -84,7 +86,8 @@ pub use residual::condition_from_residual;
 pub use resource::{PolicyResource, ResourceEntity, ResourceIdType};
 pub use router::{AccessDecision, PolicyRouter};
 #[cfg(feature = "sea-orm")]
-pub use scoped::{DbLoadError, PrimaryKeyOf, ScopedRow};
+pub use scoped::{DbLoadError, PrimaryKeyOf, ScopedRow, ScopedTable};
+pub use session::SessionChecker;
 pub use store::{PolicyStore, SharedPolicyStore};
 
 /// Re-exported so `#[derive(PolicyResource)]`'s generated [`ScopedRow`]

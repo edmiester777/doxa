@@ -36,14 +36,15 @@
 //! ## When the guard cannot see it
 //!
 //! A guard runs in `FromRequestParts`, before the body exists. For what a
-//! handler finds in that body there are two more doors, both recording
+//! handler finds in that body there are three more doors, all recording
 //! exactly as the guard does:
 //!
 //! | Door | For |
 //! |------|-----|
 //! | [`authorize::<One<R>>`](authorize) | an id the handler parsed, loaded through [`Granting::State`] |
 //! | [`AuthorizeLoaded`] | an object the handler already holds, or one inside its open transaction |
-//! | [`AuthorizeScope`] / [`Scoped`] | *several* objects it is about to query for, as a filter |
+//! | [`AuthorizeLoadedAll`] | *several* such objects, decided in one pass and named individually in the trail |
+//! | [`AuthorizeScope`] / [`Scoped`] | *which* objects it may query for at all, as a filter |
 //!
 //! ```ignore
 //! // the route's own subject, where no extractor could reach it
@@ -55,13 +56,23 @@
 //! let folder = find_folder(&txn, tenant, &body.folder).await?
 //!     .authorize_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions).await?;
 //!
-//! // several of them, decided once and pushed into the query rather than
-//! // asked row by row
+//! // several of them, in one query and one pass through the policy — and
+//! // the refusal still names the folder that caused it
+//! let folders = Folder::load_all_scoped(body.folders, &txn, tenant).await?
+//!     .authorize_all_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions).await?;
+//!
+//! // or, when the handler is building the query rather than holding the
+//! // rows: the subset itself, as a filter
 //! let scope = FolderByName::authorize_scope_dependency(
 //!     folder_action::Read, &parts.extensions,
 //! )?;
 //! let folders = scope.filter(Column::Name.is_in(body.folders)).all(&txn).await?;
 //! ```
+//!
+//! The last two answer different questions. [`AuthorizeLoadedAll`] decides
+//! about rows the caller *named*, so a refusal can say which one; the scope
+//! decides what the caller may see at all, so it records one verdict about
+//! the collection and the rows never leave the database.
 //!
 //! The turbofish on the first two is the *descriptor* — the asset whose
 //! vocabulary governs the check — because a row does not imply one. See
@@ -142,6 +153,22 @@ pub trait FromAuthExtensions: Clone + Send + Sync + 'static {
 
     /// Roles asserted for the caller.
     fn roles(&self) -> &[String];
+
+    /// Whether the policy resolved this caller as unrestricted.
+    ///
+    /// Read where a door reaches a verdict *without* consulting the
+    /// checker — [`Scoping::scope`], which is a function of the context
+    /// alone. Every other door goes through the capability checker, which
+    /// applies whatever admin rule the policy has for itself; the scope
+    /// path has nowhere else to learn it, and without this an
+    /// administrator would be handed the filtered subset a filter-aware
+    /// asset builds while every other route gave them everything.
+    ///
+    /// Default: `false`. A context that does not model an administrator
+    /// has none, which is the safe direction.
+    fn is_admin(&self) -> bool {
+        false
+    }
 }
 
 impl FromAuthExtensions for CapabilityContext {
@@ -173,6 +200,13 @@ where
 
     fn roles(&self) -> &[String] {
         self.claims.roles()
+    }
+
+    /// The flag `AuthLayer` set when it resolved the session — the same
+    /// answer the policy's own admin rule gave, carried rather than
+    /// re-derived.
+    fn is_admin(&self) -> bool {
+        self.is_admin
     }
 }
 
@@ -745,6 +779,15 @@ inventory::collect!(&'static Action);
 ///     .collect();
 /// ```
 ///
+/// ## Ordering
+///
+/// Sorted by [`Action::name`], and that is a promise rather than an
+/// accident of the registry. Duplicates are therefore adjacent, so a
+/// caller building a Cedar `Action` entity set — where a repeated UID is
+/// not merely untidy but a parse failure — can use [`Vec::dedup`] instead
+/// of a set. Nothing else about the order is specified: two rows sharing a
+/// name may come back either way round.
+///
 /// Requires the `catalog` feature, on by default.
 #[cfg(feature = "catalog")]
 pub fn actions() -> Vec<&'static Action> {
@@ -1051,6 +1094,31 @@ pub trait Scoping: Granting {
     /// empty page instead; only the asset knows how to say "nothing" in
     /// its own query language.
     fn empty_scope() -> Option<Self::Filter> {
+        None
+    }
+
+    /// The scope for a caller the policy resolved as unrestricted, when
+    /// this asset has one.
+    ///
+    /// Consulted before [`scope`](Self::scope) whenever
+    /// [`FromAuthExtensions::is_admin`] holds, because this is the one
+    /// door that reaches a verdict without the capability checker — and so
+    /// the one place an administrator would otherwise be handed the same
+    /// filtered subset as anyone else. Every other door asks the checker,
+    /// which applies the policy's own admin rule.
+    ///
+    /// `None` — the default — means this asset draws no distinction, and
+    /// an admin gets whatever [`scope`](Self::scope) returns. That is right
+    /// for a scope that is only tenancy: an administrator of a tenant is
+    /// still inside it. It is wrong for a scope carrying a policy
+    /// condition, where "unrestricted" has to be sayable, and only the
+    /// asset can say it — `Entity::find()` for a SeaORM listing, whatever
+    /// the equivalent is elsewhere.
+    ///
+    /// It cannot widen a check anything else performed: a collection route
+    /// still passes the coarse capability first, and an admin who fails
+    /// that is refused before this is reached.
+    fn unscoped() -> Option<Self::Filter> {
         None
     }
 }
@@ -1847,6 +1915,84 @@ impl<T: PolicyResource> AuthorizeLoaded for T {
     }
 }
 
+/// [`AuthorizeLoaded`] for rows that arrived together.
+///
+/// A request body naming its references names several at once — a pipeline
+/// declaring the models it reads, a document declaring the folders it
+/// links. Authorized one at a time that is one policy call per row, and
+/// each one assembles the same entity hierarchy before evaluating
+/// anything. Asked together it is one assembly and one pass.
+///
+/// ```ignore
+/// let sources = Source::load_all_scoped(body.sources, &txn, tenant).await?
+///     .authorize_all_dependency::<SourceByName, _>(source_action::Read, &ext)
+///     .await?;
+/// ```
+///
+/// It is the same decision the singular door reaches, recorded the same
+/// way: every row is deposited under its own id, and the request's event
+/// keeps what the audit builder keeps — the refusal if there was one,
+/// otherwise the first grant. That is what a loop of
+/// [`AuthorizeLoaded::authorize_dependency`] already left, and it is the
+/// useful half: a refused row is named, so a body reference and a path
+/// segment are indistinguishable in the trail.
+///
+/// What it is *not* is [`AuthorizeScope`], which answers "which rows may
+/// this caller see" as a filter and therefore records one verdict about a
+/// collection, under the id `collection`. Reach for this when the caller
+/// named the rows and has to be told which one was refused; reach for that
+/// when the handler is building a query.
+///
+/// ## All or nothing
+///
+/// The first refusal, in order, refuses the whole call — matching what a
+/// `?` inside a loop already did. Rows before it are recorded as granted,
+/// because they were; rows after it are never asked about, because the
+/// request is over.
+pub trait AuthorizeLoadedAll<T: PolicyResource>: Sized {
+    /// The coarse capability once, then an instance check per row.
+    fn authorize_all<R: Granting<Row = T>, A: DeclaredAction>(
+        self,
+        action: A,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Vec<T>, Denial>> + Send;
+
+    /// An instance check per row, for rows this route's own guard has
+    /// already cleared the coarse question for.
+    ///
+    /// The plural of [`AuthorizeLoaded::authorize_dependency`], and skips
+    /// exactly what that skips: a caller who may write a pipeline naming
+    /// sources they may read should not be refused because they may not
+    /// *list* sources.
+    fn authorize_all_dependency<R: Granting<Row = T>, A: DeclaredAction>(
+        self,
+        action: A,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Vec<T>, Denial>> + Send;
+}
+
+/// Blanket for the same reason [`AuthorizeLoaded`]'s is, and on `Vec` so
+/// the rows a plural loader returns go straight through.
+impl<T: PolicyResource> AuthorizeLoadedAll<T> for Vec<T> {
+    fn authorize_all<R: Granting<Row = T>, A: DeclaredAction>(
+        self,
+        _action: A,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Vec<T>, Denial>> + Send {
+        let () = Declares::<R, A>::PROOF;
+        decide_all::<R>(self, A::ACTION, extensions, Coarse::Check)
+    }
+
+    fn authorize_all_dependency<R: Granting<Row = T>, A: DeclaredAction>(
+        self,
+        _action: A,
+        extensions: &Extensions,
+    ) -> impl Future<Output = Result<Vec<T>, Denial>> + Send {
+        let () = Declares::<R, A>::PROOF;
+        decide_all::<R>(self, A::ACTION, extensions, Coarse::Skip)
+    }
+}
+
 /// Authorize a *subset* of an asset the handler will query itself.
 ///
 /// [`AuthorizeLoaded`] decides about rows already in hand, one at a time.
@@ -1968,6 +2114,16 @@ async fn gated_scope<R: Scoping>(
 /// The scope itself, with the asset's answer for a caller who was granted
 /// nothing. Records nothing — [`record_scope`] is that half.
 fn subset<R: Scoping>(action: &'static str, ctx: &R::Ctx) -> Result<R::Filter, Denial> {
+    // The only door that does not go through the capability checker, so
+    // the only one that has to apply the policy's admin verdict itself.
+    // An asset that draws no distinction answers `None` and is scoped as
+    // anyone else would be.
+    if ctx.is_admin() {
+        if let Some(everything) = R::unscoped() {
+            return Ok(everything);
+        }
+    }
+
     match R::scope(action, ctx)? {
         Some(filter) => Ok(filter),
         // The policy granted nothing on this asset. Whether that is a
@@ -2187,6 +2343,96 @@ async fn decide<R: Granting>(
             Err(denial)
         }
     }
+}
+
+/// The body of both [`AuthorizeLoadedAll`] methods.
+///
+/// One coarse gate for the set — it is a question about the asset, not
+/// about any row — then one entity per row through
+/// [`CapabilityChecker::check_instance_many`], which is where the saving
+/// is: a checker that can hoist its evaluation does, and one that cannot
+/// falls back to the loop this replaces.
+///
+/// Recording walks the verdicts in order and stops at the first refusal,
+/// so the trail is exactly what a loop of
+/// [`AuthorizeLoaded::authorize_dependency`] would have left: every row up
+/// to the refusal deposited as a grant, then the refusal — which the audit
+/// builder keeps in preference to any of them, because one event carries
+/// one decision and a denial outranks a grant.
+async fn decide_all<R: Granting>(
+    resources: Vec<R::Row>,
+    action: &'static str,
+    extensions: &Extensions,
+    coarse: Coarse,
+) -> Result<Vec<R::Row>, Denial> {
+    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
+
+    let declared = match coarse {
+        Coarse::Check => gate::<R>(action, &ctx, checker.as_ref()).await,
+        Coarse::Skip => declared_action::<R>(action),
+    };
+    let declared = match declared {
+        Ok(declared) => declared,
+        Err(denial) => {
+            record_denial(&denial, extensions, ctx.tenant());
+            return Err(denial);
+        }
+    };
+
+    // An empty set asks nothing, so it deposits nothing. Recording a
+    // grant here would file a decision about rows that do not exist.
+    if resources.is_empty() {
+        return Ok(resources);
+    }
+
+    let tenant = ctx.tenant().unwrap_or("");
+    let entities: Vec<ResourceEntity> = resources
+        .iter()
+        .map(|resource| ResourceEntity::of(resource, tenant))
+        .collect();
+
+    let allowed = match checker
+        .check_instance_many(tenant, ctx.roles(), action, &entities)
+        .await
+    {
+        Ok(allowed) => allowed,
+        Err(error) => return Err(Denial::Auth(error)),
+    };
+
+    // A checker answering a different number of verdicts than it was
+    // asked about cannot be lined up with the rows, and guessing which
+    // row an answer belongs to is how a grant lands on the wrong object.
+    if allowed.len() != entities.len() {
+        return Err(Denial::Auth(AuthError::PolicyFailed(format!(
+            "capability checker answered {} verdict(s) for {} resource(s)",
+            allowed.len(),
+            entities.len(),
+        ))));
+    }
+
+    for (entity, allowed) in entities.into_iter().zip(allowed) {
+        if !allowed {
+            let denial = Denial::Denied {
+                action: Cow::Borrowed(action),
+                resource_type: Cow::Borrowed(entity_type::<R>()),
+                resource_id: Cow::Owned(entity.entity_id),
+                reason: "instance denied",
+            };
+            record_denial(&denial, extensions, ctx.tenant());
+            return Err(denial);
+        }
+        crate::record::grant(
+            extensions,
+            crate::record::Grant {
+                event_type: declared.event_type,
+                action: Cow::Borrowed(action),
+                resource_type: Cow::Borrowed(entity_type::<R>()),
+                resource_id: Cow::Owned(entity.entity_id),
+            },
+        );
+    }
+
+    Ok(resources)
 }
 
 /// The decision itself, split out for the same reason the sealed chain is

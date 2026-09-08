@@ -237,4 +237,64 @@ pub trait PolicyExtension: Send + Sync {
     fn is_admin_role(&self, role: &str) -> bool {
         role == "admin"
     }
+
+    // -----------------------------------------------------------------
+    // What the assembled session already knows
+    // -----------------------------------------------------------------
+    //
+    // The three below are read by
+    // [`SessionChecker`](crate::session::SessionChecker), which is the
+    // per-request bridge from a guard to this policy. They exist because
+    // the session an extension assembles is frequently a *decision*, not
+    // just a description: an allow-list resolved up front answers some
+    // questions outright, and re-asking Cedar can only agree with it more
+    // slowly. Every one defaults to "the session says nothing", so an
+    // extension that does not model any of this is unaffected.
+
+    /// Whether this session bypasses policy entirely.
+    ///
+    /// Checked before anything else, on every door. An extension that
+    /// models an administrator has to answer here as well as in
+    /// [`admin_session`](Self::admin_session): that one says what an
+    /// admin's session *is*, this one recognizes one that was already
+    /// assembled.
+    ///
+    /// Default: `false` — no session is privileged, which is the safe
+    /// direction for an extension that has no notion of admin.
+    fn session_is_admin(&self, _session: &Self::SessionOutput) -> bool {
+        false
+    }
+
+    /// The verdict the session already holds for this pair, if it holds
+    /// one.
+    ///
+    /// `Some(_)` is authoritative and Cedar is not consulted; `None` falls
+    /// through. The answer must be one Cedar would agree with — this is a
+    /// shortcut past the evaluation, not a second policy — so an extension
+    /// answering here is asserting that
+    /// [`assemble_session`](Self::assemble_session) already asked, for
+    /// this action on this entity type, and recorded what came back.
+    ///
+    /// Default: `None` for everything, so nothing is short-circuited.
+    fn decide_from_session(
+        &self,
+        _session: &Self::SessionOutput,
+        _action: &str,
+        _resource: &crate::ResourceEntity,
+    ) -> Option<bool> {
+        None
+    }
+
+    /// The tenant this session is confined to, when the session is a
+    /// better source for it than the caller's claims.
+    ///
+    /// Returning `None` — the default — means the tenant the guard passed
+    /// in stands. Override when the session is populated on a path the
+    /// claims are not: an auth-disabled bypass mode, or a service
+    /// principal whose tenancy is resolved rather than asserted. The two
+    /// agree for an ordinary authenticated caller, and where they do not,
+    /// this is the one that decided what the session contains.
+    fn session_tenant<'a>(&self, _session: &'a Self::SessionOutput) -> Option<&'a str> {
+        None
+    }
 }
