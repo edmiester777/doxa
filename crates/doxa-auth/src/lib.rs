@@ -46,6 +46,10 @@ pub mod granted;
 pub mod layer;
 #[cfg(feature = "axum")]
 pub mod middleware;
+/// Requires `audit`: the door exists to guarantee a verdict is recorded,
+/// which is not a promise it could keep with the audit half compiled out.
+#[cfg(all(feature = "axum", feature = "audit"))]
+pub mod off_request;
 #[cfg(feature = "axum")]
 pub mod openapi;
 #[cfg(feature = "axum")]
@@ -94,5 +98,7 @@ pub use granted::{
 pub use layer::{AuthLayer, AuthService};
 #[cfg(feature = "axum")]
 pub use middleware::AuthState;
+#[cfg(all(feature = "axum", feature = "audit"))]
+pub use off_request::OffRequest;
 #[cfg(feature = "axum")]
 pub use openapi::{auth_contribution, BearerAuthorization};

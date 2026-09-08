@@ -622,7 +622,13 @@ mod sealed {
     }
 }
 
-use sealed::{Authorized, Chain};
+use sealed::Authorized;
+
+// Nameable inside the crate but nowhere outside it, so `off_request` can
+// carry the same bound `authorize` does without the chain becoming
+// something a consumer could implement. The seal is about who may *add* a
+// form, not about who may run one.
+pub(crate) use sealed::Chain;
 
 /// What a route authorizes: an object, a collection, or a bare
 /// capability.
