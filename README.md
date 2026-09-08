@@ -66,6 +66,10 @@ async fn list_widgets(Auth(ctx): Auth<MySession, MyClaims>) -> Json<Vec<Widget>>
 // Cedar authorization — badge + security metadata in the OpenAPI spec
 async fn delete_widget(_: Require<WidgetsAdmin>) -> StatusCode { /* ... */ }
 
+// Or guard on the object itself — loads it, checks the policy against its
+// attributes, and hands it to the handler already authorized
+async fn get_widget(widget: Granted<Widget>) -> Json<Widget> { /* ... */ }
+
 // Append-only audit — non-blocking, auto-emits after each response
 let audited = OpenApiRouter::new()
     .routes(routes!(list_widgets, delete_widget))
@@ -108,7 +112,7 @@ utoipa = "5"             # required — see note below
 |---|---|---|
 | `docs` (default) | [`doxa-docs`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-docs) | OpenAPI docs, Scalar UI, `#[get]` / `#[post]` / `#[derive(ApiError)]`, SSE |
 | `macros` (default) | [`doxa-macros`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-macros) | Proc macros — re-exported from `doxa` by default |
-| `auth` | [`doxa-auth`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-auth) | OIDC / JWT middleware, generic over your claim struct |
+| `auth` | [`doxa-auth`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-auth) | OIDC / JWT middleware generic over your claim struct, and `Granted<T>` route guards |
 | `policy` | [`doxa-policy`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-policy) | Cedar authorization with pluggable storage |
 | `audit` | [`doxa-audit`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-audit) | Non-blocking audit log with auto-capture and trait-based outcomes, optional SeaORM sink |
 | `protected` | [`doxa-protected`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-protected) | `ProtectedString` — zeroize-on-drop, redacted everywhere |
@@ -128,11 +132,12 @@ Each crate also works standalone if you prefer fine-grained control over your de
 | Putting it all together | [7](#7-full-app-assembly) |
 | Cedar authorization, your storage | [8](#8-cedar-authorization) |
 | Capabilities → OpenAPI badges | [9](#9-capabilities--openapi-badges) |
-| Non-blocking audit log | [10](#10-non-blocking-audit-log) |
-| Router with audited + unaudited routes | [11](#11-audited-router-with-public-routes) |
-| Handler-level audit enrichment | [12](#12-audit-enrichment-in-handlers) |
-| Custom audit middleware | [13](#13-custom-middleware-that-emits-audit-events) |
-| Custom audit event types | [14](#14-custom-audit-event-types) |
+| Per-object guards, derived from the row | [10](#10-guard-a-route-on-the-object-it-is-about) |
+| Non-blocking audit log | [11](#11-non-blocking-audit-log) |
+| Router with audited + unaudited routes | [12](#12-audited-router-with-public-routes) |
+| Handler-level audit enrichment | [13](#13-audit-enrichment-in-handlers) |
+| Custom audit middleware | [14](#14-custom-middleware-that-emits-audit-events) |
+| Custom audit event types | [15](#15-custom-audit-event-types) |
 
 ---
 
@@ -381,16 +386,23 @@ async fn check_document(
     State(router): State<Arc<PolicyRouter<MyExtension>>>,
     Path(doc_id): Path<String>,
 ) -> Result<Json<Document>, MyError> {
+    // The tenant is the partition the policy store is keyed by, so there
+    // is nothing to evaluate without one. A single-tenant deployment
+    // returns a constant from `Claims::scope` rather than `None`.
+    let tenant = ctx.tenant_id().ok_or(MyError::Unscoped)?;
+
     let resource = build_uid("Document", &doc_id)?;
     let decision = router
-        .check(ctx.company_id(), ctx.roles(), "read", resource)
+        .check(tenant, ctx.roles(), "read", resource)
         .await?;
     // decision.allowed is true/false, decision.reason explains why
     // ...
 }
 ```
 
-Implement `PolicyStore` for your backend. `PolicyExtension` plugs in domain-specific post-evaluation (e.g., row-level filters from Cedar residuals). `PolicyRouter` is the centralized slow-path PEP. For the common case of gating a route on a fixed capability, `Require<M>` (example 9) is simpler — it calls the policy check automatically.
+Implement `PolicyStore` for your backend. `PolicyExtension` plugs in domain-specific post-evaluation (e.g., row-level filters from Cedar residuals). `PolicyRouter` is the centralized slow-path PEP.
+
+This is the manual form, and it is worth seeing once because everything below is built on it. You rarely write it: `Granted<T>` (example 10) runs this same chain from the route signature and hands back the loaded object, and `Require<M>` (example 9) does it for a fixed capability.
 
 ### 9. Capabilities → OpenAPI badges
 
@@ -438,7 +450,122 @@ async fn list_widgets(_: Require<WidgetsRead>) -> Json<Vec<Widget>> {
 
 Output in the rendered spec: a standard `security` requirement for codegen, an `x-required-permissions` extension for downstream tooling, and an `x-badges` chip rendered on the operation in Scalar. To use a custom OpenAPI scheme name instead of `"bearer"`, write `Require<WidgetsRead, MyScheme>` with a `SchemeName` impl.
 
-### 10. Non-blocking audit log
+### 10. Guard a route on the object it is about
+
+A capability answers *may they call this at all*. Most routes need the narrower question — *may they do this to **this** object* — which means loading the object first and checking against its attributes. `Granted<T>` covers both, plus the collection case in between:
+
+| Form | Asks | Yields |
+|------|------|--------|
+| `Granted<Widget>` | may this caller act on **this object** | the loaded object |
+| `Granted<Many<Widget>>` | what **subset** may they see | a query filter |
+| `Granted<Cap<M>>` | may they call this at all | `()` |
+
+```rust
+use doxa::auth::{Cap, Granted, Many};
+
+// Loads the widget, checks `read` against its Cedar attributes, 404s if
+// it does not exist, 403s if the policy refuses. Derefs to the object.
+#[get("/widgets/{id}")]
+async fn get_widget(widget: Granted<Widget>) -> Json<Widget> {
+    Json(widget.into_inner())
+}
+
+// The subset, as a filter the handler pushes into its own query
+#[get("/widgets")]
+async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
+    Json(load_where(scope.into_inner()).await)
+}
+
+// The coarse gate, same as `Require<M>` but on the same guard
+#[post("/flush")]
+async fn flush(_: Granted<Cap<WidgetsRead>>) -> StatusCode { StatusCode::OK }
+```
+
+Destructure for the caller alongside the object — no second `Auth<S, C>` extractor, and the context is shared rather than copied:
+
+```rust
+async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode { /* ... */ }
+```
+
+**What the route owes.** One trait says what the asset is and what may be done to it:
+
+```rust
+impl Granting for Widget {
+    type Row = Self;              // the Cedar identity, from #[derive(PolicyResource)]
+    type Key = u32;               // what the {id} segment parses into
+    type Ctx = CapabilityContext; // tenant + roles, or your own Auth context
+    type State = DatabaseConnection;
+    type Error = DbLoadError;
+
+    /// The whole vocabulary. An action absent here is refused, and a
+    /// route naming one fails to build rather than at runtime.
+    const ACTIONS: &'static [Action] = &[
+        Action::new("read").capability(&WIDGETS_READ).event("data_access"),
+        Action::new("delete").capability(&WIDGETS_ADMIN).event("admin_delete"),
+    ];
+
+    async fn load(id: u32, db: &Self::State, ctx: &Self::Ctx)
+        -> Result<Option<Self>, Self::Error> { /* ... */ }
+}
+```
+
+The action comes from the HTTP method — `post` → `create`, `put` / `patch` → `update`, `delete` → `delete`, anything else → `read` — and `#[key(…, action = "archive")]` names one the method does not imply. The spec gets the same treatment `Require<M>` gives: `security`, the `x-badges` chip, and the `401` / `403` responses the guard itself can return — plus `400` and `404` on the instance form, which is the only one that parses a key and loads an object.
+
+**Most of that is derivable.** With the `policy-sea-orm` feature, `#[derive(PolicyResource)]` writes both the Cedar identity and the scoped lookup from field roles, and `#[asset]` writes the `Granting` impl:
+
+```rust
+#[derive(DeriveEntityModel, PolicyResource)]
+#[resource(entity_type = "Widget")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: Uuid,
+    #[resource(id, attr, key)]     // Cedar id, policy attribute, and route key
+    pub name: String,
+    #[resource(parent = "Tenant", scope)]  // every lookup is confined to this
+    pub tenant_id: String,
+}
+
+#[derive(Actions)]
+#[actions(resource = "Widget", prefix = "widgets")]
+pub enum WidgetAction {
+    /// List and view widgets.
+    Read,
+    /// Remove widgets.
+    Delete,
+}
+
+// The application's caller, state and error, stated once for every asset
+impl GrantProfile for AppGrants {
+    type Ctx = CapabilityContext;
+    type State = DatabaseConnection;
+    type Error = DbLoadError;
+}
+
+#[asset(row = Model, profile = AppGrants, actions = WidgetAction, list = tenant)]
+pub struct WidgetByName;
+
+// A second route key over the same row — a unit struct, not a newtype, so
+// the row keeps one Cedar identity and two routes cannot disagree about it
+#[asset(row = Model, key = pk, profile = AppGrants, actions = WidgetAction)]
+pub struct WidgetById;
+```
+
+`#[resource(scope)]` is the security property: every generated lookup carries the scope column, so another tenant's row is *absent* rather than refused — the route answers `404` where a primary-key lookup would have leaked its existence with a `403`. `#[derive(Actions)]` generates the `widgets.read` / `widgets.delete` capabilities from the variants and their doc comments, registering each so `doxa::policy::capabilities()` lists them without a hand-maintained catalog.
+
+**When the guard cannot see it.** A guard runs before the request body exists. For what a handler finds in that body — or loads inside an open transaction — the same chain is reachable directly, recording exactly as the guard does:
+
+```rust
+// an object the handler already holds
+let widget = find_widget(&txn, tenant, &name).await?
+    .authorize::<WidgetByName, _>(widget_action::Read, &parts.extensions).await?;
+
+// several of them, in one pass through the policy — the refusal still
+// names the one that caused it
+let folders = Folder::load_all_scoped(body.folders, &txn, tenant).await?
+    .authorize_all_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions).await?;
+```
+
+### 11. Non-blocking audit log
 
 ```rust
 let logger = spawn_audit_writer(db, 4096);   // background mpsc → SeaORM
@@ -455,9 +582,9 @@ audit.emit();   // non-blocking
 
 Events buffer onto a bounded channel; a background task persists them to the `doxa_audit_log` table. Applications define their own `AuditEventType` enum — the built-in one is a reference impl. Disable the `sea-orm` feature to ship events elsewhere.
 
-When used with `AuditLayer` (example 11), most of this is automatic: HTTP metadata is captured from the request/response, and error outcomes propagate through the `#[api(outcome = "...")]` attribute on `ApiError` variants (example 2). Manual builder usage is only needed outside the HTTP request lifecycle.
+When used with `AuditLayer` (example 12), most of this is automatic: HTTP metadata is captured from the request/response, and error outcomes propagate through the `#[api(outcome = "...")]` attribute on `ApiError` variants (example 2). Manual builder usage is only needed outside the HTTP request lifecycle.
 
-### 11. Audited router with public routes
+### 12. Audited router with public routes
 
 `AuditLayer` is a tower middleware that creates an `AuditEventBuilder` per request, injects it into extensions, and **auto-emits with `Outcome::Allowed`** after the response completes. Handlers on the happy path just enrich the builder and return — no terminal call needed.
 
@@ -509,26 +636,19 @@ async fn main() {
 
 The split is natural: routes registered *before* the layers get auth + audit; routes merged *after* don't. Health checks, readiness probes, and the OpenAPI spec endpoint stay silent.
 
-### 12. Audit enrichment in handlers
+### 13. Audit enrichment in handlers
 
 `AuditLayer` injects an `AuditEventBuilder` into request extensions with request metadata (method, path, source IP, user-agent, request ID) already populated. The auth layer stamps actor info (sub, roles, tenant). Handlers enrich the builder with domain context and return — the layer handles everything else.
 
 **Outcome propagation is automatic.** When an `ApiError` is returned, its `outcome` attribute (from example 2) is attached to the response and the layer reads it. Handlers only need `emit_denied`/`emit_error` for non-`ApiError` error paths.
 
-**A guarded route needs none of this.** `Granted<T>` already resolved which action it checked and which object it checked against, so it deposits both on the request's event and the layer folds them in after the response. The category sits beside the action in the asset's `ACTIONS` table, and the handler writes nothing at all:
+**A guarded route needs none of this.** `Granted<T>` (example 10) already resolved which action it checked and which object it checked against, and the audit category sits beside the action in the same `ACTIONS` table:
 
 ```rust
-impl Granting for Document {
-    // …
-
-    /// Every action a document permits, declared once for every route
-    /// that guards one — so a verb can't end up filed under the wrong
-    /// category, and one this table omits is refused outright.
-    const ACTIONS: &'static [Action] = &[
-        Action::new("read").event(EventType::DataAccess.as_static()),
-        Action::new("delete").event(EventType::AdminDelete.as_static()),
-    ];
-}
+const ACTIONS: &'static [Action] = &[
+    Action::new("read").event(EventType::DataAccess.as_static()),
+    Action::new("delete").event(EventType::AdminDelete.as_static()),
+];
 
 #[get("/documents/{id}")]
 async fn get_document(doc: Granted<Document>) -> Json<Document> {
@@ -538,38 +658,9 @@ async fn get_document(doc: Granted<Document>) -> Json<Document> {
 }
 ```
 
-A refusal takes the same path, so the grant and the denial name the same action and the same resource.
+The guard deposits all three and the layer folds them in after the response, so the handler writes nothing. A refusal takes the same path, so the grant and the denial name the same action and the same resource. Declaring the table by hand is one option; `#[derive(Actions)]` writes it from the enum variants, and `#[action(event = "…")]` appears only where a default is wrong.
 
-**Or derive the table.** An action also needs a capability to gate it, a description for the catalog and the OpenAPI badge, and a resource for the coarse check — all of which follow from the variant and the enum it sits in. `#[derive(Actions)]` writes them, and `#[action(…)]` appears only where a default is wrong:
-
-```rust
-#[derive(Actions)]
-pub enum DocumentAction {
-    /// List and view documents.
-    #[action(event = "data_access")]
-    Read,
-    /// Remove documents.
-    #[action(event = "admin_delete")]
-    Delete,
-}
-
-#[doxa::asset(row = Document, profile = AppGrants, actions = DocumentAction)]
-pub struct DocumentByName;
-```
-
-`#[asset]` writes the `Granting` impl. Five of its six items are not decisions: the caller shape, the state and the loader error belong to the application and are stated once on its `GrantProfile`; the key and the loader are the scoped lookup `#[derive(PolicyResource)]` already wrote from `#[resource(key)]` and `#[resource(scope)]`. Only the vocabulary is a fact about this asset.
-
-```rust
-impl GrantProfile for AppGrants {
-    type Ctx = Caller;
-    type State = DatabaseConnection;
-    type Error = DbLoadError;
-}
-```
-
-A second route key over the same row is a unit struct naming it — `#[doxa::asset(row = Document, key = Uuid, …)] pub struct DocumentById;` — rather than a newtype wrapping it. The row keeps one `PolicyResource` impl, so two routes onto one object cannot come to disagree about its Cedar identity. That failure is silent when it happens: a policy granting on one identity simply does not match the route that names the other.
-
-That generates the `document.read` and `document.delete` capabilities — descriptions taken from the doc comments — as markers under `document_action::`, usable as `Granted<Cap<document_action::Delete>>` like any other. Each registers itself, so `doxa::policy::capabilities()` lists them without anything maintaining a list. What follows is the unguarded case — a route with no `Granted` on it, or a handler that knows something the guard cannot. Anything set here wins over the deposit, in any order:
+What follows is the unguarded case — a route with no `Granted` on it, or a handler that knows something the guard cannot. Anything set here wins over the deposit, in any order:
 
 ```rust
 use axum::{extract::Path, Extension, Json};
@@ -601,7 +692,7 @@ All clones of a builder share state behind an `Arc`, so exactly one emission occ
 
 The layer also auto-captures `http_method`, `http_path`, and `http_status` on every request — no handler code needed for HTTP metadata.
 
-### 13. Custom middleware that emits audit events
+### 14. Custom middleware that emits audit events
 
 For cross-cutting concerns that aren't tied to a single handler — rate limiting, IP blocking, request validation — write a tower middleware that pulls the `AuditEventBuilder` from extensions and emits before short-circuiting.
 
@@ -675,7 +766,7 @@ let audited = OpenApiRouter::new()
 
 Without an `AuditLayer` in the stack there is nobody else to send it, and those calls emit exactly as they always did.
 
-### 14. Custom audit event types
+### 15. Custom audit event types
 
 The built-in `EventType` covers common CRUD + auth patterns, but you define the vocabulary for your domain by implementing `AuditEventType`.
 

@@ -61,12 +61,86 @@ async fn list_widgets(_: Require<WidgetsRead>) -> Json<Vec<Widget>> {
 }
 ```
 
+### Per-object authorization
+
+`Require<M>` answers *may they call this at all*. `Granted<T>` answers the narrower question — *may they do this to **this** object* — by loading the object and checking the policy against its Cedar attributes. One extractor covers all three forms:
+
+| Form | Asks | Yields |
+|------|------|--------|
+| `Granted<Widget>` | may this caller act on **this object** | the loaded object |
+| `Granted<Many<Widget>>` | what **subset** may they see | a query filter |
+| `Granted<Cap<M>>` | may they call this at all | `()` |
+
+```rust
+use doxa_auth::{Granted, Many};
+
+#[get("/widgets/{id}")]
+async fn get_widget(widget: Granted<Widget>) -> Json<Widget> {
+    Json(widget.into_inner())   // derefs to the object; 404 if absent, 403 if refused
+}
+
+#[get("/widgets")]
+async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
+    Json(load_where(scope.into_inner()).await)
+}
+```
+
+Destructure for the caller alongside the object — `Granted(caller, widget)` — rather than pairing the guard with a second `Auth<S, C>`; the context is shared, not copied.
+
+One trait per asset says what it is and what may be done to it:
+
+```rust
+impl Granting for Widget {
+    type Row = Self;              // Cedar identity, from #[derive(PolicyResource)]
+    type Key = u32;               // what the {id} segment parses into
+    type Ctx = CapabilityContext; // tenant + roles, or your own Auth context
+    type State = DatabaseConnection;
+    type Error = DbLoadError;
+
+    /// The whole vocabulary. An action absent here is refused, and a route
+    /// naming one fails to build rather than at runtime.
+    const ACTIONS: &'static [Action] = &[
+        Action::new("read").capability(&WIDGETS_READ).event("data_access"),
+        Action::new("delete").capability(&WIDGETS_ADMIN).event("admin_delete"),
+    ];
+
+    async fn load(id: u32, db: &Self::State, ctx: &Self::Ctx)
+        -> Result<Option<Self>, Self::Error> { /* ... */ }
+}
+```
+
+The action follows from the HTTP method — `post` → `create`, `put` / `patch` → `update`, `delete` → `delete`, anything else → `read` — and `#[key(…, action = "archive")]` names one the method does not imply. The guard stamps its own OpenAPI metadata: `security`, the badge, and the `401` / `403` it can return — plus `400` / `404` on the instance form, the only one that parses a key and loads an object. It also deposits the action, resource and audit category onto the request's `AuditEventBuilder`, so a guarded handler writes nothing to the audit trail.
+
+`#[asset]` writes the `Granting` impl from a `GrantProfile` (the application's caller, state and error, stated once) and an `#[derive(Actions)]` enum. With `doxa-policy`'s `sea-orm` feature, `#[derive(PolicyResource)]` supplies the key and a scope-confined loader, so another tenant's row is *absent* rather than refused — the route answers `404` where a bare primary-key lookup would leak its existence with a `403`.
+
+### Authorizing what the guard cannot see
+
+A guard runs in `FromRequestParts`, before the body exists. For objects a handler finds in that body — or loads inside an open transaction — the same chain is reachable directly, recording identically:
+
+```rust
+// an object the handler already holds
+let widget = find_widget(&txn, tenant, &name).await?
+    .authorize::<WidgetByName, _>(widget_action::Read, &parts.extensions).await?;
+
+// several at once — one pass through the policy, and the refusal still
+// names the one that caused it
+let folders = Folder::load_all_scoped(body.folders, &txn, tenant).await?
+    .authorize_all_dependency::<FolderByName, _>(folder_action::Read, &parts.extensions).await?;
+```
+
 ## Key types
 
 | Type | Purpose |
 |------|---------|
-| `Auth<S, C>` | Extractor for the authenticated context |
+| `Auth<S, C>` | Extractor for the authenticated context (shared, behind an `Arc`) |
 | `Require<M>` | Capability-checking extractor |
+| `Granted<T>` | Route guard for an object, a collection, or a capability |
+| `Granting` | Trait an asset implements: its key, loader, and action vocabulary |
+| `GrantProfile` | The application's caller / state / error, stated once for every asset |
+| `Scoping` | Adds the collection form — which subset the caller may query for |
+| `Action` | One row of `Granting::ACTIONS`: capability, audit category, existence |
+| `AuthorizeLoaded` / `AuthorizeLoadedAll` | Authorize objects the handler already holds |
+| `AuthorizeScope` | The query filter, for a handler building its own query |
 | `AuthState` | Middleware state (validator + resolver + policy + optional audit) |
 | `AuthLayer` | Tower layer implementing the auth pipeline |
 | `TokenValidator` | Trait for IdP token validation |
@@ -77,10 +151,12 @@ async fn list_widgets(_: Require<WidgetsRead>) -> Json<Vec<Widget>> {
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `axum` | yes | Auth middleware, `Auth` extractor, `IntoResponse` on errors |
+| `axum` | yes | Auth middleware, `Auth` / `Require` / `Granted` extractors, `IntoResponse` on errors |
 | `audit` | yes | Stamps actor info onto `AuditEventBuilder`, emits auth-failure events |
+| `uuid` | yes | `RouteKey` for `uuid::Uuid`, so a UUID `{id}` segment binds without a newtype |
+| `catalog` | no | Self-registering action catalog, so `actions()` answers without a hand-maintained list |
 
-Disable `axum` to use the framework-neutral pipeline from non-axum contexts. Disable `audit` to drop `doxa-audit` from the dependency graph.
+Disable `axum` to use the framework-neutral pipeline from non-axum contexts — `Granted` and everything around it lives behind that feature. Disable `audit` to drop `doxa-audit` from the dependency graph. `catalog` costs a life-before-main constructor per declared action; it is off here and turned on by the `doxa` facade's `auth-catalog` feature, which is on by default.
 
 ## License
 
