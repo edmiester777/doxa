@@ -10,7 +10,7 @@
 #![cfg(all(feature = "full", feature = "policy-sea-orm"))]
 
 use axum::http::StatusCode;
-use doxa::auth::{ActionTable, CapabilityContext, GrantProfile, Granted, Granting, One};
+use doxa::auth::{ActionTable, CapabilityContext, FromState, GrantProfile, Granted, Granting, One};
 use doxa::policy::{
     AuthError, Capability, CapabilityChecker, DbLoadError, PolicyResource, ResourceEntity,
     ScopedRow,
@@ -61,6 +61,7 @@ pub struct AppGrants;
 impl GrantProfile for AppGrants {
     type Ctx = CapabilityContext;
     type State = DatabaseConnection;
+    type Source = FromState<DatabaseConnection>;
     type Error = DbLoadError;
 }
 

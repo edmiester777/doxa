@@ -581,11 +581,12 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// One route's way into a resource: the `Granting` impl, written from the
 /// application's profile and the row's own lookup.
 ///
-/// Five of `Granting`'s six items are transcription. `Ctx`, `State` and
-/// `Error` are the application's and identical across its assets; `Key`
-/// and `load` are the scoped lookup `#[derive(PolicyResource)]` already
-/// wrote from `#[resource(key)]` and `#[resource(scope)]`. Only the
-/// vocabulary is a fact about this asset.
+/// Six of `Granting`'s seven items are transcription. `Ctx`, `State`,
+/// `Source` and `Error` are the application's and identical across its
+/// assets; `Key` and `load` are the scoped lookup the row already declares
+/// through [`fetch`]. Only the vocabulary is a fact about this asset.
+///
+/// [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
 ///
 /// ```ignore
 /// #[doxa::asset(profile = AppGrants, actions = WidgetAction)]
@@ -608,16 +609,53 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// | `profile` | required — the application's `GrantProfile` |
 /// | `actions` | required — the enum deriving `Actions` |
 /// | `row` | `Self` |
-/// | `key` | `<Row as ScopedRow>::Key`; `key = pk` for the primary key |
+/// | `key` | `<Row as FetchByKey<State>>::Key`; `key = pk` for the row's own id |
 /// | `list` | none — `list = tenant` adds a tenant-confined `Scoping` |
+/// | `ctx` | the profile's |
+/// | `source` | the profile's — and the state follows it |
 /// | `error` | the profile's |
-/// | `load_with` | `ScopedRow::load_scoped`, confined to the caller's tenant |
+/// | `load_with` | `FetchByKey::fetch`, confined to the caller's tenant |
+///
+/// # No backend is assumed
+///
+/// The lookups are named through [`fetch`], which no backend owns, so
+/// everything above reads the same whether the row is a SeaORM model, a
+/// document behind an HTTP control plane or an entry in a map.
+/// `#[derive(PolicyResource)]` answers those traits for a SeaORM model
+/// from `#[resource(key)]` and `#[resource(scope)]`; anything else answers
+/// them itself, which is one associated type and a method per lookup.
+///
+/// # `load_with`, and what taking the caller costs
+///
+/// `FetchByKey::fetch` is handed a `&str` scope and nothing else, which is
+/// the guarantee rather than a thin signature: a lookup that cannot see
+/// the caller cannot ignore the caller's tenant.
+///
+/// `load_with` is handed the whole `Ctx`, and exists for the lookup that
+/// needs more than the scope — one that varies by role, or reads the
+/// assembled session. Those are the same fact. Taking the `Ctx` is what
+/// makes such a lookup expressible, and it is what makes confinement
+/// yours to write: a `load_with` that takes `_ctx` and means it compiles,
+/// passes its tests, and serves one tenant's rows to another, with the
+/// capability gate and the instance check both passing on the way.
+///
+/// Nothing else moves. The coarse gate still runs first and still costs no
+/// load, the instance check still runs on whatever came back, and the
+/// verdict still reaches the audit trail under the row's Cedar identity.
+/// The scope is the only thing that becomes the loader's responsibility.
+///
+/// `source` is what a loader is handed and where it comes from, which move
+/// together: `source = Extension<Txn>` means the guard extracts the
+/// request's transaction and `load` receives `&Txn`. That is the case a
+/// router-state loader cannot serve — a pool does not see rows the request
+/// has written and not committed, so a lookup pinned to one answers `None`
+/// for an object the caller is holding.
 ///
 /// `key = pk` is a word rather than a type because it selects a different
-/// lookup, not just a different key: `ScopedTable::load_by_id`, which keeps
+/// lookup, not just a different key: `FetchById::fetch_by_id`, which keeps
 /// the scope filter that a hand-written `Entity::find_by_id(id).one(db)`
-/// silently drops. It reads `ScopedTable` and not `ScopedRow` deliberately
-/// — a primary key belongs to the table — so a row that declares no
+/// silently drops. It reads `FetchById` and not `FetchByKey` deliberately
+/// — an identifier belongs to the collection — so a row that declares no
 /// `#[resource(key)]` still has an id route.
 ///
 /// `list = tenant` names its filter for the same reason. The generated

@@ -1,23 +1,56 @@
 //! `#[asset]` — the `Granting` impl an application would otherwise
 //! transcribe.
 //!
-//! Five of `Granting`'s six items are not decisions. `Ctx`, `State` and
-//! `Error` belong to the application and are the same for every asset in
-//! it; `Key` and `load` are the lookup the row already declares through
-//! [`ScopedRow`] — or, for `key = pk`, through [`ScopedTable`], which is
-//! why the id route reaches a row that declares no key column at all;
-//! `Row` is `Self` unless the attribute says otherwise. Only `ACTIONS` is
-//! a fact about this asset, and the attribute takes it as one word.
+//! Six of `Granting`'s seven items are not decisions. `Ctx`, `State`,
+//! `Source` and `Error` belong to the application and are the same for
+//! every asset in it; `Key` and `load` are the lookup the row already
+//! declares through [`FetchByKey`] — or, for `key = pk`, through
+//! [`FetchById`], which is why the id route reaches a row that declares no
+//! key column at all; `Row` is `Self` unless the attribute says otherwise.
+//! Only `ACTIONS` is a fact about this asset, and the attribute takes it
+//! as one word.
 //!
-//! `ctx` and `error` override the profile for the asset that genuinely
-//! differs — a loader answering 409 on an ambiguous name, or a `Scoping`
-//! impl that needs the assembled session to read the policy's residual —
-//! without the rest of the service restating anything.
+//! `ctx`, `error` and `source` override the profile for the asset that
+//! genuinely differs — a loader answering 409 on an ambiguous name, a
+//! `Scoping` impl that needs the assembled session to read the policy's
+//! residual, a lookup that must run inside the request's open transaction
+//! — without the rest of the service restating anything.
 //!
 //! ```ignore
 //! #[doxa::asset(profile = AppGrants, actions = WidgetAction)]
 //! pub struct WidgetByName;
 //! ```
+//!
+//! # No backend is assumed
+//!
+//! The lookups are named through [`fetch`], which no backend owns, so what
+//! this writes is the same whether the row lives in Postgres, behind an
+//! HTTP control plane or in a process-local map. `#[derive(PolicyResource)]`
+//! answers those traits for a SeaORM model; anything else answers them
+//! itself, in about fifteen lines.
+//!
+//! # `load_with`, and what taking the caller costs
+//!
+//! [`FetchByKey::fetch`] is handed a `&str` scope and nothing else. That
+//! is not a thin signature, it is the guarantee: a lookup that cannot see
+//! the caller cannot ignore the caller's tenant, so the generated loader
+//! confines every fetch and refuses to guess when there is no tenant to
+//! confine to.
+//!
+//! `load_with` is handed the whole `Ctx`, and exists for the lookup that
+//! needs more than the scope — one that varies by role, or reads the
+//! assembled session. Those two facts are the same fact. Taking the `Ctx`
+//! is what makes such a lookup expressible, and it is what makes
+//! confinement the consumer's to write: a `load_with` that takes `_ctx`
+//! and means it compiles, passes its tests, and serves one tenant's rows
+//! to another, with the capability gate and the instance check both
+//! passing on the way. `asset_load_with.rs` in the `doxa` crate pins that
+//! boundary as a runnable fact.
+//!
+//! Everything around the loader is unchanged either way: the coarse gate
+//! still runs first and still costs no load, the instance check still runs
+//! on whatever came back, and the verdict still reaches the audit trail
+//! under the row's Cedar identity. The scope is the only thing that moves.
 //!
 //! The struct is left exactly as written. That is the whole reason this
 //! is an attribute on a descriptor rather than something that generates
@@ -27,8 +60,9 @@
 //! `PolicyResource` impl and cannot come to disagree about the object's
 //! Cedar identity.
 //!
-//! [`ScopedRow`]: https://docs.rs/doxa-policy/latest/doxa_policy/trait.ScopedRow.html
-//! [`ScopedTable`]: https://docs.rs/doxa-policy/latest/doxa_policy/trait.ScopedTable.html
+//! [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
+//! [`FetchByKey`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.FetchByKey.html
+//! [`FetchById`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.FetchById.html
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -45,18 +79,21 @@ struct Args {
     profile: Option<Path>,
     /// The vocabulary, as an `ActionTable`.
     actions: Option<Path>,
-    /// Route key. `<Row as ScopedRow>::Key` when absent.
+    /// Route key. `<Row as FetchByKey<State>>::Key` when absent.
     key: Option<Type>,
-    /// `key = pk`: the row's primary key rather than its key column, and
-    /// `ScopedTable::load_by_id` rather than `ScopedRow::load_scoped`.
-    /// Asks nothing of `#[resource(key)]`, so a row that declares no key
-    /// column still has an id route.
+    /// `key = pk`: the row's own identifier rather than a key column, and
+    /// `FetchById` rather than `FetchByKey`. Asks nothing of
+    /// `#[resource(key)]`, so a row that declares no key column still has
+    /// an id route.
     by_primary_key: bool,
     /// Loader failure, overriding the profile's.
     error: Option<Type>,
     /// Caller shape, overriding the profile's.
     ctx: Option<Type>,
-    /// A loader to call instead of `ScopedRow::load_scoped`.
+    /// Where the loader's state comes from, overriding the profile's. The
+    /// state follows it, so `source = Extension<Txn>` is also `State = Txn`.
+    source: Option<Type>,
+    /// A loader to call instead of the row's own fetch.
     load_with: Option<Path>,
     /// `list = tenant`: emit a `Scoping` confined to the caller's tenant.
     list: Option<Ident>,
@@ -101,13 +138,15 @@ impl Parse for Args {
                 out.error = Some(input.parse()?);
             } else if key == "ctx" {
                 out.ctx = Some(input.parse()?);
+            } else if key == "source" {
+                out.source = Some(input.parse()?);
             } else if key == "load_with" {
                 out.load_with = Some(input.parse()?);
             } else {
                 return Err(syn::Error::new(
                     key.span(),
                     "unknown `asset` option; expected `profile`, `actions`, `row`, `key`, \
-                     `list`, `ctx`, `error` or `load_with`",
+                     `list`, `ctx`, `source`, `error` or `load_with`",
                 ));
             }
 
@@ -167,10 +206,26 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     }
 
+    // The source and the state move together: naming a source is naming
+    // where the loader's handle comes from, and the handle it yields is
+    // then what the loader gets. Letting them be set apart would allow a
+    // profile whose `State` no source produces, which is a type error
+    // stated in two places instead of one.
+    let (source, state) = match &args.source {
+        Some(source) => (
+            quote!(#source),
+            quote!(<#source as ::doxa::auth::LoaderSource>::State),
+        ),
+        None => (
+            quote!(<#profile as ::doxa::auth::GrantProfile>::Source),
+            quote!(<#profile as ::doxa::auth::GrantProfile>::State),
+        ),
+    };
+
     let key = match (&args.key, args.by_primary_key) {
         (Some(key), _) => quote!(#key),
-        (None, true) => quote!(::doxa::policy::PrimaryKeyOf<#row>),
-        (None, false) => quote!(<#row as ::doxa::policy::ScopedRow>::Key),
+        (None, true) => quote!(<#row as ::doxa::policy::FetchById<#state>>::Id),
+        (None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::Key),
     };
 
     let error = match &args.error {
@@ -189,9 +244,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         None => quote!(<#profile as ::doxa::auth::GrantProfile>::Ctx),
     };
 
-    // The loader is the one generated item that needs the ORM, so it is
-    // the one gated on the feature. Without it the attribute still writes
-    // the five associated items and asks only for `load_with`.
     let load = match &args.load_with {
         Some(path) => quote! {
             async fn load(
@@ -202,17 +254,17 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                 #path(key, state, ctx).await
             }
         },
-        None if cfg!(feature = "sea-orm") => {
-            // `load_by_id` is a `ScopedTable` method and `load_scoped`
-            // a `ScopedRow` one, so the trait is part of the choice
-            // rather than a constant around it. That is the whole
-            // reach of `key = pk` on a row that declares no key
-            // column: a primary key belongs to the table, so the id
-            // route asks nothing of `#[resource(key)]`.
+        None => {
+            // `fetch_by_id` is a `FetchById` method and `fetch` a
+            // `FetchByKey` one, so the trait is part of the choice rather
+            // than a constant around it. That is the whole reach of
+            // `key = pk` on a row that declares no key column: an
+            // identifier belongs to the collection, so the id route asks
+            // nothing of `#[resource(key)]`.
             let lookup = if args.by_primary_key {
-                quote!(<#row as ::doxa::policy::ScopedTable>::load_by_id)
+                quote!(<#row as ::doxa::policy::FetchById<#state>>::fetch_by_id)
             } else {
-                quote!(<#row as ::doxa::policy::ScopedRow>::load_scoped)
+                quote!(<#row as ::doxa::policy::FetchByKey<#state>>::fetch)
             };
             quote! {
                 async fn load(
@@ -239,14 +291,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                 }
             }
         }
-        None => {
-            return Err(syn::Error::new(
-                name.span(),
-                "`asset` writes the loader from `ScopedRow` — or from `ScopedTable`, for \
-                 `key = pk` — which needs the `sea-orm` feature on `doxa-macros`. Enable it, \
-                 or supply `load_with = <fn>`",
-            ))
-        }
     };
 
     // Listing, and only the tenant-confined kind. `Scoping::scope` is
@@ -255,49 +299,50 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     // implying it is that. An asset needing the residual writes `Scoping`
     // itself, and the compiler asks for it the moment a route says
     // `Many<…>`.
-    let scoping =
-        match &args.list {
-            None => quote!(),
-            Some(_) if !cfg!(feature = "sea-orm") => return Err(syn::Error::new(
-                name.span(),
-                "`list = tenant` builds the listing from `ScopedTable`, which needs the `sea-orm` \
-                 feature on `doxa-macros`. Enable it, or write `Scoping` by hand",
-            )),
-            // Bounded on `ScopedTable` rather than `ScopedRow`: listing needs
-            // the owning column and nothing else, so a table no route addresses
-            // by a key column can still be paged.
-            Some(_) => quote! {
-                impl ::doxa::auth::Scoping for #name {
-                    type Filter = ::doxa::policy::__private::sea_orm::Select<
-                        <#row as ::doxa::policy::ScopedTable>::Entity,
-                    >;
+    let scoping = match &args.list {
+        None => quote!(),
+        // Bounded on `FetchSubset` rather than `FetchByKey`: listing needs
+        // the owning column and nothing else, so a collection no route
+        // addresses by a key can still be paged.
+        Some(_) => quote! {
+            impl ::doxa::auth::Scoping for #name {
+                type Filter = <#row as ::doxa::policy::FetchSubset>::Filter;
 
-                    fn scope(
-                        _action: &str,
-                        ctx: &Self::Ctx,
-                    ) -> ::std::result::Result<
-                        ::std::option::Option<Self::Filter>,
-                        ::doxa::policy::AuthError,
-                    > {
-                        // The coarse capability already decided whether this
-                        // caller may list at all; what is left is which rows,
-                        // and that is the tenant.
-                        //
-                        // No tenant is no scope, which `empty_scope` turns into
-                        // a refusal — rather than a listing of whatever happens
-                        // to sit under the empty string.
-                        let ::std::option::Option::Some(scope) =
-                            ::doxa::auth::FromAuthExtensions::tenant(ctx)
-                        else {
-                            return ::std::result::Result::Ok(::std::option::Option::None);
-                        };
-                        ::std::result::Result::Ok(::std::option::Option::Some(
-                            <#row as ::doxa::policy::ScopedTable>::scoped(scope),
-                        ))
-                    }
+                fn scope(
+                    _action: &str,
+                    ctx: &Self::Ctx,
+                ) -> ::std::result::Result<
+                    ::std::option::Option<Self::Filter>,
+                    ::doxa::policy::AuthError,
+                > {
+                    // The coarse capability already decided whether this
+                    // caller may list at all; what is left is which rows,
+                    // and that is the tenant.
+                    //
+                    // No tenant is no scope, which `empty_scope` turns into
+                    // a refusal — rather than a listing of whatever happens
+                    // to sit under the empty string.
+                    let ::std::option::Option::Some(scope) =
+                        ::doxa::auth::FromAuthExtensions::tenant(ctx)
+                    else {
+                        return ::std::result::Result::Ok(::std::option::Option::None);
+                    };
+                    ::std::result::Result::Ok(::std::option::Option::Some(
+                        <#row as ::doxa::policy::FetchSubset>::subset(scope),
+                    ))
                 }
-            },
-        };
+
+                // Forwarded rather than left at the default, so a backend
+                // that can say "everything" is asked. `FetchSubset` answers
+                // `None` unless it overrides this, which is the right
+                // reading of a scope that is only tenancy: an administrator
+                // of a tenant is still inside it.
+                fn unscoped() -> ::std::option::Option<Self::Filter> {
+                    <#row as ::doxa::policy::FetchSubset>::everything()
+                }
+            }
+        },
+    };
 
     Ok(quote! {
         #item
@@ -308,7 +353,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             type Row = #row;
             type Key = #key;
             type Ctx = #ctx;
-            type State = <#profile as ::doxa::auth::GrantProfile>::State;
+            type State = #state;
+            type Source = #source;
             type Error = #error;
 
             const ACTIONS: &'static [::doxa::auth::Action] =
@@ -331,27 +377,20 @@ mod tests {
         expand(args, item).expect_err("rejected").to_string()
     }
 
-    /// The common case: the row is its own descriptor, so five of the six
-    /// items come from the profile and the row's own `ScopedRow`.
-    ///
-    /// `load_with` only so the assertions hold whether or not `sea-orm`
-    /// is on; none of them are about the loader.
+    /// The common case: the row is its own descriptor, so six of the seven
+    /// items come from the profile and the row's own `FetchByKey`.
     #[test]
-    fn the_profile_supplies_the_three_application_types() {
+    fn the_profile_supplies_the_application_types() {
         let out = expand_ok(
+            quote!(profile = AppGrants, actions = WidgetAction),
             quote!(
-                profile = AppGrants,
-                actions = WidgetAction,
-                load_with = load
-            ),
-            quote!(
-                pub struct Source;
+                pub struct Widget;
             ),
         );
 
         assert!(out.contains("type Row = Self ;"), "{out}");
         assert!(
-            out.contains("type Key = < Self as :: doxa :: policy :: ScopedRow > :: Key"),
+            out.contains("type Key = < Self as :: doxa :: policy :: FetchByKey <"),
             "{out}",
         );
         assert!(
@@ -363,12 +402,71 @@ mod tests {
             "{out}",
         );
         assert!(
+            out.contains(
+                "type Source = < AppGrants as :: doxa :: auth :: GrantProfile > :: Source"
+            ),
+            "{out}",
+        );
+        assert!(
             out.contains("type Error = < AppGrants as :: doxa :: auth :: GrantProfile > :: Error"),
             "{out}",
         );
         assert!(
             out.contains("< WidgetAction as :: doxa :: auth :: ActionTable > :: ACTIONS"),
             "{out}",
+        );
+    }
+
+    /// Nothing the attribute writes names an ORM, so the whole of it is
+    /// available to a row that lives somewhere else. This is the test that
+    /// would have failed before `fetch` existed: the loader arm used to
+    /// refuse outright without the `sea-orm` feature, and `list` with it.
+    #[test]
+    fn no_backend_is_named_anywhere_in_the_output() {
+        let out = expand_ok(
+            quote!(profile = AppGrants, actions = WidgetAction, list = tenant),
+            quote!(
+                pub struct Widget;
+            ),
+        );
+
+        assert!(!out.contains("sea_orm"), "{out}");
+        assert!(!out.contains("ScopedRow"), "{out}");
+        assert!(!out.contains("ScopedTable"), "{out}");
+    }
+
+    /// The source and the state move together, so `source = …` is also the
+    /// answer to "which handle does the loader get". A request-scoped
+    /// transaction is the case: naming it as the source is the whole of
+    /// what an asset does to be loaded inside one.
+    #[test]
+    fn a_source_override_carries_the_state_with_it() {
+        let out = expand_ok(
+            quote!(
+                profile = AppGrants,
+                actions = WidgetAction,
+                source = axum::Extension<Txn>
+            ),
+            quote!(
+                pub struct Widget;
+            ),
+        );
+
+        assert!(
+            out.contains("type Source = axum :: Extension < Txn >"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "type State = < axum :: Extension < Txn > as :: doxa :: auth :: LoaderSource > \
+                 :: State"
+            ),
+            "{out}",
+        );
+        // And the profile is not consulted for either of them.
+        assert!(
+            !out.contains("GrantProfile > :: State"),
+            "state should follow the source: {out}",
         );
     }
 
@@ -446,37 +544,46 @@ mod tests {
     }
 
     /// The generated lookup is confined to the caller's tenant, which is
-    /// the security property `ScopedRow` exists for: a key owned by
+    /// the security property `FetchByKey` exists for: a key owned by
     /// someone else answers `None`, exactly as a key that does not exist.
-    #[cfg(feature = "sea-orm")]
     #[test]
     fn the_default_loader_is_the_scoped_one() {
         let out = expand_ok(
             quote!(profile = AppGrants, actions = WidgetAction),
             quote!(
-                pub struct Source;
+                pub struct Widget;
             ),
         );
 
-        assert!(out.contains("load_scoped (key , state , scope)"), "{out}");
+        assert!(out.contains("fetch (key , state , scope)"), "{out}");
         assert!(out.contains("tenant (ctx)"), "{out}");
     }
 
-    /// Without the ORM there is no lookup to write, and the error says
-    /// which feature rather than leaving a missing method at the call
-    /// site.
-    #[cfg(not(feature = "sea-orm"))]
+    /// A caller with no tenant has no scope to confine the lookup to, and
+    /// the loader answers that nothing is there rather than querying for
+    /// the empty string.
+    ///
+    /// Paired with the test above because the two halves are separable:
+    /// a loader that reads the tenant and then falls back to `""` also
+    /// contains `tenant (ctx)`, and is the bug this arm exists to avoid.
     #[test]
-    fn without_the_orm_the_error_names_the_feature() {
-        let message = expand_err(
+    fn no_tenant_is_no_row_rather_than_an_empty_scope() {
+        let out = expand_ok(
             quote!(profile = AppGrants, actions = WidgetAction),
             quote!(
-                pub struct Source;
+                pub struct Widget;
             ),
         );
 
-        assert!(message.contains("`sea-orm` feature"), "{message}");
-        assert!(message.contains("load_with"), "{message}");
+        assert!(
+            out.contains(
+                "let :: std :: option :: Option :: Some (scope) = :: doxa :: auth :: \
+                 FromAuthExtensions :: tenant (ctx) else { return :: std :: result :: Result :: \
+                 Ok (:: std :: option :: Option :: None) ; }"
+            ),
+            "{out}",
+        );
+        assert!(!out.contains("unwrap_or"), "{out}");
     }
 
     #[test]
@@ -535,17 +642,16 @@ mod tests {
 
     /// `pk` changes the lookup, not just the key type — which is why it
     /// is a word rather than `key = Uuid`. The generated call is
-    /// `load_by_id`, whose default body keeps the scope filter that a
-    /// hand-written `find_by_id` drops.
+    /// `fetch_by_id`, which keeps the scope filter that a hand-written
+    /// `find_by_id` drops.
     ///
     /// The trait it is qualified with is asserted too, and is not
-    /// incidental: `ScopedTable` is the half a row gets from
-    /// `#[resource(scope)]` alone, so naming `ScopedRow` here would put
-    /// the id route out of reach of every table that declares no key
+    /// incidental: `FetchById` is the half a row gets from
+    /// `#[resource(scope)]` alone, so naming `FetchByKey` here would put
+    /// the id route out of reach of every collection that declares no key
     /// column — and back into a hand-written `find_by_id`.
-    #[cfg(feature = "sea-orm")]
     #[test]
-    fn key_pk_selects_the_scoped_primary_key_lookup() {
+    fn key_pk_selects_the_scoped_identifier_lookup() {
         let out = expand_ok(
             quote!(
                 row = Widget,
@@ -559,16 +665,15 @@ mod tests {
         );
 
         assert!(
-            out.contains("type Key = :: doxa :: policy :: PrimaryKeyOf < Widget >"),
+            out.contains("type Key = < Widget as :: doxa :: policy :: FetchById <"),
             "{out}",
         );
+        assert!(out.contains(">> :: Id ;"), "{out}");
         assert!(
-            out.contains(
-                "< Widget as :: doxa :: policy :: ScopedTable > :: load_by_id \
-                 (key , state , scope)"
-            ),
+            out.contains(":: fetch_by_id (key , state , scope)"),
             "{out}",
         );
+        assert!(!out.contains(":: fetch (key"), "{out}");
     }
 
     /// `key = pk` says what the key is, so a type beside it is a second
@@ -597,7 +702,6 @@ mod tests {
     /// applies the tenant and no other policy condition, so `list = tenant`
     /// rather than a bare `list` — the call site says which listing this
     /// is, and an asset needing the policy's residual writes its own.
-    #[cfg(feature = "sea-orm")]
     #[test]
     fn list_tenant_emits_a_tenant_confined_scoping() {
         let out = expand_ok(
@@ -616,7 +720,42 @@ mod tests {
             out.contains("impl :: doxa :: auth :: Scoping for WidgetByName"),
             "{out}",
         );
-        assert!(out.contains("scoped (scope)"), "{out}");
+        assert!(
+            out.contains("type Filter = < Widget as :: doxa :: policy :: FetchSubset > :: Filter"),
+            "{out}",
+        );
+        assert!(out.contains(":: subset (scope)"), "{out}");
+    }
+
+    /// `unscoped` is forwarded rather than left at `Scoping`'s default, so
+    /// a backend that can say "everything" is the one that decides whether
+    /// an administrator gets it.
+    ///
+    /// Worth its own test because the default is silent: leaving the
+    /// method off compiles, and the only symptom is an admin quietly
+    /// receiving the tenant-filtered subset on a collection whose backend
+    /// had a wider answer to give.
+    #[test]
+    fn list_tenant_forwards_the_backends_unrestricted_subset() {
+        let out = expand_ok(
+            quote!(
+                row = Widget,
+                profile = AppGrants,
+                actions = WidgetAction,
+                list = tenant
+            ),
+            quote!(
+                pub struct WidgetByName;
+            ),
+        );
+
+        assert!(
+            out.contains(
+                "fn unscoped () -> :: std :: option :: Option < Self :: Filter > { < Widget as \
+                 :: doxa :: policy :: FetchSubset > :: everything () }"
+            ),
+            "{out}",
+        );
     }
 
     /// No `list`, no `Scoping` — so `Granted<Many<…>>` over an asset that

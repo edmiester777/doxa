@@ -29,7 +29,8 @@ use axum::extract::FromRequestParts;
 use axum::http::Request;
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLogger};
 use doxa::auth::{
-    AuthContext, AuthorizeScope, Claims, Denial, FromAuthExtensions, GrantProfile, Scoped, Scoping,
+    AuthContext, AuthorizeScope, Claims, Denial, FromAuthExtensions, FromState, GrantProfile,
+    Scoped, Scoping,
 };
 use doxa::policy::{
     condition_from_residual, AuthError, Capability, CapabilityChecker, DbLoadError, ResourceEntity,
@@ -143,6 +144,7 @@ pub struct AppGrants;
 impl GrantProfile for AppGrants {
     type Ctx = Caller;
     type State = DatabaseConnection;
+    type Source = FromState<DatabaseConnection>;
     type Error = DbLoadError;
 }
 

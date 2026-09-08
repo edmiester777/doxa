@@ -16,7 +16,7 @@ use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
 use doxa::auth::{
-    Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
+    Action, Cap, CapabilityContext, FromState, GrantSite, Granted, Granting, Many, One, Scoping,
 };
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
@@ -59,6 +59,7 @@ impl Granting for Widget {
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     const ACTIONS: &'static [Action] = &[
@@ -122,6 +123,7 @@ impl Granting for Gadget {
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     const ACTIONS: &'static [Action] = &[Action::new("read")];
@@ -518,6 +520,7 @@ impl Granting for Ledger {
     type Key = u32;
     type Ctx = Arc<doxa::auth::AuthContext<Session, doxa::auth::OidcClaims>>;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     const ACTIONS: &'static [Action] = &[Action::new("read")];

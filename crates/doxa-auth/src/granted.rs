@@ -371,6 +371,19 @@ pub enum Refusal<E> {
     Key(KeyError),
     /// No auth context, no checker, or a policy that failed to decide.
     Auth(AuthError),
+    /// The loader's state could not be extracted from the request.
+    ///
+    /// Only reachable for a [`Granting::Source`] that is a real extractor;
+    /// [`FromState`] cannot fail. The rejection is already rendered,
+    /// because an extractor's own is the right answer here — a missing
+    /// `Extension<Txn>` is a wiring fault and should say so rather than
+    /// being flattened into a denial the caller would read as a 403.
+    ///
+    /// Boxed because it is the rarest variant and by far the largest: a
+    /// `Response` is a header map and a body handle, and inlining it would
+    /// widen every `Result<_, Refusal<_>>` on the success path — which is
+    /// every guard in the service.
+    Source(Box<Response>),
     /// The loader failed with the consumer's own error type.
     Load(E),
 }
@@ -400,6 +413,7 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
                 .into_response(),
             Refusal::Key(error) => error.into_response(),
             Refusal::Auth(error) => error.into_response(),
+            Refusal::Source(response) => *response,
             Refusal::Load(error) => error.into_response(),
         }
     }
@@ -624,8 +638,11 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     type Loaded: Send;
     /// Caller shape this subject's chain needs.
     type Ctx: FromAuthExtensions;
-    /// State the chain reaches through `FromRef`.
+    /// What the chain's loader is handed.
     type State: Send + Sync;
+    /// How the guard gets hold of it out of a request. See
+    /// [`LoaderSource`].
+    type Source: LoaderSource<State = Self::State>;
     /// Identifying values the route must supply.
     type Key: RouteKey;
     /// Loader failure this subject's chain can raise. [`Cap`] loads
@@ -951,7 +968,7 @@ fn declared<R: Granting>(action: &str) -> Option<&'static Action> {
 /// declaration was mostly transcription.
 ///
 /// ```
-/// # use doxa_auth::granted::GrantProfile;
+/// # use doxa_auth::granted::{FromState, GrantProfile};
 /// # use doxa_auth::CapabilityContext;
 /// # use axum::http::StatusCode;
 /// pub struct AppGrants;
@@ -959,6 +976,7 @@ fn declared<R: Granting>(action: &str) -> Option<&'static Action> {
 /// impl GrantProfile for AppGrants {
 ///     type Ctx = CapabilityContext;
 ///     type State = ();
+///     type Source = FromState<()>;
 ///     type Error = StatusCode;
 /// }
 /// ```
@@ -971,8 +989,14 @@ pub trait GrantProfile: Send + Sync + 'static {
     /// is enough for instance routes; a collection route needs
     /// [`AuthContext<S, C>`] to reach the assembled session.
     type Ctx: FromAuthExtensions;
-    /// State loaders reach through `FromRef`.
+    /// What loaders are handed.
     type State: Send + Sync;
+    /// How the guard gets hold of it out of a request.
+    ///
+    /// [`FromState<Self::State>`](FromState) for state that lives in the
+    /// router, which is nearly always the answer. Any other extractor
+    /// works — see [`LoaderSource`] for the case that wants one.
+    type Source: LoaderSource<State = Self::State>;
     /// Loader failure. Reaches the client through its own
     /// `IntoResponse`, so any audit outcome it attaches survives.
     type Error: IntoResponse + Send;
@@ -1028,8 +1052,11 @@ pub trait Granting: Sized + Send + Sync + 'static {
     /// `<Self::Profile as GrantProfile>::Ctx`, which the `#[asset]`
     /// attribute writes for you.
     type Ctx: FromAuthExtensions;
-    /// State the loader reaches through `FromRef`.
+    /// What [`load`](Self::load) is handed.
     type State: Send + Sync;
+    /// How the guard gets hold of it out of a request. See
+    /// [`LoaderSource`].
+    type Source: LoaderSource<State = Self::State>;
     /// Loader failure. Reaches the client through its own
     /// `IntoResponse`, so any audit outcome it attaches survives.
     type Error: IntoResponse + Send;
@@ -1145,26 +1172,117 @@ pub struct Many<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 /// [`NoState`].
 pub struct Cap<M, S = DefaultSite>(PhantomData<fn() -> (M, S)>);
 
+// ---------------------------------------------------------------------------
+// Loader state
+// ---------------------------------------------------------------------------
+
+/// Where a loader's state comes from, and how the guard gets hold of it.
+///
+/// [`Granting::State`] is what a loader queries — a connection, a client,
+/// a store. This is what the *request* yields, which is not always the
+/// same thing: state living in the router arrives through `FromRef`, and
+/// state living in the request — a transaction a layer opened, a handle
+/// keyed to the caller — arrives through an extractor. Both are
+/// `FromRequestParts`, so the guard extracts [`Granting::Source`] and then
+/// asks it for the state.
+///
+/// Splitting the two is what keeps the loader signature honest. Were the
+/// guard to extract the state directly, an asset wanting an extractor
+/// would have to *name* the wrapper as its state, and every loader — the
+/// ones `#[asset]` writes, and every manual call to [`authorize`] — would
+/// be unwrapping a `State<DatabaseConnection>` to reach a database. The
+/// wrapper is the guard's business, so it stays there.
+pub trait LoaderSource: Send + Sync + 'static {
+    /// What the loader is handed.
+    type State: Send + Sync;
+
+    /// Borrow it out of whatever the request produced.
+    fn state(&self) -> &Self::State;
+}
+
+/// Loader state taken from the router's state.
+///
+/// The ordinary case, and what `#[asset]` writes unless told otherwise:
+/// `FromState<DatabaseConnection>` as an asset's source means the loader
+/// receives `&DatabaseConnection`, reached through `FromRef` exactly as it
+/// was before there was anywhere else to reach.
+///
+/// The alternative is any other extractor. `Extension<Txn>` as a source
+/// hands the loader `&Txn`, which is the case
+/// [`ScopedTable::load_by_id`] is generic over the connection *for*: a
+/// pool cannot see rows the request has written and not committed, so a
+/// loader pinned to one answers `None` for an object the caller is
+/// holding — and the route 404s on something it just created.
+///
+/// [`ScopedTable::load_by_id`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedTable.html#method.load_by_id
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FromState<T>(pub T);
+
+impl<T: Send + Sync + 'static> LoaderSource for FromState<T> {
+    type State = T;
+
+    fn state(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<St, T> FromRequestParts<St> for FromState<T>
+where
+    St: Send + Sync,
+    T: axum::extract::FromRef<St>,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        _: &mut http::request::Parts,
+        state: &St,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(FromState(T::from_ref(state)))
+    }
+}
+
+/// So a request-scoped handle is a source without a wrapper around a
+/// wrapper: `type Source = Extension<Txn>` hands the loader `&Txn`.
+impl<T: Send + Sync + 'static> LoaderSource for axum::Extension<T> {
+    type State = T;
+
+    fn state(&self) -> &T {
+        &self.0
+    }
+}
+
 /// [`Subject::State`] for a form that reads nothing from the router.
 ///
-/// The extractor needs `Subject::State: FromRef<St>` to reach a loader's
-/// state, and [`Cap`] has no loader — but the bound is on the impl, so it
-/// still has to hold. Naming `()` would mean every stateful router owed
-/// an `impl FromRef<AppState> for ()`, which is not a thing a consumer
-/// should have to write and which the orphan rule makes awkward anyway.
-/// This is a local type, so one blanket impl covers every router state
-/// there will ever be.
+/// [`Cap`] has no loader, but [`Subject::State`] and [`Subject::Source`]
+/// are bounds on the impl, so they still have to be satisfied by
+/// something. Naming `()` would mean every stateful router owed an `impl
+/// FromRef<AppState> for ()`, which is not a thing a consumer should have
+/// to write and which the orphan rule makes awkward anyway. This is a
+/// local type, so the impls below cover every router state there will
+/// ever be.
 ///
-/// Deliberately not [`Clone`]: axum's reflexive `impl<T: Clone>
-/// FromRef<T> for T` would then overlap the blanket below at `St =
-/// NoState`. Nothing needs to clone a zero-sized marker, and
-/// [`Default`] covers the one way there is to build it.
+/// It is its own source: there is nothing to extract, so going through
+/// [`FromState`] would be a `FromRef` hop to reach a zero-sized value that
+/// was already known.
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct NoState;
 
-impl<St> axum::extract::FromRef<St> for NoState {
-    fn from_ref(_: &St) -> Self {
-        NoState
+impl LoaderSource for NoState {
+    type State = Self;
+
+    fn state(&self) -> &Self {
+        self
+    }
+}
+
+impl<St: Send + Sync> FromRequestParts<St> for NoState {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        _: &mut http::request::Parts,
+        _: &St,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(NoState)
     }
 }
 
@@ -1196,6 +1314,7 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
     type Loaded = R::Row;
     type Ctx = R::Ctx;
     type State = R::State;
+    type Source = R::Source;
     type Key = R::Key;
     type Error = R::Error;
     type Site = S;
@@ -1278,6 +1397,7 @@ impl<R: Scoping, S: GrantSite> Subject for Many<R, S> {
     type Loaded = R::Filter;
     type Ctx = R::Ctx;
     type State = R::State;
+    type Source = R::Source;
     type Key = ();
     type Error = R::Error;
     type Site = S;
@@ -1346,6 +1466,7 @@ impl<M: Capable, S: GrantSite> Subject for Cap<M, S> {
     type Loaded = ();
     type Ctx = CapabilityContext;
     type State = NoState;
+    type Source = NoState;
     type Key = ();
     type Error = std::convert::Infallible;
     type Site = S;
@@ -1535,7 +1656,7 @@ impl<T, St> axum::extract::FromRequestParts<St> for Granted<T>
 where
     T: Chain,
     St: Send + Sync,
-    T::State: axum::extract::FromRef<St>,
+    T::Source: FromRequestParts<St>,
 {
     type Rejection = Refusal<T::Error>;
 
@@ -1551,11 +1672,18 @@ where
             .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
 
         let key = fetch_key::<T, St>(parts, state).await?;
-        let state = <T::State as axum::extract::FromRef<St>>::from_ref(state);
+
+        // The source is extracted, not read out of the router state, so a
+        // loader may be handed something the request owns — a transaction
+        // an earlier layer opened — rather than only a slice of `St`.
+        let source = <T::Source as FromRequestParts<St>>::from_request_parts(parts, state)
+            .await
+            .map_err(|rejection| Refusal::Source(Box::new(rejection.into_response())))?;
 
         // Same entry point a handler uses, so the refusal is recorded by
         // the same code either way.
-        let loaded = authorize::<T>(key, T::Site::ACTION, &state, &parts.extensions).await?;
+        let loaded =
+            authorize::<T>(key, T::Site::ACTION, source.state(), &parts.extensions).await?;
         Ok(Granted(ctx, loaded))
     }
 }
@@ -1726,7 +1854,9 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// declares `read` and nothing else:
     ///
     /// ```
-    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::granted::{
+    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
@@ -1740,6 +1870,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
+    /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
     /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
@@ -1757,7 +1888,9 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// Name one it does not, and the same call will not build:
     ///
     /// ```compile_fail
-    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::granted::{
+    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
@@ -1771,6 +1904,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
+    /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
     /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
@@ -1806,7 +1940,9 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// governing the check is the descriptor's:
     ///
     /// ```
-    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::granted::{
+    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
@@ -1822,6 +1958,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
+    /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     ///     const ACTIONS: &'static [Action] = &[Action::new("read")];
     /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
@@ -1844,7 +1981,9 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// the turbofish:
     ///
     /// ```compile_fail
-    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::granted::{
+    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
@@ -1859,6 +1998,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
+    /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
     /// #     async fn load(_: String, _: &(), _: &CapabilityContext)

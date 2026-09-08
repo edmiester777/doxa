@@ -275,3 +275,92 @@ impl From<DbErr> for DbLoadError {
         DbLoadError::Failed
     }
 }
+
+/// Answer the backend-neutral [`fetch`](crate::fetch) traits from a row's
+/// [`ScopedTable`] — and, with `key`, its [`ScopedRow`].
+///
+/// `#[derive(PolicyResource)]` emits this, so a derived row needs nothing.
+/// It is exported for the row that implements [`ScopedTable`] by hand,
+/// which would otherwise transcribe three impls that have one possible
+/// body each.
+///
+/// Why a macro rather than a blanket `impl<T: ScopedTable, C:
+/// ConnectionTrait> Fetch<C> for T`: a blanket would be the last word.
+/// Coherence cannot rule out a downstream row implementing both
+/// [`ScopedTable`] and its own [`Fetch`](crate::fetch::Fetch) against some
+/// non-SeaORM source, so the blanket would be rejected the moment any
+/// consumer wrote the impl this whole module exists to make possible.
+/// Emitting concrete impls per row leaves that door open.
+///
+/// ```ignore
+/// impl ScopedTable for Model {
+///     type Entity = Entity;
+///     const SCOPE_COLUMN: Column = Column::TenantId;
+/// }
+///
+/// impl ScopedRow for Model {
+///     type Key = String;
+///     const KEY_COLUMN: Column = Column::Name;
+/// }
+///
+/// doxa_policy::fetch_from_scoped!(Model, key);
+/// ```
+///
+/// Without the `key` argument only [`FetchById`](crate::fetch::FetchById)
+/// and [`FetchSubset`](crate::fetch::FetchSubset) are written, which is
+/// right for a table no route addresses by a column: it can still be
+/// listed and still be reached by its own id.
+#[cfg(feature = "sea-orm")]
+#[macro_export]
+macro_rules! fetch_from_scoped {
+    ($row:ty) => {
+        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::Fetch<C> for $row {
+            type Error = $crate::__private::sea_orm::DbErr;
+        }
+
+        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::FetchById<C> for $row {
+            type Id = $crate::PrimaryKeyOf<$row>;
+
+            fn fetch_by_id(
+                id: Self::Id,
+                src: &C,
+                scope: &str,
+            ) -> impl ::core::future::Future<
+                Output = ::core::result::Result<
+                    ::core::option::Option<Self>,
+                    $crate::__private::sea_orm::DbErr,
+                >,
+            > + Send {
+                <$row as $crate::ScopedTable>::load_by_id(id, src, scope.to_owned())
+            }
+        }
+
+        impl $crate::fetch::FetchSubset for $row {
+            type Filter = $crate::__private::sea_orm::Select<<$row as $crate::ScopedTable>::Entity>;
+
+            fn subset(scope: &str) -> Self::Filter {
+                <$row as $crate::ScopedTable>::scoped(scope.to_owned())
+            }
+        }
+    };
+    ($row:ty, key) => {
+        $crate::fetch_from_scoped!($row);
+
+        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::FetchByKey<C> for $row {
+            type Key = <$row as $crate::ScopedRow>::Key;
+
+            fn fetch(
+                key: Self::Key,
+                src: &C,
+                scope: &str,
+            ) -> impl ::core::future::Future<
+                Output = ::core::result::Result<
+                    ::core::option::Option<Self>,
+                    $crate::__private::sea_orm::DbErr,
+                >,
+            > + Send {
+                <$row as $crate::ScopedRow>::load_scoped(key, src, scope.to_owned())
+            }
+        }
+    };
+}

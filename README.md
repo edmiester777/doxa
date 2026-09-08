@@ -494,7 +494,8 @@ impl Granting for Widget {
     type Row = Self;              // the Cedar identity, from #[derive(PolicyResource)]
     type Key = u32;               // what the {id} segment parses into
     type Ctx = CapabilityContext; // tenant + roles, or your own Auth context
-    type State = DatabaseConnection;
+    type State = DatabaseConnection;      // what load() is handed
+    type Source = FromState<DatabaseConnection>; // how the guard gets hold of it
     type Error = DbLoadError;
 
     /// The whole vocabulary. An action absent here is refused, and a
@@ -538,6 +539,7 @@ pub enum WidgetAction {
 impl GrantProfile for AppGrants {
     type Ctx = CapabilityContext;
     type State = DatabaseConnection;
+    type Source = FromState<DatabaseConnection>;
     type Error = DbLoadError;
 }
 

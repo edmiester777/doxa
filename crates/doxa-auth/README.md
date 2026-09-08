@@ -94,7 +94,8 @@ impl Granting for Widget {
     type Row = Self;              // Cedar identity, from #[derive(PolicyResource)]
     type Key = u32;               // what the {id} segment parses into
     type Ctx = CapabilityContext; // tenant + roles, or your own Auth context
-    type State = DatabaseConnection;
+    type State = DatabaseConnection;      // what load() is handed
+    type Source = FromState<DatabaseConnection>; // how the guard gets hold of it
     type Error = DbLoadError;
 
     /// The whole vocabulary. An action absent here is refused, and a route
@@ -111,7 +112,9 @@ impl Granting for Widget {
 
 The action follows from the HTTP method — `post` → `create`, `put` / `patch` → `update`, `delete` → `delete`, anything else → `read` — and `#[key(…, action = "archive")]` names one the method does not imply. The guard stamps its own OpenAPI metadata: `security`, the badge, and the `401` / `403` it can return — plus `400` / `404` on the instance form, the only one that parses a key and loads an object. It also deposits the action, resource and audit category onto the request's `AuditEventBuilder`, so a guarded handler writes nothing to the audit trail.
 
-`#[asset]` writes the `Granting` impl from a `GrantProfile` (the application's caller, state and error, stated once) and an `#[derive(Actions)]` enum. With `doxa-policy`'s `sea-orm` feature, `#[derive(PolicyResource)]` supplies the key and a scope-confined loader, so another tenant's row is *absent* rather than refused — the route answers `404` where a bare primary-key lookup would leak its existence with a `403`.
+`#[asset]` writes the `Granting` impl from a `GrantProfile` (the application's caller, state, source and error, stated once) and an `#[derive(Actions)]` enum. The key and the loader come off `doxa-policy`'s `fetch` traits, which name no backend, so the same declaration serves a SeaORM model, a document behind an HTTP API, or a row in a map. Whichever it is, the generated loader reads the caller's tenant and confines the lookup to it — another tenant's row is *absent* rather than refused, and the route answers `404` where a bare primary-key lookup would leak its existence with a `403`. With `doxa-policy`'s `sea-orm` feature, `#[derive(PolicyResource)]` supplies those impls from field roles.
+
+`Source` is how the guard gets hold of the loader's state, and it is an extractor rather than a `FromRef` slice of the router state. `FromState<Db>` is the ordinary answer; `Extension<Txn>` is the one a router-state loader cannot give, since a pool does not see rows the request has written and not committed.
 
 ### Authorizing what the guard cannot see
 
@@ -136,7 +139,9 @@ let folders = Folder::load_all_scoped(body.folders, &txn, tenant).await?
 | `Require<M>` | Capability-checking extractor |
 | `Granted<T>` | Route guard for an object, a collection, or a capability |
 | `Granting` | Trait an asset implements: its key, loader, and action vocabulary |
-| `GrantProfile` | The application's caller / state / error, stated once for every asset |
+| `GrantProfile` | The application's caller / state / source / error, stated once for every asset |
+| `LoaderSource` | Where a loader's state comes from — any extractor, not just router state |
+| `FromState<T>` | The ordinary source: `T` reached out of the router state through `FromRef` |
 | `Scoping` | Adds the collection form — which subset the caller may query for |
 | `Action` | One row of `Granting::ACTIONS`: capability, audit category, existence |
 | `AuthorizeLoaded` / `AuthorizeLoadedAll` | Authorize objects the handler already holds |

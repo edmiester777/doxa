@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tower::ServiceExt;
 
-use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
+use doxa::auth::{Action, Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
@@ -52,6 +52,7 @@ impl Granting for Widget {
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     const ACTIONS: &'static [Action] = &[
@@ -464,6 +465,7 @@ impl Granting for Filed {
     type Key = (String, u32);
     type Ctx = CapabilityContext;
     type State = ();
+    type Source = FromState<()>;
     type Error = StatusCode;
 
     const ACTIONS: &'static [Action] = &[Action::new("read")];

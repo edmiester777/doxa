@@ -22,8 +22,15 @@
 //! by `{model_id}` and the same row addressed by `{name}` are one Cedar
 //! entity reached two ways.
 //!
+//! Both roles also emit the backend-neutral [`fetch`] impls, via
+//! `fetch_from_scoped!`. Those are what `#[asset]` reaches, so the SeaORM
+//! traits above are one answer to the question rather than the question:
+//! a row that is not in a table implements [`fetch`] directly and gets the
+//! same generated `Granting`.
+//!
 //! [`ScopedTable`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedTable.html
 //! [`ScopedRow`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedRow.html
+//! [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -272,6 +279,20 @@ fn scoped_impl(
         }
     });
 
+    // The backend-neutral half, which is what `#[asset]` actually reaches:
+    // the SeaORM traits above say how *this* table answers a scoped
+    // lookup, and these say that it answers one at all. Emitted here
+    // rather than as a blanket impl in `doxa-policy` because a blanket
+    // would foreclose a consumer implementing the same traits for a row of
+    // their own against some other backend — see `fetch_from_scoped!`.
+    //
+    // `key` selects the arm: without one there is no `ScopedRow` to build
+    // `FetchByKey` from, and the table keeps its id route and its listing.
+    let fetch = match key {
+        Some(_) => quote!(::doxa::policy::fetch_from_scoped!(#ident, key);),
+        None => quote!(::doxa::policy::fetch_from_scoped!(#ident);),
+    };
+
     Ok(quote! {
         #[automatically_derived]
         impl ::doxa::policy::ScopedTable for #ident {
@@ -294,6 +315,8 @@ fn scoped_impl(
         }
 
         #row
+
+        #fetch
     })
 }
 
