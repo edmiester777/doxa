@@ -24,7 +24,7 @@
 //! | [`error`] | [`AuthError`] enum (no HTTP response mapping) |
 //! | [`uid`] | Cedar entity UID builder with input validation |
 //! | [`resource`] | [`PolicyResource`] — instance-level resource identity |
-//! | `scoped` | `ScopedRow` — SeaORM lookup confined to an owner (needs `sea-orm`; not linked, as the module is absent without it) |
+//! | `scoped` | `ScopedRow` — SeaORM lookup confined to an owner, and `DbLoadError` for when it fails (needs `sea-orm`; not linked, as the module is absent without it) |
 
 pub mod capability;
 pub mod cedar_core;
@@ -78,7 +78,7 @@ pub use policy::Policy;
 pub use resource::{PolicyResource, ResourceEntity, ResourceIdType};
 pub use router::{AccessDecision, PolicyRouter};
 #[cfg(feature = "sea-orm")]
-pub use scoped::ScopedRow;
+pub use scoped::{DbLoadError, ScopedRow};
 pub use store::{PolicyStore, SharedPolicyStore};
 
 /// Re-exported so `#[derive(PolicyResource)]`'s generated [`ScopedRow`]

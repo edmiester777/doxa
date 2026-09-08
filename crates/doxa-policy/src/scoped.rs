@@ -11,8 +11,12 @@
 //! of which a derive expanding inside an entity crate could write. What a
 //! derive *can* write is the query: two columns and the table they sit
 //! in. The application keeps the thin [`Granting`] impl that supplies its
-//! own caller and maps [`DbErr`] into its own error, which is the part
-//! that was never mechanical.
+//! own caller, which is the part that was never mechanical.
+//!
+//! The error was never that part, though it was written as if it were.
+//! Turning a [`DbErr`] into a response admits one answer — a 500, and the
+//! detail in the log rather than the body — so [`DbLoadError`] ships it
+//! and an `impl Granting` names it instead of declaring it.
 //!
 //! [`Granting`]: https://docs.rs/doxa-auth/latest/doxa_auth/granted/trait.Granting.html
 
@@ -82,5 +86,67 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
     /// Every row `scope` owns, as a `Select` the caller pages.
     fn scoped(scope: impl Into<Value>) -> Select<Self::Entity> {
         Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope))
+    }
+}
+
+/// A load that failed for a reason the caller had nothing to do with.
+///
+/// The error type a SeaORM loader wants, so that `Granting::Error` is
+/// something to name rather than something to write. There is one shape
+/// worth having — a 500 the client is told nothing about, and the real
+/// [`DbErr`] in the log — and no application-specific decision inside it,
+/// which is why every consumer had been writing the same twenty lines.
+///
+/// ```ignore
+/// impl Granting for Model {
+///     type State = DatabaseConnection;
+///     type Error = DbLoadError;
+///
+///     async fn load(
+///         name: String,
+///         db: &DatabaseConnection,
+///         ctx: &CapabilityContext,
+///     ) -> Result<Option<Self>, DbLoadError> {
+///         Ok(Self::load_scoped(name, db, ctx.tenant().unwrap_or_default()).await?)
+///     }
+/// }
+/// ```
+///
+/// A row the caller may not see is not this: [`ScopedRow::load_scoped`]
+/// answers `Ok(None)` for a key in another scope exactly as it does for a
+/// key that does not exist, and the guard turns that into a 404. This type
+/// is only for the query itself failing.
+///
+/// ## Why it carries nothing
+///
+/// A [`DbErr`]'s `Display` can hold the statement, the column names and
+/// sometimes a bound value. The response envelope is built from the error's
+/// own `Display` and its serialized form, so anything this type held would
+/// be a schema leak on a path nobody reviews — the 500 branch. It therefore
+/// holds nothing, and the `From<`[`DbErr`]`>` impl logs before discarding.
+///
+/// Logging in a `From` is deliberate rather than incidental: the conversion
+/// is the last point at which the diagnosis exists. A consumer that catches
+/// the error and answers some other way still gets the record, which is not
+/// true of a type that logs when it renders.
+///
+/// Requires the `sea-orm` feature; the response half requires `axum` too.
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    feature = "axum",
+    derive(serde::Serialize, doxa::ToSchema, doxa_macros::ApiError)
+)]
+pub enum DbLoadError {
+    /// The query did not complete. Deliberately incurious in what it says:
+    /// the detail is in the log, under the request's own span.
+    #[error("could not load the requested resource")]
+    #[cfg_attr(feature = "axum", api(status = 500, code = "load_failed"))]
+    Failed,
+}
+
+impl From<DbErr> for DbLoadError {
+    fn from(error: DbErr) -> Self {
+        tracing::error!(%error, "resource load failed");
+        DbLoadError::Failed
     }
 }
