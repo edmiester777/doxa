@@ -140,6 +140,122 @@ Multiple `checks(...)` blocks are supported — all must pass for the capability
 | `description` | yes | Human-readable description, displayed in UI badges |
 | `checks(...)` | yes (1+) | One or more check blocks with `action`, `entity_type`, `entity_id` |
 
+`entity_id` takes a string literal, or the bare word `tenant` for a gate whose resource *is* the caller's partition — `entity_id = tenant`. That is an instruction to substitute the request's tenant, carried out before the consumer's UID builder is reached, which is why it is not spelled `"tenant"`.
+
+## Authorization macros
+
+Three macros cover what a guarded route needs: what the row *is* to Cedar, what may be *done* to it, and how a route *reaches* it. Used together with `doxa-auth`'s `Granted<T>`.
+
+### `#[derive(PolicyResource)]`
+
+Gives a domain type its Cedar identity — entity type, instance id, the attributes policies may reference, and its parents. The entity type doubles as the audit `resource_type`, so an audit row and the decision that produced it share one string.
+
+```rust
+#[derive(PolicyResource)]
+#[resource(entity_type = "Widget")]
+pub struct Model {
+    pub id: Uuid,
+
+    /// The Cedar id, an attribute policies can name, and the route's key.
+    #[resource(id, attr, key)]
+    pub name: String,
+
+    /// Every generated lookup is confined to this column.
+    #[resource(parent = "Tenant", scope)]
+    pub tenant_id: String,
+}
+```
+
+| Container key | Description |
+|---------------|-------------|
+| `entity_type` | Cedar entity type (required) |
+| `id_with` | Method producing the Cedar id, when no single field is it |
+| `attrs_with` | Method producing attributes no field backs |
+| `tenant_parent` | Entity type this resource is `in` by virtue of the request rather than of any column |
+
+| Field role | Description |
+|------------|-------------|
+| `id` | This field is the Cedar instance id |
+| `attr` | Expose as `resource.<field>` to policies |
+| `parent = "Type"` | This field holds the id of a parent entity |
+| `key` | The value a route's key segment matches (needs `sea-orm`) |
+| `scope` | The column every query is confined to (needs `sea-orm`) |
+
+With the `sea-orm` feature, `scope` emits a `ScopedTable` impl — the confinement column, plus the column behind each Cedar attribute so a policy residual can be translated — and `key` adds `ScopedRow` on top of it. Marking only `scope` is a table nothing addresses by a column: it can still be listed and still have a residual read against it. The key and the Cedar id are deliberately independent, so a row addressed by `{id}` and the same row addressed by `{name}` stay one Cedar entity reached two ways.
+
+### `#[derive(Actions)]`
+
+The vocabulary of what may be done to an asset. Each variant becomes a Cedar action, a `Capable` marker, and a capability whose description is the variant's doc comment.
+
+```rust
+#[derive(Actions)]
+#[actions(resource = "Widget", prefix = "widgets")]
+pub enum WidgetAction {
+    /// List and view widgets.
+    #[action(event = "data_access")]
+    Read,
+    /// Remove widgets.
+    #[action(event = "admin_delete")]
+    Delete,
+}
+```
+
+That yields the `widgets.read` and `widgets.delete` capabilities as markers under `widget_action::`, usable as `Granted<Cap<widget_action::Delete>>`, plus the `ACTIONS` table `#[asset]` reads.
+
+| Container key | Default | Description |
+|---------------|---------|-------------|
+| `resource` | enum name minus an `Action` / `Actions` suffix | The thing being acted on |
+| `prefix` | `snake_case(resource)` | Capability name prefix — `{prefix}.{action}` |
+| `entity_type` | `{resource}Collection` | Cedar entity type for the coarse check |
+| `entity_id` | `"collection"` | Cedar id for the coarse check; also takes `tenant` |
+
+| Variant key | Description |
+|-------------|-------------|
+| `name` | Cedar action name (default: snake_case of the variant) |
+| `event` | Audit category, as an expression — `EventType::DataAccess.as_static()` |
+| `description` | Capability description (default: the doc comment) |
+| `capability` | Capability name, overriding `{prefix}.{action}` |
+| `capable` | Gate on an existing `Capable` marker instead of minting one |
+| `instance_only` | No coarse capability at all — this action is only ever checked per object |
+| `entity_type` / `entity_id` | Override the coarse check's resource for this variant |
+
+`event` is parsed as an expression, not a string literal, so it also accepts `EventType::DataAccess.as_static()` — worth preferring where you have the enum in scope. A bare `"data_acess"` compiles happily and files every event of that action under a category nothing reads.
+
+### `#[asset]`
+
+Writes the `Granting` impl. Five of its six items are not decisions — `Ctx`, `State` and `Error` belong to the application and are stated once on a `GrantProfile`; `Key` and `load` are the lookup the row already declared through `ScopedRow`. Only the vocabulary is a fact about this asset.
+
+```rust
+#[asset(row = Model, profile = AppGrants, actions = WidgetAction, list = tenant)]
+pub struct WidgetByName;
+
+// A second route key over the same row: a unit struct naming it, not a
+// newtype wrapping it, so both share one PolicyResource impl and cannot
+// come to disagree about the object's Cedar identity.
+#[asset(row = Model, key = pk, profile = AppGrants, actions = WidgetAction)]
+pub struct WidgetById;
+```
+
+| Key | Description |
+|-----|-------------|
+| `row` | The row this descriptor reaches (default: `Self`) |
+| `profile` | The application's `GrantProfile`, supplying `Ctx` / `State` / `Error` |
+| `actions` | The `#[derive(Actions)]` enum holding the vocabulary |
+| `key` | Route key type, or `pk` for the row's primary key (default: `<Row as ScopedRow>::Key`) |
+| `load_with` | A loader to call instead of `ScopedRow::load_scoped` |
+| `ctx` / `error` | Override the profile, for the one asset that genuinely differs |
+| `list = tenant` | Also emit a `Scoping` impl confined to the caller's tenant |
+
+`key = pk` rather than a hand-written primary-key loader, because the obvious version is wrong in a way that passes every test: `Entity::find_by_id(id).one(db)` drops the tenant filter, and an instance check that then refuses it has already answered `403` where it would have answered `404` — confirming the row exists.
+
+## Features
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `sea-orm` | no | Emit the `ScopedRow` half of `#[derive(PolicyResource)]` — the loader built from `#[resource(key)]` and `#[resource(scope)]` |
+
+Off by default so the derive costs no ORM dependency for consumers that only need Cedar identity. With it off, using either role is an error naming the feature rather than a missing impl at the call site. Through the `doxa` facade it is reached as `policy-sea-orm`.
+
 ## License
 
 Apache 2.0
