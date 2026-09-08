@@ -188,6 +188,7 @@ use proc_macro::TokenStream;
 
 mod actions;
 mod api_error;
+mod asset;
 mod capability;
 mod grant;
 mod method;
@@ -570,6 +571,50 @@ pub fn derive_actions(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
     capability::expand(args.into(), item.into()).into()
+}
+
+/// One route's way into a resource: the `Granting` impl, written from the
+/// application's profile and the row's own lookup.
+///
+/// Five of `Granting`'s six items are transcription. `Ctx`, `State` and
+/// `Error` are the application's and identical across its assets; `Key`
+/// and `load` are the scoped lookup `#[derive(PolicyResource)]` already
+/// wrote from `#[resource(key)]` and `#[resource(scope)]`. Only the
+/// vocabulary is a fact about this asset.
+///
+/// ```ignore
+/// #[doxa::asset(profile = AppGrants, actions = SourceAction)]
+/// pub struct Source { /* … */ }
+/// ```
+///
+/// A second route key over the same row is a unit struct naming it. The
+/// row keeps one `PolicyResource` impl, so the two routes cannot come to
+/// disagree about the object's Cedar identity — which a newtype per key
+/// would allow, and which fails silently, as a policy that simply does not
+/// match:
+///
+/// ```ignore
+/// #[doxa::asset(row = Source, key = Uuid, profile = AppGrants, actions = SourceAction)]
+/// pub struct SourceById;
+/// ```
+///
+/// | Option | Default |
+/// |---|---|
+/// | `profile` | required — the application's `GrantProfile` |
+/// | `actions` | required — the enum deriving `Actions` |
+/// | `row` | `Self` |
+/// | `key` | `<Row as ScopedRow>::Key` |
+/// | `error` | the profile's |
+/// | `load_with` | `ScopedRow::load_scoped`, confined to the caller's tenant |
+///
+/// Listing stays hand-written: `Scoping::scope` reads the session the
+/// policy assembled, which is the one part of an asset that is genuinely
+/// the application's logic rather than its wiring.
+#[proc_macro_attribute]
+pub fn asset(args: TokenStream, item: TokenStream) -> TokenStream {
+    asset::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// Generic operation attribute for cases where the HTTP method must be

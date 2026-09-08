@@ -553,11 +553,21 @@ pub enum DocumentAction {
     Delete,
 }
 
-impl Granting for Document {
-    const ACTIONS: &'static [Action] = DocumentAction::ACTIONS;
-    // …
+#[doxa::asset(row = Document, profile = AppGrants, actions = DocumentAction)]
+pub struct DocumentByName;
+```
+
+`#[asset]` writes the `Granting` impl. Five of its six items are not decisions: the caller shape, the state and the loader error belong to the application and are stated once on its `GrantProfile`; the key and the loader are the scoped lookup `#[derive(PolicyResource)]` already wrote from `#[resource(key)]` and `#[resource(scope)]`. Only the vocabulary is a fact about this asset.
+
+```rust
+impl GrantProfile for AppGrants {
+    type Ctx = Caller;
+    type State = DatabaseConnection;
+    type Error = DbLoadError;
 }
 ```
+
+A second route key over the same row is a unit struct naming it — `#[doxa::asset(row = Document, key = Uuid, …)] pub struct DocumentById;` — rather than a newtype wrapping it. The row keeps one `PolicyResource` impl, so two routes onto one object cannot come to disagree about its Cedar identity. That failure is silent when it happens: a policy granting on one identity simply does not match the route that names the other.
 
 That generates the `document.read` and `document.delete` capabilities — descriptions taken from the doc comments — as markers under `document_action::`, usable as `Granted<Cap<document_action::Delete>>` like any other. Each registers itself, so `doxa::policy::capabilities()` lists them without anything maintaining a list. What follows is the unguarded case — a route with no `Granted` on it, or a handler that knows something the guard cannot. Anything set here wins over the deposit, in any order:
 

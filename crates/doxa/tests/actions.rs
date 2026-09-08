@@ -75,6 +75,7 @@ struct Source {
 }
 
 impl Granting for Source {
+    type Row = Self;
     type Key = u32;
     type Ctx = CapabilityContext;
     type State = ();

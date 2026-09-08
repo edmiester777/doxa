@@ -234,7 +234,7 @@ pub use ui::{DeveloperTools, DocumentDownload, ScalarConfig, ScalarLayout, Scala
 // out of when the derives aren't needed.
 #[cfg(feature = "macros")]
 pub use doxa_macros::{
-    capability, delete, get, operation, patch, post, put, Actions, ApiError, PolicyResource,
+    asset, capability, delete, get, operation, patch, post, put, Actions, ApiError, PolicyResource,
     SseEvent,
 };
 

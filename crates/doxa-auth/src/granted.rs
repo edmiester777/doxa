@@ -886,22 +886,92 @@ fn declared<R: Granting>(action: &str) -> Option<&'static Action> {
     R::ACTIONS.iter().find(|declared| declared.name == action)
 }
 
+/// The caller shape, state and loader failure an application uses
+/// everywhere, stated once.
+///
+/// These three are properties of the *application*, not of any asset:
+/// every route in a service reaches the same database through the same
+/// session type and fails the same way. [`Granting`] used to ask for them
+/// per asset, so a service with six assets wrote them six times and the
+/// declaration was mostly transcription.
+///
+/// ```
+/// # use doxa_auth::granted::GrantProfile;
+/// # use doxa_auth::CapabilityContext;
+/// # use axum::http::StatusCode;
+/// pub struct AppGrants;
+///
+/// impl GrantProfile for AppGrants {
+///     type Ctx = CapabilityContext;
+///     type State = ();
+///     type Error = StatusCode;
+/// }
+/// ```
+///
+/// An asset that genuinely differs — a loader that answers 409 on an
+/// ambiguous name, say — overrides that one associated type on its own
+/// [`Granting`] impl and keeps the profile for the rest.
+pub trait GrantProfile: Send + Sync + 'static {
+    /// Caller shape this application's chains need. [`CapabilityContext`]
+    /// is enough for instance routes; a collection route needs
+    /// [`AuthContext<S, C>`] to reach the assembled session.
+    type Ctx: FromAuthExtensions;
+    /// State loaders reach through `FromRef`.
+    type State: Send + Sync;
+    /// Loader failure. Reaches the client through its own
+    /// `IntoResponse`, so any audit outcome it attaches survives.
+    type Error: IntoResponse + Send;
+}
+
 /// Everything asset-specific about reaching one object: which actions
 /// the asset permits and what each one costs, and how to load one.
 ///
-/// One impl per asset serves every route that guards it. The route
+/// One impl per *route key* serves every route that guards it. The route
 /// supplies only what is route-specific — which segments carry the key,
 /// and which action the verb implies.
+///
+/// # The descriptor and the row
+///
+/// [`Row`](Self::Row) is what gets loaded and what Cedar is asked about;
+/// `Self` is the descriptor that says how to reach it. Usually they are
+/// the same type and `type Row = Self;` is the whole of it.
+///
+/// They come apart when one row is addressed two ways — by name on one
+/// route and by id on another. [`Key`](Self::Key) is a single associated
+/// type, so that is two impls and therefore two types; making the row a
+/// separate one means the second descriptor is a unit struct rather than
+/// a newtype:
+///
+/// ```ignore
+/// pub struct SourceById;
+///
+/// impl Granting for SourceById {
+///     type Row = Source;      // same Cedar entity as the by-name route
+///     type Key = Uuid;
+///     // …
+/// }
+/// ```
+///
+/// That matters beyond tidiness. A newtype would carry its own
+/// [`PolicyResource`] forwarding, so two routes over one row could come
+/// to disagree about the object's Cedar id — and a policy granting on one
+/// identity silently fails to govern the route that names the other. With
+/// the row named rather than wrapped there is one identity and no way to
+/// state a second.
 ///
 /// Listing is [`Scoping`], a separate trait, because not every asset can
 /// be listed — a staged batch or a singleton is reached by name and by
 /// nothing else. Splitting them is what lets the compiler say so.
-pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
+pub trait Granting: Sized + Send + Sync + 'static {
+    /// What the loader returns and the policy decides about.
+    ///
+    /// `Self` in the ordinary case. See the note above for when it is not.
+    type Row: PolicyResource;
     /// Identifying values [`load`](Self::load) needs.
     type Key: RouteKey;
-    /// Caller shape this asset's chain needs. [`CapabilityContext`] is
-    /// enough for instance routes; a collection route needs
-    /// [`AuthContext<S, C>`] to reach the assembled session.
+    /// Caller shape this asset's chain needs. Usually
+    /// `<Self::Profile as GrantProfile>::Ctx`, which the `#[asset]`
+    /// attribute writes for you.
     type Ctx: FromAuthExtensions;
     /// State the loader reaches through `FromRef`.
     type State: Send + Sync;
@@ -931,7 +1001,7 @@ pub trait Granting: PolicyResource + Sized + Send + Sync + 'static {
         key: Self::Key,
         state: &Self::State,
         ctx: &Self::Ctx,
-    ) -> impl Future<Output = Result<Option<Self>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<Self::Row>, Self::Error>> + Send;
 }
 
 /// An asset a caller can be granted a *subset* of, rather than one
@@ -1028,14 +1098,22 @@ impl<St> axum::extract::FromRef<St> for NoState {
 fn asset_permission<R: Granting>(action: &str) -> Cow<'static, str> {
     match declared::<R>(action).and_then(|declared| declared.capability) {
         Some(cap) => Cow::Borrowed(cap.name),
-        None => Cow::Owned(format!("{}:{action}", R::ENTITY_TYPE)),
+        None => Cow::Owned(format!("{}:{action}", entity_type::<R>())),
     }
+}
+
+/// The Cedar entity type a descriptor's row names itself by.
+///
+/// Read through [`Granting::Row`] rather than off the descriptor, so two
+/// routes over one row document and record the same entity.
+const fn entity_type<R: Granting>() -> &'static str {
+    <R::Row as PolicyResource>::ENTITY_TYPE
 }
 
 impl<R: Granting, S: GrantSite> sealed::Sealed for One<R, S> {}
 
 impl<R: Granting, S: GrantSite> Subject for One<R, S> {
-    type Loaded = R;
+    type Loaded = R::Row;
     type Ctx = R::Ctx;
     type State = R::State;
     type Key = R::Key;
@@ -1055,7 +1133,7 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
     };
 
     fn doc_name() -> Cow<'static, str> {
-        Cow::Borrowed(R::ENTITY_TYPE)
+        Cow::Borrowed(entity_type::<R>())
     }
 
     fn permission(action: &str) -> Cow<'static, str> {
@@ -1074,7 +1152,7 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
         state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
-    ) -> Result<Authorized<R>, Refusal<R::Error>> {
+    ) -> Result<Authorized<R::Row>, Refusal<R::Error>> {
         // Gate first: a caller who may not touch this kind of thing at
         // all should not cost a query, and must not be able to tell a
         // missing object from one they may not see.
@@ -1084,7 +1162,7 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
             .await
             .map_err(Refusal::Load)?
             .ok_or(Refusal::NotFound {
-                entity_type: R::ENTITY_TYPE,
+                entity_type: entity_type::<R>(),
             })?;
 
         let tenant = ctx.tenant().unwrap_or("");
@@ -1096,7 +1174,7 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
         if !allowed {
             return Err(Refusal::Denied {
                 action: Cow::Borrowed(action),
-                resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+                resource_type: Cow::Borrowed(entity_type::<R>()),
                 resource_id: Cow::Owned(entity.entity_id),
                 reason: "instance denied",
             });
@@ -1108,7 +1186,7 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
         Ok(Authorized {
             loaded: resource,
             action: Cow::Borrowed(action),
-            resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+            resource_type: Cow::Borrowed(entity_type::<R>()),
             resource_id: Cow::Owned(entity.entity_id),
         })
     }
@@ -1137,7 +1215,7 @@ impl<R: Scoping, S: GrantSite> Subject for Many<R, S> {
     };
 
     fn doc_name() -> Cow<'static, str> {
-        Cow::Borrowed(R::ENTITY_TYPE)
+        Cow::Borrowed(entity_type::<R>())
     }
 
     fn permission(action: &str) -> Cow<'static, str> {
@@ -1165,7 +1243,7 @@ impl<R: Scoping, S: GrantSite> Chain for Many<R, S> {
             // refusal or an empty page is the asset's call.
             None => R::empty_scope().ok_or(Refusal::Denied {
                 action: Cow::Borrowed(action),
-                resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+                resource_type: Cow::Borrowed(entity_type::<R>()),
                 resource_id: Cow::Borrowed("collection"),
                 reason: "no authorized scope",
             })?,
@@ -1176,7 +1254,7 @@ impl<R: Scoping, S: GrantSite> Chain for Many<R, S> {
         Ok(Authorized {
             loaded: scope,
             action: Cow::Borrowed(action),
-            resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+            resource_type: Cow::Borrowed(entity_type::<R>()),
             resource_id: Cow::Borrowed("collection"),
         })
     }
@@ -1280,7 +1358,7 @@ pub(crate) fn capability_resource(
 fn declared_action<R: Granting>(action: &'static str) -> Result<&'static Action, Denial> {
     declared::<R>(action).ok_or(Denial::Denied {
         action: Cow::Borrowed(action),
-        resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+        resource_type: Cow::Borrowed(entity_type::<R>()),
         // The refusal is about the action, not about an object: for a
         // collection there will never be one, and for a resource already
         // loaded the asset does not admit the verb being asked about.
@@ -1563,6 +1641,7 @@ pub trait AuthorizeLoaded: Granting {
     /// #     fn resource_id(&self) -> String { String::new() }
     /// # }
     /// # impl Granting for Widget {
+    /// #     type Row = Self;
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
@@ -1593,6 +1672,7 @@ pub trait AuthorizeLoaded: Granting {
     /// #     fn resource_id(&self) -> String { String::new() }
     /// # }
     /// # impl Granting for Widget {
+    /// #     type Row = Self;
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
@@ -1639,6 +1719,7 @@ pub trait AuthorizeLoaded: Granting {
     /// #     fn resource_id(&self) -> String { String::new() }
     /// # }
     /// # impl Granting for Widget {
+    /// #     type Row = Self;
     /// #     type Key = String;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
@@ -1666,7 +1747,7 @@ pub trait AuthorizeLoaded: Granting {
 /// cannot override [`AuthorizeLoaded::authorize`] into something that
 /// decides differently — or does not decide at all — because coherence
 /// leaves no room for a second impl.
-impl<R: Granting> AuthorizeLoaded for R {
+impl<R: Granting<Row = R>> AuthorizeLoaded for R {
     // Written as `-> impl Future` rather than `async fn` so the proof is
     // discharged when the method is *called*, not when the future is
     // first polled. A caller who names an action their asset does not
@@ -1677,7 +1758,7 @@ impl<R: Granting> AuthorizeLoaded for R {
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Self, Denial>> + Send {
         let () = Declares::<R, A>::PROOF;
-        decide(self, A::ACTION, extensions, Coarse::Check)
+        decide::<R>(self, A::ACTION, extensions, Coarse::Check)
     }
 
     fn authorize_dependency<A: DeclaredAction>(
@@ -1686,7 +1767,7 @@ impl<R: Granting> AuthorizeLoaded for R {
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Self, Denial>> + Send {
         let () = Declares::<R, A>::PROOF;
-        decide(self, A::ACTION, extensions, Coarse::Skip)
+        decide::<R>(self, A::ACTION, extensions, Coarse::Skip)
     }
 }
 
@@ -1726,11 +1807,11 @@ enum Coarse {
 /// The body of both [`AuthorizeLoaded`] methods, and the third door onto
 /// a decision — recording through the same path as the other two.
 async fn decide<R: Granting>(
-    resource: R,
+    resource: R::Row,
     action: &'static str,
     extensions: &Extensions,
     coarse: Coarse,
-) -> Result<R, Denial> {
+) -> Result<R::Row, Denial> {
     let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
 
     match verdict::<R>(&resource, action, &ctx, checker.as_ref(), coarse).await {
@@ -1740,7 +1821,7 @@ async fn decide<R: Granting>(
                 crate::record::Grant {
                     event_type: declared.event_type,
                     action: Cow::Borrowed(action),
-                    resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+                    resource_type: Cow::Borrowed(entity_type::<R>()),
                     resource_id: Cow::Owned(entity_id),
                 },
             );
@@ -1761,7 +1842,7 @@ async fn decide<R: Granting>(
 /// qualified identity the policy actually saw, which is not always what
 /// the handler used to find the row.
 async fn verdict<R: Granting>(
-    resource: &R,
+    resource: &R::Row,
     action: &'static str,
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
@@ -1784,7 +1865,7 @@ async fn verdict<R: Granting>(
     if !allowed {
         return Err(Denial::Denied {
             action: Cow::Borrowed(action),
-            resource_type: Cow::Borrowed(R::ENTITY_TYPE),
+            resource_type: Cow::Borrowed(entity_type::<R>()),
             resource_id: Cow::Owned(entity.entity_id),
             reason: "instance denied",
         });
