@@ -213,8 +213,18 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                         // Every lookup is confined to the caller's tenant, so a
                         // key belonging to someone else answers `None` exactly as
                         // a key that does not exist would.
-                        let scope = ::doxa::auth::FromAuthExtensions::tenant(ctx)
-                            .unwrap_or_default();
+                        //
+                        // A caller with no tenant has no scope to be confined
+                        // to, and the answer is that nothing is there. Defaulting
+                        // to the empty string instead would issue a real query
+                        // for `scope = ''` — which finds nothing on any sane
+                        // schema, and is a row somebody could create on the
+                        // wrong one.
+                        let ::std::option::Option::Some(scope) =
+                            ::doxa::auth::FromAuthExtensions::tenant(ctx)
+                        else {
+                            return ::std::result::Result::Ok(::std::option::Option::None);
+                        };
                         ::std::result::Result::Ok(
                             <#row as ::doxa::policy::ScopedRow>::#lookup(key, state, scope).await?,
                         )
@@ -234,39 +244,49 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     // implying it is that. An asset needing the residual writes `Scoping`
     // itself, and the compiler asks for it the moment a route says
     // `Many<…>`.
-    let scoping = match &args.list {
-        None => quote!(),
-        Some(_) if !cfg!(feature = "sea-orm") => {
-            return Err(syn::Error::new(
+    let scoping =
+        match &args.list {
+            None => quote!(),
+            Some(_) if !cfg!(feature = "sea-orm") => return Err(syn::Error::new(
                 name.span(),
-                "`list = tenant` builds the listing from `ScopedRow`, which needs the `sea-orm` \
+                "`list = tenant` builds the listing from `ScopedTable`, which needs the `sea-orm` \
                  feature on `doxa-macros`. Enable it, or write `Scoping` by hand",
-            ))
-        }
-        Some(_) => quote! {
-            impl ::doxa::auth::Scoping for #name {
-                type Filter = ::doxa::policy::__private::sea_orm::Select<
-                    <#row as ::doxa::policy::ScopedRow>::Entity,
-                >;
+            )),
+            // Bounded on `ScopedTable` rather than `ScopedRow`: listing needs
+            // the owning column and nothing else, so a table no route addresses
+            // by a key column can still be paged.
+            Some(_) => quote! {
+                impl ::doxa::auth::Scoping for #name {
+                    type Filter = ::doxa::policy::__private::sea_orm::Select<
+                        <#row as ::doxa::policy::ScopedTable>::Entity,
+                    >;
 
-                fn scope(
-                    _action: &str,
-                    ctx: &Self::Ctx,
-                ) -> ::std::result::Result<
-                    ::std::option::Option<Self::Filter>,
-                    ::doxa::policy::AuthError,
-                > {
-                    // The coarse capability already decided whether this
-                    // caller may list at all; what is left is which rows,
-                    // and that is the tenant.
-                    let scope = ::doxa::auth::FromAuthExtensions::tenant(ctx).unwrap_or_default();
-                    ::std::result::Result::Ok(::std::option::Option::Some(
-                        <#row as ::doxa::policy::ScopedRow>::scoped(scope),
-                    ))
+                    fn scope(
+                        _action: &str,
+                        ctx: &Self::Ctx,
+                    ) -> ::std::result::Result<
+                        ::std::option::Option<Self::Filter>,
+                        ::doxa::policy::AuthError,
+                    > {
+                        // The coarse capability already decided whether this
+                        // caller may list at all; what is left is which rows,
+                        // and that is the tenant.
+                        //
+                        // No tenant is no scope, which `empty_scope` turns into
+                        // a refusal — rather than a listing of whatever happens
+                        // to sit under the empty string.
+                        let ::std::option::Option::Some(scope) =
+                            ::doxa::auth::FromAuthExtensions::tenant(ctx)
+                        else {
+                            return ::std::result::Result::Ok(::std::option::Option::None);
+                        };
+                        ::std::result::Result::Ok(::std::option::Option::Some(
+                            <#row as ::doxa::policy::ScopedTable>::scoped(scope),
+                        ))
+                    }
                 }
-            }
-        },
-    };
+            },
+        };
 
     Ok(quote! {
         #item

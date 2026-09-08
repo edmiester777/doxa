@@ -209,6 +209,81 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
         })
     }
 
+    /// Check `action` against several concrete objects, in one pass.
+    ///
+    /// [`check_instance`](Self::check_instance) assembles an entity set,
+    /// then evaluates. The set does not depend on which object is being
+    /// asked about, so N objects asked separately is N identical
+    /// assemblies — the cost a handler pays for a request body naming
+    /// several references. Here the hierarchy is built once and every
+    /// resource is evaluated against it.
+    ///
+    /// Verdicts come back positionally, one per resource. An empty slice
+    /// answers with an empty vector without loading the tenant at all.
+    #[tracing::instrument(skip_all, fields(tenant_id, action, count = resources.len()))]
+    pub async fn check_instance_many(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        action: &str,
+        resources: &[ResourceEntity],
+    ) -> Result<Vec<AccessDecision>, AuthError> {
+        if resources.is_empty() {
+            return Ok(Vec::new());
+        }
+        if tenant_id.is_empty() {
+            return Ok(resources
+                .iter()
+                .map(|_| AccessDecision::deny("no tenant context — cannot evaluate action"))
+                .collect());
+        }
+
+        // Resolved before the evaluator is built, so a resource whose id
+        // cannot become a UID fails the whole call rather than being
+        // silently absent from the answers.
+        let uids = resources
+            .iter()
+            .map(|resource| {
+                self.extension.build_resource_uid(
+                    tenant_id,
+                    &resource.entity_type,
+                    &resource.entity_id,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let store = self.cache.get_or_load(&self.store, tenant_id).await?;
+        let borrowed: Vec<&ResourceEntity> = resources.iter().collect();
+        let evaluator = CedarEvaluator::new_with_resources(
+            &store,
+            tenant_id,
+            roles,
+            self.extension.as_ref(),
+            &borrowed,
+        )?;
+
+        uids.into_iter()
+            .map(|uid| {
+                let allowed = evaluator.check_action(action, uid.clone())?;
+                Ok(AccessDecision {
+                    allowed,
+                    reason: (!allowed).then(|| format!("policy denied {action} on {uid}")),
+                })
+            })
+            .collect()
+    }
+
+    /// The [`PolicyExtension`] this router evaluates through.
+    ///
+    /// Exposed so a wrapper that has to consult the extension before
+    /// reaching the policy — a session that already holds the answer, an
+    /// admin shortcut — can do so without being handed a second copy to
+    /// keep in step. [`SessionChecker`](crate::session::SessionChecker) is
+    /// the one in the box.
+    pub fn extension(&self) -> &E {
+        &self.extension
+    }
+
     /// Evaluate a single [`Capability`] against the tenant's policies.
     ///
     /// Returns `Ok(true)` only if every underlying [`CapabilityCheck`]
@@ -297,6 +372,25 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for PolicyRouter<E> {
             PolicyRouter::check_instance(self, tenant_id, roles, action, resource)
                 .await?
                 .allowed,
+        )
+    }
+
+    /// Overridden rather than left to the default loop: the router is
+    /// exactly the implementation that can hoist the entity-set assembly
+    /// out of the per-resource question.
+    async fn check_instance_many(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        action: &str,
+        resources: &[ResourceEntity],
+    ) -> Result<Vec<bool>, AuthError> {
+        Ok(
+            PolicyRouter::check_instance_many(self, tenant_id, roles, action, resources)
+                .await?
+                .into_iter()
+                .map(|decision| decision.allowed)
+                .collect(),
         )
     }
 }
@@ -728,5 +822,133 @@ mod tests {
             decision.allowed,
             "membership from the stored entity must still hold after the merge",
         );
+    }
+
+    // ── Batched instance checks ─────────────────────────────
+
+    /// The whole point: several resources, one entity hierarchy, one
+    /// verdict each — and each verdict about its own resource, not about
+    /// the set.
+    #[tokio::test]
+    async fn a_batch_decides_each_resource_on_its_own_attributes() {
+        let router = build_stub_router(REGION_POLICY);
+
+        let decisions = router
+            .check_instance_many(
+                "batch_t1",
+                &["viewer".to_string()],
+                "read",
+                &[
+                    widget("w-1", "us"),
+                    widget("w-2", "eu"),
+                    widget("w-3", "us"),
+                ],
+            )
+            .await
+            .expect("router ok");
+
+        assert_eq!(
+            decisions.iter().map(|d| d.allowed).collect::<Vec<_>>(),
+            vec![true, false, true],
+        );
+        assert!(decisions[1].reason.is_some(), "denials carry a reason");
+    }
+
+    /// Batching is an optimization, so it has to be invisible: the same
+    /// question asked either way must reach the same verdict. A shared
+    /// entity set that let one resource's attributes leak into another's
+    /// decision would show up here and nowhere else.
+    #[tokio::test]
+    async fn a_batch_agrees_with_the_checks_it_replaces() {
+        let router = build_stub_router(REGION_POLICY);
+        let resources = [widget("w-1", "us"), widget("w-2", "eu")];
+
+        let batched = router
+            .check_instance_many("batch_t2", &["viewer".to_string()], "read", &resources)
+            .await
+            .expect("router ok");
+
+        for (resource, batched) in resources.iter().zip(batched) {
+            let singular = router
+                .check_instance("batch_t2", &["viewer".to_string()], "read", resource)
+                .await
+                .expect("router ok");
+            assert_eq!(
+                singular.allowed, batched.allowed,
+                "{} disagreed",
+                resource.entity_id,
+            );
+        }
+    }
+
+    /// The duplicate-UID case, in the plural. One overlapping resource
+    /// sends the whole batch down the merge path, and every resource in it
+    /// — overlapping or not — must still be decided on its own attributes.
+    #[tokio::test]
+    async fn a_batch_containing_a_stored_uid_still_merges() {
+        let stored = serde_json::json!({
+            "uid": {"type": "Widget", "id": "w-1"},
+            "attrs": {"region": "eu"},
+            "parents": [],
+        });
+        let router = build_stub_router_with_entities(REGION_POLICY, vec![stored]);
+
+        let decisions = router
+            .check_instance_many(
+                "batch_t3",
+                &["viewer".to_string()],
+                "read",
+                &[widget("w-1", "us"), widget("w-2", "eu")],
+            )
+            .await
+            .expect("a stored entity must not turn the batch into an error");
+
+        assert_eq!(
+            decisions.iter().map(|d| d.allowed).collect::<Vec<_>>(),
+            vec![true, false],
+            "the live attribute wins for the stored UID, and its neighbour is unaffected",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_batch_asks_nothing() {
+        let router = build_failing_uid_router();
+
+        assert!(router
+            .check_instance_many("batch_t4", &[], "read", &[])
+            .await
+            .expect("nothing to build a uid for")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_batch_denies_on_empty_tenant() {
+        let router = build_stub_router(REGION_POLICY);
+
+        let decisions = router
+            .check_instance_many("", &["viewer".to_string()], "read", &[widget("w-1", "us")])
+            .await
+            .expect("router ok");
+
+        assert_eq!(decisions.len(), 1);
+        assert!(!decisions[0].allowed);
+    }
+
+    /// A resource whose id cannot become a UID fails the call rather than
+    /// being quietly missing from the answers — a short vector would line
+    /// the remaining verdicts up against the wrong rows.
+    #[tokio::test]
+    async fn a_batch_propagates_a_uid_failure() {
+        let router = build_failing_uid_router();
+
+        assert!(router
+            .check_instance_many(
+                "batch_t5",
+                &[],
+                "read",
+                &[ResourceEntity::new("Widget", "w-1")],
+            )
+            .await
+            .is_err());
     }
 }

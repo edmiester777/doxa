@@ -6,6 +6,14 @@
 //! route: a row addressed by name and the same row addressed by id are
 //! one Cedar entity with two loaders, and only the loaders differ.
 //!
+//! The same reasoning splits this module's own two traits.
+//! [`ScopedTable`] is what the table owes — the column that says whose
+//! rows these are, and what its Cedar attributes mean in SQL — and
+//! [`ScopedRow`] adds the key one route matches on. A table reached by a
+//! name that no column holds still has an owner, so it can still be
+//! listed and still have a policy's residual read against it; requiring a
+//! key would have meant inventing one.
+//!
 //! Nothing here names an application type. [`Granting`] needs a caller
 //! shape, a state type and an error of the application's choosing — none
 //! of which a derive expanding inside an entity crate could write. What a
@@ -29,47 +37,45 @@ use sea_orm::{
 
 /// The value a row's primary key takes, for [`ScopedRow::load_by_id`].
 pub type PrimaryKeyOf<R> =
-    <<<R as ScopedRow>::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType;
+    <<<R as ScopedTable>::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType;
 
-/// A row one key resolves to, within one scope column.
+/// A table one scope column confines, and what its Cedar attributes mean
+/// in SQL.
 ///
-/// The scope column is the whole security property: every lookup is
-/// confined to it, so a key belonging to someone else is indistinguishable
-/// from a key that does not exist. Both answer `None`, and a route built
-/// on this cannot leak the existence of another owner's object by
-/// answering 403 where it would otherwise answer 404.
+/// The scope column is the whole security property: every query built here
+/// carries it, so a row belonging to someone else is not merely refused,
+/// it is absent — and a route built on this cannot leak the existence of
+/// another owner's object by answering 403 where it would otherwise answer
+/// 404.
 ///
-/// Both methods have default bodies, so an implementation is four lines —
-/// which is why `#[derive(PolicyResource)]` can write it from
-/// `#[resource(key)]` and `#[resource(scope)]` and leave nothing behind.
+/// Separate from [`ScopedRow`] because a key is a fact about a *route* and
+/// a scope is a fact about the *table*. Two routes reach one table by
+/// different keys; a table addressed by no key at all — a name resolved
+/// through logic rather than matched against a column — still has an owner
+/// and still has attributes a policy names. Splitting them is what lets
+/// that table be listed and have its residual read, without inventing a
+/// key column for it to hold.
 ///
 /// # Example
 ///
 /// ```ignore
-/// impl ScopedRow for Model {
+/// impl ScopedTable for Model {
 ///     type Entity = Entity;
-///     type Key = String;
-///     const KEY_COLUMN: Column = Column::Name;
 ///     const SCOPE_COLUMN: Column = Column::CompanyId;
 /// }
 ///
-/// let row = Model::load_scoped("orders".to_owned(), &db, "acme").await?;
+/// let page = Model::scoped("acme").paginate(&db, 50);
 /// ```
+///
 /// `FromQueryResult` is a supertrait rather than left to
 /// `EntityTrait::Model`'s own bound: the compiler will not read that bound
 /// backwards through `Entity = Self`, and every SeaORM `Model` satisfies
 /// it anyway.
-pub trait ScopedRow: Sized + Send + FromQueryResult {
-    /// Table the key resolves in.
+pub trait ScopedTable: Sized + Send + FromQueryResult {
+    /// Table the scope column sits in.
     type Entity: EntityTrait<Model = Self>;
 
-    /// What the route's key segment parses into.
-    type Key: Into<Value> + Send;
-
-    /// Column the key matches.
-    const KEY_COLUMN: <Self::Entity as EntityTrait>::Column;
-
-    /// Column carrying the owner every lookup is confined to.
+    /// Column carrying the owner every query is confined to.
     const SCOPE_COLUMN: <Self::Entity as EntityTrait>::Column;
 
     /// The column a policy means by `resource.<attr>`.
@@ -88,9 +94,46 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
     /// a row whose attributes have no columns cannot have a policy
     /// condition pushed into its query, and the alternative to refusing is
     /// a filter *wider* than the policy authorized.
+    ///
+    /// It answers about *this* table. A policy attribute that names
+    /// something the row does not store — a column of the data a row
+    /// merely describes, say — has no answer here and must not be given
+    /// one: a filter built against the wrong table is the one failure this
+    /// module's refusals cannot catch.
     fn column_for_attr(_attr: &str) -> Option<<Self::Entity as EntityTrait>::Column> {
         None
     }
+
+    /// Every row `scope` owns, as a `Select` the caller pages.
+    fn scoped(scope: impl Into<Value>) -> Select<Self::Entity> {
+        Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope))
+    }
+}
+
+/// A row one key resolves to, within its table's scope.
+///
+/// [`ScopedTable`] says which rows are the caller's; this says how a route
+/// reaches one of them. Every method has a default body, so an
+/// implementation is three lines — which is why
+/// `#[derive(PolicyResource)]` can write it from `#[resource(key)]` and
+/// leave nothing behind.
+///
+/// # Example
+///
+/// ```ignore
+/// impl ScopedRow for Model {
+///     type Key = String;
+///     const KEY_COLUMN: Column = Column::Name;
+/// }
+///
+/// let row = Model::load_scoped("orders".to_owned(), &db, "acme").await?;
+/// ```
+pub trait ScopedRow: ScopedTable {
+    /// What the route's key segment parses into.
+    type Key: Into<Value> + Send;
+
+    /// Column the key matches.
+    const KEY_COLUMN: <Self::Entity as EntityTrait>::Column;
 
     /// One row, or `None` if `scope` holds no such key.
     ///
@@ -160,11 +203,6 @@ pub trait ScopedRow: Sized + Send + FromQueryResult {
     ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
         let query = Self::Entity::find_by_id(id).filter(Self::SCOPE_COLUMN.eq(scope));
         async move { query.one(db).await }
-    }
-
-    /// Every row `scope` owns, as a `Select` the caller pages.
-    fn scoped(scope: impl Into<Value>) -> Select<Self::Entity> {
-        Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope))
     }
 }
 

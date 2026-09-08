@@ -33,7 +33,7 @@ use doxa::auth::{
 };
 use doxa::policy::{
     condition_from_residual, AuthError, Capability, CapabilityChecker, DbLoadError, ResourceEntity,
-    ScopedRow,
+    ScopedTable,
 };
 use doxa::{asset, get, routes, Actions, OpenApiRouter, PolicyResource};
 use sea_orm::entity::prelude::*;
@@ -174,6 +174,20 @@ impl Scoping for WidgetByName {
             .clone()
             .map(|condition| Model::scoped(tenant).filter(condition)))
     }
+
+    /// What "everything" is, for the one caller the policy resolved as
+    /// unrestricted.
+    ///
+    /// This is the door that never asks the capability checker — the whole
+    /// point of a filter is that the verdict already happened — so it is
+    /// also the only one where an administrator would otherwise be handed
+    /// the same policy condition as anybody else, while every other route
+    /// gave them everything. An asset whose scope is only tenancy needs no
+    /// answer here; one carrying a policy condition does, and only it can
+    /// say what dropping the condition means.
+    fn unscoped() -> Option<Self::Filter> {
+        Some(Entity::find())
+    }
 }
 
 // ---- policy stub ------------------------------------------------------------
@@ -216,6 +230,17 @@ fn parts(
     axum::http::request::Parts,
     tokio::sync::mpsc::Receiver<AuditEvent>,
 ) {
+    parts_as(roles, grants, false)
+}
+
+fn parts_as(
+    roles: &[&str],
+    grants: Grants,
+    is_admin: bool,
+) -> (
+    axum::http::request::Parts,
+    tokio::sync::mpsc::Receiver<AuditEvent>,
+) {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
     let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
 
@@ -224,7 +249,7 @@ fn parts(
             roles: roles.iter().map(|role| (*role).to_owned()).collect(),
         },
         session: grants,
-        is_admin: false,
+        is_admin,
     });
     request.extensions_mut().insert(ctx);
 
@@ -272,6 +297,56 @@ fn the_scope_composes_the_tenant_and_the_policys_own_condition() {
     let sql = sql(scope);
     assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
     assert!(sql.contains(r#""region" = 'us'"#), "{sql}");
+}
+
+/// The admin seat. Every other door reaches the capability checker, which
+/// applies whatever admin rule the policy has; this one is a function of
+/// the context alone, so without [`Scoping::unscoped`] an administrator
+/// would get the filtered subset here and everything everywhere else.
+#[test]
+fn an_admin_is_scoped_to_everything_rather_than_to_the_policys_condition() {
+    let (parts, _rx) = parts_as(&[], granted(), true);
+
+    let scope = WidgetByName::authorize_scope_dependency(widget_action::Read, &parts.extensions)
+        .expect("the action is declared");
+
+    let sql = sql(scope);
+    assert!(
+        !sql.contains(r#""region" = 'us'"#),
+        "an unrestricted caller must not carry the policy's row condition: {sql}",
+    );
+    assert!(
+        !sql.contains(r#""tenant_id" = 'acme'"#),
+        "nor the tenant, which is what this asset's `unscoped` chose to mean: {sql}",
+    );
+}
+
+/// The mirror, and the reason the seat is not simply "admins skip the
+/// scope": a caller the policy did *not* mark is scoped exactly as before.
+#[test]
+fn an_ordinary_caller_is_unaffected_by_the_admin_seat() {
+    let (parts, _rx) = parts(&[], granted());
+
+    let sql = sql(
+        WidgetByName::authorize_scope_dependency(widget_action::Read, &parts.extensions)
+            .expect("granted a subset"),
+    );
+
+    assert!(sql.contains(r#""region" = 'us'"#), "{sql}");
+    assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
+}
+
+/// An admin whose policy granted nothing is still unrestricted: the seat
+/// is consulted *before* the scope, so an empty grant map cannot refuse
+/// them where the instance doors would have let them through.
+#[test]
+fn an_admin_is_not_refused_by_an_empty_grant() {
+    let (parts, _rx) = parts_as(&[], Grants::none(), true);
+
+    assert!(
+        WidgetByName::authorize_scope_dependency(widget_action::Read, &parts.extensions).is_ok(),
+        "an unrestricted caller must not be refused for holding no per-row grant",
+    );
 }
 
 /// The request the whole path exists for: several names from a body,

@@ -11,7 +11,7 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use doxa::policy::{DbLoadError, PolicyResource, ScopedRow};
+use doxa::policy::{DbLoadError, PolicyResource, ScopedRow, ScopedTable};
 use doxa::PolicyResource;
 use sea_orm::entity::prelude::*;
 use sea_orm::{
@@ -112,7 +112,7 @@ fn an_unmarked_column_is_not_an_attribute() {
 #[test]
 fn the_columns_come_off_the_field_names() {
     assert_eq!(<Model as ScopedRow>::KEY_COLUMN.as_str(), "name");
-    assert_eq!(<Model as ScopedRow>::SCOPE_COLUMN.as_str(), "tenant_id");
+    assert_eq!(<Model as ScopedTable>::SCOPE_COLUMN.as_str(), "tenant_id");
 }
 
 /// The listing is the scope filter and nothing else, so what a caller may

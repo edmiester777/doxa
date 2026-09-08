@@ -10,7 +10,7 @@
 //! what the consumer does with the results. Persistence is delegated to
 //! the [`PolicyStore`](crate::store::PolicyStore) trait.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,13 +34,32 @@ use crate::uid::{action_uid, principal_uid};
 /// [`PolicyStore`](crate::store::PolicyStore) for a single tenant.
 ///
 /// The [`policy_set`](CedarStore::policy_set) contains only policies belonging
-/// to this tenant. Entity JSONs are kept raw so that a synthetic per-request
-/// user entity can be prepended before parsing into [`Entities`]. The
-/// [`resources`](CedarStore::resources) map enumerates the tenant's resources
-/// grouped by Cedar entity type, driving the per-session evaluation loop.
+/// to this tenant. The [`resources`](CedarStore::resources) map enumerates the
+/// tenant's resources grouped by Cedar entity type, driving the per-session
+/// evaluation loop.
+///
+/// ## Why the entities are held twice
+///
+/// [`entities`](CedarStore::entities) is the tenant's entity set already
+/// parsed. Every check has to add a synthetic principal — and an instance
+/// check its resource — so the set an evaluation runs against is never
+/// exactly this one; but Cedar holds its entities behind [`Arc`], so
+/// cloning this and adding two is a hash-map copy and a refcount bump per
+/// entity, where re-parsing is a JSON deserialize plus an expression parse
+/// per attribute. Building it once per tenant rather than once per check is
+/// the difference between a lookup and a load.
+///
+/// [`entity_jsons`](CedarStore::entity_jsons) is kept for the one case that
+/// cannot use the parsed set: a consumer that persists an entity for a
+/// resource it *also* loads live has two entries for one UID, which Cedar
+/// refuses. Folding them together is a merge of the raw JSON, so that path
+/// still parses from scratch — and [`stored_uids`](CedarStore::stored_uids)
+/// is what tells the two apart without a scan.
 pub(crate) struct CedarStore {
     pub(crate) policy_set: PolicySet,
     pub(crate) entity_jsons: Vec<Value>,
+    pub(crate) entities: Entities,
+    pub(crate) stored_uids: HashSet<String>,
     pub(crate) resources: HashMap<String, Vec<String>>,
 }
 
@@ -251,9 +270,27 @@ pub(crate) async fn load_tenant_store(
     let entity_jsons = store.load_entity_jsons(tenant_id).await?;
     let resources = store.list_resources(tenant_id).await?;
 
+    // Parsed here rather than per check. `.partial()` so an absent entity
+    // dereferences to a residual — see the note in `new_with_resources`,
+    // which re-applies it after adding, so the property does not depend on
+    // `add_entities` preserving the mode.
+    let entities = Entities::from_json_value(Value::Array(entity_jsons.clone()), None)
+        .map_err(|e| AuthError::PolicyFailed(format!("entity parse error: {e}")))?
+        .partial();
+
+    // Only the UIDs, and only to answer "does the store already hold this
+    // one" in O(1) when a live resource is injected.
+    let stored_uids = entity_jsons
+        .iter()
+        .filter_map(|entity| entity_uid_of(entity).ok())
+        .map(|uid| uid.to_string())
+        .collect();
+
     Ok(Arc::new(CedarStore {
         policy_set,
         entity_jsons,
+        entities,
+        stored_uids,
         resources,
     }))
 }
@@ -307,6 +344,24 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
         extension: &'a E,
         resource: Option<&ResourceEntity>,
     ) -> Result<Self, AuthError> {
+        let resources: Vec<&ResourceEntity> = resource.into_iter().collect();
+        Self::new_with_resources(store, tenant_id, roles, extension, &resources)
+    }
+
+    /// Build an evaluator with several ad-hoc resource entities in scope.
+    ///
+    /// One entity set serves every one of them: a request naming twenty
+    /// objects asks twenty questions of the *same* hierarchy, and building
+    /// it per question is the cost that made a body-named reference
+    /// expensive. Each check still names its own resource UID, so what the
+    /// caller gets back is one decision per resource, not one for the set.
+    pub(crate) fn new_with_resources(
+        store: &'a CedarStore,
+        tenant_id: &str,
+        roles: &[String],
+        extension: &'a E,
+        resources: &[&ResourceEntity],
+    ) -> Result<Self, AuthError> {
         let principal_type = extension.principal_entity_type();
         let principal_id = extension.synthetic_principal_id();
         let principal = principal_uid(principal_type, principal_id)?;
@@ -318,23 +373,48 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
             "parents": role_parents
         });
 
-        let mut all_entities = store.entity_jsons.clone();
-        all_entities.push(user_entity_json);
-        if let Some(r) = resource {
-            merge_resource_entity(
-                &mut all_entities,
-                resource_entity_json(extension, tenant_id, r)?,
-            )?;
-        }
+        let injected = resources
+            .iter()
+            .map(|resource| resource_entity_json(extension, tenant_id, resource))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Cedar refuses two entries for one UID, so a resource the store
+        // also persists has to be folded into the stored entry rather than
+        // added beside it — and folding is a merge of the raw JSON. That is
+        // the only case that re-parses; everything else clones the set the
+        // tenant load already parsed.
+        let overlaps = injected.iter().any(|entity| {
+            entity_uid_of(entity).is_ok_and(|uid| store.stored_uids.contains(&uid.to_string()))
+        });
+
         // `.partial()` makes an absent resource entity dereference to a Cedar
         // residual instead of erroring, so a `when { resource.<field> == … }`
         // clause survives partial evaluation as a residual the consumer can
         // translate into a row filter. Without it the residual branch of
         // `evaluate_resource` is unreachable — a missing entity errors and the
         // policy is dropped, collapsing every conditional grant to a denial.
-        let entities = Entities::from_json_value(Value::Array(all_entities), None)
-            .map_err(|e| AuthError::PolicyFailed(format!("entity parse error: {e}")))?
-            .partial();
+        // Applied here rather than relied on from the cached set, so the
+        // property holds however the set was assembled.
+        let entities = if overlaps {
+            let mut all_entities = store.entity_jsons.clone();
+            all_entities.push(user_entity_json);
+            for entity in injected {
+                merge_resource_entity(&mut all_entities, entity)?;
+            }
+            Entities::from_json_value(Value::Array(all_entities), None)
+                .map_err(|e| AuthError::PolicyFailed(format!("entity parse error: {e}")))?
+                .partial()
+        } else {
+            let mut added = Vec::with_capacity(injected.len() + 1);
+            added.push(user_entity_json);
+            added.extend(injected);
+            store
+                .entities
+                .clone()
+                .add_entities_from_json_value(Value::Array(added), None)
+                .map_err(|e| AuthError::PolicyFailed(format!("entity parse error: {e}")))?
+                .partial()
+        };
 
         Ok(Self {
             authorizer: Authorizer::new(),

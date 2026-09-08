@@ -115,6 +115,39 @@ pub trait CapabilityChecker: Send + Sync {
         action: &str,
         resource: &crate::ResourceEntity,
     ) -> Result<bool, crate::AuthError>;
+
+    /// The same question about several objects at once, in order.
+    ///
+    /// A request that names its resources in a body names several of them:
+    /// a pipeline declaring the models it reads, a document declaring the
+    /// folders it links. Asked one at a time that is one entity-set
+    /// assembly per object, and the set is the same every time — so an
+    /// implementation that can hoist the assembly should override this,
+    /// and one that cannot loses nothing by the default.
+    ///
+    /// Returns one verdict per resource, positionally. Whether a refusal
+    /// anywhere refuses the whole request is the caller's to decide; this
+    /// only answers.
+    ///
+    /// The default asks [`check_instance`](Self::check_instance) in turn,
+    /// so every existing implementation keeps working and gains the batch
+    /// the day it wants to.
+    async fn check_instance_many(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        action: &str,
+        resources: &[crate::ResourceEntity],
+    ) -> Result<Vec<bool>, crate::AuthError> {
+        let mut out = Vec::with_capacity(resources.len());
+        for resource in resources {
+            out.push(
+                self.check_instance(tenant_id, roles, action, resource)
+                    .await?,
+            );
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
