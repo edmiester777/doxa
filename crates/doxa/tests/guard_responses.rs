@@ -5,7 +5,7 @@
 //! spec in which it can only succeed.
 
 use doxa::auth::Require;
-use doxa::policy::{Capability, CapabilityCheck, Capable};
+use doxa::policy::{Capability, CapabilityCheck, Capable, ResourceId};
 use doxa::{get, routes, OpenApiRouter};
 
 pub const WIDGETS_READ: Capability = Capability {
@@ -14,7 +14,7 @@ pub const WIDGETS_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read",
         entity_type: "Widget",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 

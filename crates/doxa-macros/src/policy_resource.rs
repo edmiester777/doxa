@@ -41,6 +41,8 @@ struct Container {
     id_with: Option<Ident>,
     /// Method producing attributes no field backs.
     attrs_with: Option<Ident>,
+    /// Entity type this resource is `in` by virtue of the request.
+    tenant_parent: Option<LitStr>,
 }
 
 pub fn expand(input: TokenStream) -> Result<TokenStream> {
@@ -150,10 +152,20 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 
     let scoped = scoped_impl(ident, key.as_ref(), scope.as_ref())?;
 
+    // Not a field: the tenant is a fact about the request, so there may
+    // be no column to read and a nullable one would answer a different
+    // question — a row belonging to no tenant is still decided about
+    // inside the asking one.
+    let tenant_parent = match &container.tenant_parent {
+        Some(ty) => quote!(const TENANT_PARENT: ::std::option::Option<&'static str> = Some(#ty);),
+        None => quote!(),
+    };
+
     Ok(quote! {
         #[automatically_derived]
         impl ::doxa::policy::PolicyResource for #ident {
             const ENTITY_TYPE: &'static str = #entity_type;
+            #tenant_parent
 
             fn resource_id(&self) -> ::std::string::String {
                 #id_body
@@ -270,6 +282,7 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
     let mut entity_type = None;
     let mut id_with = None;
     let mut attrs_with = None;
+    let mut tenant_parent = None;
 
     for attr in &input.attrs {
         if !attr.path().is_ident("resource") {
@@ -285,8 +298,12 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
             } else if meta.path.is_ident("attrs_with") {
                 attrs_with = Some(meta.value()?.parse::<Ident>()?);
                 Ok(())
+            } else if meta.path.is_ident("tenant_parent") {
+                tenant_parent = Some(meta.value()?.parse::<LitStr>()?);
+                Ok(())
             } else {
-                Err(meta.error("expected `entity_type`, `id_with` or `attrs_with`"))
+                Err(meta
+                    .error("expected `entity_type`, `id_with`, `attrs_with` or `tenant_parent`"))
             }
         })?;
     }
@@ -302,6 +319,7 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
         entity_type,
         id_with,
         attrs_with,
+        tenant_parent,
     })
 }
 

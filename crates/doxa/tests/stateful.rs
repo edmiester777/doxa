@@ -25,7 +25,7 @@ use tower::ServiceExt;
 
 use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
 use doxa::{get, routes, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -58,7 +58,7 @@ const DOCUMENTS_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read",
         entity_type: "DocumentCollection",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 
@@ -68,7 +68,7 @@ const DOCUMENTS_REINDEX: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "reindex",
         entity_type: "DocumentIndex",
-        entity_id: "all",
+        entity_id: ResourceId::Literal("all"),
     }],
 };
 

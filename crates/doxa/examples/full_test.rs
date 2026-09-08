@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 
 use doxa::audit::{AuditEventBuilder, AuditLayer, EventType};
 use doxa::auth::{Auth, AuthLayer, AuthState, Claims, Require};
-use doxa::policy::{Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity};
+use doxa::policy::{
+    Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
+};
 use doxa::protected::ProtectedString;
 use doxa::{
     get, post, routes, ApiDocBuilder, ApiError, MountDocsExt, MountOpts, OpenApiRouter,
@@ -186,7 +188,7 @@ pub const WIDGETS_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read",
         entity_type: "Widget",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 
@@ -196,7 +198,7 @@ pub const WIDGETS_WRITE: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "write",
         entity_type: "Widget",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 

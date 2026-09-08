@@ -51,6 +51,29 @@ pub mod openapi;
 #[cfg(feature = "axum")]
 pub(crate) mod record;
 
+/// Re-exported so `#[derive(Actions)]`'s output can register itself
+/// without the declaring crate taking a direct dependency on `inventory`.
+#[cfg(feature = "catalog")]
+#[doc(hidden)]
+pub use inventory;
+
+/// Stand-in for the above when the `catalog` feature is off, so the
+/// derive expands to the same tokens either way and the registration
+/// simply evaporates.
+#[cfg(not(feature = "catalog"))]
+#[doc(hidden)]
+pub mod inventory {
+    #[doc(hidden)]
+    pub use crate::__doxa_action_submit as submit;
+}
+
+#[cfg(not(feature = "catalog"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __doxa_action_submit {
+    ($($tt:tt)*) => {};
+}
+
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};
 pub use context::{AuthContext, CapabilityContext};
@@ -58,11 +81,13 @@ pub use provider::{ClaimResolver, MinimalClaims, OidcClaimConfig, TokenValidator
 
 #[cfg(feature = "axum")]
 pub use extractors::{Auth, BearerScheme, Require, SchemeName};
+#[cfg(all(feature = "axum", feature = "catalog"))]
+pub use granted::actions;
 #[cfg(feature = "axum")]
 pub use granted::{
-    authorize, declares, distinct, Action, AuthorizeLoaded, Cap, DefaultSite, FromAuthExtensions,
-    GrantSite, Granted, Granting, KeyError, KeySegment, Many, NoState, One, Refusal, RouteKey,
-    Scoping, Subject, SubjectForm,
+    authorize, declares, distinct, Action, AuthorizeLoaded, Cap, DeclaredAction, DefaultSite,
+    Denial, FromAuthExtensions, GrantSite, Granted, Granting, KeyError, KeySegment, Many, NoState,
+    One, Refusal, RouteKey, Scoping, Subject, SubjectForm,
 };
 #[cfg(feature = "axum")]
 pub use layer::{AuthLayer, AuthService};

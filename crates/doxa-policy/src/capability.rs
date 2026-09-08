@@ -23,7 +23,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use doxa_policy::capability::{Capability, CapabilityCheck};
+//! use doxa_policy::capability::{Capability, CapabilityCheck, ResourceId};
 //!
 //! pub const ADMIN_SETTINGS: Capability = Capability {
 //!     name: "admin_settings",
@@ -31,7 +31,7 @@
 //!     checks: &[CapabilityCheck {
 //!         action: "admin_write",
 //!         entity_type: "AdminConfig",
-//!         entity_id: "singleton",
+//!         entity_id: ResourceId::Literal("singleton"),
 //!     }],
 //! };
 //! ```
@@ -63,7 +63,7 @@ pub struct Capability {
 /// # Example
 ///
 /// ```
-/// use doxa_policy::capability::{Capability, CapabilityCheck, Capable};
+/// use doxa_policy::capability::{Capability, CapabilityCheck, Capable, ResourceId};
 ///
 /// pub const WIDGETS_READ: Capability = Capability {
 ///     name: "widgets.read",
@@ -71,7 +71,7 @@ pub struct Capability {
 ///     checks: &[CapabilityCheck {
 ///         action: "read",
 ///         entity_type: "Widget",
-///         entity_id: "collection",
+///         entity_id: ResourceId::Literal("collection"),
 ///     }],
 /// };
 ///
@@ -107,7 +107,7 @@ pub trait CapabilityChecker: Send + Sync {
 
     /// Evaluate `action` against one concrete object, with its
     /// attributes in scope. The instance-level counterpart to
-    /// [`check`](Self::check), whose resource ids are static sentinels.
+    /// [`check`](Self::check), whose resource ids are constants or the tenant.
     async fn check_instance(
         &self,
         tenant_id: &str,
@@ -160,21 +160,56 @@ pub fn capabilities() -> Vec<&'static Capability> {
     all
 }
 
+/// The Cedar id a coarse check asks about.
+///
+/// A coarse gate runs before anything is loaded, so there is no object to
+/// name: the id is either a constant the application chose, or the tenant
+/// the request is being made in. Those are the only two forms because the
+/// tenant is the only identity doxa holds at that point — roles are a
+/// list, and whatever sits behind them is the consumer's own session
+/// type.
+///
+/// [`Tenant`](Self::Tenant) is resolved before
+/// [`PolicyExtension::build_resource_uid`](crate::extension::PolicyExtension::build_resource_uid)
+/// is called, so that hook receives a real id and never a marker to
+/// decode. It is the extension point for the *consumer's* UID hierarchy —
+/// `{tenant}::{name}` composition, flat namespaces, per-type prefixes —
+/// and it keeps all of that. What it no longer has to do is recognize a
+/// sentinel doxa invented and substitute a value doxa had already passed
+/// it as an argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceId {
+    /// A fixed id: `"collection"` for a whole collection, `"singleton"`
+    /// for a resource there is only one of.
+    Literal(&'static str),
+    /// The tenant the request is being made in, substituted by doxa.
+    Tenant,
+}
+
+impl ResourceId {
+    /// The id as the policy engine should see it.
+    ///
+    /// Borrows from whichever side supplied it, so resolving costs
+    /// nothing for either form.
+    pub const fn resolve<'a>(&'a self, tenant_id: &'a str) -> &'a str {
+        match self {
+            ResourceId::Literal(id) => id,
+            ResourceId::Tenant => tenant_id,
+        }
+    }
+}
+
 /// One `(action, entity_type, entity_id)` triple inside a [`Capability`].
 ///
-/// `entity_type` and `entity_id` are passed verbatim to the consumer's
+/// `entity_type` and the resolved `entity_id` are passed to the consumer's
 /// [`PolicyExtension::build_resource_uid`](crate::extension::PolicyExtension::build_resource_uid),
 /// so the same UID hierarchy used by every other policy check applies.
-/// For singleton resources (e.g. `AdminConfig`), use a constant id like
-/// `"singleton"`. For tenant-scoped collection resources, consumers may
-/// use a sentinel id (e.g. `"tenant"`) and substitute the real tenant id
-/// inside their `build_resource_uid` impl.
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityCheck {
     /// Cedar action name (e.g. `"admin_write"`).
     pub action: &'static str,
     /// Cedar entity type (e.g. `"AdminConfig"`).
     pub entity_type: &'static str,
-    /// Cedar entity id (e.g. `"singleton"`).
-    pub entity_id: &'static str,
+    /// Cedar entity id — a constant, or the request's tenant.
+    pub entity_id: ResourceId,
 }

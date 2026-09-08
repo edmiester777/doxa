@@ -17,7 +17,7 @@ use tower::ServiceExt;
 
 use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
 use doxa::{delete, get, routes, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -29,7 +29,7 @@ const WIDGETS_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read",
         entity_type: "Widget",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 

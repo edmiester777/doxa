@@ -169,7 +169,7 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
     /// Check `action` against one concrete object.
     ///
     /// Unlike [`check_capability`](Self::check_capability), whose
-    /// resource ids are `&'static str` sentinels, this evaluates against
+    /// resource ids are constants or the tenant, this evaluates against
     /// the instance the request actually touches — and injects its
     /// attributes into the entity set, so a `when { resource.<attr> … }`
     /// clause resolves instead of collapsing to a residual denial.
@@ -227,9 +227,16 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
         cap: &Capability,
     ) -> Result<bool, AuthError> {
         for check in cap.checks {
-            let resource =
-                self.extension
-                    .build_resource_uid(tenant_id, check.entity_type, check.entity_id)?;
+            // Resolved here, so `build_resource_uid` is handed a real id.
+            // It is the consumer's hook for the consumer's UID hierarchy;
+            // asking it to decode a marker doxa invented, using a value
+            // doxa passed it in the same call, was a round trip through
+            // consumer code that consulted nothing about the consumer.
+            let resource = self.extension.build_resource_uid(
+                tenant_id,
+                check.entity_type,
+                check.entity_id.resolve(tenant_id),
+            )?;
             let decision = self.check(tenant_id, roles, check.action, resource).await?;
             if !decision.allowed {
                 return Ok(false);
@@ -297,7 +304,7 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for PolicyRouter<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::CapabilityCheck;
+    use crate::capability::{CapabilityCheck, ResourceId};
     use crate::test_support::{
         build_failing_uid_router, build_stub_router, build_stub_router_with_entities,
     };
@@ -306,7 +313,7 @@ mod tests {
     // have to use unique tenant ids to avoid process-wide cache pollution.
 
     macro_rules! read_cap {
-        ($entity_id:literal) => {
+        ($entity_id:expr) => {
             Capability {
                 name: "widgets.read",
                 description: "list widgets",
@@ -320,7 +327,7 @@ mod tests {
     }
 
     macro_rules! write_cap {
-        ($entity_id:literal) => {
+        ($entity_id:expr) => {
             Capability {
                 name: "widgets.write",
                 description: "edit widgets",
@@ -334,7 +341,7 @@ mod tests {
     }
 
     macro_rules! full_cap {
-        ($entity_id:literal) => {
+        ($entity_id:expr) => {
             Capability {
                 name: "widgets.full",
                 description: "read and write",
@@ -368,11 +375,70 @@ mod tests {
             .check_capability(
                 "router_t1",
                 &["viewer".to_string()],
-                &read_cap!("router_t1"),
+                &read_cap!(ResourceId::Literal("router_t1")),
             )
             .await
             .expect("router ok");
         assert!(allowed);
+    }
+
+    /// The substitution, and the whole point of it: the stub extension
+    /// ignores the tenant it is passed and builds a UID straight from the
+    /// id (`test_support.rs:52`), so the only way this policy can match
+    /// is if `Tenant` was resolved before the hook was reached.
+    ///
+    /// That is what an extension no longer has to do — it now receives an
+    /// id rather than a marker naming an argument it was already holding.
+    #[tokio::test]
+    async fn the_tenant_is_substituted_before_the_extension_sees_it() {
+        let policy = r#"
+            permit(
+                principal in Role::"viewer",
+                action == Action::"read_widget",
+                resource == WidgetCollection::"router_t7"
+            );
+        "#;
+        let router = build_stub_router(policy);
+
+        let allowed = router
+            .check_capability(
+                "router_t7",
+                &["viewer".to_string()],
+                &read_cap!(ResourceId::Tenant),
+            )
+            .await
+            .expect("router ok");
+
+        assert!(allowed);
+    }
+
+    /// And it is the *asking* tenant, not a constant baked into the
+    /// catalog: the same capability evaluated in another tenant asks
+    /// about that tenant's collection and is refused.
+    #[tokio::test]
+    async fn a_tenant_id_follows_the_request_rather_than_the_declaration() {
+        let policy = r#"
+            permit(
+                principal in Role::"viewer",
+                action == Action::"read_widget",
+                resource == WidgetCollection::"router_t8"
+            );
+        "#;
+        let router = build_stub_router(policy);
+
+        let allowed = router
+            .check_capability(
+                "router_t9",
+                &["viewer".to_string()],
+                &read_cap!(ResourceId::Tenant),
+            )
+            .await
+            .expect("router ok");
+
+        assert!(
+            !allowed,
+            "the policy names router_t8, the request is router_t9"
+        );
     }
 
     #[tokio::test]
@@ -391,7 +457,7 @@ mod tests {
             .check_capability(
                 "router_t2",
                 &["viewer".to_string()],
-                &full_cap!("router_t2"),
+                &full_cap!(ResourceId::Literal("router_t2")),
             )
             .await
             .expect("router ok");
@@ -405,7 +471,7 @@ mod tests {
             .check_capability(
                 "router_t3",
                 &["viewer".to_string()],
-                &read_cap!("router_t3"),
+                &read_cap!(ResourceId::Literal("router_t3")),
             )
             .await
             .expect("router ok");
@@ -419,7 +485,7 @@ mod tests {
             .check_capability(
                 "router_t4",
                 &["viewer".to_string()],
-                &read_cap!("router_t4"),
+                &read_cap!(ResourceId::Literal("router_t4")),
             )
             .await
             .expect_err("uid construction failure should propagate");
@@ -437,9 +503,9 @@ mod tests {
                 "router_t5",
                 &["viewer".to_string()],
                 &[
-                    read_cap!("router_t5"),
-                    write_cap!("router_t5"),
-                    full_cap!("router_t5"),
+                    read_cap!(ResourceId::Literal("router_t5")),
+                    write_cap!(ResourceId::Literal("router_t5")),
+                    full_cap!(ResourceId::Literal("router_t5")),
                 ],
             )
             .await
@@ -473,7 +539,10 @@ mod tests {
             .evaluate_capabilities(
                 "router_t6",
                 &["viewer".to_string()],
-                &[read_cap!("router_t6"), write_cap!("router_t6")],
+                &[
+                    read_cap!(ResourceId::Literal("router_t6")),
+                    write_cap!(ResourceId::Literal("router_t6")),
+                ],
             )
             .await
             .expect("router ok");
@@ -485,7 +554,10 @@ mod tests {
             .evaluate_capabilities(
                 "router_t6",
                 &["editor".to_string()],
-                &[read_cap!("router_t6"), write_cap!("router_t6")],
+                &[
+                    read_cap!(ResourceId::Literal("router_t6")),
+                    write_cap!(ResourceId::Literal("router_t6")),
+                ],
             )
             .await
             .expect("router ok");
@@ -498,7 +570,7 @@ mod tests {
             .evaluate_capabilities(
                 "router_t6",
                 &["viewer".to_string(), "editor".to_string()],
-                &[full_cap!("router_t6")],
+                &[full_cap!(ResourceId::Literal("router_t6"))],
             )
             .await
             .expect("router ok");
@@ -511,7 +583,11 @@ mod tests {
         // capability evaluation must propagate that denial unchanged.
         let router = build_stub_router("");
         let allowed = router
-            .check_capability("", &["viewer".to_string()], &read_cap!("ignored"))
+            .check_capability(
+                "",
+                &["viewer".to_string()],
+                &read_cap!(ResourceId::Literal("ignored")),
+            )
             .await
             .expect("router ok");
         assert!(!allowed);

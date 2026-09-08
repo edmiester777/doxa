@@ -26,6 +26,11 @@ audit = ["dep:doxa-audit"]
 # is a UUID binds without a newtype. Disable to drop `uuid` from the
 # dep graph; `audit` pulls it in regardless.
 uuid = ["dep:uuid"]
+# Self-registering action catalog, so `doxa::auth::actions()` answers
+# without a hand-maintained list. The sibling of `doxa-policy/catalog`,
+# and separate because the two vocabularies are: a capability is what a
+# client is told it holds, an action is what Cedar is asked about.
+catalog = ["dep:inventory"]
 
 [dependencies]
 doxa-policy = { workspace = true }
@@ -40,6 +45,7 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 cached = { workspace = true }
+inventory = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

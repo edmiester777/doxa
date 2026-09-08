@@ -17,7 +17,7 @@ use doxa::audit::EventType;
 use doxa::auth::{
     Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
 };
-use doxa::policy::{AuthError, Capability, CapabilityChecker, Capable, ResourceEntity};
+use doxa::policy::{AuthError, Capability, CapabilityChecker, Capable, ResourceEntity, ResourceId};
 use doxa::{capability, Actions, PolicyResource, ToSchema};
 use serde::Serialize;
 
@@ -151,14 +151,15 @@ fn the_description_comes_off_the_doc_comment() {
 
 /// The check's entity is the collection, defaulted from the resource
 /// noun — which is what a coarse gate asks about, there being no instance
-/// yet. The tenant is not in here: it reaches `build_resource_uid` as its
-/// own argument.
+/// yet. `ResourceId::Tenant` is the other form, for an asset whose
+/// collections are per-tenant; doxa resolves it against the request
+/// rather than passing a marker to the consumer's UID builder.
 #[test]
 fn the_check_defaults_to_the_collection() {
     let check = source_action::Delete::CAPABILITY.checks[0];
     assert_eq!(check.action, "delete");
     assert_eq!(check.entity_type, "SourceCollection");
-    assert_eq!(check.entity_id, "collection");
+    assert_eq!(check.entity_id, ResourceId::Literal("collection"));
 }
 
 #[test]
@@ -216,6 +217,59 @@ fn a_table_that_repeats_an_action_is_not_distinct() {
 /// `capable` references the marker rather than minting a second one. A
 /// duplicate here would be a catalog entry advertised to clients that no
 /// route ever checks.
+/// Every variant reaches the action catalog, whether or not it declared
+/// a capability — which is the point, because the capability catalog
+/// cannot see all of them.
+///
+/// `Ping` declares none at all, so `capabilities()` has no row naming
+/// `ping`. `Archive` gates on `SourcesArchive`, declared by
+/// `#[capability]` elsewhere, so its action is reachable through that
+/// capability's checks but only by knowing to look. A startup seeding
+/// Cedar action entities from the capability catalog would miss `ping`
+/// outright — and miss it silently, since a policy naming an entity
+/// Cedar does not have simply never matches.
+#[test]
+fn every_action_reaches_the_catalog() {
+    let names: Vec<_> = doxa::auth::actions()
+        .into_iter()
+        .map(|action| action.name)
+        .collect();
+
+    assert_eq!(
+        names,
+        ["archive", "delete", "ping", "read", "run_query"],
+        "one row per variant, sorted by name",
+    );
+}
+
+/// The row in the catalog is the row `ACTIONS` points at, not a copy —
+/// so the capability and the audit category the guard reads are the ones
+/// a startup seeding Cedar sees.
+#[test]
+fn the_catalogued_row_is_the_declared_row() {
+    let read = doxa::auth::actions()
+        .into_iter()
+        .find(|action| action.name == "read")
+        .expect("declared by `SourceAction::Read`");
+
+    assert_eq!(read.event_type, Some("data_access"));
+    assert_eq!(
+        read.capability.map(|cap| cap.name),
+        Some("sources.read"),
+        "the same capability `Granting::ACTIONS` gates `read` behind",
+    );
+
+    let ping = doxa::auth::actions()
+        .into_iter()
+        .find(|action| action.name == "ping")
+        .expect("instance-only, but still catalogued");
+
+    assert!(
+        ping.capability.is_none(),
+        "that is what instance-only means"
+    );
+}
+
 #[test]
 fn the_generated_capabilities_reach_the_catalog() {
     let names: Vec<_> = doxa::policy::capabilities()
