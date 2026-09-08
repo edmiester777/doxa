@@ -19,7 +19,7 @@ use doxa::auth::{
     Action, Cap, CapabilityContext, GrantSite, Granted, Granting, Many, One, Scoping,
 };
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
 use doxa::{PolicyResource, ToSchema};
 
@@ -31,7 +31,7 @@ const WIDGETS_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read",
         entity_type: "Widget",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 

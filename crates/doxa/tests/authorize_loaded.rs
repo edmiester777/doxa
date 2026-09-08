@@ -21,8 +21,10 @@ use serde::Serialize;
 use serde_json::json;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLogger, Outcome};
-use doxa::auth::{Action, AuthorizeLoaded, CapabilityContext, Granting, Refusal};
-use doxa::policy::{AuthError, Capability, CapabilityCheck, CapabilityChecker, ResourceEntity};
+use doxa::auth::{Action, AuthorizeLoaded, CapabilityContext, DeclaredAction, Denial, Granting};
+use doxa::policy::{
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, ResourceEntity, ResourceId,
+};
 use doxa::{PolicyResource, ToSchema};
 
 // ---- domain -----------------------------------------------------------------
@@ -33,12 +35,16 @@ const SOURCES_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read_source",
         entity_type: "SourceCollection",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 
+/// `tenant_parent` rather than a `#[resource(parent)]` field: which
+/// tenant a decision is made in is a fact about the *request*, so there
+/// is no column to read it from — and for a row that belongs to no
+/// tenant, a nullable column would not answer the question either.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema, PolicyResource)]
-#[resource(entity_type = "Source")]
+#[resource(entity_type = "Source", tenant_parent = "Tenant")]
 struct Source {
     #[resource(id)]
     name: String,
@@ -69,6 +75,16 @@ impl Granting for Source {
     }
 }
 
+/// The three lines a hand-written [`Granting::ACTIONS`] table pays for
+/// the marker `#[derive(Actions)]` would have generated. Naming a type
+/// rather than a string is what moves "does this asset permit this verb"
+/// to the build — see the compile-fail case on `DeclaredAction`.
+struct ReadSource;
+
+impl DeclaredAction for ReadSource {
+    const ACTION: &'static str = "read_source";
+}
+
 fn source(region: &str) -> Source {
     Source {
         name: "primary".to_owned(),
@@ -90,11 +106,22 @@ impl CapabilityChecker for Regional {
 
     async fn check_instance(
         &self,
-        _: &str,
+        tenant: &str,
         _: &[String],
         _: &str,
         resource: &ResourceEntity,
     ) -> Result<bool, AuthError> {
+        // The parent doxa supplied from the request, which no column on
+        // `Source` carries. A policy would spell this `resource in
+        // Tenant::"acme"`; here it is asserted directly, because a
+        // hierarchy check that silently had nothing to resolve against
+        // would still have let every test below pass.
+        assert_eq!(
+            resource.parents,
+            [("Tenant".to_owned(), tenant.to_owned())],
+            "`tenant_parent` should reach the policy",
+        );
+
         Ok(resource.attrs.get("region") == Some(&json!("us")))
     }
 }
@@ -149,7 +176,7 @@ async fn the_authorized_object_comes_back() {
     let (parts, _rx) = parts(&["sources.read"]);
 
     let authorized = source("us")
-        .authorize("read_source", &parts.extensions)
+        .authorize(ReadSource, &parts.extensions)
         .await
         .expect("holds the capability, and the region is granted");
 
@@ -164,11 +191,11 @@ async fn the_coarse_gate_still_runs() {
     let (parts, _rx) = parts(&[]);
 
     let refusal = source("us")
-        .authorize("read_source", &parts.extensions)
+        .authorize(ReadSource, &parts.extensions)
         .await
         .expect_err("does not hold sources.read");
 
-    let Refusal::Denied {
+    let Denial::Denied {
         action,
         resource_type,
         resource_id,
@@ -198,7 +225,7 @@ async fn a_dependency_skips_the_coarse_gate() {
     let (parts, _rx) = parts(&[]);
 
     let authorized = source("us")
-        .authorize_dependency("read_source", &parts.extensions)
+        .authorize_dependency(ReadSource, &parts.extensions)
         .await
         .expect("the instance check is the only one that applies");
 
@@ -212,11 +239,11 @@ async fn a_dependency_is_still_held_to_the_instance_check() {
     let (parts, _rx) = parts(&["sources.read"]);
 
     let refusal = source("eu")
-        .authorize_dependency("read_source", &parts.extensions)
+        .authorize_dependency(ReadSource, &parts.extensions)
         .await
         .expect_err("the region is not granted");
 
-    let Refusal::Denied {
+    let Denial::Denied {
         resource_type,
         resource_id,
         reason,
@@ -231,32 +258,31 @@ async fn a_dependency_is_still_held_to_the_instance_check() {
     assert_eq!(reason, "instance denied");
 }
 
-/// `Granting::ACTIONS` is the asset's vocabulary either way. A verb it
-/// never declared cannot be smuggled past the gate by calling the
-/// dependency form, which would otherwise be a way to authorize something
-/// the asset does not admit doing at all.
-#[tokio::test]
-async fn an_undeclared_action_is_refused_through_either_door() {
-    for door in ["authorize", "authorize_dependency"] {
-        let (parts, _rx) = parts(&["sources.read"]);
+/// `Granting::ACTIONS` is the asset's vocabulary either way, and a verb
+/// it never declared cannot be smuggled past the gate by calling the
+/// dependency form.
+///
+/// There is no runtime test for that here because there is no longer a
+/// runtime failure to observe: `Purge` is a perfectly good
+/// [`DeclaredAction`], and `Declares::<Source, Purge>::PROOF` refuses to
+/// evaluate, so neither line below builds. Both are pinned as
+/// `compile_fail` doctests on `AuthorizeLoaded::authorize` — where the
+/// error message they produce is also on show.
+///
+/// ```ignore
+/// source("us").authorize(Purge, &parts.extensions).await
+/// source("us").authorize_dependency(Purge, &parts.extensions).await
+/// ```
+///
+/// This is the whole of what the typed action bought. Before it, both
+/// lines compiled and answered `403 action not declared` — a status
+/// indistinguishable, to the caller and in the audit trail, from a
+/// caller who was genuinely refused.
+#[allow(dead_code)]
+struct Purge;
 
-        let refusal = match door {
-            "authorize" => source("us").authorize("purge", &parts.extensions).await,
-            _ => {
-                source("us")
-                    .authorize_dependency("purge", &parts.extensions)
-                    .await
-            }
-        }
-        .expect_err("`purge` is not in ACTIONS");
-
-        let Refusal::Denied { action, reason, .. } = refusal else {
-            panic!("{door}: an undeclared action is a denial");
-        };
-
-        assert_eq!(action, "purge", "{door}");
-        assert_eq!(reason, "action not declared", "{door}");
-    }
+impl DeclaredAction for Purge {
+    const ACTION: &'static str = "purge";
 }
 
 /// No auth layer above, so there is no caller to decide about. A missing
@@ -266,13 +292,13 @@ async fn an_unauthenticated_request_reaches_no_verdict() {
     let extensions = axum::http::Extensions::new();
 
     let refusal = source("us")
-        .authorize_dependency("read_source", &extensions)
+        .authorize_dependency(ReadSource, &extensions)
         .await
         .expect_err("nothing installed a caller");
 
     assert!(matches!(
         refusal,
-        Refusal::Auth(AuthError::MissingCredentials),
+        Denial::Auth(AuthError::MissingCredentials),
     ));
 }
 
@@ -286,7 +312,7 @@ async fn a_grant_is_recorded_like_the_guard_would() {
     let (parts, mut rx) = parts(&["sources.read"]);
 
     source("us")
-        .authorize("read_source", &parts.extensions)
+        .authorize(ReadSource, &parts.extensions)
         .await
         .expect("granted");
 
@@ -310,7 +336,7 @@ async fn a_dependency_grant_is_recorded_too() {
     let (parts, mut rx) = parts(&[]);
 
     source("us")
-        .authorize_dependency("read_source", &parts.extensions)
+        .authorize_dependency(ReadSource, &parts.extensions)
         .await
         .expect("granted");
 
@@ -330,14 +356,14 @@ async fn a_dependency_does_not_displace_the_route_s_own_subject() {
     let (parts, mut rx) = parts(&["sources.read"]);
 
     source("us")
-        .authorize("read_source", &parts.extensions)
+        .authorize(ReadSource, &parts.extensions)
         .await
         .expect("the route's subject");
     Source {
         name: "replica".to_owned(),
         region: "us".to_owned(),
     }
-    .authorize_dependency("read_source", &parts.extensions)
+    .authorize_dependency(ReadSource, &parts.extensions)
     .await
     .expect("something its body referred to");
 
@@ -358,14 +384,14 @@ async fn a_refused_dependency_displaces_the_grant() {
     let (parts, mut rx) = parts(&["sources.read"]);
 
     source("us")
-        .authorize("read_source", &parts.extensions)
+        .authorize(ReadSource, &parts.extensions)
         .await
         .expect("the route's subject");
     Source {
         name: "replica".to_owned(),
         region: "eu".to_owned(),
     }
-    .authorize_dependency("read_source", &parts.extensions)
+    .authorize_dependency(ReadSource, &parts.extensions)
     .await
     .expect_err("the region is not granted");
 

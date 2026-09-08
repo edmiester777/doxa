@@ -47,13 +47,17 @@
 //! ```ignore
 //! // the route's own subject, where no extractor could reach it
 //! let widget = find_widget(&txn, tenant, &name).await?
-//!     .authorize("read", &parts.extensions).await?;
+//!     .authorize(widget_action::Read, &parts.extensions).await?;
 //!
 //! // something its body merely refers to: this route's guard already
 //! // answered the coarse question, and it was a different one
 //! let folder = find_folder(&txn, tenant, &body.folder).await?
-//!     .authorize_dependency("read", &parts.extensions).await?;
+//!     .authorize_dependency(folder_action::Read, &parts.extensions).await?;
 //! ```
+//!
+//! The action is a type rather than a string — one of the markers
+//! `#[derive(Actions)]` emits — so an asset that does not permit it fails
+//! the build, as it does for a route.
 //!
 //! ## What the handler owes the audit trail
 //!
@@ -93,7 +97,7 @@ use axum::response::{IntoResponse, Response};
 use http::Extensions;
 
 use doxa_policy::{
-    AuthError, Capability, CapabilityChecker, Capable, PolicyResource, ResourceEntity,
+    AuthError, Capability, CapabilityChecker, Capable, PolicyResource, ResourceEntity, ResourceId,
     ResourceIdType,
 };
 
@@ -355,6 +359,83 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
     }
 }
 
+/// Why a decision about an object *already in hand* went against the
+/// caller.
+///
+/// [`Refusal`] spans everything that can go wrong between a route segment
+/// and a verdict, which is right for an extractor: it parses a key, it
+/// loads a row, and either can fail. [`AuthorizeLoaded`] does neither, so
+/// [`Refusal::Key`], [`Refusal::NotFound`] and [`Refusal::Load`] are
+/// unreachable through it — arms a `match` has to carry, that nothing can
+/// ever exercise, and that reviewers still have to keep correct.
+///
+/// Note the missing type parameter. `Refusal<E>` is generic only because
+/// of [`Refusal::Load`], so a door that cannot load has no use for `E`
+/// either.
+///
+/// Converts into a [`Refusal`], so a handler whose own error type is the
+/// wider one loses nothing by starting here:
+///
+/// ```ignore
+/// // `?` widens the denial; the three impossible variants are simply
+/// // never constructed.
+/// let folder = find_folder(&txn, tenant, name)
+///     .await?
+///     .authorize_dependency(folder_action::Read, &parts.extensions)
+///     .await?;
+/// ```
+#[derive(Debug)]
+pub enum Denial {
+    /// The policy refused. Recorded once, by whichever door reached it.
+    Denied {
+        /// Capability name, or the Cedar action for an instance check.
+        action: Cow<'static, str>,
+        /// Cedar entity type of the refused resource.
+        resource_type: Cow<'static, str>,
+        /// Cedar entity id of the refused resource.
+        resource_id: Cow<'static, str>,
+        /// Short reason, used for both the log field and the audit
+        /// event's error text.
+        reason: &'static str,
+    },
+    /// No auth context, no checker, or a policy that failed to decide.
+    Auth(AuthError),
+}
+
+impl From<AuthError> for Denial {
+    fn from(error: AuthError) -> Self {
+        Denial::Auth(error)
+    }
+}
+
+impl<E> From<Denial> for Refusal<E> {
+    fn from(denial: Denial) -> Self {
+        match denial {
+            Denial::Denied {
+                action,
+                resource_type,
+                resource_id,
+                reason,
+            } => Refusal::Denied {
+                action,
+                resource_type,
+                resource_id,
+                reason,
+            },
+            Denial::Auth(error) => Refusal::Auth(error),
+        }
+    }
+}
+
+impl IntoResponse for Denial {
+    fn into_response(self) -> Response {
+        match self {
+            Denial::Denied { .. } => AuthError::Forbidden.into_response(),
+            Denial::Auth(error) => error.into_response(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Call sites
 // ---------------------------------------------------------------------------
@@ -553,14 +634,14 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
 ///
 /// ```
 /// # use doxa_auth::granted::Action;
-/// # use doxa_policy::{Capability, CapabilityCheck};
+/// # use doxa_policy::{Capability, CapabilityCheck, ResourceId};
 /// # const SOURCES_READ: Capability = Capability {
 /// #     name: "sources.read",
 /// #     description: "Read sources",
 /// #     checks: &[CapabilityCheck {
 /// #         action: "read_source",
 /// #         entity_type: "SourceCollection",
-/// #         entity_id: "collection",
+/// #         entity_id: ResourceId::Literal("collection"),
 /// #     }],
 /// # };
 /// const ACTIONS: &[Action] = &[
@@ -612,6 +693,84 @@ impl Action {
         self.event_type = Some(event_type);
         self
     }
+}
+
+#[cfg(feature = "catalog")]
+inventory::collect!(&'static Action);
+
+/// Every action declared by a `#[derive(Actions)]` enum anywhere in the
+/// linked binary, sorted by name.
+///
+/// The sibling of [`doxa_policy::capabilities`], and needed for the same
+/// reason: something outside the guard consumes this vocabulary and
+/// cannot name it. A Cedar policy set is evaluated against an entity for
+/// each action, and that entity set is built at startup — from a list
+/// which, without this, is hand-maintained. An action added to a catalog
+/// enum and forgotten there does not fail: Cedar simply never matches the
+/// entity, and the policy that mentions it never fires.
+///
+/// The capability catalog answers half the question already, since every
+/// [`CapabilityCheck`](doxa_policy::CapabilityCheck) names an action. What
+/// it cannot see is an `#[action(instance_only)]` row, which declares no
+/// capability precisely because the instance check is the whole of it.
+///
+/// ## What it cannot see
+///
+/// A hand-written [`Granting::ACTIONS`] table. Registration happens in the
+/// derive, so a table written out by hand is absent here with no error —
+/// as is any action in a crate the binary does not link. Assert the count
+/// in a test if the set matters.
+///
+/// One name may appear more than once: two assets declaring `"read"` are
+/// two rows, with two capabilities and possibly two audit categories, and
+/// collapsing them here would lose that. Deduplicate on the way out if
+/// what you want is the Cedar vocabulary:
+///
+/// ```ignore
+/// let names: BTreeSet<_> = doxa::auth::actions()
+///     .into_iter()
+///     .map(|action| action.name)
+///     .collect();
+/// ```
+///
+/// Requires the `catalog` feature, on by default.
+#[cfg(feature = "catalog")]
+pub fn actions() -> Vec<&'static Action> {
+    let mut all: Vec<&'static Action> = inventory::iter::<&'static Action>
+        .into_iter()
+        .copied()
+        .collect();
+    all.sort_unstable_by_key(|action| action.name);
+    all
+}
+
+/// A type standing for one Cedar action.
+///
+/// Actions are named by string almost everywhere — [`Action::new`] takes
+/// one, [`GrantSite::ACTION`] is one — because a `const` table is what
+/// makes [`Subject::SITE_DECLARED`] possible, and a trait method cannot be
+/// called in a `const`. A route pays nothing for that: the macro's site
+/// type carries the string, and the assertion runs where the route is
+/// instantiated.
+///
+/// [`AuthorizeLoaded`] has no site, so until this trait existed it was the
+/// one door that checked its action when the request arrived. Naming a
+/// type instead of a string moves that check back to the build, and
+/// `#[derive(Actions)]` emits one of these per variant, so an asset with a
+/// derived vocabulary has the types already.
+///
+/// For a hand-written [`Granting::ACTIONS`] table it is three lines:
+///
+/// ```
+/// # use doxa_auth::granted::DeclaredAction;
+/// pub struct ReadWidget;
+/// impl DeclaredAction for ReadWidget {
+///     const ACTION: &'static str = "read_widget";
+/// }
+/// ```
+pub trait DeclaredAction: Send + Sync + 'static {
+    /// The Cedar action name, as [`Granting::ACTIONS`] spells it.
+    const ACTION: &'static str;
 }
 
 /// `&str` equality in a const context, which `==` is not.
@@ -886,9 +1045,10 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
                 entity_type: R::ENTITY_TYPE,
             })?;
 
-        let entity = ResourceEntity::of(&resource);
+        let tenant = ctx.tenant().unwrap_or("");
+        let entity = ResourceEntity::of(&resource, tenant);
         let allowed = checker
-            .check_instance(ctx.tenant().unwrap_or(""), ctx.roles(), action, &entity)
+            .check_instance(tenant, ctx.roles(), action, &entity)
             .await?;
 
         if !allowed {
@@ -1012,17 +1172,16 @@ impl<M: Capable, S: GrantSite> Chain for Cap<M, S> {
         ctx: &CapabilityContext,
         checker: &dyn CapabilityChecker,
     ) -> Result<Authorized<()>, Refusal<Self::Error>> {
-        let allowed = checker
-            .check(ctx.tenant().unwrap_or(""), ctx.roles(), M::CAPABILITY)
-            .await?;
+        let tenant = ctx.tenant().unwrap_or("");
+        let allowed = checker.check(tenant, ctx.roles(), M::CAPABILITY).await?;
 
-        let (resource_type, resource_id) = capability_resource(M::CAPABILITY);
+        let (resource_type, resource_id) = capability_resource(M::CAPABILITY, tenant);
 
         if !allowed {
             return Err(Refusal::Denied {
                 action: Cow::Borrowed(M::CAPABILITY.name),
                 resource_type: Cow::Borrowed(resource_type),
-                resource_id: Cow::Borrowed(resource_id),
+                resource_id,
                 reason: "capability denied",
             });
         }
@@ -1033,7 +1192,7 @@ impl<M: Capable, S: GrantSite> Chain for Cap<M, S> {
             loaded: (),
             action: Cow::Borrowed(M::CAPABILITY.name),
             resource_type: Cow::Borrowed(resource_type),
-            resource_id: Cow::Borrowed(resource_id),
+            resource_id,
         })
     }
 }
@@ -1044,11 +1203,24 @@ impl<M: Capable, S: GrantSite> Chain for Cap<M, S> {
 /// the first is the one whose denial short-circuits the evaluation — and
 /// the one worth naming in the trail. A capability with no checks at all
 /// names itself.
-pub(crate) fn capability_resource(cap: &'static Capability) -> (&'static str, &'static str) {
+///
+/// Takes the tenant because a [`ResourceId::Tenant`] check is about that
+/// tenant's collection, so the trail should say which one. It used to
+/// record the literal sentinel, which named no resource that exists.
+pub(crate) fn capability_resource(
+    cap: &'static Capability,
+    tenant: &str,
+) -> (&'static str, Cow<'static, str>) {
     cap.checks
         .first()
-        .map(|check| (check.entity_type, check.entity_id))
-        .unwrap_or(("capability", cap.name))
+        .map(|check| {
+            let id = match check.entity_id {
+                ResourceId::Literal(id) => Cow::Borrowed(id),
+                ResourceId::Tenant => Cow::Owned(tenant.to_owned()),
+            };
+            (check.entity_type, id)
+        })
+        .unwrap_or(("capability", Cow::Borrowed(cap.name)))
 }
 
 /// The asset's own row for this action, or a refusal.
@@ -1063,10 +1235,8 @@ pub(crate) fn capability_resource(cap: &'static Capability) -> (&'static str, &'
 /// [`AuthorizeLoaded`] on a resource that is already in hand — so an
 /// undeclared action is refused identically however the check was
 /// reached.
-fn declared_action<R: Granting>(
-    action: &'static str,
-) -> Result<&'static Action, Refusal<R::Error>> {
-    declared::<R>(action).ok_or(Refusal::Denied {
+fn declared_action<R: Granting>(action: &'static str) -> Result<&'static Action, Denial> {
+    declared::<R>(action).ok_or(Denial::Denied {
         action: Cow::Borrowed(action),
         resource_type: Cow::Borrowed(R::ENTITY_TYPE),
         // The refusal is about the action, not about an object: for a
@@ -1084,7 +1254,7 @@ async fn gate<R: Granting>(
     action: &'static str,
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
-) -> Result<&'static Action, Refusal<R::Error>> {
+) -> Result<&'static Action, Denial> {
     let declared = declared_action::<R>(action)?;
 
     let Some(cap) = declared.capability else {
@@ -1098,12 +1268,12 @@ async fn gate<R: Granting>(
         return Ok(declared);
     }
 
-    let (resource_type, resource_id) = capability_resource(cap);
+    let (resource_type, resource_id) = capability_resource(cap, ctx.tenant().unwrap_or(""));
 
-    Err(Refusal::Denied {
+    Err(Denial::Denied {
         action: Cow::Borrowed(cap.name),
         resource_type: Cow::Borrowed(resource_type),
-        resource_id: Cow::Borrowed(resource_id),
+        resource_id,
         reason: "capability denied",
     })
 }
@@ -1228,7 +1398,7 @@ pub async fn authorize<T: Chain>(
     state: &T::State,
     extensions: &Extensions,
 ) -> Result<T::Loaded, Refusal<T::Error>> {
-    let (ctx, checker) = caller_and_checker::<T::Ctx, T::Error>(extensions)?;
+    let (ctx, checker) = caller_and_checker::<T::Ctx>(extensions)?;
 
     match T::authorize(key, action, state, &ctx, checker.as_ref()).await {
         Ok(authorized) => {
@@ -1255,16 +1425,16 @@ pub async fn authorize<T: Chain>(
 /// Shared by every door so that a request reaching one without an
 /// [`AuthLayer`](crate::AuthLayer) above it fails the same way whichever
 /// door it was.
-fn caller_and_checker<C: FromAuthExtensions, E>(
+fn caller_and_checker<C: FromAuthExtensions>(
     extensions: &Extensions,
-) -> Result<(C, Arc<dyn CapabilityChecker>), Refusal<E>> {
-    let ctx = C::from_extensions(extensions).ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
+) -> Result<(C, Arc<dyn CapabilityChecker>), Denial> {
+    let ctx = C::from_extensions(extensions).ok_or(Denial::Auth(AuthError::MissingCredentials))?;
 
     let checker = extensions
         .get::<Arc<dyn CapabilityChecker>>()
         .cloned()
         .ok_or_else(|| {
-            Refusal::Auth(AuthError::PolicyFailed(
+            Denial::Auth(AuthError::PolicyFailed(
                 "capability checker not configured on AuthLayer".into(),
             ))
         })?;
@@ -1295,7 +1465,7 @@ fn caller_and_checker<C: FromAuthExtensions, E>(
 /// let folder = find_folder(&txn, tenant, &body.folder)
 ///     .await?
 ///     .ok_or(Error::NoSuchFolder)?
-///     .authorize_dependency("read", &parts.extensions)
+///     .authorize_dependency(folder_action::Read, &parts.extensions)
 ///     .await?;
 /// ```
 ///
@@ -1332,14 +1502,77 @@ pub trait AuthorizeLoaded: Granting {
     /// ```ignore
     /// let widget = find_widget(&txn, tenant, name)
     ///     .await?
-    ///     .authorize("read", &parts.extensions)
+    ///     .authorize(widget_action::Read, &parts.extensions)
     ///     .await?;
     /// ```
-    fn authorize(
+    ///
+    /// The action is a type, so an asset that does not permit it is a
+    /// build failure rather than a `403` at request time. `Widget`
+    /// declares `read` and nothing else:
+    ///
+    /// ```
+    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::CapabilityContext;
+    /// # use doxa_policy::PolicyResource;
+    /// # use std::convert::Infallible;
+    /// # struct Widget;
+    /// # impl PolicyResource for Widget {
+    /// #     const ENTITY_TYPE: &'static str = "Widget";
+    /// #     fn resource_id(&self) -> String { String::new() }
+    /// # }
+    /// # impl Granting for Widget {
+    /// #     type Key = String;
+    /// #     type Ctx = CapabilityContext;
+    /// #     type State = ();
+    /// #     type Error = Infallible;
+    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
+    /// # }
+    /// struct Read;
+    /// impl DeclaredAction for Read {
+    ///     const ACTION: &'static str = "read";
+    /// }
+    ///
+    /// # let extensions = http::Extensions::new();
+    /// let _ = Widget.authorize(Read, &extensions);
+    /// ```
+    ///
+    /// Name one it does not, and the same call will not build:
+    ///
+    /// ```compile_fail
+    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::CapabilityContext;
+    /// # use doxa_policy::PolicyResource;
+    /// # use std::convert::Infallible;
+    /// # struct Widget;
+    /// # impl PolicyResource for Widget {
+    /// #     const ENTITY_TYPE: &'static str = "Widget";
+    /// #     fn resource_id(&self) -> String { String::new() }
+    /// # }
+    /// # impl Granting for Widget {
+    /// #     type Key = String;
+    /// #     type Ctx = CapabilityContext;
+    /// #     type State = ();
+    /// #     type Error = Infallible;
+    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
+    /// # }
+    /// struct Purge;
+    /// impl DeclaredAction for Purge {
+    ///     const ACTION: &'static str = "purge";
+    /// }
+    ///
+    /// # let extensions = http::Extensions::new();
+    /// // error: this action is missing from the asset's `Granting::ACTIONS`
+    /// let _ = Widget.authorize(Purge, &extensions);
+    /// ```
+    fn authorize<A: DeclaredAction>(
         self,
-        action: &'static str,
+        action: A,
         extensions: &Extensions,
-    ) -> impl Future<Output = Result<Self, Refusal<Self::Error>>> + Send;
+    ) -> impl Future<Output = Result<Self, Denial>> + Send;
 
     /// Instance check only, for an object this route's guard has already
     /// cleared the coarse question for.
@@ -1348,11 +1581,43 @@ pub trait AuthorizeLoaded: Granting {
     /// still be one the asset declares, and the policy must still permit
     /// it on this object. See [the trait docs](Self#which-of-the-two) for
     /// why the coarse question is the wrong one to ask about a dependency.
-    fn authorize_dependency(
+    ///
+    /// In particular the vocabulary check is not skipped, and it is the
+    /// same build-time one, so the dependency form is not a way around
+    /// it:
+    ///
+    /// ```compile_fail
+    /// # use doxa_auth::granted::{Action, AuthorizeLoaded, DeclaredAction, Granting};
+    /// # use doxa_auth::CapabilityContext;
+    /// # use doxa_policy::PolicyResource;
+    /// # use std::convert::Infallible;
+    /// # struct Widget;
+    /// # impl PolicyResource for Widget {
+    /// #     const ENTITY_TYPE: &'static str = "Widget";
+    /// #     fn resource_id(&self) -> String { String::new() }
+    /// # }
+    /// # impl Granting for Widget {
+    /// #     type Key = String;
+    /// #     type Ctx = CapabilityContext;
+    /// #     type State = ();
+    /// #     type Error = Infallible;
+    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
+    /// # }
+    /// # struct Purge;
+    /// # impl DeclaredAction for Purge {
+    /// #     const ACTION: &'static str = "purge";
+    /// # }
+    /// # let extensions = http::Extensions::new();
+    /// // error: this action is missing from the asset's `Granting::ACTIONS`
+    /// let _ = Widget.authorize_dependency(Purge, &extensions);
+    /// ```
+    fn authorize_dependency<A: DeclaredAction>(
         self,
-        action: &'static str,
+        action: A,
         extensions: &Extensions,
-    ) -> impl Future<Output = Result<Self, Refusal<Self::Error>>> + Send;
+    ) -> impl Future<Output = Result<Self, Denial>> + Send;
 }
 
 /// Blanket, and therefore the only implementation there can be: an asset
@@ -1360,21 +1625,52 @@ pub trait AuthorizeLoaded: Granting {
 /// decides differently — or does not decide at all — because coherence
 /// leaves no room for a second impl.
 impl<R: Granting> AuthorizeLoaded for R {
-    async fn authorize(
+    // Written as `-> impl Future` rather than `async fn` so the proof is
+    // discharged when the method is *called*, not when the future is
+    // first polled. A caller who names an action their asset does not
+    // permit gets the error at the call site, awaited or not.
+    fn authorize<A: DeclaredAction>(
         self,
-        action: &'static str,
+        _action: A,
         extensions: &Extensions,
-    ) -> Result<Self, Refusal<R::Error>> {
-        decide(self, action, extensions, Coarse::Check).await
+    ) -> impl Future<Output = Result<Self, Denial>> + Send {
+        let () = Declares::<R, A>::PROOF;
+        decide(self, A::ACTION, extensions, Coarse::Check)
     }
 
-    async fn authorize_dependency(
+    fn authorize_dependency<A: DeclaredAction>(
         self,
-        action: &'static str,
+        _action: A,
         extensions: &Extensions,
-    ) -> Result<Self, Refusal<R::Error>> {
-        decide(self, action, extensions, Coarse::Skip).await
+    ) -> impl Future<Output = Result<Self, Denial>> + Send {
+        let () = Declares::<R, A>::PROOF;
+        decide(self, A::ACTION, extensions, Coarse::Skip)
     }
+}
+
+/// Compile-time proof that `R` permits `A`, forced by both
+/// [`AuthorizeLoaded`] methods.
+///
+/// The same two assertions [`Subject::SITE_DECLARED`] makes for a route,
+/// reached the same way — a const in a generic impl, evaluated where the
+/// pair is instantiated. Without it this door checked its action at
+/// request time and answered an undeclared one with a `403`, which is the
+/// status a real denial uses: a handler naming an action its asset does
+/// not have would read, in the trail and to the caller, exactly like a
+/// caller who was refused.
+struct Declares<R, A>(PhantomData<fn() -> (R, A)>);
+
+impl<R: Granting, A: DeclaredAction> Declares<R, A> {
+    const PROOF: () = {
+        assert!(
+            distinct(R::ACTIONS),
+            "`Granting::ACTIONS` names one action twice; the later row never runs",
+        );
+        assert!(
+            declares(R::ACTIONS, A::ACTION),
+            "this action is missing from the asset's `Granting::ACTIONS`",
+        );
+    };
 }
 
 /// Whether the capability gate runs, which is the only thing the two
@@ -1392,8 +1688,8 @@ async fn decide<R: Granting>(
     action: &'static str,
     extensions: &Extensions,
     coarse: Coarse,
-) -> Result<R, Refusal<R::Error>> {
-    let (ctx, checker) = caller_and_checker::<R::Ctx, R::Error>(extensions)?;
+) -> Result<R, Denial> {
+    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
 
     match verdict::<R>(&resource, action, &ctx, checker.as_ref(), coarse).await {
         Ok((declared, entity_id)) => {
@@ -1408,9 +1704,9 @@ async fn decide<R: Granting>(
             );
             Ok(resource)
         }
-        Err(refusal) => {
-            record_refusal(&refusal, extensions, ctx.tenant());
-            Err(refusal)
+        Err(denial) => {
+            record_denial(&denial, extensions, ctx.tenant());
+            Err(denial)
         }
     }
 }
@@ -1428,7 +1724,7 @@ async fn verdict<R: Granting>(
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
     coarse: Coarse,
-) -> Result<(&'static Action, String), Refusal<R::Error>> {
+) -> Result<(&'static Action, String), Denial> {
     let declared = match coarse {
         Coarse::Check => gate::<R>(action, ctx, checker).await?,
         // Still the asset's vocabulary, just not its capability: a
@@ -1437,13 +1733,14 @@ async fn verdict<R: Granting>(
         Coarse::Skip => declared_action::<R>(action)?,
     };
 
-    let entity = ResourceEntity::of(resource);
+    let tenant = ctx.tenant().unwrap_or("");
+    let entity = ResourceEntity::of(resource, tenant);
     let allowed = checker
-        .check_instance(ctx.tenant().unwrap_or(""), ctx.roles(), action, &entity)
+        .check_instance(tenant, ctx.roles(), action, &entity)
         .await?;
 
     if !allowed {
-        return Err(Refusal::Denied {
+        return Err(Denial::Denied {
             action: Cow::Borrowed(action),
             resource_type: Cow::Borrowed(R::ENTITY_TYPE),
             resource_id: Cow::Owned(entity.entity_id),
@@ -1454,10 +1751,9 @@ async fn verdict<R: Granting>(
     Ok((declared, entity.entity_id))
 }
 
-/// The one place a denial is recorded, whichever door the check came in
-/// by. Everything else is a request that never reached a decision, so
-/// there is nothing to record — it renders through `IntoResponse` like
-/// any other rejection.
+/// A denial the extractor reached. Everything else is a request that
+/// never got to a decision, so there is nothing to record — it renders
+/// through `IntoResponse` like any other rejection.
 fn record_refusal<E>(refusal: &Refusal<E>, extensions: &Extensions, tenant: Option<&str>) {
     let Refusal::Denied {
         action,
@@ -1471,7 +1767,34 @@ fn record_refusal<E>(refusal: &Refusal<E>, extensions: &Extensions, tenant: Opti
 
     crate::record::record(
         extensions,
-        crate::record::Denial {
+        crate::record::Denied {
+            tenant,
+            action,
+            resource_type,
+            resource_id,
+            reason,
+        },
+    );
+}
+
+/// The same, for a denial [`AuthorizeLoaded`] reached. Both end in
+/// [`crate::record::record`], which is the one place a refusal becomes a
+/// log line and an audit row — the two doors differ in what can go wrong
+/// on the way, not in what a verdict costs once reached.
+fn record_denial(denial: &Denial, extensions: &Extensions, tenant: Option<&str>) {
+    let Denial::Denied {
+        action,
+        resource_type,
+        resource_id,
+        reason,
+    } = denial
+    else {
+        return;
+    };
+
+    crate::record::record(
+        extensions,
+        crate::record::Denied {
             tenant,
             action,
             resource_type,

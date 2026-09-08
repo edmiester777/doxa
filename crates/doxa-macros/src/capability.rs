@@ -11,13 +11,63 @@ struct CapabilityArgs {
     checks: Vec<CheckArgs>,
 }
 
+/// The id half of a check, as written.
+///
+/// A coarse gate has no object to name, so the id is a constant or the
+/// tenant — and the tenant is spelled as a bare `tenant` rather than as
+/// the string `"tenant"`, because it is not an id at all. It is a
+/// instruction to substitute one, and doxa carries it out before the
+/// consumer's UID builder is reached.
+#[derive(Clone)]
+pub(crate) enum EntityId {
+    Literal(LitStr),
+    Tenant,
+}
+
+impl EntityId {
+    /// A literal id, for a default the derive works out rather than reads.
+    pub fn literal(value: &str, span: proc_macro2::Span) -> Self {
+        EntityId::Literal(LitStr::new(value, span))
+    }
+
+    pub fn tokens(&self) -> TokenStream {
+        match self {
+            EntityId::Literal(id) => quote!(::doxa::policy::ResourceId::Literal(#id)),
+            EntityId::Tenant => quote!(::doxa::policy::ResourceId::Tenant),
+        }
+    }
+}
+
+/// `entity_id = "collection"` or `entity_id = tenant`.
+pub(crate) fn parse_entity_id(input: ParseStream) -> syn::Result<EntityId> {
+    if input.peek(LitStr) {
+        return Ok(EntityId::Literal(input.parse()?));
+    }
+
+    let ident: Ident = input.parse().map_err(|_| {
+        input.error("expected a string literal, or the bare word `tenant` for the request's tenant")
+    })?;
+
+    if ident == "tenant" {
+        Ok(EntityId::Tenant)
+    } else {
+        Err(syn::Error::new(
+            ident.span(),
+            format!(
+                "unknown `entity_id` form `{ident}`; expected a string literal such as \
+                 \"collection\", or the bare word `tenant`",
+            ),
+        ))
+    }
+}
+
 /// One `(action, entity_type, entity_id)` triple. Shared with the
 /// `Actions` derive, which builds them from defaults rather than
 /// parsing them.
 pub(crate) struct CheckArgs {
     pub action: LitStr,
     pub entity_type: LitStr,
-    pub entity_id: LitStr,
+    pub entity_id: EntityId,
 }
 
 mod kw {
@@ -51,7 +101,7 @@ impl Parse for CheckArgs {
             } else if lookahead.peek(kw::entity_id) {
                 content.parse::<kw::entity_id>()?;
                 content.parse::<Token![=]>()?;
-                entity_id = Some(content.parse::<LitStr>()?);
+                entity_id = Some(parse_entity_id(&content)?);
             } else {
                 return Err(lookahead.error());
             }
@@ -146,7 +196,7 @@ pub(crate) fn declare(
         .map(|c| {
             let action = &c.action;
             let entity_type = &c.entity_type;
-            let entity_id = &c.entity_id;
+            let entity_id = c.entity_id.tokens();
             quote! {
                 ::doxa::policy::CapabilityCheck {
                     action: #action,

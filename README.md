@@ -398,12 +398,12 @@ Declare a capability, bind it to a marker, and gate the route. doxa ships the `R
 
 ```rust
 use doxa::auth::Require;
-use doxa::policy::{Capable, Capability, CapabilityCheck};
+use doxa::policy::{Capable, Capability, CapabilityCheck, ResourceId};
 
 pub const WIDGETS_READ: Capability = Capability {
     name: "widgets.read",
     description: "Read widget definitions",
-    checks: &[CapabilityCheck { action: "read", entity_type: "Widget", entity_id: "collection" }],
+    checks: &[CapabilityCheck { action: "read", entity_type: "Widget", entity_id: ResourceId::Literal("collection") }],
 };
 
 pub struct WidgetsRead;
@@ -540,7 +540,7 @@ async fn get_document(doc: Granted<Document>) -> Json<Document> {
 
 A refusal takes the same path, so the grant and the denial name the same action and the same resource.
 
-**Or derive the table.** An action also needs a capability to gate it, a description for the catalog and the OpenAPI badge, and a sentinel resource for the coarse check — all of which follow from the variant and the enum it sits in. `#[derive(Actions)]` writes them, and `#[action(…)]` appears only where a default is wrong:
+**Or derive the table.** An action also needs a capability to gate it, a description for the catalog and the OpenAPI badge, and a resource for the coarse check — all of which follow from the variant and the enum it sits in. `#[derive(Actions)]` writes them, and `#[action(…)]` appears only where a default is wrong:
 
 ```rust
 #[derive(Actions)]

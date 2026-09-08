@@ -15,7 +15,7 @@ use tower::ServiceExt;
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
 use doxa::auth::{Action, CapabilityContext, Granted, Granting, Require};
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
 use doxa::{get, routes, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -27,7 +27,7 @@ const WIDGETS_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read",
         entity_type: "Widget",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 

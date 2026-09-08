@@ -19,7 +19,7 @@ use tower::ServiceExt;
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, EventType, Outcome};
 use doxa::auth::{Action, Cap, CapabilityContext, Granted, Granting, Many, Scoping};
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
 use doxa::{delete, get, routes, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -31,7 +31,7 @@ const WIDGETS_FLUSH: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "flush",
         entity_type: "WidgetCache",
-        entity_id: "all",
+        entity_id: ResourceId::Literal("all"),
     }],
 };
 

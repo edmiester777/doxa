@@ -40,7 +40,7 @@ let decision = router
 Declare a static capability — a bundle of `(action, entity_type, entity_id)` checks that must all pass:
 
 ```rust
-use doxa_policy::{Capable, Capability, CapabilityCheck};
+use doxa_policy::{Capable, Capability, CapabilityCheck, ResourceId};
 
 pub const WIDGETS_READ: Capability = Capability {
     name: "widgets.read",
@@ -48,7 +48,7 @@ pub const WIDGETS_READ: Capability = Capability {
     checks: &[CapabilityCheck {
         action: "read",
         entity_type: "Widget",
-        entity_id: "collection",
+        entity_id: ResourceId::Literal("collection"),
     }],
 };
 

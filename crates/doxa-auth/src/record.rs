@@ -21,7 +21,7 @@ use http::Extensions;
 
 /// A guard let the request through: what was checked, and on what.
 ///
-/// Unlike [`Denial`] nothing here feeds a log line — a granted check is
+/// Unlike [`Denied`] nothing here feeds a log line — a granted check is
 /// the ordinary case — so with the `audit` feature off every field is
 /// genuinely unread.
 #[cfg_attr(not(feature = "audit"), allow(dead_code))]
@@ -39,7 +39,7 @@ pub(crate) struct Grant {
 }
 
 /// One refusal: what was attempted, on what, and why it was turned down.
-pub(crate) struct Denial<'a> {
+pub(crate) struct Denied<'a> {
     /// Tenant the check ran against. `None` for an unscoped caller.
     pub tenant: Option<&'a str>,
     /// Capability name for a coarse gate, Cedar action for an instance
@@ -67,7 +67,7 @@ pub(crate) fn grant(extensions: &Extensions, grant: Grant) {
 /// Safe to call without an audit layer in the stack — the log line is
 /// unconditional and the audit half is skipped when no builder is
 /// present.
-pub(crate) fn record(extensions: &Extensions, denial: Denial<'_>) {
+pub(crate) fn record(extensions: &Extensions, denial: Denied<'_>) {
     tracing::warn!(
         tenant_id = denial.tenant.unwrap_or("-"),
         action = denial.action,
@@ -94,7 +94,7 @@ fn deposit_grant(extensions: &Extensions, grant: Grant) {
 }
 
 #[cfg(feature = "audit")]
-fn deposit_denial(extensions: &Extensions, denial: Denial<'_>) {
+fn deposit_denial(extensions: &Extensions, denial: Denied<'_>) {
     let Some(audit) = extensions.get::<doxa_audit::AuditEventBuilder>() else {
         return;
     };
@@ -118,4 +118,4 @@ fn deposit_denial(extensions: &Extensions, denial: Denial<'_>) {
 fn deposit_grant(_extensions: &Extensions, _grant: Grant) {}
 
 #[cfg(not(feature = "audit"))]
-fn deposit_denial(_extensions: &Extensions, _denial: Denial<'_>) {}
+fn deposit_denial(_extensions: &Extensions, _denial: Denied<'_>) {}

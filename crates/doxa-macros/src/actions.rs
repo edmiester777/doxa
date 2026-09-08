@@ -1,7 +1,7 @@
 //! `#[derive(Actions)]` — an asset's action vocabulary, declared once.
 //!
 //! An action needs a Cedar name, a capability to gate it, a description
-//! for the catalog and the OpenAPI badge, and a sentinel resource for the
+//! for the catalog and the OpenAPI badge, and a resource for the
 //! coarse check. All but the audit category can be worked out from the
 //! variant and the enum it sits in, so the common case is a bare list of
 //! variants with doc comments, and `#[action(…)]` appears only where a
@@ -9,9 +9,14 @@
 //!
 //! What it emits, for `enum SourceAction { Read, Delete }`:
 //!
-//! - `mod source_action` holding one marker struct per variant, each a
-//!   full capability declaration — so it registers in the catalog like
-//!   any `#[capability]` and can be named as `Granted<Cap<…>>`.
+//! - `mod source_action` holding one marker struct per variant. Each
+//!   implements `DeclaredAction`, so it can be handed to
+//!   `AuthorizeLoaded::authorize` and the asset's vocabulary is checked at
+//!   build time rather than at request time. Where the variant declares a
+//!   capability the marker carries that too, registering in the catalog
+//!   like any `#[capability]` and namable as `Granted<Cap<…>>`.
+//! - One `Action` const per variant, registered so `doxa::auth::actions()`
+//!   can answer without a hand-maintained list.
 //! - `SourceAction::ACTIONS`, the table `Granting::ACTIONS` wants.
 //! - `SourceAction::ALL` and `as_static`, so the enum is usable as a
 //!   value too.
@@ -24,9 +29,9 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Attribute, Data, DeriveInput, Expr, Fields, Ident, LitStr, Path, Visibility};
+use syn::{Attribute, Data, DeriveInput, Expr, Fields, Ident, LitStr, Path};
 
-use crate::capability::{declare, CheckArgs};
+use crate::capability::{declare, parse_entity_id, CheckArgs, EntityId};
 
 /// Container-level `#[actions(…)]`. Every field overrides a default that
 /// is otherwise read off the enum's name.
@@ -35,7 +40,7 @@ struct Container {
     resource: Option<LitStr>,
     prefix: Option<LitStr>,
     entity_type: Option<LitStr>,
-    entity_id: Option<LitStr>,
+    entity_id: Option<EntityId>,
 }
 
 /// Variant-level `#[action(…)]`. Present only where a default is wrong.
@@ -51,16 +56,17 @@ struct Variant {
     /// application's own event enum can be named rather than spelled.
     event: Option<Expr>,
     entity_type: Option<LitStr>,
-    entity_id: Option<LitStr>,
+    entity_id: Option<EntityId>,
     instance_only: bool,
 }
 
-/// The Cedar id of the sentinel resource a coarse check asks about.
+/// The Cedar id a coarse check asks about, when the enum does not say.
 ///
 /// A coarse gate runs before anything is loaded, so there is no object to
-/// name and the id is always a constant. The tenant reaches
-/// `PolicyExtension::build_resource_uid` as its own argument, so this
-/// says only *which* collection, never whose.
+/// name: the collection is the default, and it says *which* one rather
+/// than whose. An asset whose collections are per-tenant writes
+/// `#[actions(entity_id = tenant)]`, and doxa substitutes the request's
+/// tenant rather than asking the consumer's UID builder to.
 const DEFAULT_ENTITY_ID: &str = "collection";
 
 pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
@@ -111,14 +117,15 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         Some(lit) => lit.value(),
         None => format!("{resource}Collection"),
     };
-    let entity_id = match &container.entity_id {
-        Some(lit) => lit.value(),
-        None => DEFAULT_ENTITY_ID.to_owned(),
-    };
+    let entity_id = container
+        .entity_id
+        .clone()
+        .unwrap_or_else(|| EntityId::literal(DEFAULT_ENTITY_ID, enum_name.span()));
 
     let module = Ident::new(&snake_case(&enum_name.to_string()), enum_name.span());
 
     let mut markers = Vec::new();
+    let mut consts = Vec::new();
     let mut rows = Vec::new();
     let mut arms = Vec::new();
     let mut all = Vec::new();
@@ -175,100 +182,129 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             None => quote!(),
         };
 
-        if parsed.instance_only {
-            rows.push(quote! {
-                ::doxa::auth::Action::new(#action) #event
-            });
-            continue;
-        }
+        // The coarse half, which is the only part a variant can opt out
+        // of: an `instance_only` action has no capability, and a
+        // `capable` one gates on a capability that already exists.
+        // Minting a second marker over that name would put two entries in
+        // the catalog and leave whichever the routes did not name looking
+        // enforced.
+        let (capability, declaration, cap_name) = if parsed.instance_only {
+            (quote!(), quote!(), None)
+        } else if let Some(path) = &parsed.capable {
+            (
+                quote!(.capability(<#path as ::doxa::policy::Capable>::CAPABILITY)),
+                quote!(),
+                None,
+            )
+        } else {
+            let cap_name = match &parsed.capability {
+                Some(lit) => lit.value(),
+                None => format!("{prefix}.{action}"),
+            };
+            let description = parsed
+                .description
+                .clone()
+                .map(|lit| lit.value())
+                .or_else(|| doc_comment(&variant.attrs))
+                .unwrap_or_else(|| format!("{action} on {resource}"));
 
-        // A capability that already exists is referenced, not redeclared.
-        // Minting a second marker over the same name would put two
-        // entries in the catalog and leave whichever the routes did not
-        // name looking enforced.
-        if let Some(path) = &parsed.capable {
-            rows.push(quote! {
-                ::doxa::auth::Action::new(#action)
-                    .capability(<#path as ::doxa::policy::Capable>::CAPABILITY)
-                    #event
-            });
-            continue;
-        }
-
-        let cap_name = match &parsed.capability {
-            Some(lit) => lit.value(),
-            None => format!("{prefix}.{action}"),
-        };
-        let description = parsed
-            .description
-            .clone()
-            .map(|lit| lit.value())
-            .or_else(|| doc_comment(&variant.attrs))
-            .unwrap_or_else(|| format!("{action} on {resource}"));
-
-        let check = CheckArgs {
-            action: LitStr::new(&action, ident.span()),
-            entity_type: LitStr::new(
-                parsed
-                    .entity_type
-                    .as_ref()
-                    .map(|lit| lit.value())
-                    .unwrap_or_else(|| entity_type.clone())
-                    .as_str(),
-                ident.span(),
-            ),
-            entity_id: LitStr::new(
-                parsed
+            let check = CheckArgs {
+                action: LitStr::new(&action, ident.span()),
+                entity_type: LitStr::new(
+                    parsed
+                        .entity_type
+                        .as_ref()
+                        .map(|lit| lit.value())
+                        .unwrap_or_else(|| entity_type.clone())
+                        .as_str(),
+                    ident.span(),
+                ),
+                entity_id: parsed
                     .entity_id
-                    .as_ref()
-                    .map(|lit| lit.value())
-                    .unwrap_or_else(|| entity_id.clone())
-                    .as_str(),
-                ident.span(),
-            ),
+                    .clone()
+                    .unwrap_or_else(|| entity_id.clone()),
+            };
+
+            let declaration = declare(
+                ident,
+                &LitStr::new(&cap_name, ident.span()),
+                &LitStr::new(&description, ident.span()),
+                std::slice::from_ref(&check),
+            );
+
+            (
+                quote!(.capability(<#module::#ident as ::doxa::policy::Capable>::CAPABILITY)),
+                declaration,
+                Some(cap_name),
+            )
         };
 
-        let declaration = declare(
-            ident,
-            &LitStr::new(&cap_name, ident.span()),
-            &LitStr::new(&description, ident.span()),
-            std::slice::from_ref(&check),
-        );
+        // A const rather than an inline row, because a registration needs
+        // something with an address. `ACTIONS` then points at the same
+        // value the catalog holds, so the two cannot describe one action
+        // differently.
+        //
+        // Emitted beside the enum rather than inside the module: `event`
+        // is an arbitrary expression and `capable` an arbitrary path, and
+        // both are written where the enum is. Resolving them one module
+        // deeper would break every table that names its own event enum.
+        //
+        // Named after the enum as well as the variant, because that is the
+        // scope it lands in: two vocabularies in one module may each have
+        // a `Read`, and they are different actions on different assets.
+        let row_const = Ident::new(&format!("_DOXA_ACTION_{enum_name}_{ident}"), ident.span());
 
-        let marker_doc = format!("The `{cap_name}` capability.");
-        let marker_vis = module_vis(vis);
+        let marker_doc = match &cap_name {
+            Some(cap) => format!("The `{action}` action, and the `{cap}` capability."),
+            None => format!("The `{action}` action."),
+        };
+
         markers.push(quote! {
             #[doc = #marker_doc]
-            #marker_vis struct #ident;
+            pub struct #ident;
+
+            impl ::doxa::auth::DeclaredAction for #ident {
+                const ACTION: &'static str = #action;
+            }
+
             #declaration
         });
 
-        rows.push(quote! {
-            ::doxa::auth::Action::new(#action)
-                .capability(<#module::#ident as ::doxa::policy::Capable>::CAPABILITY)
-                #event
+        consts.push(quote! {
+            #[doc(hidden)]
+            #[allow(non_upper_case_globals)]
+            const #row_const: ::doxa::auth::Action =
+                ::doxa::auth::Action::new(#action) #capability #event;
+
+            // Declaring the action is what puts it in the catalog, so
+            // `doxa::auth::actions()` can answer without anyone
+            // maintaining a list. Expands to nothing without the
+            // `catalog` feature.
+            ::doxa::auth::inventory::submit! { &#row_const }
         });
+
+        rows.push(quote!(#row_const));
     }
 
-    // Every action either gated on a capability declared elsewhere or
-    // instance-only: there is nothing to put in the module, and an empty
-    // one would only be a name to wonder about.
-    let markers = (!markers.is_empty()).then(|| {
-        let module_doc = format!(
-            "Capability markers for [`{enum_name}`], one per action.\n\n\
-             Each is a full capability declaration — it registers in the \
-             catalog and can be named as `Granted<Cap<{module}::…>>`."
-        );
-        quote! {
-            #[doc = #module_doc]
-            #vis mod #module {
-                #(#markers)*
-            }
+    let module_doc = format!(
+        "Action markers for [`{enum_name}`], one per variant.\n\n\
+         Each implements `DeclaredAction`, so passing one to \
+         `AuthorizeLoaded::authorize` is checked against the asset's \
+         vocabulary at build time. Where the variant declares a \
+         capability the marker carries that too — it registers in the \
+         catalog and can be named as `Granted<Cap<{module}::…>>`."
+    );
+    let markers = quote! {
+        #[doc = #module_doc]
+        #vis mod #module {
+            #(#markers)*
         }
-    });
+    };
 
     Ok(quote! {
         #markers
+
+        #(#consts)*
 
         impl #enum_name {
             /// Every action this asset permits, as `Granting::ACTIONS`
@@ -288,29 +324,22 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     })
 }
 
-/// A marker inside the generated module needs to be at least as visible
-/// as the module itself, and `pub` inside a private module is still
-/// private.
-fn module_vis(vis: &Visibility) -> TokenStream {
-    match vis {
-        Visibility::Inherited => quote!(),
-        _ => quote!(pub),
-    }
-}
-
 fn parse_container(attrs: &[Attribute]) -> syn::Result<Container> {
     let mut out = Container::default();
 
     for attr in attrs.iter().filter(|a| a.path().is_ident("actions")) {
         attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("entity_id") {
+                out.entity_id = Some(parse_entity_id(meta.value()?)?);
+                return Ok(());
+            }
+
             let target = if meta.path.is_ident("resource") {
                 &mut out.resource
             } else if meta.path.is_ident("prefix") {
                 &mut out.prefix
             } else if meta.path.is_ident("entity_type") {
                 &mut out.entity_type
-            } else if meta.path.is_ident("entity_id") {
-                &mut out.entity_id
             } else {
                 return Err(meta.error(
                     "unknown `actions` option; expected `resource`, `prefix`, `entity_type` or \
@@ -348,6 +377,11 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
                 return Ok(());
             }
 
+            if meta.path.is_ident("entity_id") {
+                out.entity_id = Some(parse_entity_id(meta.value()?)?);
+                return Ok(());
+            }
+
             let target = if meta.path.is_ident("name") {
                 &mut out.name
             } else if meta.path.is_ident("capability") {
@@ -356,8 +390,6 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
                 &mut out.description
             } else if meta.path.is_ident("entity_type") {
                 &mut out.entity_type
-            } else if meta.path.is_ident("entity_id") {
-                &mut out.entity_id
             } else {
                 return Err(meta.error(
                     "unknown `action` option; expected `name`, `capability`, `capable`, \
@@ -490,23 +522,48 @@ mod tests {
             "{out}",
         );
         assert!(out.contains(r#"entity_type : "SourceCollection""#), "{out}");
-        assert!(out.contains(r#"entity_id : "collection""#), "{out}");
+        assert!(
+            out.contains(r#"ResourceId :: Literal ("collection")"#),
+            "{out}",
+        );
         assert!(out.contains("pub mod source_action"), "{out}");
     }
 
+    /// The tenant is written as a bare word, not as the string
+    /// `"tenant"`. It names no id — it says there is one to substitute,
+    /// and doxa does that before the consumer's UID builder is reached.
     #[test]
     fn the_container_overrides_every_default() {
         let out = expand_ok(quote! {
-            #[actions(resource = "Source", prefix = "sources", entity_id = "tenant")]
+            #[actions(resource = "Source", prefix = "sources", entity_id = tenant)]
             pub enum SourceAction {
                 Delete,
             }
         });
 
         assert!(out.contains(r#"name : "sources.delete""#), "{out}");
-        assert!(out.contains(r#"entity_id : "tenant""#), "{out}");
+        assert!(out.contains("ResourceId :: Tenant"), "{out}");
     }
 
+    /// A misspelling is caught at the attribute rather than becoming a
+    /// literal id that matches nothing — which is what a bare string
+    /// would have silently produced.
+    #[test]
+    fn an_unknown_entity_id_word_is_refused() {
+        let message = expand_err(quote! {
+            #[actions(entity_id = tennant)]
+            pub enum SourceAction {
+                Read,
+            }
+        });
+
+        assert!(message.contains("tennant"), "{message}");
+        assert!(message.contains("bare word `tenant`"), "{message}");
+    }
+
+    /// No capability, but still a marker: the action exists, so there is
+    /// something to name at a call site and something to check it
+    /// against. Only the coarse half is absent.
     #[test]
     fn instance_only_declares_no_capability() {
         let out = expand_ok(quote! {
@@ -517,10 +574,63 @@ mod tests {
         });
 
         assert!(!out.contains("CapabilityCheck"), "{out}");
-        assert!(!out.contains("pub struct Ping"), "{out}");
+        assert!(out.contains("pub struct Ping"), "{out}");
+        assert!(
+            out.contains(r#"const ACTION : & 'static str = "ping""#),
+            "{out}"
+        );
         assert!(out.contains(r#"Action :: new ("ping")"#), "{out}");
         // The row is the whole of it: no `.capability(…)` to resolve.
         assert!(!out.contains(". capability ("), "{out}");
+    }
+
+    /// Every variant reaches the catalog, including the two that declare
+    /// no capability — which is the gap this closes. A capability-derived
+    /// list can see neither.
+    #[test]
+    fn every_variant_registers_its_action() {
+        let out = expand_ok(quote! {
+            pub enum SourceAction {
+                Read,
+                #[action(capable = catalog::SourcesArchive)]
+                Archive,
+                #[action(instance_only)]
+                Ping,
+            }
+        });
+
+        for variant in ["Read", "Archive", "Ping"] {
+            let row = format!("_DOXA_ACTION_SourceAction_{variant}");
+            assert!(out.contains(&row), "{variant} has no action const: {out}");
+            assert!(
+                out.contains(&format!("submit ! {{ & {row} }}")),
+                "{variant} is not registered: {out}",
+            );
+        }
+    }
+
+    /// The action const lands beside the enum, not inside the module, so
+    /// its name has to carry the enum too. Two vocabularies in one module
+    /// each having a `Read` is ordinary — they are different actions on
+    /// different assets — and a shared const name would be a redefinition
+    /// the user never wrote.
+    #[test]
+    fn two_vocabularies_in_one_module_do_not_collide() {
+        let sources = expand_ok(quote! {
+            pub enum SourceAction { Read }
+        });
+        let widgets = expand_ok(quote! {
+            pub enum WidgetAction { Read }
+        });
+
+        assert!(
+            sources.contains("_DOXA_ACTION_SourceAction_Read"),
+            "{sources}"
+        );
+        assert!(
+            widgets.contains("_DOXA_ACTION_WidgetAction_Read"),
+            "{widgets}"
+        );
     }
 
     #[test]
@@ -586,13 +696,17 @@ mod tests {
             "{out}",
         );
         assert!(!out.contains("CapabilityCheck"), "{out}");
-        assert!(!out.contains("struct Read"), "{out}");
+        // The action marker is still emitted — it is the referenced
+        // capability that is not re-declared, not the action.
+        assert!(out.contains("pub struct Read"), "{out}");
+        assert!(!out.contains("Capable for Read"), "{out}");
     }
 
-    /// Nothing to declare means no module, rather than an empty one left
-    /// behind as a name to wonder about.
+    /// The module is emitted even when no variant declares a capability:
+    /// every action has a marker now, because every action is something a
+    /// call site may need to name and have checked.
     #[test]
-    fn an_enum_that_declares_nothing_emits_no_module() {
+    fn an_enum_that_declares_no_capability_still_has_markers() {
         let out = expand_ok(quote! {
             pub enum SourceAction {
                 #[action(capable = catalog::SourcesRead)]
@@ -602,7 +716,10 @@ mod tests {
             }
         });
 
-        assert!(!out.contains("mod source_action"), "{out}");
+        assert!(out.contains("mod source_action"), "{out}");
+        assert!(out.contains("pub struct Read"), "{out}");
+        assert!(out.contains("pub struct Ping"), "{out}");
+        assert!(!out.contains("CapabilityCheck"), "{out}");
     }
 
     #[test]

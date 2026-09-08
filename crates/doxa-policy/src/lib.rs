@@ -70,7 +70,7 @@ macro_rules! __doxa_capability_submit {
 
 #[cfg(feature = "catalog")]
 pub use capability::capabilities;
-pub use capability::{Capability, CapabilityCheck, CapabilityChecker, Capable};
+pub use capability::{Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceId};
 pub use cedar_core::{TenantStoreCache, DEFAULT_TENANT_CACHE_CAPACITY, DEFAULT_TENANT_CACHE_TTL};
 pub use error::AuthError;
 pub use extension::{PolicyExtension, ResourceAccess};

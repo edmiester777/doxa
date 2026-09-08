@@ -25,7 +25,7 @@ use doxa_policy::{AuthError, CapabilityChecker, Capable};
 
 use crate::claims::Claims;
 use crate::context::{AuthContext, CapabilityContext};
-use crate::record::{self, Denial};
+use crate::record::{self, Denied};
 
 /// Extracts the authenticated user context. Returns 401 if missing.
 ///
@@ -114,7 +114,7 @@ impl SchemeName for BearerScheme {
 ///
 /// ```ignore
 /// use doxa_auth::Require;
-/// use doxa_policy::{Capable, Capability, CapabilityCheck};
+/// use doxa_policy::{Capable, Capability, CapabilityCheck, ResourceId};
 ///
 /// pub const WIDGETS_READ: Capability = Capability {
 ///     name: "widgets.read",
@@ -122,7 +122,7 @@ impl SchemeName for BearerScheme {
 ///     checks: &[CapabilityCheck {
 ///         action: "read",
 ///         entity_type: "Widget",
-///         entity_id: "collection",
+///         entity_id: ResourceId::Literal("collection"),
 ///     }],
 /// };
 ///
@@ -180,15 +180,16 @@ where
             return Ok(Require(PhantomData));
         }
 
-        let (resource_type, resource_id) = crate::granted::capability_resource(M::CAPABILITY);
+        let (resource_type, resource_id) =
+            crate::granted::capability_resource(M::CAPABILITY, tenant);
 
         record::record(
             &parts.extensions,
-            Denial {
+            Denied {
                 tenant: ctx.tenant_id.as_deref(),
                 action: M::CAPABILITY.name,
                 resource_type,
-                resource_id,
+                resource_id: &resource_id,
                 reason: "capability denied",
             },
         );

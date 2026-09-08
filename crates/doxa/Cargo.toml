@@ -11,7 +11,7 @@ keywords = ["axum", "openapi", "auth", "cedar", "doxa"]
 categories = ["web-programming::http-server", "authentication"]
 
 [features]
-default = ["docs", "macros", "docs-scalar", "policy-catalog"]
+default = ["docs", "macros", "docs-scalar", "policy-catalog", "auth-catalog"]
 
 # OpenAPI documentation, Scalar UI hosting, and the core doxa-docs
 # surface (ApiDocBuilder, MountDocsExt, ProblemDetails, etc.).
@@ -49,6 +49,13 @@ policy-axum = ["policy", "doxa-policy/axum"]
 # life-before-main constructor per declaration.
 policy-catalog = ["doxa-policy?/catalog"]
 
+# Self-registering action catalog, so `doxa::auth::actions()` answers
+# without a hand-maintained list. Separate from `policy-catalog` because
+# the vocabularies are: a capability is what a client is told it holds,
+# an action is what Cedar is asked about, and an instance-only action has
+# the second without the first.
+auth-catalog = ["doxa-auth?/catalog"]
+
 # SeaORM loaders for policy resources: the `ScopedRow` trait, and the
 # `#[resource(key)]` / `#[resource(scope)]` roles on
 # `#[derive(PolicyResource)]` that generate an impl of it. Pulls SeaORM
@@ -56,7 +63,7 @@ policy-catalog = ["doxa-policy?/catalog"]
 policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-sea-orm"]
 
 # Everything.
-full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "policy-axum", "policy-catalog", "policy-sea-orm"]
+full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
 
 [dependencies]
 doxa-docs = { workspace = true, optional = true }
