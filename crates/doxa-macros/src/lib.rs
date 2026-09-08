@@ -463,6 +463,61 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Both roles require the `policy-sea-orm` feature; using one without it
 /// is an error naming the feature rather than a missing impl at the route.
+///
+/// ## More ways in than one
+///
+/// `#[resource(key)]` is the *unnamed* lookup, and there is one per struct.
+/// A row reached three ways — a uuid, a name, and a `(dataset, version)`
+/// pair — runs out of it, and used to give the surplus to `#[asset]`'s
+/// `load_with`, which is the one door that gives up the scope guarantee.
+///
+/// So name them. `#[resource(key(FindByPair))]` on every column that takes
+/// part emits a `Lookup` marker of that name; a column may carry several
+/// names, and several columns may carry one:
+///
+/// ```ignore
+/// #[resource(entity_type = "Version")]
+/// pub struct Model {
+///     #[sea_orm(primary_key)]                      pub id: Uuid,
+///     #[resource(id, key(FindByDataset, FindByPair))] pub dataset: String,
+///     #[resource(key(FindByPair))]                 pub version: i64,
+///     #[resource(scope)]                           pub tenant_id: String,
+/// }
+///
+/// // …and the asset names the way in rather than the row:
+/// #[asset(with = FindByPair, profile = AppGrants, actions = VersionAction)]
+/// pub struct VersionByPair;
+/// ```
+///
+/// A composite lookup also gets a key struct — `FindByPairKey` above, with
+/// a field per column and a `RouteKey` impl that parses it out of the
+/// route's path segments. It is a struct rather than a tuple because every
+/// hand-written call site builds the key by position, and two segments of
+/// the same type transpose silently. Route parsing stays positional, in
+/// declaration order, because path segments are. A single-column lookup
+/// keys on the bare scalar, exactly as `#[resource(key)]` does.
+///
+/// Named or not, every lookup is built on `ScopedTable::scoped`, so the
+/// owning column reaches all of them: a second way in is not a way out.
+///
+/// ## A condition on every query
+///
+/// `#[resource(filter = …)]` adds a condition each query carries on top of
+/// the scope — the soft-delete tombstone being the case it exists for:
+///
+/// ```ignore
+/// #[resource(entity_type = "Version", filter = Column::DeletedAt.is_null())]
+/// ```
+///
+/// Repeatable, and `AND`ed. The expression is spliced rather than
+/// interpreted, so it is whatever SeaORM accepts in a `filter(…)` call and
+/// there is no operator vocabulary here to fall behind theirs.
+///
+/// It lands on the table rather than on a lookup, which is what makes it
+/// unforgettable: applied by hand it has to be applied to the key lookup,
+/// the id lookup, the listing *and* the residual filter, and missing one is
+/// not a compile error but a deleted row coming back on whichever route
+/// used it.
 #[proc_macro_derive(PolicyResource, attributes(resource))]
 pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
     policy_resource::expand(input.into())
@@ -608,8 +663,9 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// |---|---|
 /// | `profile` | required — the application's `GrantProfile` |
 /// | `actions` | required — the enum deriving `Actions` |
-/// | `row` | `Self` |
+/// | `row` | `Self` — or the lookup's, with `with` |
 /// | `key` | `<Row as FetchByKey<State>>::Key`; `key = pk` for the row's own id |
+/// | `with` | none — names a `Lookup`, which carries the row and the key |
 /// | `list` | none — `list = tenant` adds a tenant-confined `Scoping` |
 /// | `ctx` | the profile's |
 /// | `source` | the profile's — and the state follows it |
@@ -625,11 +681,28 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// from `#[resource(key)]` and `#[resource(scope)]`; anything else answers
 /// them itself, which is one associated type and a method per lookup.
 ///
+/// # A second way in
+///
+/// `with = FindByPair` names a `Lookup` — one of the markers
+/// `#[resource(key(FindByPair))]` emits — for the row reached more ways
+/// than its unnamed `FetchByKey` and `FetchById` can spell between them. A
+/// marker carries its row and its key, so `with` is the whole declaration:
+///
+/// ```ignore
+/// #[asset(with = FindByPair, profile = AppGrants, actions = VersionAction)]
+/// pub struct VersionByPair;
+/// ```
+///
+/// Reach for it before `load_with`, and for the reason below: a named
+/// lookup is still handed a `&str` scope and nothing else, so it is a
+/// second way in rather than a way out.
+///
 /// # `load_with`, and what taking the caller costs
 ///
 /// `FetchByKey::fetch` is handed a `&str` scope and nothing else, which is
 /// the guarantee rather than a thin signature: a lookup that cannot see
-/// the caller cannot ignore the caller's tenant.
+/// the caller cannot ignore the caller's tenant. `Lookup::fetch` takes the
+/// same, which is why naming one costs nothing here.
 ///
 /// `load_with` is handed the whole `Ctx`, and exists for the lookup that
 /// needs more than the scope — one that varies by role, or reads the
