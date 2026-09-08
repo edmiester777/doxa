@@ -910,6 +910,53 @@ mod tests {
         );
     }
 
+    /// A body may name one object twice — `sales.orders` and the bare
+    /// `orders` resolving to one row — so the batch has to tolerate two
+    /// entries for one UID. Cedar refuses a duplicate in an entity set, so
+    /// without folding them this is a `500` rather than two answers.
+    #[tokio::test]
+    async fn a_batch_naming_one_resource_twice_answers_twice() {
+        let router = build_stub_router(REGION_POLICY);
+
+        let decisions = router
+            .check_instance_many(
+                "batch_t6",
+                &["viewer".to_string()],
+                "read",
+                &[widget("w-1", "us"), widget("w-1", "us")],
+            )
+            .await
+            .expect("one resource named twice is not an error");
+
+        assert_eq!(
+            decisions.iter().map(|d| d.allowed).collect::<Vec<_>>(),
+            vec![true, true],
+        );
+    }
+
+    /// Two snapshots of one row disagreeing about an attribute is still one
+    /// object, and Cedar decides about objects — so the two slots have to
+    /// carry one verdict rather than one each. Which snapshot's attributes
+    /// survive the fold is not specified; that they agree is, because an
+    /// object both granted and refused in one answer is not a verdict a
+    /// caller can act on.
+    #[tokio::test]
+    async fn one_uid_gets_one_verdict_however_often_it_is_named() {
+        let router = build_stub_router(REGION_POLICY);
+
+        let decisions = router
+            .check_instance_many(
+                "batch_t7",
+                &["viewer".to_string()],
+                "read",
+                &[widget("w-1", "us"), widget("w-1", "eu")],
+            )
+            .await
+            .expect("conflicting snapshots of one row are not an error");
+
+        assert_eq!(decisions[0].allowed, decisions[1].allowed);
+    }
+
     #[tokio::test]
     async fn an_empty_batch_asks_nothing() {
         let router = build_failing_uid_router();

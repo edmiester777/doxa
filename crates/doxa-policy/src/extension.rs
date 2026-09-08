@@ -294,6 +294,14 @@ pub trait PolicyExtension: Send + Sync {
     /// principal whose tenancy is resolved rather than asserted. The two
     /// agree for an ordinary authenticated caller, and where they do not,
     /// this is the one that decided what the session contains.
+    ///
+    /// `None` and `Some("")` are different answers, and the difference
+    /// matters. `None` defers; `Some("")` says the session names no tenant,
+    /// which [`SessionChecker`](crate::session::SessionChecker) refuses
+    /// rather than evaluating. An extension whose rule is "the tenant is
+    /// the session's, full stop" wants the latter, and writes it as
+    /// `Some(session.tenant.as_deref().unwrap_or(""))` — deferring there
+    /// would quietly evaluate against a tenant the session never resolved.
     fn session_tenant<'a>(&self, _session: &'a Self::SessionOutput) -> Option<&'a str> {
         None
     }
