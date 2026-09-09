@@ -59,9 +59,11 @@ struct Source {
 /// with: the rows arrive already loaded, so nothing here is `Self`.
 struct SourceByName;
 
+doxa::auth::route_key!(pub SourceKey { name: String });
+
 impl Granting for SourceByName {
     type Row = Source;
-    type Key = String;
+    type Key = SourceKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -75,7 +77,7 @@ impl Granting for SourceByName {
     /// to a pool that cannot see the caller's open transaction, which is
     /// the whole reason this door exists.
     async fn load(
-        _key: String,
+        SourceKey { name: _ }: SourceKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Source>, StatusCode> {

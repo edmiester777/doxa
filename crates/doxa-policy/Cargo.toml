@@ -14,7 +14,7 @@ categories = ["authentication", "web-programming"]
 default = ["catalog"]
 # Optional axum integration: derives `ApiError` for `AuthError` so the
 # error type plugs straight into axum handlers with typed OpenAPI docs.
-axum = ["dep:axum", "dep:doxa", "dep:doxa-macros", "dep:http", "dep:serde", "dep:utoipa"]
+axum = ["dep:axum", "dep:doxa", "dep:doxa-macros", "dep:http", "dep:utoipa"]
 # Self-assembling capability catalog. Every `#[capability]` registers
 # itself, so `capabilities()` answers without a hand-maintained list.
 # Costs a life-before-main constructor per declaration; turn it off on a
@@ -31,7 +31,7 @@ cached = { workspace = true }
 inventory = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true, optional = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

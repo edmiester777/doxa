@@ -57,7 +57,9 @@ enum Role {
     Id,
     Attr(String),
     Parent(LitStr),
-    Key,
+    /// The unnamed lookup, carrying the name a route's segment is spelled
+    /// with — the field's own unless `key = "…"` said otherwise.
+    Key(String),
     /// One column of the named lookup `#[resource(key(Name))]` declares.
     /// A field may carry several, and several fields may carry the same
     /// one — which is how a column serves more than one way in, and how a
@@ -107,7 +109,8 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let mut id_field: Option<Ident> = None;
     let mut attrs: Vec<(String, Ident)> = Vec::new();
     let mut parents: Vec<(LitStr, Ident)> = Vec::new();
-    let mut key: Option<(Ident, Type)> = None;
+    // Column, its type, and the name a route's segment carries.
+    let mut key: Option<(Ident, Type, String)> = None;
     let mut named: Vec<NamedLookup> = Vec::new();
     let mut scope: Option<Ident> = None;
     // What the identifier columns are called, for the `key = pk` route.
@@ -115,12 +118,12 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     // primary key is a fact about the table that the row has already
     // stated once. Plural for the composite key, whose `PrimaryKeyOf` is a
     // tuple and whose route therefore has a segment each.
-    let mut primary_key: Vec<Ident> = Vec::new();
+    let mut primary_key: Vec<(Ident, Type)> = Vec::new();
 
     for field in &fields.named {
         let name = field.ident.clone().expect("named field");
         if is_primary_key(field) {
-            primary_key.push(name.clone());
+            primary_key.push((name.clone(), field.ty.clone()));
         }
         for role in field_roles(field)? {
             match role {
@@ -135,7 +138,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                 }
                 Role::Attr(attr_key) => attrs.push((attr_key, name.clone())),
                 Role::Parent(ty) => parents.push((ty, name.clone())),
-                Role::Key => {
+                Role::Key(segment) => {
                     if key.is_some() {
                         return Err(syn::Error::new_spanned(
                             field,
@@ -145,7 +148,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                              column that takes part",
                         ));
                     }
-                    key = Some((name.clone(), field.ty.clone()));
+                    key = Some((name.clone(), field.ty.clone(), segment));
                 }
                 Role::NamedKey(lookup) => {
                     let columns = match named.iter_mut().find(|(existing, _)| *existing == lookup) {
@@ -292,8 +295,8 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 /// meet a missing-impl error at the route rather than an explanation here.
 fn scoped_impl(
     ident: &Ident,
-    key: Option<&(Ident, Type)>,
-    primary_key: &[Ident],
+    key: Option<&(Ident, Type, String)>,
+    primary_key: &[(Ident, Type)],
     named: &[NamedLookup],
     scope: Option<&Ident>,
     filters: &[Expr],
@@ -305,7 +308,7 @@ fn scoped_impl(
             // Every one of these needs the owning column, and each is worth
             // its own diagnosis: they are three different things a struct
             // can ask for that all resolve to "mark the scope".
-            if let Some((field, _)) = key {
+            if let Some((field, _, _)) = key {
                 return Err(syn::Error::new(
                     field.span(),
                     "a key with no scope column would look up across every owner, so a caller \
@@ -355,7 +358,7 @@ fn scoped_impl(
         quote!(#key => ::std::option::Option::Some(Column::#column),)
     });
 
-    let row = key.map(|(key_field, key_ty)| {
+    let row = key.map(|(key_field, key_ty, _)| {
         let key_column = column_variant(key_field);
         quote! {
             #[automatically_derived]
@@ -379,23 +382,43 @@ fn scoped_impl(
     // `key` selects the arm: without one there is no `ScopedRow` to build
     // `FetchByKey` from, and the table keeps its id route and its listing.
     //
-    // The column names go across with them. They are the field idents this
-    // derive already read, and they are what lets a route addressing the
-    // row by that column stop repeating the name in a `#[key("…")]`.
-    let id_names = primary_key
-        .iter()
-        .map(|field| LitStr::new(&field.to_string(), field.span()));
-    let fetch = match key {
-        Some((field, _)) => {
-            let key_name = LitStr::new(&field.to_string(), field.span());
+    // A route reads its key with axum's `Path` / `Query`, which bind by
+    // field name, so every key is a struct with one named field per
+    // segment — including the one-segment keys, where a bare `String`
+    // would have nothing to bind against. These are those structs, and
+    // the fields are the idents this derive already read.
+    let id_key = (!primary_key.is_empty()).then(|| key_struct(ident, "Id", primary_key));
+    let named_key = key.map(|(field, ty, segment)| {
+        let segment = Ident::new(segment, field.span());
+        key_struct(ident, "Key", &[(segment, ty.clone())])
+    });
+
+    let id_fields = primary_key.iter().map(|(field, _)| field);
+    let fetch = match (&id_key, key) {
+        (Some((id_ty, _)), Some((field, _, segment))) => {
+            let segment = Ident::new(segment, field.span());
+            let key_ty = Ident::new(&format!("{ident}Key"), ident.span());
             quote! {
                 ::doxa::policy::fetch_from_scoped!(
-                    #ident, key, id = [#(#id_names),*], key = [#key_name]
+                    #ident,
+                    id = #id_ty { #(#id_fields),* },
+                    key = #key_ty { #segment }
                 );
             }
         }
-        None => quote!(::doxa::policy::fetch_from_scoped!(#ident, id = [#(#id_names),*]);),
+        (Some((id_ty, _)), None) => quote! {
+            ::doxa::policy::fetch_from_scoped!(#ident, id = #id_ty { #(#id_fields),* });
+        },
+        (None, Some((field, _, segment))) => {
+            let segment = Ident::new(segment, field.span());
+            let key_ty = Ident::new(&format!("{ident}Key"), ident.span());
+            quote!(::doxa::policy::fetch_from_scoped!(#ident, key = #key_ty { #segment });)
+        }
+        (None, None) => quote!(::doxa::policy::fetch_from_scoped!(#ident);),
     };
+
+    let id_key = id_key.map(|(_, tokens)| tokens);
+    let named_key = named_key.map(|(_, tokens)| tokens);
 
     // One marker type per named lookup, each carrying its own key and its
     // own columns. The macro builds every one on `ScopedTable::scoped`, so
@@ -415,20 +438,9 @@ fn scoped_impl(
                 .join(" + "),
         );
 
-        // A single column keeps the bare scalar for its key — the same
-        // shape `#[resource(key)]` produces, so a one-segment route reads
-        // identically whether its lookup was named or not. Only a composite
-        // needs a struct, and only a composite gets one.
-        if columns.len() == 1 {
-            return quote! {
-                ::doxa::policy::scoped_lookup!(
-                    #[doc = #doc]
-                    #[automatically_derived]
-                    pub #lookup for #ident { #(#entries),* }
-                );
-            };
-        }
-
+        // Every lookup gets a key struct, one column or several: the name
+        // is what binds a route's segment to a column, and only a struct
+        // has names to offer.
         let key = Ident::new(&format!("{lookup}Key"), lookup.span());
         let route_key = route_key_impl(&key, columns);
 
@@ -484,13 +496,48 @@ fn scoped_impl(
 
         #row
 
+        #id_key
+
+        #named_key
+
         #fetch
 
         #(#lookups)*
     })
 }
 
-/// The `RouteKey` impl for a composite lookup's generated key struct.
+/// The struct a route's key parses into, plus the [`RouteKey`] impl that
+/// describes its segments to the generated OpenAPI.
+///
+/// One named field per segment, and the name is the whole point: a guard
+/// reads the key with axum's `Path` or `Query`, which bind a capture to a
+/// field by name, so the route parameter and the field are one string.
+/// A one-segment key is a one-field struct rather than the bare column
+/// type for exactly that reason — a `String` names nothing.
+///
+/// [`RouteKey`]: https://docs.rs/doxa-auth/latest/doxa_auth/granted/trait.RouteKey.html
+fn key_struct(row: &Ident, suffix: &str, fields: &[(Ident, Type)]) -> (Ident, TokenStream) {
+    let name = Ident::new(&format!("{row}{suffix}"), row.span());
+    let doc = format!("The key a route naming a [`{row}`] parses into.");
+
+    let decls = fields.iter().map(|(field, ty)| {
+        quote! {
+            #[allow(missing_docs)]
+            pub #field: #ty,
+        }
+    });
+
+    let tokens = quote! {
+        #[doc = #doc]
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize)]
+        pub struct #name { #(#decls)* }
+    };
+
+    let route_key = route_key_impl(&name, fields);
+    (name, quote! { #tokens #route_key })
+}
+
+/// The `RouteKey` impl for a generated key struct.
 ///
 /// Emitted here rather than by `scoped_lookup!` because [`RouteKey`] lives
 /// in `doxa-auth`, and `doxa-policy` — where that macro is defined, and
@@ -498,33 +545,17 @@ fn scoped_impl(
 /// not depend on it. The derive already assumes the `doxa` facade, so
 /// naming both halves of it costs nothing new.
 ///
-/// Only a composite reaches this. A single-column lookup keys on the bare
-/// scalar, which already has a `RouteKey` impl.
+/// It describes the key rather than parsing it. Reading the segments is
+/// serde's job — the struct derives [`Deserialize`](serde::Deserialize)
+/// and a guard hands it to axum's `Path` / `Query` — so what is left here
+/// is what serde cannot say: the OpenAPI type of each segment, and the
+/// order the document lists them in.
 ///
 /// [`RouteKey`]: https://docs.rs/doxa-auth/latest/doxa_auth/granted/trait.RouteKey.html
 fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
     let kinds = columns
         .iter()
         .map(|(_, ty)| quote!(<#ty as ::doxa::auth::KeySegment>::KIND));
-
-    // Positional, and the position is the order the columns were declared
-    // in. Path segments arrive in route order and there is nothing in them
-    // to match a field name against, so this is where the ordering still
-    // has to be got right — which is why the struct exists for every *other*
-    // call site.
-    let fields = columns.iter().enumerate().map(|(index, (field, ty))| {
-        quote! {
-            #field: {
-                let __raw = __segments.get(#index).copied().unwrap_or_default();
-                <#ty as ::doxa::auth::KeySegment>::parse_segment(__raw).ok_or_else(|| {
-                    ::doxa::auth::KeyError {
-                        position: #index,
-                        raw: ::std::borrow::ToOwned::to_owned(__raw),
-                    }
-                })?
-            }
-        }
-    });
 
     let names = columns
         .iter()
@@ -538,12 +569,6 @@ fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
             // Declared beside `SEGMENTS`, so the names and the kinds are
             // one list and cannot come to describe different segments.
             const NAMES: &'static [&'static str] = &[#(#names),*];
-
-            fn parse(
-                __segments: &[&str],
-            ) -> ::std::result::Result<Self, ::doxa::auth::KeyError> {
-                ::std::result::Result::Ok(Self { #(#fields),* })
-            }
         }
     }
 }
@@ -675,7 +700,11 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
                 Ok(())
             } else if meta.path.is_ident("key") {
                 // Bare `key` is the unnamed lookup, one column and one per
-                // struct. `key(A, B)` enrols this column in the named
+                // struct, and the route parameter takes the field's own
+                // name. `key = "slug"` spells it differently — the column
+                // is still this field, but a route says `{slug}`, which is
+                // how one column serves a route that calls it something
+                // else. `key(A, B)` enrols this column in the named
                 // lookups `A` and `B` — so one column can serve several
                 // ways in, and several columns can compose one key.
                 if meta.input.peek(syn::token::Paren) {
@@ -691,7 +720,11 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
                     }
                     roles.extend(names.into_iter().map(Role::NamedKey));
                 } else {
-                    roles.push(Role::Key);
+                    let name = match meta.value() {
+                        Ok(value) => value.parse::<LitStr>()?.value(),
+                        Err(_) => default_key.clone(),
+                    };
+                    roles.push(Role::Key(name));
                 }
                 Ok(())
             } else if meta.path.is_ident("scope") {
@@ -699,8 +732,8 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
                 Ok(())
             } else {
                 Err(meta.error(
-                    "expected `id`, `attr`, `parent = \"EntityType\"`, `key`, `key(Lookup, …)` \
-                     or `scope`",
+                    "expected `id`, `attr`, `parent = \"EntityType\"`, `key`, `key = \"segment\"`, \
+                     `key(Lookup, …)` or `scope`",
                 ))
             }
         })?;
@@ -908,10 +941,9 @@ mod tests {
         assert!(out.contains("Column :: CompanyId"), "{out}");
     }
 
-    /// The column names go across with the lookups, because `Column::Name`
-    /// is a variant and the key behind it is a bare `String` — neither can
-    /// say what a route's parameter should be called. This is the field
-    /// ident, which the derive is already holding.
+    /// Each way in gets a key struct, and the field names are the field
+    /// idents the derive is already holding — so a route's parameter is
+    /// named once, here.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn the_key_and_identifier_columns_are_named_for_the_route() {
@@ -929,7 +961,9 @@ mod tests {
         });
 
         assert!(
-            out.contains(r#"fetch_from_scoped ! (Model , key , id = ["id"] , key = ["name"])"#),
+            out.contains(
+                "fetch_from_scoped ! (Model , id = ModelId { id } , key = ModelKey { name })"
+            ),
             "{out}",
         );
     }
@@ -953,7 +987,7 @@ mod tests {
         });
 
         assert!(
-            out.contains(r#"fetch_from_scoped ! (Model , id = ["user_id" , "group_id"])"#),
+            out.contains("fetch_from_scoped ! (Model , id = ModelId { user_id , group_id })"),
             "{out}",
         );
     }
@@ -974,7 +1008,7 @@ mod tests {
         });
 
         assert!(
-            out.contains(r#"fetch_from_scoped ! (Model , key , id = [] , key = ["name"])"#),
+            out.contains("fetch_from_scoped ! (Model , key = ModelKey { name })"),
             "{out}",
         );
     }
@@ -1060,14 +1094,11 @@ mod tests {
             }
         });
 
-        // One column, two lookups, and the pair keeps both of its columns.
-        // The single-column one keys on the bare scalar and so declares no
-        // key struct; the composite names one.
+        // One column, two lookups, each with its own key struct.
         assert!(
             out.contains(
-                "scoped_lookup ! (# [doc = \"Reaches [`Model`] by `dataset`, within the row's \
-                 own scope.\"] # [automatically_derived] pub FindByDataset for Model { dataset \
-                 : String => Column :: Dataset })"
+                "pub FindByDataset as FindByDatasetKey for Model { dataset : String => Column :: \
+                 Dataset }"
             ),
             "{out}",
         );
@@ -1080,9 +1111,8 @@ mod tests {
         );
     }
 
-    /// A composite key is a struct, so it needs the `RouteKey` impl that
-    /// parses it out of path segments — which a tuple got for free from the
-    /// blanket impls in `doxa-auth`.
+    /// A key struct needs the `RouteKey` impl that says what its segments
+    /// are called and what the spec should call their types.
     ///
     /// It is emitted here rather than by `scoped_lookup!` because that macro
     /// lives in `doxa-policy`, which does not depend on `doxa-auth`.
@@ -1124,12 +1154,12 @@ mod tests {
         );
     }
 
-    /// A single-column lookup keys on the scalar, which already has a
-    /// `RouteKey` impl — so there is nothing to declare and nothing that
-    /// would drag `doxa-auth` into a policy-only consumer's expansion.
+    /// A single-column lookup gets a key struct too. A bare `String`
+    /// cannot say what the route's segment is called, and the name is what
+    /// binds.
     #[cfg(feature = "sea-orm")]
     #[test]
-    fn a_single_column_lookup_declares_no_key_struct() {
+    fn a_single_column_lookup_gets_a_key_struct_too() {
         let out = expand_ok(quote! {
             #[resource(entity_type = "Version")]
             struct Model {
@@ -1140,9 +1170,44 @@ mod tests {
             }
         });
 
-        assert!(out.contains("pub FindByName for Model"), "{out}");
-        assert!(!out.contains("FindByNameKey"), "{out}");
-        assert!(!out.contains("doxa :: auth"), "{out}");
+        assert!(
+            out.contains("pub FindByName as FindByNameKey for Model"),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"const NAMES : & 'static [& 'static str] = & ["name"]"#),
+            "{out}",
+        );
+    }
+
+    /// `key = "slug"` renames the route's segment without moving the
+    /// column: the lookup still matches `Column::Name`, and the key's field
+    /// — which is what a route binds — is `slug`.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn a_renamed_key_moves_the_segment_and_not_the_column() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Connection")]
+            struct Model {
+                #[resource(id, key = "slug")]
+                name: String,
+                #[resource(scope)]
+                company_id: String,
+            }
+        });
+
+        assert!(out.contains("pub struct ModelKey"), "{out}");
+        assert!(
+            out.contains("fetch_from_scoped ! (Model , key = ModelKey { slug })"),
+            "{out}",
+        );
+        assert!(
+            out.contains(r#"const NAMES : & 'static [& 'static str] = & ["slug"]"#),
+            "{out}",
+        );
+        // The column is untouched: the rename is what a route calls the
+        // segment, not where the value is looked for.
+        assert!(out.contains("Column :: Name"), "{out}");
     }
 
     /// A named lookup is enough on its own: a row with no unnamed key still
@@ -1162,11 +1227,11 @@ mod tests {
             }
         });
 
-        assert!(out.contains("pub FindByPair for Model"), "{out}");
         assert!(
-            out.contains("fetch_from_scoped ! (Model , id = [])"),
+            out.contains("pub FindByPair as FindByPairKey for Model"),
             "{out}"
         );
+        assert!(out.contains("fetch_from_scoped ! (Model)"), "{out}");
         assert!(
             !out.contains("impl :: doxa :: policy :: ScopedRow for Model"),
             "{out}",

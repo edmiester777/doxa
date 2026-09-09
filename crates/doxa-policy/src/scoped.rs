@@ -337,7 +337,10 @@ impl From<DbErr> for DbLoadError {
 ///     const KEY_COLUMN: Column = Column::Name;
 /// }
 ///
-/// doxa_policy::fetch_from_scoped!(Model, key);
+/// #[derive(serde::Deserialize)]
+/// struct ModelKey { name: String }
+///
+/// doxa_policy::fetch_from_scoped!(Model, key = ModelKey { name });
 /// ```
 ///
 /// Without the `key` argument only [`FetchById`](crate::fetch::FetchById)
@@ -345,38 +348,32 @@ impl From<DbErr> for DbLoadError {
 /// right for a table no route addresses by a column: it can still be
 /// listed and still be reached by its own id.
 ///
-/// # Naming the columns
+/// # Why the key is a struct
 ///
-/// The column *names* are what lets a route skip `#[key("…")]`, and they
-/// are not recoverable from `Column::Name` — that is a variant, and the
-/// key type behind it is a bare `String`. So they are said here:
+/// [`ScopedRow::Key`] is the column's own type, because that is what goes
+/// into a `WHERE` clause. [`FetchByKey::Key`](crate::fetch::FetchByKey::Key)
+/// is what a *route* produces, and that is a struct with one named field
+/// per segment — including when there is only one. A guard reads it with
+/// axum's `Path`/`Query`, which bind by field name, so the name is how a
+/// segment finds its column. A bare `String` names nothing and could only
+/// be bound by position.
 ///
-/// ```ignore
-/// doxa_policy::fetch_from_scoped!(Model, key, id = "id", key = "name");
-/// ```
-///
-/// `#[derive(PolicyResource)]` writes that form from the field idents it
-/// already has. The shorter arms leave the names empty, which means the
-/// lookup declines to name its columns and a route over it says which
-/// segment it uses — the behaviour before there was anywhere to put them.
+/// The field idents in `ModelKey { name }` are both the destructure and
+/// the column names the route binds by, so there is nowhere for the two to
+/// disagree. `#[derive(PolicyResource)]` writes the struct and this call
+/// from the same idents.
 #[cfg(feature = "sea-orm")]
 #[macro_export]
 macro_rules! fetch_from_scoped {
+    // No id struct: nothing routes to this row by its own id, so the id
+    // stays SeaORM's own primary-key value and names no segment.
     ($row:ty) => {
-        $crate::fetch_from_scoped!($row, id = []);
-    };
-    ($row:ty, key) => {
-        $crate::fetch_from_scoped!($row, key, id = [], key = []);
-    };
-    ($row:ty, id = [$($id:literal),* $(,)?]) => {
-        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::Fetch<C> for $row {
-            type Error = $crate::__private::sea_orm::DbErr;
-        }
+        $crate::__fetch_row!($row);
 
         impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::FetchById<C> for $row {
             type Id = $crate::PrimaryKeyOf<$row>;
 
-            const ID_NAMES: &'static [&'static str] = &[$($id),*];
+            const ID_NAMES: &'static [&'static str] = &[];
 
             fn fetch_by_id(
                 id: Self::Id,
@@ -391,6 +388,58 @@ macro_rules! fetch_from_scoped {
                 <$row as $crate::ScopedTable>::load_by_id(id, src, scope.to_owned())
             }
         }
+    };
+    ($row:ty, id = $idty:ident { $($idf:ident),+ $(,)? }) => {
+        $crate::__fetch_row!($row);
+
+        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::FetchById<C> for $row {
+            type Id = $idty;
+
+            const ID_NAMES: &'static [&'static str] = &[$(::core::stringify!($idf)),+];
+
+            fn fetch_by_id(
+                id: Self::Id,
+                src: &C,
+                scope: &str,
+            ) -> impl ::core::future::Future<
+                Output = ::core::result::Result<
+                    ::core::option::Option<Self>,
+                    $crate::__private::sea_orm::DbErr,
+                >,
+            > + Send {
+                let $idty { $($idf,)+ } = id;
+                <$row as $crate::ScopedTable>::load_by_id(
+                    $crate::__pk_value!($($idf),+),
+                    src,
+                    scope.to_owned(),
+                )
+            }
+        }
+    };
+    ($row:ty, key = $key:ident { $field:ident }) => {
+        $crate::fetch_from_scoped!($row);
+        $crate::__fetch_by_key!($row, key = $key { $field });
+    };
+    (
+        $row:ty,
+        id = $idty:ident { $($idf:ident),+ $(,)? },
+        key = $key:ident { $field:ident }
+    ) => {
+        $crate::fetch_from_scoped!($row, id = $idty { $($idf),+ });
+        $crate::__fetch_by_key!($row, key = $key { $field });
+    };
+}
+
+/// `Fetch` and `FetchSubset`, which every arm of
+/// [`fetch_from_scoped!`](crate::fetch_from_scoped) writes identically.
+#[cfg(feature = "sea-orm")]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __fetch_row {
+    ($row:ty) => {
+        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::Fetch<C> for $row {
+            type Error = $crate::__private::sea_orm::DbErr;
+        }
 
         impl $crate::fetch::FetchSubset for $row {
             type Filter = $crate::__private::sea_orm::Select<<$row as $crate::ScopedTable>::Entity>;
@@ -400,13 +449,29 @@ macro_rules! fetch_from_scoped {
             }
         }
     };
-    ($row:ty, key, id = [$($id:literal),* $(,)?], key = [$($name:literal),* $(,)?]) => {
-        $crate::fetch_from_scoped!($row, id = [$($id),*]);
+}
 
+/// A primary key as [`ScopedTable::load_by_id`] takes it: one column is
+/// the value itself, several are a tuple. A one-field key is *not* a
+/// one-tuple, which is why this is a macro rather than a `(…)` in the
+/// caller.
+#[cfg(feature = "sea-orm")]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __pk_value {
+    ($field:ident) => { $field };
+    ($first:ident, $($rest:ident),+) => { ($first, $($rest),+) };
+}
+
+#[cfg(feature = "sea-orm")]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __fetch_by_key {
+    ($row:ty, key = $key:ident { $field:ident }) => {
         impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::FetchByKey<C> for $row {
-            type Key = <$row as $crate::ScopedRow>::Key;
+            type Key = $key;
 
-            const KEY_NAMES: &'static [&'static str] = &[$($name),*];
+            const KEY_NAMES: &'static [&'static str] = &[::core::stringify!($field)];
 
             fn fetch(
                 key: Self::Key,
@@ -418,7 +483,8 @@ macro_rules! fetch_from_scoped {
                     $crate::__private::sea_orm::DbErr,
                 >,
             > + Send {
-                <$row as $crate::ScopedRow>::load_scoped(key, src, scope.to_owned())
+                let $key { $field } = key;
+                <$row as $crate::ScopedRow>::load_scoped($field, src, scope.to_owned())
             }
         }
     };
@@ -437,12 +503,10 @@ macro_rules! fetch_from_scoped {
 /// `Column` beside the model the same way.
 ///
 /// ```ignore
-/// // one column: the key is the value, not a one-field struct
-/// doxa_policy::scoped_lookup!(pub FindByName for Model {
+/// doxa_policy::scoped_lookup!(pub FindByName as FindByNameKey for Model {
 ///     name: String => Column::Name,
 /// });
 ///
-/// // several: the key is a struct of the same name, declared here too
 /// doxa_policy::scoped_lookup!(pub FindByPair as FindByPairKey for Model {
 ///     dataset: String => Column::Dataset,
 ///     version: i64    => Column::Version,
@@ -451,75 +515,40 @@ macro_rules! fetch_from_scoped {
 /// let key = FindByPairKey { dataset: "sales".into(), version: 3 };
 /// ```
 ///
-/// The composite key is a struct rather than a tuple because every
-/// hand-written call site builds it by position, and two segments of the
-/// same type swap silently. `#[derive(PolicyResource)]` additionally writes
-/// the `RouteKey` impl that parses it out of a route's path segments — this
-/// macro does not, because that trait belongs to `doxa-auth` and this crate
-/// does not depend on it.
+/// The key is a struct rather than a tuple or a bare value for two
+/// reasons. Every hand-written call site builds a tuple by position, and
+/// two segments of the same type swap silently. And a route reads the key
+/// with axum's `Path`/`Query`, which bind by field name — so the name is
+/// what ties a segment to a column, and a scalar has none to offer.
+///
+/// The struct derives [`serde::Deserialize`], which is what those
+/// extractors need, so the consuming crate must have `serde` among its
+/// dependencies. `#[derive(PolicyResource)]` additionally writes the
+/// `RouteKey` impl carrying the OpenAPI segment types — this macro does
+/// not, because that trait belongs to `doxa-auth` and this crate does not
+/// depend on it.
 ///
 /// Every arm builds on [`ScopedTable::scoped`], so the scope filter and any
 /// [`table_condition`](ScopedTable::table_condition) come along and a named
 /// lookup cannot drift from the listing. That is the same reason
 /// [`ScopedRow::load_scoped`] is written that way.
 ///
-/// The field names on the left are bindings for the key's parts, and they
-/// are also what the lookup reports as
-/// [`Lookup::KEY_NAMES`](crate::fetch::Lookup::KEY_NAMES) — so a route
-/// whose path parameter is spelled the same way needs no `#[key("…")]` to
-/// say which segment feeds this lookup. `macro_rules` hygiene keeps them
-/// from colliding with the generated function's own `key`, `src` and
-/// `scope`, so a column genuinely called `scope` is fine.
+/// The field names on the left are the key's fields, the lookup's
+/// [`KEY_NAMES`](crate::fetch::Lookup::KEY_NAMES), and the route
+/// parameters a guard binds — one string in all three places.
+/// `macro_rules` hygiene keeps them from colliding with the generated
+/// function's own `key`, `src` and `scope`, so a column genuinely called
+/// `scope` is fine.
 #[cfg(feature = "sea-orm")]
 #[macro_export]
 macro_rules! scoped_lookup {
-    // One column. Separate arm because a single-segment route key is a
-    // `String`, not a `(String,)` — `RouteKey` is implemented for the
-    // former, and a one-tuple would be a key no route could parse.
-    (
-        $(#[$meta:meta])*
-        $vis:vis $name:ident for $row:ty { $field:ident : $ty:ty => $column:expr $(,)? }
-    ) => {
-        $(#[$meta])*
-        $vis struct $name;
-
-        impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::Lookup<C> for $name {
-            type Row = $row;
-            type Key = $ty;
-            type Error = $crate::__private::sea_orm::DbErr;
-
-            const KEY_NAMES: &'static [&'static str] = &[::core::stringify!($field)];
-
-            fn fetch(
-                key: Self::Key,
-                src: &C,
-                scope: &str,
-            ) -> impl ::core::future::Future<
-                Output = ::core::result::Result<
-                    ::core::option::Option<$row>,
-                    $crate::__private::sea_orm::DbErr,
-                >,
-            > + Send {
-                use $crate::__private::sea_orm::{ColumnTrait as _, QueryFilter as _};
-
-                // Built outside the async block, so the future captures a
-                // plain `Select` rather than the borrow of `scope`.
-                let query = <$row as $crate::ScopedTable>::scoped(scope.to_owned());
-                let $field = key;
-                let query = query.filter($column.eq($field));
-                async move { query.one(src).await }
-            }
-        }
-    };
-    // Several columns. The key is a generated struct with named fields
-    // rather than a tuple: a two-`String` tuple bound the wrong way round
-    // parses cleanly and loads the wrong row, and every hand-written call
-    // site — a job, an `authorize` from inside a handler — builds that
-    // tuple by position. Named fields make the swap unwritable.
-    //
-    // Route parsing stays positional, because path segments are; the
-    // declaration order below is the segment order. What the struct removes
-    // is the hazard everywhere *except* the route.
+    // One arm, one column or several. The key is always a struct with
+    // named fields — never a bare scalar and never a tuple — because a
+    // name is what binds a segment to a column. A two-`String` tuple bound
+    // the wrong way round parses cleanly and loads the wrong row, and a
+    // bare scalar cannot say which of a route's segments it wanted at all.
+    // Named fields make the first unwritable and let axum's `Path` answer
+    // the second.
     (
         $(#[$meta:meta])*
         $vis:vis $name:ident as $key:ident for $row:ty {
@@ -530,7 +559,7 @@ macro_rules! scoped_lookup {
         $vis struct $name;
 
         #[doc = ::core::concat!("The key [`", ::core::stringify!($name), "`] matches on.")]
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize)]
         $vis struct $key {
             $(
                 #[allow(missing_docs)]
@@ -543,11 +572,9 @@ macro_rules! scoped_lookup {
             type Key = $key;
             type Error = $crate::__private::sea_orm::DbErr;
 
-            // One per column, which is one per segment for the key this
-            // macro generates. A hand-written `RouteKey` that parses
-            // *fewer* segments than there are columns — one path segment
-            // split into two — names them on that impl instead, and
-            // `RouteKey::NAMES` wins where both are present.
+            // One per column, which is one per segment. These are the
+            // field names too, so the route parameter a segment is read
+            // out of and the struct field it lands in are one string.
             const KEY_NAMES: &'static [&'static str] =
                 &[$(::core::stringify!($field)),+];
 
@@ -563,6 +590,8 @@ macro_rules! scoped_lookup {
             > + Send {
                 use $crate::__private::sea_orm::{ColumnTrait as _, QueryFilter as _};
 
+                // Built outside the async block, so the future captures a
+                // plain `Select` rather than the borrow of `scope`.
                 let query = <$row as $crate::ScopedTable>::scoped(scope.to_owned());
                 let $key { $($field,)+ } = key;
                 let query = query $(.filter($column.eq($field)))+;

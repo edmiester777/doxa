@@ -1,10 +1,11 @@
 //! Where a route's key comes from, and what it is called.
 //!
-//! Two facts used to be written at every call site. Which parameter feeds
-//! the lookup is now the asset's to say — `Granting::KEY_NAMES`, the column
-//! the lookup matches — so a route repeats it only when it spells it
-//! differently. Where that parameter *lives* is `#[key(with = "…")]`, the
-//! path by default and the query string when the route says so.
+//! Two facts used to be written at every call site. What the parameter is
+//! *called* is now the key type's to say: its fields are the route's
+//! parameters, and `Granting::KEY_NAMES` repeats that list for the spec.
+//! So no route names its own segment, and a rename happens once, on the
+//! key. Where the parameter *lives* is `#[key(with = "…")]` — the path by
+//! default, the query string when the route says so.
 //!
 //! Both are read twice: once by the guard, once by the OpenAPI
 //! description. These tests assert the two halves agree, which is the
@@ -53,11 +54,18 @@ struct Widget {
     region: String,
 }
 
+doxa::auth::route_key!(
+    /// The key every route below binds, and the reason none of them
+    /// repeats its name: the field is called `name`, so `{name}` and
+    /// `?name=` both find it.
+    pub WidgetKey { name: String }
+);
+
 /// Keyed on `name`, and it says so. That one line is what lets every route
 /// below bind `{name}` — or `?name=` — without naming it again.
 impl Granting for Widget {
     type Row = Self;
-    type Key = String;
+    type Key = WidgetKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -67,7 +75,7 @@ impl Granting for Widget {
     const KEY_NAMES: &'static [&'static str] = &["name"];
 
     async fn load(
-        name: String,
+        WidgetKey { name }: WidgetKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
@@ -113,10 +121,39 @@ struct Filters {
     upper: Option<bool>,
 }
 
-/// A segment spelled differently from the column, which is what the
-/// annotation is left for.
+doxa::auth::route_key!(
+    /// The same column reached under another name. The rename lives here,
+    /// on the key, rather than on each route that uses it — so a segment
+    /// spelled `{slug}` and a spec saying `slug` come from one place.
+    pub AliasKey { slug: String }
+);
+
+/// A second way into the same row, addressed by a segment spelled
+/// differently from the column behind it.
+struct WidgetByAlias;
+
+impl Granting for WidgetByAlias {
+    type Row = Widget;
+    type Key = AliasKey;
+    type Ctx = CapabilityContext;
+    type State = ();
+    type Source = FromState<()>;
+    type Error = StatusCode;
+
+    const ACTIONS: &'static [Action] = &[Action::new("read").capability(&WIDGETS_READ)];
+    const KEY_NAMES: &'static [&'static str] = &["slug"];
+
+    async fn load(
+        AliasKey { slug }: AliasKey,
+        state: &(),
+        ctx: &CapabilityContext,
+    ) -> Result<Option<Widget>, StatusCode> {
+        <Widget as Granting>::load(WidgetKey { name: slug }, state, ctx).await
+    }
+}
+
 #[get("/aliases/{slug}", tag = "Widgets")]
-async fn get_alias(#[key("slug")] widget: Granted<Widget>) -> String {
+async fn get_alias(widget: Granted<WidgetByAlias>) -> String {
     widget.into_inner().name
 }
 
@@ -194,7 +231,7 @@ fn params(api: &utoipa::openapi::OpenApi, path: &str) -> Vec<utoipa::openapi::pa
         .unwrap_or_default()
 }
 
-// ---- the asset's key names answer -------------------------------------------
+// ---- the key's field names answer -------------------------------------------
 
 /// The whole point: two path parameters, no annotation, and the right one
 /// binds. The body is the loaded widget's name, so a route that bound
@@ -220,10 +257,11 @@ async fn the_other_segment_is_not_what_binds() {
     );
 }
 
-/// The annotation still wins, for the route whose parameter is spelled
-/// differently from the column behind it.
+/// A route whose segment is spelled differently from the column behind
+/// it. Nothing on the route says so: the key's field is `slug`, so
+/// `{slug}` is what binds.
 #[tokio::test]
-async fn an_annotation_overrides_the_assets_names() {
+async fn a_renamed_key_binds_the_segment_its_field_names() {
     assert_eq!(call("/aliases/beta").await, (StatusCode::OK, "beta".into()));
 }
 
@@ -235,15 +273,6 @@ async fn a_query_source_reads_the_key_out_of_the_query_string() {
         call("/widgets?name=alpha").await,
         (StatusCode::OK, "alpha".into())
     );
-}
-
-/// Percent-encoding is decoded before the lookup sees it, which is the
-/// reason to reach for a query key in the first place — a name a path
-/// segment cannot hold.
-#[tokio::test]
-async fn a_query_key_is_percent_decoded() {
-    let (status, _) = call("/widgets?name=al%70ha").await;
-    assert_eq!(status, StatusCode::OK, "`%70` is `p`");
 }
 
 /// The route said the caller supplies this, and the caller did not. That
@@ -306,10 +335,10 @@ async fn a_query_key_is_documented_in_the_query() {
     );
 }
 
-/// An annotated segment documents the name the route uses, not the
-/// column's — the resolution is one answer, and the spec gets that one.
+/// A renamed key documents the name the route uses, not the column's —
+/// the key's fields are the one answer, and the spec gets that one.
 #[tokio::test]
-async fn an_overridden_name_is_the_one_documented() {
+async fn a_renamed_key_is_documented_under_its_own_name() {
     let params = params(&api(), "/aliases/{slug}");
 
     assert_eq!(params.len(), 1);

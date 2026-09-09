@@ -84,13 +84,20 @@ impl Catalog {
 
 // ---- the two loaders --------------------------------------------------------
 
+doxa::auth::route_key!(
+    /// What the route's `{name}` segment parses into. A `load_with` row
+    /// has no `FetchByKey` impl to read a key off, so the key is declared
+    /// here and named on the asset.
+    pub WidgetKey { name: String }
+);
+
 /// Written the way the attribute's own loader is: read the tenant, refuse
 /// to guess when there is none, confine the lookup to it.
 ///
 /// This is what a `load_with` owes, and there is nothing in the signature
 /// that says so — which is the whole reason the generated path exists.
 async fn confined(
-    name: String,
+    key: WidgetKey,
     catalog: &Catalog,
     ctx: &CapabilityContext,
 ) -> Result<Option<Widget>, StatusCode> {
@@ -102,7 +109,7 @@ async fn confined(
     Ok(catalog
         .rows
         .iter()
-        .find(|widget| widget.name == name && widget.tenant == scope)
+        .find(|widget| widget.name == key.name && widget.tenant == scope)
         .cloned())
 }
 
@@ -111,7 +118,7 @@ async fn confined(
 ///
 /// It compiles, and nothing downstream catches it. See the last test.
 async fn unconfined(
-    name: String,
+    key: WidgetKey,
     catalog: &Catalog,
     _ctx: &CapabilityContext,
 ) -> Result<Option<Widget>, StatusCode> {
@@ -120,7 +127,7 @@ async fn unconfined(
     Ok(catalog
         .rows
         .iter()
-        .find(|widget| widget.name == name)
+        .find(|widget| widget.name == key.name)
         .cloned())
 }
 
@@ -135,13 +142,15 @@ impl GrantProfile for AppGrants {
     type Error = StatusCode;
 }
 
-/// `key = String` is not optional here, and the reason is worth knowing:
-/// the key still defaults to `<Row as FetchByKey<State>>::Key`, and a row
-/// reached only by a `load_with` has no `FetchByKey` impl to read it from.
-/// The error names the trait, but naming the key is the answer.
+/// `key = WidgetKey` is not optional here, and the reason is worth
+/// knowing: the key still defaults to `<Row as FetchByKey<State>>::Key`,
+/// and a row reached only by a `load_with` has no `FetchByKey` impl to
+/// read it from. The error names the trait, but naming the key is the
+/// answer — and naming it is also what tells the route that its segment
+/// is called `name`.
 #[asset(
     row = Widget,
-    key = String,
+    key = WidgetKey,
     profile = AppGrants,
     actions = WidgetAction,
     load_with = confined
@@ -150,7 +159,7 @@ pub struct WidgetConfined;
 
 #[asset(
     row = Widget,
-    key = String,
+    key = WidgetKey,
     profile = AppGrants,
     actions = WidgetAction,
     load_with = unconfined

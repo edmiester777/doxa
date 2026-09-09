@@ -30,7 +30,7 @@ use axum::http::Request;
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLogger};
 use doxa::auth::{
     AuthContext, AuthorizeScope, Claims, Denial, FromAuthExtensions, FromState, GrantProfile,
-    Scoped, Scoping,
+    Granted, Many, Scoped, Scoping,
 };
 use doxa::policy::{
     condition_from_residual, AuthError, Capability, CapabilityChecker, DbLoadError, ResourceEntity,
@@ -38,7 +38,7 @@ use doxa::policy::{
 };
 use doxa::{asset, get, routes, Actions, OpenApiRouter, PolicyResource};
 use sea_orm::entity::prelude::*;
-use sea_orm::{Condition, DatabaseConnection, DbBackend, QueryTrait, Select};
+use sea_orm::{Condition, DatabaseConnection, DbBackend, MockDatabase, QueryTrait, Select};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -422,6 +422,50 @@ async fn the_gated_form_passes_with_the_capability() {
             .await
             .is_ok(),
     );
+}
+
+/// The listing route, which is the other way to the same subset. It has
+/// to answer as the dependency door does, and the seat is where the two
+/// would part company: the capability the route gates on says whether the
+/// caller may list widgets at all, and nothing about which rows come
+/// back, so passing it cannot be what hands an administrator everything.
+///
+/// A route consulting only [`Scoping::scope`] would filter the listing by
+/// the policy's row condition while a handler resolving names through
+/// `Scoped` on the same asset saw every row — one caller, one asset, two
+/// answers, and the narrow one is the one that looks like working
+/// software.
+#[tokio::test]
+async fn the_listing_route_seats_an_admin_the_way_the_dependency_does() {
+    let (mut parts, _rx) = parts_as(&["widgets.read"], granted(), true);
+    let db = MockDatabase::new(DbBackend::Postgres).into_connection();
+
+    let granted = Granted::<Many<WidgetByName>>::from_request_parts(&mut parts, &db)
+        .await
+        .expect("holds widgets.read");
+
+    let sql = sql(granted.into_inner());
+    assert!(
+        !sql.contains(r#""region" = 'us'"#),
+        "the listing carried the policy's row condition an admin is exempt from: {sql}",
+    );
+}
+
+/// And the mirror, so the seat cannot be read as "a listing ignores the
+/// scope": the caller the policy did not mark is filtered exactly as the
+/// dependency door filters them.
+#[tokio::test]
+async fn the_listing_route_scopes_an_ordinary_caller() {
+    let (mut parts, _rx) = parts(&["widgets.read"], granted());
+    let db = MockDatabase::new(DbBackend::Postgres).into_connection();
+
+    let granted = Granted::<Many<WidgetByName>>::from_request_parts(&mut parts, &db)
+        .await
+        .expect("holds widgets.read");
+
+    let sql = sql(granted.into_inner());
+    assert!(sql.contains(r#""region" = 'us'"#), "{sql}");
+    assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
 }
 
 /// A caller the policy granted nothing is refused rather than handed an

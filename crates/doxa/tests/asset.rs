@@ -170,15 +170,28 @@ fn the_profile_supplies_the_caller_state_and_error() {
 
 /// The key is the one the row declared through `#[resource(key)]`, so the
 /// route and the lookup cannot disagree about what addresses the object.
+///
+/// It arrives as the struct the derive wrote around the key column rather
+/// than as the column type itself. A `String` is what the segment parses
+/// *into*; the field name is what says which segment, and only a struct
+/// has one to offer.
 #[test]
 fn the_key_comes_off_the_row() {
-    fn key_is_the_scoped_one<A>()
+    fn key_is_the_generated_one<A>()
     where
-        A: Granting<Key = <Model as ScopedRow>::Key>,
+        A: Granting<Key = ModelKey>,
     {
     }
 
-    key_is_the_scoped_one::<WidgetByName>();
+    key_is_the_generated_one::<WidgetByName>();
+
+    // …and the field is the key column, carrying the column's type.
+    let key = ModelKey {
+        name: "primary".to_owned(),
+    };
+    let _: <Model as ScopedRow>::Key = key.name;
+
+    assert_eq!(<WidgetByName as Granting>::KEY_NAMES, &["name"]);
 }
 
 /// The vocabulary is the enum's table, and the same one either route sees.
@@ -244,9 +257,15 @@ async fn the_generated_loader_confines_the_lookup_to_the_caller_s_tenant() {
         .append_query_results([vec![row()]])
         .into_connection();
 
-    let found = <WidgetByName as Granting>::load("primary".to_owned(), &db, &caller("acme"))
-        .await
-        .expect("query runs");
+    let found = <WidgetByName as Granting>::load(
+        ModelKey {
+            name: "primary".to_owned(),
+        },
+        &db,
+        &caller("acme"),
+    )
+    .await
+    .expect("query runs");
 
     assert_eq!(found, Some(row()));
 
@@ -272,7 +291,7 @@ async fn the_primary_key_lookup_is_confined_to_the_tenant_too() {
         .append_query_results([Vec::<Model>::new()])
         .into_connection();
 
-    <WidgetById as Granting>::load(Uuid::nil(), &db, &caller("acme"))
+    <WidgetById as Granting>::load(ModelId { id: Uuid::nil() }, &db, &caller("acme"))
         .await
         .expect("query runs");
 
@@ -293,7 +312,7 @@ async fn a_row_with_no_key_column_still_has_a_scoped_id_route() {
         .append_query_results([Vec::<keyless::Model>::new()])
         .into_connection();
 
-    <DataModelById as Granting>::load(Uuid::nil(), &db, &caller("acme"))
+    <DataModelById as Granting>::load(keyless::ModelId { id: Uuid::nil() }, &db, &caller("acme"))
         .await
         .expect("query runs");
 
@@ -339,9 +358,15 @@ async fn a_caller_without_a_tenant_reaches_nothing() {
         roles: Vec::new(),
     };
 
-    let found = <WidgetByName as Granting>::load("primary".to_owned(), &db, &ctx)
-        .await
-        .expect("no tenant is not an error, it is an absence");
+    let found = <WidgetByName as Granting>::load(
+        ModelKey {
+            name: "primary".to_owned(),
+        },
+        &db,
+        &ctx,
+    )
+    .await
+    .expect("no tenant is not an error, it is an absence");
 
     assert_eq!(found, None);
 }
@@ -371,9 +396,15 @@ async fn a_failed_query_becomes_the_profile_s_error() {
         .append_query_errors([DbErr::Custom("connection reset".to_owned())])
         .into_connection();
 
-    let error = <WidgetByName as Granting>::load("primary".to_owned(), &db, &caller("acme"))
-        .await
-        .expect_err("the query failed");
+    let error = <WidgetByName as Granting>::load(
+        ModelKey {
+            name: "primary".to_owned(),
+        },
+        &db,
+        &caller("acme"),
+    )
+    .await
+    .expect_err("the query failed");
 
     assert!(matches!(error, DbLoadError::Failed));
 }
@@ -405,13 +436,11 @@ impl CapabilityChecker for Allow {
 
 struct GetWidget;
 impl doxa::auth::GrantSite for GetWidget {
-    const PARAMS: &'static [&'static str] = &["name"];
     const ACTION: &'static str = "read";
 }
 
 struct DeleteWidget;
 impl doxa::auth::GrantSite for DeleteWidget {
-    const PARAMS: &'static [&'static str] = &["name"];
     const ACTION: &'static str = "delete";
 }
 

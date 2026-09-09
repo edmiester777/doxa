@@ -44,11 +44,13 @@ struct Widget {
     name: String,
 }
 
+doxa::auth::route_key!(pub WidgetKey { id: u32 });
+
 /// No coarse capability, so the chain goes straight to the instance
 /// check — this file is about what an *instance* denial records.
 impl Granting for Widget {
     type Row = Self;
-    type Key = u32;
+    type Key = WidgetKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -57,7 +59,7 @@ impl Granting for Widget {
     const ACTIONS: &'static [Action] = &[Action::new("read")];
 
     async fn load(
-        id: u32,
+        WidgetKey { id }: WidgetKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {

@@ -198,7 +198,7 @@ pub struct Model {
 }
 ```
 
-Each name emits a `Lookup` marker; a composite also gets a key struct — `FindByPairKey`, with a field per column and the `RouteKey` impl that parses it out of the route's path segments. A struct rather than a tuple, because every hand-written call site builds the key by position and two segments of the same type transpose silently. Route parsing stays positional in declaration order, since path segments are. A single-column lookup keys on the bare scalar.
+Each name emits a `Lookup` marker and a key struct — `FindByPairKey`, with a field per column, `Deserialize`, and the `RouteKey` impl carrying the OpenAPI type of each segment. One column or several: a guard reads the key with axum's `Path` / `Query`, which bind by field name, so the field is what ties a route's segment to a column. A tuple would bind by position and two segments of the same type transpose silently; a bare scalar could not say which segment it wanted at all.
 
 `filter` is spliced rather than interpreted, so it is whatever SeaORM accepts. It hangs on the table, which is what makes it unforgettable: the key lookup, the id lookup, the listing and the residual filter all inherit it, and a soft delete applied to three of those four is not a compile error but a deleted row coming back on the fourth.
 

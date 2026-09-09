@@ -47,9 +47,11 @@ struct Widget {
     region: String,
 }
 
+doxa::auth::route_key!(pub WidgetKey { id: u32 });
+
 impl Granting for Widget {
     type Row = Self;
-    type Key = u32;
+    type Key = WidgetKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -61,7 +63,7 @@ impl Granting for Widget {
     ];
 
     async fn load(
-        id: u32,
+        WidgetKey { id }: WidgetKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
@@ -92,11 +94,12 @@ async fn get_widget(widget: Granted<Widget>) -> String {
     widget.into_inner().region
 }
 
-/// Two path parameters, so the key segment has to be named — and the
-/// guard is destructured in the argument list, which the macro has to
-/// see through to reach the type it rewrites.
+/// Two path parameters and no annotation: the key struct's field is
+/// called `id`, so `{id}` is what binds and `{fid}` is left for the
+/// handler. The guard is destructured in the argument list, which the
+/// macro has to see through to reach the type it rewrites.
 #[delete("/folders/{fid}/widgets/{id}", tag = "Widgets")]
-async fn drop_widget(#[key("id")] Granted(_, _widget): Granted<Widget>) -> StatusCode {
+async fn drop_widget(Granted(_, _widget): Granted<Widget>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
@@ -460,9 +463,15 @@ struct Filed {
 // No `Scoping` impl: a filed widget is reached by folder and id, and
 // there is no route that lists them. `Granted<Many<Filed>>` therefore
 // does not compile, which is the point of the split.
+doxa::auth::route_key!(
+    /// Two segments, bound by name rather than by position — which is
+    /// what stops `{fid}` and `{id}` being read the wrong way round.
+    pub FiledKey { fid: String, id: u32 }
+);
+
 impl Granting for Filed {
     type Row = Self;
-    type Key = (String, u32);
+    type Key = FiledKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -471,19 +480,19 @@ impl Granting for Filed {
     const ACTIONS: &'static [Action] = &[Action::new("read")];
 
     async fn load(
-        (folder, id): (String, u32),
+        FiledKey { fid, id }: FiledKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
         // The id alone is not the identity — the folder is half of it.
         Ok(Some(Filed {
-            id: format!("{folder}/{id}"),
+            id: format!("{fid}/{id}"),
         }))
     }
 }
 
 #[get("/folders/{fid}/filed/{id}", tag = "Widgets")]
-async fn get_filed(#[key("fid", "id")] filed: Granted<Filed>) -> String {
+async fn get_filed(filed: Granted<Filed>) -> String {
     filed.into_inner().id
 }
 

@@ -132,9 +132,9 @@ fn same<A: 'static, B: 'static>() {
 /// it is the one `#[resource(key)]` could not spell.
 #[test]
 fn one_column_takes_part_in_more_than_one_lookup() {
-    // One column keys on the bare scalar, as `#[resource(key)]` does; only
-    // a composite gets a struct.
-    same::<<FindByDataset as Lookup<DatabaseConnection>>::Key, String>();
+    // Every lookup gets its own key struct, one column or several: the
+    // field name is what binds the route's segment.
+    same::<<FindByDataset as Lookup<DatabaseConnection>>::Key, FindByDatasetKey>();
     same::<<FindByPair as Lookup<DatabaseConnection>>::Key, FindByPairKey>();
 
     // Different keys, one row.
@@ -150,7 +150,7 @@ fn the_asset_takes_its_row_and_its_key_from_the_lookup() {
     same::<<VersionByPair as Granting>::Key, FindByPairKey>();
 
     same::<<VersionByDataset as Granting>::Row, Model>();
-    same::<<VersionByDataset as Granting>::Key, String>();
+    same::<<VersionByDataset as Granting>::Key, FindByDatasetKey>();
 
     assert_eq!(
         <<VersionByPair as Granting>::Row as PolicyResource>::ENTITY_TYPE,
@@ -158,39 +158,22 @@ fn the_asset_takes_its_row_and_its_key_from_the_lookup() {
     );
 }
 
-/// The composite key parses out of a route's path segments, so a route can
-/// name it directly rather than the descriptor taking a tuple apart.
-///
-/// Positional, because path segments are — there is nothing in a raw
-/// segment to match a field name against. What the struct removes is the
-/// hazard at every *other* call site: a job, or an `authorize` from inside a
-/// handler, builds the key by name and cannot transpose it.
+/// The composite key names its segments, which is what stops a route
+/// transposing it. Two `String` columns bound by position parse cleanly
+/// and load the wrong row; axum's `Path` binds these by field name, so
+/// swapping them means spelling one wrong.
 #[test]
-fn the_composite_key_parses_from_path_segments() {
+fn the_composite_key_names_its_segments() {
     assert_eq!(
         <FindByPairKey as RouteKey>::SEGMENTS.len(),
         2,
         "one segment per column",
     );
-
-    let key = <FindByPairKey as RouteKey>::parse(&["sales", "3"]).expect("parses");
     assert_eq!(
-        key,
-        FindByPairKey {
-            dataset: "sales".to_owned(),
-            version: 3,
-        },
+        <FindByPairKey as RouteKey>::NAMES,
+        ["dataset", "version"],
+        "and the route parameters are those names",
     );
-}
-
-/// A segment that is not what its column holds is a 400, and says which
-/// one — the position is what the route needs to report.
-#[test]
-fn a_segment_that_does_not_parse_names_its_position() {
-    let error = <FindByPairKey as RouteKey>::parse(&["sales", "newest"]).expect_err("refused");
-
-    assert_eq!(error.position, 1);
-    assert_eq!(error.raw, "newest");
 }
 
 /// One lookup is generic over the connection, as the unnamed ones are, so
@@ -343,7 +326,10 @@ async fn the_table_condition_reaches_the_id_lookup() {
 async fn the_table_condition_reaches_a_named_lookup() {
     let db = db_returning(vec![]);
 
-    let _ = <FindByDataset as Lookup<DatabaseConnection>>::fetch("sales".to_owned(), &db, "acme")
+    let key = FindByDatasetKey {
+        dataset: "sales".to_owned(),
+    };
+    let _ = <FindByDataset as Lookup<DatabaseConnection>>::fetch(key, &db, "acme")
         .await
         .expect("query runs");
 
