@@ -15,8 +15,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use doxa::audit::EventType;
 use doxa::auth::{
-    Action, ActionTable, Cap, CapabilityContext, FromState, GrantSite, Granted, Granting, Many,
-    One, Scoping,
+    Action, ActionTable, Cap, CapabilityContext, FromState, Granted, Granting, Many, One, Scoping,
 };
 use doxa::policy::{AuthError, Capability, CapabilityChecker, Capable, ResourceEntity, ResourceId};
 use doxa::{capability, Actions, PolicyResource, ToSchema};
@@ -48,10 +47,12 @@ pub enum SourceAction {
     // capability's description, which `the_description_comes_off_the_doc_comment`
     // pins.
     #[action(event = EventType::DataAccess.as_static())]
+    #[action(verb = get)]
     Read,
 
     /// Remove data source definitions.
     #[action(event = EventType::AdminDelete.as_static())]
+    #[action(verb = delete)]
     Delete,
 
     /// A name that is not the variant's, because Cedar already had one.
@@ -86,7 +87,7 @@ impl Granting for Source {
     type Error = StatusCode;
 
     /// The one line that wires the vocabulary to the asset.
-    const ACTIONS: &'static [Action] = SourceAction::ACTIONS;
+    type Actions = SourceAction;
 
     async fn load(
         SourceKey { id }: SourceKey,
@@ -352,15 +353,7 @@ fn parts(roles: &[&str]) -> axum::http::request::Parts {
     request.into_parts().0
 }
 
-struct Listing;
-impl GrantSite for Listing {
-    const ACTION: &'static str = "read";
-}
-
-struct Purging;
-impl GrantSite for Purging {
-    const ACTION: &'static str = "delete";
-}
+use source_action::{Delete as Purging, Read as Listing};
 
 /// The generated capability is the one the coarse gate actually asks
 /// about — a caller holding `sources.read` may list, and the same caller
@@ -396,7 +389,11 @@ async fn a_generated_marker_is_a_bare_gate() {
 #[tokio::test]
 async fn an_instance_only_action_skips_the_coarse_gate() {
     let parts = parts(&[]);
-    doxa::auth::authorize::<One<Source>>(SourceKey { id: 1 }, "ping", &(), &parts.extensions)
-        .await
-        .expect("no capability to hold");
+    doxa::auth::authorize::<One<Source, source_action::Ping>>(
+        SourceKey { id: 1 },
+        &(),
+        &parts.extensions,
+    )
+    .await
+    .expect("no capability to hold");
 }

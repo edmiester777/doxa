@@ -27,11 +27,11 @@ use tower::ServiceExt;
 // without the two having anything to do with each other, since the guard's
 // source is a string on the annotation rather than a type in scope.
 use axum::extract::Query;
-use doxa::auth::{Action, CapabilityContext, FromState, Granted, Granting};
+use doxa::auth::{CapabilityContext, FromState, Granted, Granting};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, ResourceEntity, ResourceId,
 };
-use doxa::{get, routes, OpenApiRouter, PolicyResource, ToSchema};
+use doxa::{get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- domain -----------------------------------------------------------------
 
@@ -61,6 +61,18 @@ doxa::auth::route_key!(
     pub WidgetKey { name: String }
 );
 
+struct WidgetsRead;
+impl doxa::policy::Capable for WidgetsRead {
+    const CAPABILITY: &'static Capability = &WIDGETS_READ;
+}
+
+#[derive(Actions)]
+#[actions(resource = "Widget")]
+pub enum WidgetActions {
+    #[action(verb = get, capable = WidgetsRead)]
+    Read,
+}
+
 /// Keyed on `name`, and it says so. That one line is what lets every route
 /// below bind `{name}` — or `?name=` — without naming it again.
 impl Granting for Widget {
@@ -71,7 +83,8 @@ impl Granting for Widget {
     type Source = FromState<()>;
     type Error = StatusCode;
 
-    const ACTIONS: &'static [Action] = &[Action::new("read").capability(&WIDGETS_READ)];
+    type Actions = WidgetActions;
+
     const KEY_NAMES: &'static [&'static str] = &["name"];
 
     async fn load(
@@ -103,10 +116,7 @@ async fn get_widget(widget: Granted<Widget>) -> String {
 /// real [`axum::extract::Query`] the handler reads for itself, so the two
 /// meanings of the word are both in scope at once.
 #[get("/widgets", tag = "Widgets")]
-async fn find_widget(
-    #[key(with = "Query")] widget: Granted<Widget>,
-    Query(filters): Query<Filters>,
-) -> String {
+async fn find_widget(widget: Granted<Widget>, Query(filters): Query<Filters>) -> String {
     let name = widget.into_inner().name;
     match filters.upper {
         Some(true) => name.to_uppercase(),
@@ -140,7 +150,8 @@ impl Granting for WidgetByAlias {
     type Source = FromState<()>;
     type Error = StatusCode;
 
-    const ACTIONS: &'static [Action] = &[Action::new("read").capability(&WIDGETS_READ)];
+    type Actions = WidgetActions;
+
     const KEY_NAMES: &'static [&'static str] = &["slug"];
 
     async fn load(

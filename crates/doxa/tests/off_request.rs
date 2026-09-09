@@ -18,8 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use doxa::audit::{AuditEvent, AuditLogger, Outcome};
 use doxa::auth::{
-    AuthorizeLoaded, CapabilityContext, DeclaredAction, FromState, GrantProfile, OffRequest, One,
-    Refusal,
+    AuthorizeLoaded, CapabilityContext, FromState, GrantProfile, OffRequest, One, Refusal,
 };
 use doxa::policy::{AuthError, Capability, CapabilityChecker, Fetch, FetchByKey, ResourceEntity};
 use doxa::{asset, Actions, PolicyResource};
@@ -86,13 +85,11 @@ fn catalog() -> Catalog {
 #[actions(resource = "Dataset", prefix = "datasets")]
 pub enum DatasetAction {
     /// Read one dataset.
+    #[action(verb = get)]
     Read,
 }
 
-struct Read;
-impl DeclaredAction for Read {
-    const ACTION: &'static str = "read";
-}
+use dataset_action::Read;
 
 pub struct JobGrants;
 
@@ -166,11 +163,10 @@ async fn a_job_authorizes_against_the_state_it_already_holds() {
     let (work, _rx) = work("acme", &["datasets.read"]);
 
     let dataset = work
-        .authorize::<One<DatasetByName>>(
+        .authorize::<One<DatasetByName, Read>>(
             DatasetKey {
                 name: "sales".to_owned(),
             },
-            "read",
             &catalog(),
         )
         .await
@@ -186,11 +182,10 @@ async fn a_job_is_confined_to_its_callers_tenant() {
     let (work, _rx) = work("globex", &["datasets.read"]);
 
     let dataset = work
-        .authorize::<One<DatasetByName>>(
+        .authorize::<One<DatasetByName, Read>>(
             DatasetKey {
                 name: "sales".to_owned(),
             },
-            "read",
             &catalog(),
         )
         .await
@@ -211,11 +206,10 @@ async fn a_job_is_confined_to_its_callers_tenant() {
 async fn a_grant_reaches_the_trail_with_no_request_anywhere() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
 
-    work.authorize::<One<DatasetByName>>(
+    work.authorize::<One<DatasetByName, Read>>(
         DatasetKey {
             name: "sales".to_owned(),
         },
-        "read",
         &catalog(),
     )
     .await
@@ -240,11 +234,10 @@ async fn a_refused_job_is_recorded_before_anything_else_runs() {
     let (work, mut rx) = work("acme", &[]);
 
     let refusal = work
-        .authorize::<One<DatasetByName>>(
+        .authorize::<One<DatasetByName, Read>>(
             DatasetKey {
                 name: "sales".to_owned(),
             },
-            "read",
             &catalog(),
         )
         .await
@@ -271,11 +264,10 @@ async fn the_actor_names_the_job_that_did_the_work() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
     let work = work.actor("job:reindex");
 
-    work.authorize::<One<DatasetByName>>(
+    work.authorize::<One<DatasetByName, Read>>(
         DatasetKey {
             name: "sales".to_owned(),
         },
-        "read",
         &catalog(),
     )
     .await
@@ -298,11 +290,10 @@ async fn the_actor_names_the_job_that_did_the_work() {
 async fn a_job_that_fails_after_authorizing_records_the_failure() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
 
-    work.authorize::<One<DatasetByName>>(
+    work.authorize::<One<DatasetByName, Read>>(
         DatasetKey {
             name: "sales".to_owned(),
         },
-        "read",
         &catalog(),
     )
     .await
@@ -366,5 +357,5 @@ fn the_handle_only_serves_subjects_that_want_its_caller() {
     {
     }
 
-    accepts::<CapabilityContext, One<DatasetByName>>();
+    accepts::<CapabilityContext, One<DatasetByName, Read>>();
 }

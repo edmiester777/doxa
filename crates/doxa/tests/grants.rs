@@ -17,11 +17,11 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, EventType, Outcome};
-use doxa::auth::{Action, Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
+use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
-use doxa::{delete, get, routes, OpenApiRouter, PolicyResource, ToSchema};
+use doxa::{delete, get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- domain -----------------------------------------------------------------
 
@@ -50,6 +50,15 @@ struct Widget {
 
 doxa::auth::route_key!(pub WidgetKey { id: u32 });
 
+#[derive(Actions)]
+#[actions(resource = "Widget")]
+pub enum WidgetActions {
+    #[action(verb = get, instance_only, event = EventType::DataAccess.as_static())]
+    Read,
+    #[action(verb = delete, instance_only, event = EventType::AdminDelete.as_static())]
+    Delete,
+}
+
 impl Granting for Widget {
     type Row = Self;
     type Key = WidgetKey;
@@ -61,10 +70,7 @@ impl Granting for Widget {
     /// Declared once for the asset, so every route guarding a widget
     /// files under the same vocabulary and no verb can disagree with the
     /// category it was recorded as.
-    const ACTIONS: &'static [Action] = &[
-        Action::new("read").event(EventType::DataAccess.as_static()),
-        Action::new("delete").event(EventType::AdminDelete.as_static()),
-    ];
+    type Actions = WidgetActions;
 
     async fn load(
         WidgetKey { id }: WidgetKey,
@@ -118,9 +124,7 @@ async fn list_widgets(widgets: Granted<Many<Widget>>) -> &'static str {
 /// without cloning one of them. The guard is a pair, so the pattern is
 /// the whole of it.
 #[delete("/widgets/{id}", tag = "Widgets")]
-async fn delete_widget(
-    #[key(action = "delete")] Granted(caller, widget): Granted<Widget>,
-) -> &'static str {
+async fn delete_widget(Granted(caller, widget): Granted<Widget>) -> &'static str {
     assert_eq!(caller.tenant_id.as_deref(), Some("acme"));
     assert_eq!(widget.id, 7);
     "ok"

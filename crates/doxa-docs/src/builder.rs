@@ -54,12 +54,48 @@ pub enum BuildError {
     /// In practice this only fails if a custom schema produced
     /// non-finite floats or otherwise invalid JSON values.
     Serialize(serde_json::Error),
+    /// An operation requires a security scheme that no
+    /// [`ApiDocBuilder::bearer_security`] or
+    /// [`ApiDocBuilder::security_scheme`] call registered.
+    ///
+    /// The reference would be dangling, which makes the document invalid
+    /// — and quietly so: every half is individually well-formed, and a
+    /// client only finds out when it tries to authenticate. A guard's
+    /// scheme name defaults to `"bearer"`, so this is what an application
+    /// registering its scheme under a different name would otherwise ship.
+    DanglingSecurityScheme {
+        /// The name the operations referenced.
+        scheme: String,
+        /// The names that were registered, so the message can suggest one.
+        registered: Vec<String>,
+    },
 }
 
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Serialize(e) => write!(f, "failed to serialize OpenAPI document: {e}"),
+            Self::DanglingSecurityScheme { scheme, registered } => {
+                write!(
+                    f,
+                    "operations require the security scheme `{scheme}`, which was never \
+                     registered on the builder"
+                )?;
+                if registered.is_empty() {
+                    write!(
+                        f,
+                        " — no scheme was registered at all; call \
+                         `.bearer_security(\"{scheme}\")`"
+                    )
+                } else {
+                    write!(
+                        f,
+                        " — registered: {}. Either register `{scheme}`, or name the \
+                         registered one on the route with `#[grant(scheme = \"…\")]`",
+                        registered.join(", "),
+                    )
+                }
+            }
         }
     }
 }
@@ -68,6 +104,7 @@ impl std::error::Error for BuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serialize(e) => Some(e),
+            Self::DanglingSecurityScheme { .. } => None,
         }
     }
 }
@@ -461,6 +498,25 @@ impl ApiDocBuilder {
                 .get_or_insert_with(utoipa::openapi::Components::new);
             for (name, scheme) in self.security_schemes {
                 components.security_schemes.insert(name, scheme);
+            }
+        }
+
+        // Every requirement must resolve to a scheme that was registered.
+        // A guard's scheme name is a `GrantSite` const defaulting to
+        // `"bearer"`, and the registration is a builder call somewhere
+        // else entirely — so the two can be individually right and still
+        // not meet. Refuse here rather than publish a dangling `$ref`.
+        {
+            let registered: Vec<String> = doc
+                .components
+                .as_ref()
+                .map(|components| components.security_schemes.keys().cloned().collect())
+                .unwrap_or_default();
+
+            for scheme in crate::contribution::referenced_schemes(&doc) {
+                if !registered.contains(&scheme) {
+                    return Err(BuildError::DanglingSecurityScheme { scheme, registered });
+                }
             }
         }
 
@@ -1095,6 +1151,89 @@ mod tests {
             paths = paths.path(*path, PathItem::new(HttpMethod::Get, op));
         }
         OpenApiBuilder::new().paths(paths.build()).build()
+    }
+
+    /// An operation requiring a scheme, for the dangling-reference check.
+    fn openapi_requiring_scheme(scheme: &str) -> OpenApi {
+        use utoipa::openapi::path::{HttpMethod, OperationBuilder, PathItem};
+        use utoipa::openapi::security::SecurityRequirement;
+        use utoipa::openapi::PathsBuilder;
+
+        let op = OperationBuilder::new()
+            .security(SecurityRequirement::new(scheme, Vec::<String>::new()))
+            .build();
+        let paths = PathsBuilder::new().path("/a", PathItem::new(HttpMethod::Get, op));
+        OpenApiBuilder::new().paths(paths.build()).build()
+    }
+
+    /// A guard's scheme name defaults to `"bearer"`, and the registration
+    /// is a builder call somewhere else. Both halves are individually
+    /// well-formed when they disagree, so nothing but this catches it.
+    #[test]
+    fn a_scheme_no_one_registered_is_refused() {
+        let error = ApiDocBuilder::new()
+            .title("t")
+            .version("0.1")
+            .security_scheme(
+                "oauth2",
+                SecurityScheme::Http(
+                    utoipa::openapi::security::HttpBuilder::new()
+                        .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
+                        .build(),
+                ),
+            )
+            .merge(openapi_requiring_scheme("bearer"))
+            .try_build()
+            .expect_err("`bearer` was never registered");
+
+        let message = error.to_string();
+        assert!(message.contains("`bearer`"), "{message}");
+        assert!(
+            message.contains("oauth2"),
+            "names what is registered: {message}"
+        );
+    }
+
+    /// With nothing registered at all the message says so rather than
+    /// listing an empty set.
+    #[test]
+    fn no_registered_scheme_at_all_says_which_call_to_make() {
+        let error = ApiDocBuilder::new()
+            .title("t")
+            .version("0.1")
+            .merge(openapi_requiring_scheme("bearer"))
+            .try_build()
+            .expect_err("nothing registered");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("no scheme was registered at all"),
+            "{message}"
+        );
+        assert!(
+            message.contains(r#".bearer_security("bearer")"#),
+            "{message}"
+        );
+    }
+
+    /// The counterpart: the names agree, so the document builds. Without
+    /// this the test above would pass just as well on a check that
+    /// refused everything.
+    #[test]
+    fn a_registered_scheme_builds() {
+        let doc = ApiDocBuilder::new()
+            .title("t")
+            .version("0.1")
+            .bearer_security("bearer")
+            .merge(openapi_requiring_scheme("bearer"))
+            .try_build()
+            .expect("`bearer` is registered");
+
+        let parsed: serde_json::Value = serde_json::from_slice(&doc.spec_json).unwrap();
+        assert_eq!(
+            parsed["components"]["securitySchemes"]["bearer"]["type"],
+            "http"
+        );
     }
 
     #[test]

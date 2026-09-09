@@ -85,7 +85,7 @@ async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
 }
 ```
 
-Destructure for the caller alongside the object — `Granted(caller, widget)` — rather than pairing the guard with a second `Auth<S, C>`; the context is shared, not copied. The key comes out of the path unless the route says `#[key(with = "Query")]`, which moves the OpenAPI parameter with it.
+Destructure for the caller alongside the object — `Granted(caller, widget)` — rather than pairing the guard with a second `Auth<S, C>`; the context is shared, not copied. The key comes out of the path, or out of the query string on a route whose template names no parameter, and the OpenAPI parameter moves with it.
 
 One trait per asset says what it is and what may be done to it:
 
@@ -100,12 +100,10 @@ impl Granting for Widget {
     type Source = FromState<DatabaseConnection>; // how the guard gets hold of it
     type Error = DbLoadError;
 
-    /// The whole vocabulary. An action absent here is refused, and a route
-    /// naming one fails to build rather than at runtime.
-    const ACTIONS: &'static [Action] = &[
-        Action::new("read").capability(&WIDGETS_READ).event("data_access"),
-        Action::new("delete").capability(&WIDGETS_ADMIN).event("admin_delete"),
-    ];
+    /// The whole vocabulary, as a type. Every form bounds its action on
+    /// `Table = Self::Actions`, so an action belonging to another asset
+    /// does not compile here — even where the two spell it the same.
+    type Actions = WidgetAction;
 
     async fn load(WidgetKey { id }: WidgetKey, db: &Self::State, ctx: &Self::Ctx)
         -> Result<Option<Self>, Self::Error> { /* ... */ }
@@ -114,7 +112,7 @@ impl Granting for Widget {
 
 The key's field names are the route's parameters — a guard reads it with axum's own `Path` / `Query` — so nothing at the call site says which segment feeds the lookup, and a route whose parameters do not include the key's fails the build.
 
-The action follows from the HTTP method — `post` → `create`, `put` / `patch` → `update`, `delete` → `delete`, anything else → `read` — and `#[key(…, action = "archive")]` names one the method does not imply. The guard stamps its own OpenAPI metadata: `security`, the badge, and the `401` / `403` it can return — plus `400` / `404` on the instance form, the only one that parses a key and loads an object. It also deposits the action, resource and audit category onto the request's `AuditEventBuilder`, so a guarded handler writes nothing to the audit trail.
+The action is a type — one of the markers `#[derive(Actions)]` emits per variant — and carries its own row, so the capability the gate checks and the category the audit records are read off it rather than looked up by name. A route that names none resolves through its method — `get` → `ReadAction`, `post` → `CreateAction`, `put` / `patch` → `UpdateAction`, `delete` → `DeleteAction` — against the mapping the vocabulary declares with `#[action(verb = get)]`, so nothing is derived from a name. `#[grant(action = Archive)]` names one the method does not imply. The guard stamps its own OpenAPI metadata: `security`, the badge, and the `401` / `403` it can return — plus `400` / `404` on the instance form, the only one that parses a key and loads an object. It also deposits the action, resource and audit category onto the request's `AuditEventBuilder`, so a guarded handler writes nothing to the audit trail.
 
 `#[asset]` writes the `Granting` impl from a `GrantProfile` (the application's caller, state, source and error, stated once) and an `#[derive(Actions)]` enum. The key and the loader come off `doxa-policy`'s `fetch` traits, which name no backend, so the same declaration serves a SeaORM model, a document behind an HTTP API, or a row in a map. Whichever it is, the generated loader reads the caller's tenant and confines the lookup to it — another tenant's row is *absent* rather than refused, and the route answers `404` where a bare primary-key lookup would leak its existence with a `403`. With `doxa-policy`'s `sea-orm` feature, `#[derive(PolicyResource)]` supplies those impls from field roles.
 

@@ -15,11 +15,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tower::ServiceExt;
 
-use doxa::auth::{Action, Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
+use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
-use doxa::{delete, get, routes, OpenApiRouter, PolicyResource, ToSchema};
+use doxa::{delete, get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- domain -----------------------------------------------------------------
 
@@ -49,6 +49,15 @@ struct Widget {
 
 doxa::auth::route_key!(pub WidgetKey { id: u32 });
 
+#[derive(Actions)]
+#[actions(resource = "Widget")]
+pub enum WidgetActions {
+    #[action(verb = get, capable = WidgetsRead)]
+    Read,
+    #[action(verb = delete, capable = WidgetsRead)]
+    Delete,
+}
+
 impl Granting for Widget {
     type Row = Self;
     type Key = WidgetKey;
@@ -57,10 +66,7 @@ impl Granting for Widget {
     type Source = FromState<()>;
     type Error = StatusCode;
 
-    const ACTIONS: &'static [Action] = &[
-        Action::new("read").capability(&WIDGETS_READ),
-        Action::new("delete").capability(&WIDGETS_READ),
-    ];
+    type Actions = WidgetActions;
 
     async fn load(
         WidgetKey { id }: WidgetKey,
@@ -469,6 +475,13 @@ doxa::auth::route_key!(
     pub FiledKey { fid: String, id: u32 }
 );
 
+#[derive(Actions)]
+#[actions(resource = "Filed")]
+pub enum FiledActions {
+    #[action(verb = get, instance_only)]
+    Read,
+}
+
 impl Granting for Filed {
     type Row = Self;
     type Key = FiledKey;
@@ -477,7 +490,7 @@ impl Granting for Filed {
     type Source = FromState<()>;
     type Error = StatusCode;
 
-    const ACTIONS: &'static [Action] = &[Action::new("read")];
+    type Actions = FiledActions;
 
     async fn load(
         FiledKey { fid, id }: FiledKey,

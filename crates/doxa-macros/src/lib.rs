@@ -591,7 +591,7 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 /// }
 ///
 /// impl Granting for Source {
-///     const ACTIONS: &'static [Action] = WidgetAction::ACTIONS;
+///     type Actions = WidgetAction;
 ///     // …
 /// }
 /// ```

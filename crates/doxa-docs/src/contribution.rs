@@ -116,10 +116,10 @@ impl ResponseContribution {
 }
 
 /// One security requirement entry the layer enforces. References a
-/// scheme that has been registered with
-/// [`crate::ApiDocBuilder::bearer_security`] or
-/// [`crate::ApiDocBuilder::security_scheme`] — a dangling reference
-/// produces an invalid spec, so make sure the scheme name matches.
+/// scheme registered with [`crate::ApiDocBuilder::bearer_security`] or
+/// [`crate::ApiDocBuilder::security_scheme`]; a name that was never
+/// registered is refused when the document is built, rather than
+/// published as a dangling reference.
 #[derive(Clone, Debug)]
 pub struct SecurityContribution {
     /// Name of the security scheme as registered on the
@@ -520,6 +520,44 @@ pub(crate) fn path_item_operations_mut(
 ///
 /// Only OAuth2 schemes have a scope vocabulary to declare into; a bearer
 /// HTTP scheme has nowhere to put them.
+/// Every security scheme the document's operations reference, in the
+/// order a `BTreeSet` gives.
+///
+/// The other half of [`declare_stamped_scopes`]'s walk: that one fills in
+/// scopes for schemes that exist, this one is how a scheme that does not
+/// exist is found. Kept separate because it runs whether or not any
+/// operation carries scopes — a bearer requirement has none, and is
+/// exactly the case that used to go unnoticed.
+pub(crate) fn referenced_schemes(
+    doc: &utoipa::openapi::OpenApi,
+) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+
+    for path_item in doc.paths.paths.values() {
+        for op in path_item_operations(path_item) {
+            let Some(security) = op.security.as_ref() else {
+                continue;
+            };
+            for requirement in security {
+                // `SecurityRequirement`'s inner map is private, so it is
+                // round-tripped through JSON exactly as the scope pass
+                // below does.
+                let Ok(value) = serde_json::to_value(requirement) else {
+                    continue;
+                };
+                let Ok(map) = serde_json::from_value::<
+                    std::collections::BTreeMap<String, Vec<String>>,
+                >(value) else {
+                    continue;
+                };
+                names.extend(map.into_keys());
+            }
+        }
+    }
+
+    names
+}
+
 pub(crate) fn declare_stamped_scopes(doc: &mut utoipa::openapi::OpenApi) {
     use std::collections::BTreeMap;
     use utoipa::openapi::security::{Flow, Scopes, SecurityScheme};
