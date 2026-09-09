@@ -20,11 +20,9 @@
 //! async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode
 //! ```
 //!
-//! Which parameter it reads is the asset's to say — [`Granting::KEY_NAMES`],
-//! written by `#[asset]` from the column the lookup matches — so a route
-//! whose parameter is spelled the same way names it nowhere. `#[key("…")]`
-//! is for the route that spells it differently, and `#[key(with = "Query")]`
-//! for the route that puts it in the query string rather than the path:
+//! Which parameter it reads is the key's fields — a route names nothing.
+//! `#[key(with = "Query")]` is for the route that puts the key in the query
+//! string rather than the path:
 //!
 //! ```ignore
 //! async fn get(w: Granted<Widget>) -> Json<Widget>   // /widgets/{name}
@@ -128,14 +126,21 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use axum::extract::rejection::PathRejection;
 use axum::extract::FromRequestParts;
 use axum::response::{IntoResponse, Response};
 use http::Extensions;
+use serde::de::value::UnitDeserializer;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
 
 use doxa_policy::{
     AuthError, Capability, CapabilityChecker, Capable, PolicyResource, ResourceEntity, ResourceId,
-    ResourceIdType,
 };
+
+// Re-exported so `route_key!` can name it through `$crate` without the
+// consuming crate depending on `doxa-policy` directly.
+pub use doxa_policy::ResourceIdType;
 
 use crate::claims::Claims;
 use crate::context::{AuthContext, CapabilityContext};
@@ -227,53 +232,52 @@ where
 // Route keys
 // ---------------------------------------------------------------------------
 
-/// The identifying values a loader needs, parsed from route segments.
+/// The identifying values a loader needs, read from the request.
 ///
-/// Implemented for `()`, for the scalars below, and for tuples of them
-/// up to four.
+/// A key is a **struct with one named field per segment**, deriving
+/// [`Deserialize`] — `#[derive(PolicyResource)]`
+/// writes one per way into a row, and `scoped_lookup!` writes one per
+/// named lookup. `()` is the key of a route that identifies nothing.
 ///
-/// A composite key binds **by position**: the order of `#[key("a", "b")]`
-/// is the order of the tuple, and a two-`String` key bound the wrong way
-/// round parses cleanly and loads the wrong object. Prefer distinct
-/// types per segment where you can, so a swap fails to parse instead of
-/// succeeding quietly. [`SEGMENTS`](Self::SEGMENTS) is checked against
-/// the site's parameter count before any of them are read, so a key and
-/// a route that disagree are refused rather than silently truncated.
-pub trait RouteKey: Sized + Send {
+/// Named fields rather than a tuple or a bare scalar because the name is
+/// what binds. A guard reads the key with axum's `Path` or `Query`, which
+/// match a route parameter to a field by name, so `/widgets/{name}` and
+/// `struct WidgetKey { name: String }` line up by construction. A tuple
+/// would bind by position, and a two-`String` key the wrong way round
+/// parses cleanly and loads the wrong object; a bare `String` could not
+/// say which of a route's captures it wanted at all.
+///
+/// This trait no longer parses anything — serde does. What is left is
+/// what serde cannot say: the OpenAPI type of each segment, and the order
+/// the published document lists them in.
+pub trait RouteKey: Sized + Send + DeserializeOwned {
     /// Schema kind per segment, in key order. Drives the OpenAPI
     /// parameter types without a runtime call.
     const SEGMENTS: &'static [ResourceIdType];
 
-    /// What each segment is called, in key order — the names a route's
-    /// parameters would have to carry for the key to bind without an
-    /// annotation.
+    /// What each segment is called, in key order — and therefore the
+    /// route parameters this key binds to, since the two are one name.
     ///
     /// `&[]` — the default — means the key declines to name its segments,
-    /// which is the only answer a bare scalar has: a `String` is a
-    /// `String` whether the column behind it is `name` or `slug`. Those
-    /// keys are named one level up, by the *lookup* that produces them
-    /// ([`FetchByKey::KEY_NAMES`]), and `#[asset]` reads whichever of the
-    /// two is non-empty.
+    /// which is only true of `()`. Every generated key names them, and
+    /// `#[asset]` reads whichever of this and the *lookup*'s
+    /// [`FetchByKey::KEY_NAMES`] is non-empty.
     ///
     /// A key that does answer wins over its lookup, because it is the
-    /// closer statement: a lookup matching two columns whose key parses
+    /// closer statement: a lookup matching two columns whose key takes
     /// one segment — a qualified name split on the way in — is the case
     /// where the columns and the segments are not the same list, and this
     /// is the one that has to agree with [`SEGMENTS`](Self::SEGMENTS).
     ///
     /// [`FetchByKey::KEY_NAMES`]: doxa_policy::fetch::FetchByKey::KEY_NAMES
     const NAMES: &'static [&'static str] = &[];
-
-    /// Parse the raw segments the route supplied.
-    fn parse(raw: &[&str]) -> Result<Self, KeyError>;
 }
 
 /// Whether every name in `needles` appears in `haystack`.
 ///
-/// `const`, so the route macro can prove at build time that the parameters
-/// an asset's key is named after are ones the route actually has — the
-/// check that used to be `#[key("…")]`'s reason for existing on a
-/// multi-parameter route.
+/// `const`, so the route macro can prove at build time that the fields an
+/// asset's key names are parameters the route actually has, rather than
+/// letting `Path` fail on the first request.
 pub const fn names_within(needles: &[&str], haystack: &[&str]) -> bool {
     let mut i = 0;
     while i < needles.len() {
@@ -310,20 +314,23 @@ pub const fn key_names(
     }
 }
 
-/// A route segment that did not parse into its key component.
+/// A request that did not produce the key the route names.
+///
+/// A missing parameter and an unparseable one are one answer here — the
+/// route said the caller supplies this, and what arrived was not it — so
+/// both render as the same 400 rather than distinguishing a difference
+/// the caller cannot act on.
 #[derive(Debug)]
 pub struct KeyError {
-    /// Zero-based position of the offending segment in the key.
-    pub position: usize,
-    /// The raw text that failed to parse.
-    pub raw: String,
+    /// What went wrong, as the extractor described it.
+    pub detail: String,
 }
 
 impl IntoResponse for KeyError {
     fn into_response(self) -> Response {
         (
             axum::http::StatusCode::BAD_REQUEST,
-            format!("invalid identifier: {}", self.raw),
+            format!("invalid identifier: {}", self.detail),
         )
             .into_response()
     }
@@ -332,51 +339,33 @@ impl IntoResponse for KeyError {
 /// Nothing to identify — collection and capability routes.
 impl RouteKey for () {
     const SEGMENTS: &'static [ResourceIdType] = &[];
-
-    fn parse(_raw: &[&str]) -> Result<Self, KeyError> {
-        Ok(())
-    }
 }
 
 /// One value inside a key.
 ///
-/// Separate from [`RouteKey`] because a tuple has to build its own
-/// `SEGMENTS` from its parts' kinds, and slices cannot be concatenated
-/// in a const context — a `KIND` per part can.
-pub trait KeySegment: Sized + Send {
+/// Separate from [`RouteKey`] because a key struct has to build its own
+/// `SEGMENTS` from its fields' kinds, and slices cannot be concatenated
+/// in a const context — a `KIND` per field can.
+///
+/// Nothing here parses. Serde reads the value out of the request; this
+/// says only what the published document should call its type, which is
+/// the one thing serde does not know.
+pub trait KeySegment {
     /// Schema kind for this segment, driving the OpenAPI parameter type.
     const KIND: ResourceIdType;
-
-    /// Parse one raw segment. The caller attaches the position.
-    fn parse_segment(raw: &str) -> Option<Self>;
 }
 
 macro_rules! scalar_key {
     ($ty:ty, $kind:expr) => {
         impl KeySegment for $ty {
             const KIND: ResourceIdType = $kind;
-
-            fn parse_segment(raw: &str) -> Option<Self> {
-                raw.parse().ok()
-            }
-        }
-
-        impl RouteKey for $ty {
-            const SEGMENTS: &'static [ResourceIdType] = &[$kind];
-
-            fn parse(raw: &[&str]) -> Result<Self, KeyError> {
-                let text = raw.first().copied().unwrap_or_default();
-                <$ty as KeySegment>::parse_segment(text).ok_or_else(|| KeyError {
-                    position: 0,
-                    raw: text.to_owned(),
-                })
-            }
         }
     };
 }
 
 scalar_key!(String, ResourceIdType::String);
 scalar_key!(i64, ResourceIdType::Integer);
+scalar_key!(i32, ResourceIdType::Integer);
 scalar_key!(u32, ResourceIdType::Integer);
 scalar_key!(u64, ResourceIdType::Integer);
 
@@ -388,29 +377,54 @@ scalar_key!(u64, ResourceIdType::Integer);
 #[cfg(feature = "uuid")]
 scalar_key!(uuid::Uuid, ResourceIdType::Uuid);
 
-macro_rules! tuple_key {
-    ($($name:ident @ $index:tt),+) => {
-        impl<$($name: KeySegment),+> RouteKey for ($($name,)+) {
-            const SEGMENTS: &'static [ResourceIdType] = &[$($name::KIND),+];
+/// Declare a route key: a struct with one named field per segment, and
+/// the [`RouteKey`] impl describing it.
+///
+/// `#[derive(PolicyResource)]` writes one of these per way into a row, so
+/// a derived asset needs nothing. This is for the asset whose loader is
+/// hand-written — a row behind an HTTP API, a cache, anything that is not
+/// a table — which still owes its route a key.
+///
+/// ```ignore
+/// doxa_auth::route_key!(pub WidgetKey { name: String });
+///
+/// impl Granting for Widget {
+///     type Key = WidgetKey;
+///     // …
+/// }
+/// ```
+///
+/// The field names are the route parameters. A guard reads the key with
+/// axum's `Path` / `Query`, which bind by name, so `/widgets/{name}` and
+/// the `name` field above are one string — there is no separate place to
+/// state the correspondence and therefore no way for the two to drift.
+///
+/// Each field's type must implement [`KeySegment`], which is what tells
+/// the published document whether the segment is a string, an integer or
+/// a UUID.
+#[macro_export]
+macro_rules! route_key {
+    (
+        $(#[$meta:meta])*
+        $vis:vis $name:ident { $($field:ident : $ty:ty),+ $(,)? }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize)]
+        $vis struct $name {
+            $(
+                #[allow(missing_docs)]
+                pub $field: $ty,
+            )+
+        }
 
-            fn parse(raw: &[&str]) -> Result<Self, KeyError> {
-                Ok(($(
-                    {
-                        let text = raw.get($index).copied().unwrap_or_default();
-                        $name::parse_segment(text).ok_or_else(|| KeyError {
-                            position: $index,
-                            raw: text.to_owned(),
-                        })?
-                    },
-                )+))
-            }
+        impl $crate::granted::RouteKey for $name {
+            const SEGMENTS: &'static [$crate::granted::ResourceIdType] =
+                &[$(<$ty as $crate::granted::KeySegment>::KIND),+];
+
+            const NAMES: &'static [&'static str] = &[$(::core::stringify!($field)),+];
         }
     };
 }
-
-tuple_key!(A @ 0, B @ 1);
-tuple_key!(A @ 0, B @ 1, C @ 2);
-tuple_key!(A @ 0, B @ 1, C @ 2, D @ 3);
 
 // ---------------------------------------------------------------------------
 // Refusals
@@ -608,87 +622,6 @@ pub enum KeyIn {
 /// `Granted(caller, widget)` pattern in every consumer would have to
 /// match.
 pub trait GrantSite: Send + Sync + 'static {
-    /// Parameters feeding the key, in key order.
-    ///
-    /// Empty means two different things, and the key tells them apart. For
-    /// a collection or capability route there is nothing to name and
-    /// nothing to read. For an instance route it means *this site does not
-    /// override*, and the names come from the asset instead
-    /// ([`Granting::KEY_NAMES`], via [`Subject::KEY_NAMES`]) — which is the
-    /// ordinary case, since a route addressing a widget by the column the
-    /// widget is keyed on has nothing to add.
-    ///
-    /// Override it where the route's parameter is spelled differently from
-    /// the column, which is what `#[key("…")]` writes.
-    ///
-    /// Whichever of the two answers, the count has to match the key. An
-    /// asset that names its key's column has an instance route that
-    /// builds:
-    ///
-    /// ```
-    /// # use doxa_auth::granted::{
-    /// #     Action, DefaultSite, FromState, Granting, One, Subject,
-    /// # };
-    /// # use doxa_auth::CapabilityContext;
-    /// # use doxa_policy::PolicyResource;
-    /// # use std::convert::Infallible;
-    /// # struct Widget;
-    /// # impl PolicyResource for Widget {
-    /// #     const ENTITY_TYPE: &'static str = "Widget";
-    /// #     fn resource_id(&self) -> String { String::new() }
-    /// # }
-    /// impl Granting for Widget {
-    ///     type Key = String;
-    ///     const KEY_NAMES: &'static [&'static str] = &["name"];
-    /// #     type Row = Self;
-    /// #     type Ctx = CapabilityContext;
-    /// #     type State = ();
-    /// #     type Source = FromState<()>;
-    /// #     type Error = Infallible;
-    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
-    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
-    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
-    ///     // …
-    /// }
-    ///
-    /// let () = <One<Widget, DefaultSite> as Subject>::SITE_DECLARED;
-    /// ```
-    ///
-    /// One that names none has nothing for the route to bind, and the same
-    /// route will not build. The only difference from the call above is the
-    /// missing `KEY_NAMES`, so this is a test of the resolution rather than
-    /// of the surrounding impl:
-    ///
-    /// ```compile_fail
-    /// # use doxa_auth::granted::{
-    /// #     Action, DefaultSite, FromState, Granting, One, Subject,
-    /// # };
-    /// # use doxa_auth::CapabilityContext;
-    /// # use doxa_policy::PolicyResource;
-    /// # use std::convert::Infallible;
-    /// # struct Widget;
-    /// # impl PolicyResource for Widget {
-    /// #     const ENTITY_TYPE: &'static str = "Widget";
-    /// #     fn resource_id(&self) -> String { String::new() }
-    /// # }
-    /// impl Granting for Widget {
-    ///     type Key = String;
-    /// #     type Row = Self;
-    /// #     type Ctx = CapabilityContext;
-    /// #     type State = ();
-    /// #     type Source = FromState<()>;
-    /// #     type Error = Infallible;
-    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
-    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
-    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
-    ///     // …
-    /// }
-    ///
-    /// // error: this route names a different number of key parameters
-    /// // than its key parses
-    /// let () = <One<Widget, DefaultSite> as Subject>::SITE_DECLARED;
-    /// ```
-    const PARAMS: &'static [&'static str] = &[];
     /// Cedar action to authorize, from the HTTP verb.
     const ACTION: &'static str;
     /// Which half of the request line the key arrives in.
@@ -856,8 +789,7 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     /// What the asset calls its key's parameters, in key order.
     ///
     /// [`Granting::KEY_NAMES`] for the two asset-backed forms, and empty
-    /// for a capability, which names no object. Read only where the site
-    /// declines to say — see [`resolved_params`].
+    /// for a capability, which names no object. See [`resolved_params`].
     const KEY_NAMES: &'static [&'static str] = &[];
 
     /// Compile-time proof that this subject's action table is coherent
@@ -880,15 +812,16 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     fn permission(action: &str) -> Cow<'static, str>;
 }
 
-/// The parameter names a subject's key is actually read from: the site's
-/// where it names any, the asset's otherwise.
+/// The parameter names a subject's key is read from — which are the key
+/// struct's own field names, because that is what binds them.
 ///
-/// `const`, and the only place the two are combined — so the guard and the
-/// OpenAPI description cannot resolve them differently. A route that reads
-/// `?name=` while its spec advertises a `{name}` segment is the failure
-/// this and [`KeyIn`] exist to make unwritable.
+/// There is nothing to combine here any more: a route parameter and the
+/// field it fills are one string, so the guard and the published document
+/// cannot resolve them differently. A route that reads `?name=` while its
+/// spec advertises a `{name}` segment is the failure this and [`KeyIn`]
+/// exist to make unwritable.
 pub const fn resolved_params<T: Subject>() -> &'static [&'static str] {
-    key_names(<T::Site as GrantSite>::PARAMS, T::KEY_NAMES)
+    T::KEY_NAMES
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,28 +1221,15 @@ pub trait Granting: Sized + Send + Sync + 'static {
     /// ```
     const ACTIONS: &'static [Action];
 
-    /// What this asset calls its key's parameters, in key order.
+    /// What this asset calls its key's parameters, in key order — and so
+    /// the route parameters it binds.
     ///
-    /// The half of the lookup a route cannot see. [`Key`](Self::Key) says
-    /// what the value parses into and the route says where it comes from;
-    /// this says what it is *called*, so a route whose parameter is spelled
-    /// the same way binds without naming it twice.
-    ///
-    /// `#[asset]` writes it from whichever lookup it selected — the key
-    /// column for the default loader, the identifier for `key = pk`, the
-    /// named lookup's own columns for `with = …` — preferring the key's own
-    /// [`RouteKey::NAMES`] where it has any.
-    ///
-    /// `&[]` means the asset declines to name them, and every route over it
-    /// says which parameter it uses. That is also what a hand-written impl
-    /// gets by default, so nothing that compiled before this existed
-    /// changed behaviour.
-    ///
-    /// One entry per segment [`Key`](Self::Key) parses. A list of the wrong
-    /// length is refused rather than truncated — see
-    /// [`GrantSite::PARAMS`], where the two are resolved against each
-    /// other at build time.
-    const KEY_NAMES: &'static [&'static str] = &[];
+    /// Defaults to the key's own [`RouteKey::NAMES`], which is where a
+    /// generated key already states them; overriding is for a lookup
+    /// whose columns are not its segments. One entry per segment
+    /// [`Key`](Self::Key) parses, checked at build time by
+    /// [`Subject::SITE_DECLARED`].
+    const KEY_NAMES: &'static [&'static str] = <Self::Key as RouteKey>::NAMES;
 
     /// Fetch one object, or `None` if there is no such thing.
     fn load(
@@ -1361,11 +1281,14 @@ pub trait Scoping: Granting {
     /// this asset has one.
     ///
     /// Consulted before [`scope`](Self::scope) whenever
-    /// [`FromAuthExtensions::is_admin`] holds, because this is the one
-    /// door that reaches a verdict without the capability checker — and so
-    /// the one place an administrator would otherwise be handed the same
-    /// filtered subset as anyone else. Every other door asks the checker,
-    /// which applies the policy's own admin rule.
+    /// [`FromAuthExtensions::is_admin`] holds, on both doors that produce
+    /// a subset — the collection route and the scoped dependency alike.
+    /// The capability checker cannot stand in for it: the checker decides
+    /// whether a caller may reach the asset, never which rows come back,
+    /// so an administrator who passes it would still be handed the same
+    /// filtered subset as anyone else. Instance doors are different — the
+    /// checker sees the row there, and applies the policy's own admin rule
+    /// to it.
     ///
     /// `None` — the default — means this asset draws no distinction, and
     /// an admin gets whatever [`scope`](Self::scope) returns. That is right
@@ -1563,16 +1486,13 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
             declares(R::ACTIONS, S::ACTION),
             "this route's action is missing from the asset's `Granting::ACTIONS`",
         );
-        // A site naming fewer parameters than the key parses would have
-        // the surplus silently dropped — a folder-scoped route loading an
-        // object from another folder. The asset's own `KEY_NAMES` covers
-        // this for most routes; a site that overrides them, or an asset
-        // that names none, is where it can go wrong, and it goes wrong at
-        // build time rather than on the first request.
+        // Naming fewer parameters than the key parses would have the
+        // surplus silently dropped. `KEY_NAMES` defaults to the key's own
+        // names, so this only fires on an asset that overrode them.
         assert!(
-            key_names(S::PARAMS, R::KEY_NAMES).len() == <R::Key as RouteKey>::SEGMENTS.len(),
-            "this route names a different number of key parameters than its key parses; \
-             annotate the argument with `#[key(\"…\")]`, one name per segment",
+            R::KEY_NAMES.len() == <R::Key as RouteKey>::SEGMENTS.len(),
+            "`Granting::KEY_NAMES` has a different length than the key's segments; \
+             it needs one name per segment",
         );
     };
 
@@ -1682,17 +1602,11 @@ impl<R: Scoping, S: GrantSite> Chain for Many<R, S> {
     ) -> Result<Authorized<R::Filter>, Refusal<R::Error>> {
         gate::<R>(action, ctx, checker).await?;
 
-        let scope = match R::scope(action, ctx)? {
-            Some(scope) => scope,
-            // The policy granted nothing on this asset. Whether that is a
-            // refusal or an empty page is the asset's call.
-            None => R::empty_scope().ok_or(Refusal::Denied {
-                action: Cow::Borrowed(action),
-                resource_type: Cow::Borrowed(entity_type::<R>()),
-                resource_id: Cow::Borrowed("collection"),
-                reason: "no authorized scope",
-            })?,
-        };
+        // The same function the dependency door reaches, rather than a
+        // second copy of it. Two spellings of one decision drift: this one
+        // had lost the admin seat, so an asset with an unrestricted answer
+        // gave it through `Scoped` and withheld it here.
+        let scope = subset::<R>(action, ctx)?;
 
         // The same id the refusal above names, so a listing and a refused
         // listing sit under one resource in the trail.
@@ -2128,6 +2042,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
+    /// # doxa_auth::route_key!(pub WidgetKey { name: String });
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2135,13 +2050,13 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// # }
     /// # impl Granting for Widget {
     /// #     type Row = Self;
-    /// #     type Key = String;
+    /// #     type Key = WidgetKey;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
-    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
     /// # }
     /// struct Read;
@@ -2162,6 +2077,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
+    /// # doxa_auth::route_key!(pub WidgetKey { name: String });
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2169,13 +2085,13 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// # }
     /// # impl Granting for Widget {
     /// #     type Row = Self;
-    /// #     type Key = String;
+    /// #     type Key = WidgetKey;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
-    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
     /// # }
     /// struct Purge;
@@ -2214,6 +2130,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
+    /// # doxa_auth::route_key!(pub WidgetKey { name: String });
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2223,13 +2140,13 @@ pub trait AuthorizeLoaded: PolicyResource {
     ///
     /// impl Granting for WidgetById {
     ///     type Row = Widget;
-    /// #     type Key = String;
+    /// #     type Key = WidgetKey;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     ///     const ACTIONS: &'static [Action] = &[Action::new("read")];
-    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Widget>, Infallible> { Ok(None) }
     ///     // …
     /// }
@@ -2255,6 +2172,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
+    /// # doxa_auth::route_key!(pub WidgetKey { name: String });
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2263,13 +2181,13 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// # struct WidgetById;
     /// # impl Granting for WidgetById {
     /// #     type Row = Widget;
-    /// #     type Key = String;
+    /// #     type Key = WidgetKey;
     /// #     type Ctx = CapabilityContext;
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
     /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
-    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Widget>, Infallible> { Ok(None) }
     /// # }
     /// # struct Purge;
@@ -2522,10 +2440,12 @@ async fn gated_scope<R: Scoping>(
 /// The scope itself, with the asset's answer for a caller who was granted
 /// nothing. Records nothing — [`record_scope`] is that half.
 fn subset<R: Scoping>(action: &'static str, ctx: &R::Ctx) -> Result<R::Filter, Denial> {
-    // The only door that does not go through the capability checker, so
-    // the only one that has to apply the policy's admin verdict itself.
-    // An asset that draws no distinction answers `None` and is scoped as
-    // anyone else would be.
+    // The capability checker cannot stand in for this on any door. It
+    // decides whether a caller may reach the asset at all, never which
+    // rows come back — so a collection route that passed it still has to
+    // apply the policy's admin verdict itself, exactly as a dependency
+    // that never asked does. An asset that draws no distinction answers
+    // `None` and is scoped as anyone else would be.
     if ctx.is_admin() {
         if let Some(everything) = R::unscoped() {
             return Ok(everything);
@@ -2936,135 +2856,64 @@ fn record_denial(denial: &Denial, extensions: &Extensions, tenant: Option<&str>)
     );
 }
 
-/// Pull the key's parameters out of the request, in the order the route
-/// names them, from whichever half of the request line the site says they
-/// live in.
+/// Read the route's key out of the request.
 ///
-/// The names come from [`resolved_params`] and the location from
-/// [`GrantSite::IN`] — the same two the OpenAPI impls read, which is what
-/// keeps the spec describing the request this actually parses.
+/// The key is a struct with one named field per segment, deriving
+/// `Deserialize`, so this is axum's own extractor and nothing more: the
+/// capture or query parameter a field binds to is the one spelled the
+/// same way. [`GrantSite::IN`] picks which half of the request line to
+/// read, and the OpenAPI impls read the same constant — which is what
+/// keeps the published spec describing the request this actually parses.
+///
+/// Nothing is decoded here. Axum stores path captures already
+/// percent-decoded and `Query` goes through `serde_urlencoded`, so the
+/// guard and any handler taking its own `Path` / `Query` are reading one
+/// decoding of the request rather than two.
 async fn fetch_key<T: Subject, St: Send + Sync>(
     parts: &mut http::request::Parts,
     state: &St,
 ) -> Result<T::Key, Refusal<T::Error>> {
-    let params_named = resolved_params::<T>();
-
-    // A route that names fewer parameters than the key parses would have
-    // the surplus silently dropped — a folder-scoped route loading an
-    // object from another folder. `One::SITE_DECLARED` refuses that at
-    // build time; this is the same refusal for anything that reached here
-    // without it.
-    if params_named.len() != T::Key::SEGMENTS.len() {
-        return Err(Refusal::Auth(AuthError::PolicyFailed(format!(
-            "route names {} key parameter(s) but the key takes {}",
-            params_named.len(),
-            T::Key::SEGMENTS.len(),
-        ))));
-    }
-
+    // Nothing to identify — a collection or capability route. Answered
+    // from a unit rather than the request because there is nothing in the
+    // request to answer from, and `Path` over a route with no captures is
+    // a rejection rather than an empty key.
     if T::Key::SEGMENTS.is_empty() {
-        return Ok(T::Key::parse(&[])?);
+        return T::Key::deserialize(UnitDeserializer::<serde::de::value::Error>::new()).map_err(
+            |error| {
+                Refusal::Key(KeyError {
+                    detail: error.to_string(),
+                })
+            },
+        );
     }
 
     match <T::Site as GrantSite>::IN {
-        KeyIn::Path => {
-            // `RawPathParams` borrows `UrlParams` rather than removing it,
-            // so a handler may still take its own `Path`.
-            let params = axum::extract::RawPathParams::from_request_parts(parts, state)
-                .await
-                // A route that names key segments but exposes no path
-                // parameters is a router the macro and the site disagree
-                // about, not a bad request.
-                .map_err(|rejection| {
-                    Refusal::Auth(AuthError::PolicyFailed(format!(
-                        "route path parameters unavailable: {rejection}"
-                    )))
-                })?;
-
-            let mut raw = Vec::with_capacity(params_named.len());
-            for name in params_named {
-                let value = params
-                    .iter()
-                    .find(|(param, _)| param == name)
-                    .map(|(_, value)| value)
-                    .ok_or_else(|| {
-                        Refusal::Auth(AuthError::PolicyFailed(format!(
-                            "route has no path parameter `{name}`"
-                        )))
-                    })?;
-                raw.push(value);
-            }
-
-            Ok(T::Key::parse(&raw)?)
-        }
-        KeyIn::Query => {
-            let query = query_pairs(parts.uri.query().unwrap_or_default());
-
-            let mut raw = Vec::with_capacity(params_named.len());
-            for name in params_named {
-                // Absent is a bad request, not a wiring fault: the route
-                // said the caller supplies this, and the caller did not.
-                // `KeyError` renders it as the 400 an unparseable path
-                // segment gets, so the two ways of naming an object fail
-                // the same way.
-                let value = query
-                    .iter()
-                    .find(|(param, _)| param == name)
-                    .map(|(_, value)| value.as_str())
-                    .ok_or_else(|| KeyError {
-                        position: raw.len(),
-                        raw: format!("missing query parameter `{name}`"),
-                    })?;
-                raw.push(value);
-            }
-
-            Ok(T::Key::parse(&raw)?)
-        }
+        KeyIn::Path => axum::extract::Path::<T::Key>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Path(key)| key)
+            .map_err(|rejection| match rejection {
+                // The route has no captures at all: the router and the
+                // asset disagree about what this route is, which is a
+                // wiring fault rather than something the caller did.
+                PathRejection::MissingPathParams(error) => Refusal::Auth(AuthError::PolicyFailed(
+                    format!("route path parameters unavailable: {error}"),
+                )),
+                other => Refusal::Key(KeyError {
+                    detail: other.body_text(),
+                }),
+            }),
+        KeyIn::Query => axum::extract::Query::<T::Key>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Query(key)| key)
+            // Absent or unparseable are both the caller's doing: the route
+            // said they supply this. `KeyError` renders the 400 a bad path
+            // segment gets, so the two ways of naming an object fail alike.
+            .map_err(|rejection| {
+                Refusal::Key(KeyError {
+                    detail: rejection.body_text(),
+                })
+            }),
     }
-}
-
-/// Decode an `application/x-www-form-urlencoded` query string into
-/// name/value pairs.
-///
-/// Hand-rolled rather than pulled from a crate because it is twenty lines
-/// and the alternative is a public dependency on somebody's parser in the
-/// one code path that decides what object a policy is asked about. `+` is
-/// a space and `%XX` is a byte, which is the whole of the encoding;
-/// anything that does not decode as UTF-8 is dropped, so it cannot reach a
-/// lookup as a lossy replacement character.
-fn query_pairs(query: &str) -> Vec<(String, String)> {
-    fn decode(raw: &str) -> Option<String> {
-        let bytes = raw.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'+' => {
-                    out.push(b' ');
-                    i += 1;
-                }
-                b'%' if i + 2 < bytes.len() => {
-                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-                    out.push(u8::from_str_radix(hex, 16).ok()?);
-                    i += 3;
-                }
-                byte => {
-                    out.push(byte);
-                    i += 1;
-                }
-            }
-        }
-        String::from_utf8(out).ok()
-    }
-
-    query
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-        .filter_map(|pair| {
-            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-            Some((decode(name)?, decode(value)?))
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

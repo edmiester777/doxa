@@ -136,13 +136,16 @@ impl Fetch<Catalog> for Widget {
     type Error = Infallible;
 }
 
-impl FetchByKey<Catalog> for Widget {
-    type Key = String;
+// One named field per route segment, so `{name}` binds by name.
+doxa_auth::route_key!(pub WidgetKey { name: String });
 
-    async fn fetch(key: String, src: &Catalog, scope: &str) -> Result<Option<Self>, Infallible> {
+impl FetchByKey<Catalog> for Widget {
+    type Key = WidgetKey;
+
+    async fn fetch(key: WidgetKey, src: &Catalog, scope: &str) -> Result<Option<Self>, Infallible> {
         // The scope is not advisory: a widget owned by someone else is
         // absent, not refused.
-        Ok(src.get(&key).filter(|w| w.tenant == scope).cloned())
+        Ok(src.get(&key.name).filter(|w| w.tenant == scope).cloned())
     }
 }
 

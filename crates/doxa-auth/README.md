@@ -90,10 +90,11 @@ Destructure for the caller alongside the object — `Granted(caller, widget)` �
 One trait per asset says what it is and what may be done to it:
 
 ```rust
+doxa_auth::route_key!(pub WidgetKey { id: u32 });
+
 impl Granting for Widget {
     type Row = Self;              // Cedar identity, from #[derive(PolicyResource)]
-    type Key = u32;               // what the {id} segment parses into
-    const KEY_NAMES: &[&str] = &["id"]; // …and what the route calls it
+    type Key = WidgetKey;         // one named field per segment: {id}
     type Ctx = CapabilityContext; // tenant + roles, or your own Auth context
     type State = DatabaseConnection;      // what load() is handed
     type Source = FromState<DatabaseConnection>; // how the guard gets hold of it
@@ -106,10 +107,12 @@ impl Granting for Widget {
         Action::new("delete").capability(&WIDGETS_ADMIN).event("admin_delete"),
     ];
 
-    async fn load(id: u32, db: &Self::State, ctx: &Self::Ctx)
+    async fn load(WidgetKey { id }: WidgetKey, db: &Self::State, ctx: &Self::Ctx)
         -> Result<Option<Self>, Self::Error> { /* ... */ }
 }
 ```
+
+The key's field names are the route's parameters — a guard reads it with axum's own `Path` / `Query` — so nothing at the call site says which segment feeds the lookup, and a route whose parameters do not include the key's fails the build.
 
 The action follows from the HTTP method — `post` → `create`, `put` / `patch` → `update`, `delete` → `delete`, anything else → `read` — and `#[key(…, action = "archive")]` names one the method does not imply. The guard stamps its own OpenAPI metadata: `security`, the badge, and the `401` / `403` it can return — plus `400` / `404` on the instance form, the only one that parses a key and loads an object. It also deposits the action, resource and audit category onto the request's `AuditEventBuilder`, so a guarded handler writes nothing to the audit trail.
 

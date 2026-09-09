@@ -499,22 +499,24 @@ async fn get(w: Granted<WidgetByName>) -> Json<Widget> { /* ... */ }
 async fn find(#[key(with = "Query")] w: Granted<WidgetByName>) -> Json<Widget> { /* ... */ }
 ```
 
-*Which* parameter it reads is the asset's to say, not the route's. `#[asset]` takes it off the column the lookup matches, so a route whose parameter is spelled the same way names it nowhere — even with several segments to choose from:
+*Which* parameter it reads is the key's, not the route's. A key is a struct deriving `Deserialize` and the guard reads it with axum's own `Path` / `Query`, so the field names are the route parameters — even with several segments to choose from:
 
 ```rust
-// binds {name}, because that is the column `WidgetByName` is keyed on
+// binds {name}, because that is the field `WidgetByName`'s key has
 #[get("/widgets/{name}/revisions/{rev}")]
 async fn get_revision(widget: Granted<WidgetByName>, /* ... */) -> Json<Revision> { /* ... */ }
 ```
 
-`#[key("slug")]` is left for the route that spells it differently. A route naming a parameter the asset's key does not have fails the build.
+To spell a segment differently, rename the field at the row — `#[resource(key = "slug")]` — rather than per route. A route whose parameters do not include the key's fails the build.
 
 **What the route owes.** One trait says what the asset is and what may be done to it:
 
 ```rust
+doxa::auth::route_key!(pub WidgetKey { id: u32 });
+
 impl Granting for Widget {
     type Row = Self;              // the Cedar identity, from #[derive(PolicyResource)]
-    type Key = u32;               // what the {id} segment parses into
+    type Key = WidgetKey;         // one named field per segment: {id}
     type Ctx = CapabilityContext; // tenant + roles, or your own Auth context
     type State = DatabaseConnection;      // what load() is handed
     type Source = FromState<DatabaseConnection>; // how the guard gets hold of it
@@ -527,7 +529,7 @@ impl Granting for Widget {
         Action::new("delete").capability(&WIDGETS_ADMIN).event("admin_delete"),
     ];
 
-    async fn load(id: u32, db: &Self::State, ctx: &Self::Ctx)
+    async fn load(WidgetKey { id }: WidgetKey, db: &Self::State, ctx: &Self::Ctx)
         -> Result<Option<Self>, Self::Error> { /* ... */ }
 }
 ```

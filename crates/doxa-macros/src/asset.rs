@@ -10,12 +10,11 @@
 //! Only `ACTIONS` is a fact about this asset, and the attribute takes it
 //! as one word.
 //!
-//! `KEY_NAMES` is what lets a route stop naming its own key segment. The
-//! column a lookup matches is a fact about the lookup, so it travels with
-//! it: `#[resource(key)] name: String` reaches the route as `&["name"]`,
-//! and `/widgets/{name}/revisions/{rev}` binds the right one of the two
-//! segments without an annotation. `#[key("…")]` is left for the route
-//! whose parameter is spelled differently from the column.
+//! `KEY_NAMES` is what lets a route stop naming its own key segment.
+//! `#[resource(key)] name: String` produces a key whose field is `name`, so
+//! `/widgets/{name}/revisions/{rev}` binds the right one of the two
+//! segments and the route says nothing. Rename at the row —
+//! `#[resource(key = "slug")]` — not per route.
 //!
 //! `with` names a [`Lookup`] instead — one of the markers
 //! `#[resource(key(Name))]` emits, for the row reached more ways than
@@ -278,18 +277,11 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         (None, None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::Key),
     };
 
-    // What the key's parameters are called, which is the half a route
-    // cannot work out: the key type is a `String`, and a `String` does not
-    // know whether the column behind it is `name` or `slug`. Read off
-    // whichever lookup was selected just above, so the answer moves with
-    // the way in rather than being restated per route.
-    //
-    // The key's own `RouteKey::NAMES` wins where it has any. That is the
-    // lookup matching more columns than its key parses segments — a
-    // qualified name split on the way in — where the columns and the
-    // segments are not the same list and only the key can say which is
-    // which. An explicit `key = T` names no lookup at all, so it is the
-    // only source there is.
+    // The fallback for `KEY_NAMES`, read off whichever lookup was selected
+    // above. The key's own `RouteKey::NAMES` wins where it has any, which
+    // is every generated key; this is left for a lookup matching more
+    // columns than its key parses segments. An explicit `key = T` names no
+    // lookup at all.
     let lookup_names = match (&args.key, &args.with, args.by_primary_key) {
         (Some(_), _, _) => quote!(&[]),
         (None, Some(with), _) => {
@@ -722,8 +714,8 @@ mod tests {
 
     /// The column a lookup matches is a fact about the lookup, so the name
     /// travels with it rather than being repeated on every route. This is
-    /// what lets `/widgets/{name}/revisions/{rev}` bind without a
-    /// `#[key("name")]`.
+    /// what lets `/widgets/{name}/revisions/{rev}` bind with nothing said
+    /// at the call site.
     #[test]
     fn the_key_names_come_off_the_lookup_that_was_selected() {
         let out = expand_ok(

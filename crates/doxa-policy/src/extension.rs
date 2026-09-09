@@ -129,6 +129,14 @@ pub trait PolicyExtension: Send + Sync {
     /// after partial evaluation. Consumers translate this to their own
     /// predicate type or ignore it.
     ///
+    /// Every policy reaching here is a `permit`. Cedar's residual set holds
+    /// both effects, and a `forbid` whose condition could not be finished
+    /// leaves the request with no decision at all — so the resource is
+    /// refused before this is called rather than having an exclusion handed
+    /// over as though it were a grant. An implementation may take the body
+    /// as a condition under which access is *allowed*, and does not need to
+    /// consult [`Policy::effect`](cedar_policy::Policy::effect).
+    ///
     /// Returns `Err` if the residual contains expressions the consumer
     /// cannot handle (fail-safe denial).
     fn extract_residual_attrs(

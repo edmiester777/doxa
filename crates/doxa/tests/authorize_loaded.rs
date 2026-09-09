@@ -54,9 +54,11 @@ struct Source {
     region: String,
 }
 
+doxa::auth::route_key!(pub SourceKey { name: String });
+
 impl Granting for Source {
     type Row = Self;
-    type Key = String;
+    type Key = SourceKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -71,7 +73,7 @@ impl Granting for Source {
     /// consumer is a pool that cannot see the request's open transaction
     /// — would be the defect this whole path exists to avoid.
     async fn load(
-        _key: String,
+        SourceKey { name: _ }: SourceKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {

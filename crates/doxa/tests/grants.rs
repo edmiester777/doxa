@@ -48,9 +48,11 @@ struct Widget {
     name: String,
 }
 
+doxa::auth::route_key!(pub WidgetKey { id: u32 });
+
 impl Granting for Widget {
     type Row = Self;
-    type Key = u32;
+    type Key = WidgetKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -65,7 +67,7 @@ impl Granting for Widget {
     ];
 
     async fn load(
-        id: u32,
+        WidgetKey { id }: WidgetKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
@@ -117,7 +119,7 @@ async fn list_widgets(widgets: Granted<Many<Widget>>) -> &'static str {
 /// the whole of it.
 #[delete("/widgets/{id}", tag = "Widgets")]
 async fn delete_widget(
-    #[key("id", action = "delete")] Granted(caller, widget): Granted<Widget>,
+    #[key(action = "delete")] Granted(caller, widget): Granted<Widget>,
 ) -> &'static str {
     assert_eq!(caller.tenant_id.as_deref(), Some("acme"));
     assert_eq!(widget.id, 7);

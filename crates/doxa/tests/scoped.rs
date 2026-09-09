@@ -253,6 +253,74 @@ async fn the_failure_tells_the_client_nothing_about_the_database() {
     assert_eq!(json["message"], "could not load the requested resource");
 }
 
+// ---- renaming the segment ---------------------------------------------------
+
+/// The row whose route calls its key column something else. The rename is
+/// here, on the column, rather than on each route that reaches it.
+mod aliased {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, PolicyResource)]
+    #[sea_orm(table_name = "connections")]
+    #[resource(entity_type = "Connection")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+
+        /// The column is `name`; a route says `{slug}`.
+        #[resource(id, key = "slug")]
+        pub name: String,
+
+        #[resource(scope)]
+        pub tenant_id: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// What a route binds is the key's field, so the rename reaches the router
+/// and the published spec without any route restating it.
+#[test]
+fn a_renamed_key_names_the_segment_it_was_renamed_to() {
+    use doxa::auth::RouteKey;
+
+    assert_eq!(<aliased::ModelKey as RouteKey>::NAMES, ["slug"]);
+    assert_eq!(
+        <aliased::Model as ScopedRow>::KEY_COLUMN.as_str(),
+        "name",
+        "the rename is what the route calls the segment, not where the value is looked for",
+    );
+}
+
+/// And the lookup still matches the column, confined to the tenant as
+/// every generated lookup is.
+#[tokio::test]
+async fn a_renamed_key_still_queries_its_own_column() {
+    use doxa::policy::FetchByKey;
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_results([Vec::<aliased::Model>::new()])
+        .into_connection();
+
+    <aliased::Model as FetchByKey<DatabaseConnection>>::fetch(
+        aliased::ModelKey {
+            slug: "primary".to_owned(),
+        },
+        &db,
+        "acme",
+    )
+    .await
+    .expect("query runs");
+
+    let sql = format!("{:?}", db.into_transaction_log()[0]);
+    assert!(sql.contains("name"), "{sql}");
+    assert!(sql.contains("primary"), "{sql}");
+    assert!(sql.contains("acme"), "{sql}");
+}
+
 /// The route's key and the Cedar id answer different questions. Here the
 /// row is reached by its uuid but still names itself by its name, so a
 /// policy written against `Connection::"primary"` covers both routes.

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use cached::stores::TimedSizedCache;
 use cached::Cached;
-use cedar_policy::{Authorizer, Context, Decision, Entities, PolicySet, Request};
+use cedar_policy::{Authorizer, Context, Decision, Effect, Entities, PolicySet, Request};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -467,17 +467,43 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
                 Ok(ResourceAccess::Allowed(merged))
             }
             None => {
-                // Residual: resource conditionally allowed — extract from both
-                // definitely satisfied and nontrivial residual policies.
+                // Cedar answers `None` for two different reasons and only
+                // one of them is a grant waiting on a condition. A `forbid`
+                // whose `when` clause could not be finished lands here too
+                // — no verdict is possible while a denial is still open —
+                // and `nontrivial_residuals` hands permits and forbids back
+                // in one undifferentiated stream, so the effect has to be
+                // read off each policy.
+                //
+                // A forbid's condition is not a filter. Translated as one it
+                // is the precise inverse of what was written: the rows the
+                // policy excluded become the rows the caller is served, and
+                // the resource joins the session besides. Negating it is no
+                // better — `region != "EU"` is not the complement of
+                // `region == "EU"` once the column is nullable, and a forbid
+                // the consumer cannot translate has no safe filter at all.
+                //
+                // So the resource is refused, which is what everything else
+                // this path cannot express already gets. Narrower than
+                // Cedar's own "cannot say", and narrow is the direction to
+                // be wrong in.
+                let residuals: Vec<_> = response.nontrivial_residuals().collect();
+                if residuals
+                    .iter()
+                    .any(|policy| matches!(policy.effect(), Effect::Forbid))
+                {
+                    return Ok(ResourceAccess::Denied);
+                }
+
                 let mut attrs = Vec::new();
                 for policy in response.definitely_satisfied() {
                     attrs.push(self.extension.extract_allowed_attrs(&policy)?);
                 }
-                for policy in response.nontrivial_residuals() {
-                    let body = extract_condition_body(&policy)?;
+                for policy in &residuals {
+                    let body = extract_condition_body(policy)?;
                     attrs.push(
                         self.extension
-                            .extract_residual_attrs(&policy, body.as_ref())?,
+                            .extract_residual_attrs(policy, body.as_ref())?,
                     );
                 }
                 let merged = self.extension.merge_resource_attrs(attrs)?;
@@ -940,5 +966,180 @@ mod cache_tests {
     #[should_panic(expected = "reload on every request")]
     fn a_zero_capacity_cache_is_refused() {
         let _ = TenantStoreCache::with_capacity_and_ttl(0, DEFAULT_TENANT_CACHE_TTL);
+    }
+}
+
+#[cfg(test)]
+mod residual_effect_tests {
+    use async_trait::async_trait;
+    use cedar_policy::{EntityUid, PolicySet};
+
+    use super::*;
+    use crate::extension::ResourceGrants;
+    use crate::store::PolicyStore;
+    use crate::uid::build_uid;
+
+    /// One widget the tenant declares, and no entity for it.
+    ///
+    /// Withholding the entity is what leaves `resource.region` unknown, and
+    /// an unknown is what turns a `when` clause into a residual — the shape
+    /// the whole filter path is built on, and the only shape in which a
+    /// `forbid` can survive evaluation undecided.
+    struct OneWidget(&'static str);
+
+    #[async_trait]
+    impl PolicyStore for OneWidget {
+        async fn list_resources(&self, _: &str) -> Result<HashMap<String, Vec<String>>, AuthError> {
+            Ok(HashMap::from([(
+                "Widget".to_owned(),
+                vec!["w-1".to_owned()],
+            )]))
+        }
+
+        async fn load_policy_set(&self, _: &str) -> Result<PolicySet, AuthError> {
+            self.0
+                .parse()
+                .map_err(|e| AuthError::PolicyFailed(format!("test parse: {e}")))
+        }
+
+        async fn load_entity_jsons(&self, _: &str) -> Result<Vec<Value>, AuthError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Surfaces the per-resource verdict, which the shared stub throws away.
+    struct Verdicts;
+
+    impl PolicyExtension for Verdicts {
+        type ResourceAttrs = ();
+        type SessionOutput = Vec<(String, bool)>;
+
+        fn extract_allowed_attrs(&self, _: &cedar_policy::Policy) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        fn extract_residual_attrs(
+            &self,
+            _: &cedar_policy::Policy,
+            _: Option<&Value>,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        fn merge_resource_attrs(&self, _: Vec<()>) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        fn build_resource_uid(
+            &self,
+            _: &str,
+            entity_type: &str,
+            resource_id: &str,
+        ) -> Result<EntityUid, AuthError> {
+            build_uid(entity_type, resource_id)
+        }
+
+        fn build_role_uid(&self, _: &str, role_name: &str) -> Result<EntityUid, AuthError> {
+            build_uid("Role", role_name)
+        }
+
+        fn assemble_session(
+            &self,
+            _: &str,
+            grants: ResourceGrants<()>,
+        ) -> Result<Self::SessionOutput, AuthError> {
+            let mut out: Vec<(String, bool)> = grants
+                .into_values()
+                .flatten()
+                .map(|(id, access)| (id, matches!(access, ResourceAccess::Allowed(()))))
+                .collect();
+            out.sort();
+            Ok(out)
+        }
+
+        fn deny_all(&self) -> Self::SessionOutput {
+            Vec::new()
+        }
+
+        fn admin_session(&self) -> Result<Self::SessionOutput, AuthError> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn verdicts(policy_text: &'static str) -> Vec<(String, bool)> {
+        let store: SharedPolicyStore = Arc::new(OneWidget(policy_text));
+        let tenant = load_tenant_store(&store, "acme").await.expect("loads");
+
+        CedarEvaluator::new(&tenant, "acme", &["viewer".to_owned()], &Verdicts)
+            .expect("builds")
+            .evaluate_session("acme")
+            .expect("evaluates")
+    }
+
+    /// The baseline: a `permit` whose condition could not be finished is a
+    /// conditional grant, and the resource joins the session so its
+    /// condition can become a filter.
+    #[tokio::test]
+    async fn a_residual_permit_is_a_conditional_grant() {
+        let verdicts = verdicts(
+            r#"permit(principal, action == Action::"query", resource)
+               when { resource.region == "us" };"#,
+        )
+        .await;
+
+        assert_eq!(verdicts, [("w-1".to_owned(), true)]);
+    }
+
+    /// The one this exists for. A `forbid` leaves a residual by the same
+    /// mechanism, and Cedar reports no decision because the denial is still
+    /// open — the same `None` a conditional grant produces. Read as a grant
+    /// its condition is the exact inverse of what was written: the caller
+    /// would be served precisely the rows the policy excluded, and the
+    /// resource would be added to the session besides.
+    #[tokio::test]
+    async fn a_residual_forbid_refuses_rather_than_becoming_a_grant() {
+        let verdicts = verdicts(
+            r#"permit(principal, action == Action::"query", resource);
+               forbid(principal, action == Action::"query", resource)
+               when { resource.region == "eu" };"#,
+        )
+        .await;
+
+        assert_eq!(
+            verdicts,
+            [("w-1".to_owned(), false)],
+            "an exclusion the policy could not finish must not be read as a grant",
+        );
+    }
+
+    /// `unless` is the same policy written the other way round, and Cedar
+    /// desugars it to `when { !… }` — so it has to reach the same answer
+    /// rather than slipping past a check that only knew one spelling.
+    #[tokio::test]
+    async fn an_unless_clause_on_a_forbid_refuses_too() {
+        let verdicts = verdicts(
+            r#"permit(principal, action == Action::"query", resource);
+               forbid(principal, action == Action::"query", resource)
+               unless { resource.region == "us" };"#,
+        )
+        .await;
+
+        assert_eq!(verdicts, [("w-1".to_owned(), false)]);
+    }
+
+    /// And the refusal is confined to the resource the forbid could apply
+    /// to: a `forbid` whose *scope* rules it out never becomes a residual,
+    /// so it cannot deny a grant it was never about.
+    #[tokio::test]
+    async fn a_forbid_scoped_to_another_resource_leaves_the_grant_alone() {
+        let verdicts = verdicts(
+            r#"permit(principal, action == Action::"query", resource)
+               when { resource.region == "us" };
+               forbid(principal, action == Action::"query", resource == Widget::"w-2")
+               when { resource.region == "eu" };"#,
+        )
+        .await;
+
+        assert_eq!(verdicts, [("w-1".to_owned(), true)]);
     }
 }

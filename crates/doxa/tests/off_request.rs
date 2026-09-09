@@ -44,10 +44,18 @@ impl Fetch<Catalog> for Dataset {
     type Error = std::convert::Infallible;
 }
 
-impl FetchByKey<Catalog> for Dataset {
-    type Key = String;
+doxa::auth::route_key!(pub DatasetKey { name: String });
 
-    async fn fetch(key: String, src: &Catalog, scope: &str) -> Result<Option<Self>, Self::Error> {
+impl FetchByKey<Catalog> for Dataset {
+    type Key = DatasetKey;
+
+    const KEY_NAMES: &'static [&'static str] = &["name"];
+
+    async fn fetch(
+        DatasetKey { name: key }: DatasetKey,
+        src: &Catalog,
+        scope: &str,
+    ) -> Result<Option<Self>, Self::Error> {
         Ok(src
             .0
             .iter()
@@ -158,7 +166,13 @@ async fn a_job_authorizes_against_the_state_it_already_holds() {
     let (work, _rx) = work("acme", &["datasets.read"]);
 
     let dataset = work
-        .authorize::<One<DatasetByName>>("sales".to_owned(), "read", &catalog())
+        .authorize::<One<DatasetByName>>(
+            DatasetKey {
+                name: "sales".to_owned(),
+            },
+            "read",
+            &catalog(),
+        )
         .await
         .expect("granted");
 
@@ -172,7 +186,13 @@ async fn a_job_is_confined_to_its_callers_tenant() {
     let (work, _rx) = work("globex", &["datasets.read"]);
 
     let dataset = work
-        .authorize::<One<DatasetByName>>("sales".to_owned(), "read", &catalog())
+        .authorize::<One<DatasetByName>>(
+            DatasetKey {
+                name: "sales".to_owned(),
+            },
+            "read",
+            &catalog(),
+        )
         .await
         .expect("granted");
 
@@ -191,9 +211,15 @@ async fn a_job_is_confined_to_its_callers_tenant() {
 async fn a_grant_reaches_the_trail_with_no_request_anywhere() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
 
-    work.authorize::<One<DatasetByName>>("sales".to_owned(), "read", &catalog())
-        .await
-        .expect("granted");
+    work.authorize::<One<DatasetByName>>(
+        DatasetKey {
+            name: "sales".to_owned(),
+        },
+        "read",
+        &catalog(),
+    )
+    .await
+    .expect("granted");
 
     // Dropping is the terminal, exactly as a response is under an
     // `AuditLayer`. Nothing was called to arrange it.
@@ -214,7 +240,13 @@ async fn a_refused_job_is_recorded_before_anything_else_runs() {
     let (work, mut rx) = work("acme", &[]);
 
     let refusal = work
-        .authorize::<One<DatasetByName>>("sales".to_owned(), "read", &catalog())
+        .authorize::<One<DatasetByName>>(
+            DatasetKey {
+                name: "sales".to_owned(),
+            },
+            "read",
+            &catalog(),
+        )
         .await
         .expect_err("the capability is not held");
 
@@ -239,9 +271,15 @@ async fn the_actor_names_the_job_that_did_the_work() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
     let work = work.actor("job:reindex");
 
-    work.authorize::<One<DatasetByName>>("sales".to_owned(), "read", &catalog())
-        .await
-        .expect("granted");
+    work.authorize::<One<DatasetByName>>(
+        DatasetKey {
+            name: "sales".to_owned(),
+        },
+        "read",
+        &catalog(),
+    )
+    .await
+    .expect("granted");
     drop(work);
 
     let event = rx.recv().await.expect("an event was emitted");
@@ -260,9 +298,15 @@ async fn the_actor_names_the_job_that_did_the_work() {
 async fn a_job_that_fails_after_authorizing_records_the_failure() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
 
-    work.authorize::<One<DatasetByName>>("sales".to_owned(), "read", &catalog())
-        .await
-        .expect("granted");
+    work.authorize::<One<DatasetByName>>(
+        DatasetKey {
+            name: "sales".to_owned(),
+        },
+        "read",
+        &catalog(),
+    )
+    .await
+    .expect("granted");
 
     work.event().emit_error("reindex failed: disk full");
     drop(work);

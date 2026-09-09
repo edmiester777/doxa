@@ -54,9 +54,13 @@ struct Widget {
 #[derive(Debug, PartialEq)]
 struct Filter(&'static str);
 
+doxa::auth::route_key!(pub WidgetKey { id: u32 });
+doxa::auth::route_key!(pub GadgetKey { id: u32 });
+doxa::auth::route_key!(pub LedgerKey { id: u32 });
+
 impl Granting for Widget {
     type Row = Self;
-    type Key = u32;
+    type Key = WidgetKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -71,7 +75,7 @@ impl Granting for Widget {
     ];
 
     async fn load(
-        id: u32,
+        WidgetKey { id }: WidgetKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
@@ -120,7 +124,7 @@ struct Gadget {
 
 impl Granting for Gadget {
     type Row = Self;
-    type Key = u32;
+    type Key = GadgetKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -129,7 +133,7 @@ impl Granting for Gadget {
     const ACTIONS: &'static [Action] = &[Action::new("read")];
 
     async fn load(
-        _id: u32,
+        GadgetKey { id: _ }: GadgetKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
@@ -155,13 +159,11 @@ impl Scoping for Gadget {
 
 struct GetWidget;
 impl GrantSite for GetWidget {
-    const PARAMS: &'static [&'static str] = &["id"];
     const ACTION: &'static str = "read";
 }
 
 struct Listing;
 impl GrantSite for Listing {
-    const PARAMS: &'static [&'static str] = &[];
     const ACTION: &'static str = "read";
 }
 
@@ -169,7 +171,6 @@ impl GrantSite for Listing {
 /// only difference between these two routes.
 struct Purging;
 impl GrantSite for Purging {
-    const PARAMS: &'static [&'static str] = &[];
     const ACTION: &'static str = "purge";
 }
 
@@ -442,9 +443,10 @@ async fn an_unparseable_key_is_rejected_early() {
 async fn a_handler_can_authorize_an_id_from_its_body() {
     let (parts, _rx) = parts(&["viewer"]);
 
-    let widget = doxa::auth::authorize::<One<Widget>>(1, "read", &(), &parts.extensions)
-        .await
-        .expect("region us is granted");
+    let widget =
+        doxa::auth::authorize::<One<Widget>>(WidgetKey { id: 1 }, "read", &(), &parts.extensions)
+            .await
+            .expect("region us is granted");
 
     assert_eq!(widget.region, "us");
 }
@@ -457,9 +459,10 @@ async fn a_handler_can_authorize_an_id_from_its_body() {
 async fn a_manual_refusal_is_recorded_like_the_extractors() {
     let (parts, mut rx) = parts(&["viewer"]);
 
-    let refused = doxa::auth::authorize::<One<Widget>>(2, "read", &(), &parts.extensions)
-        .await
-        .expect_err("region eu is denied");
+    let refused =
+        doxa::auth::authorize::<One<Widget>>(WidgetKey { id: 2 }, "read", &(), &parts.extensions)
+            .await
+            .expect_err("region eu is denied");
 
     assert_eq!(refused.into_response().status(), StatusCode::FORBIDDEN);
 
@@ -476,7 +479,7 @@ async fn a_manual_refusal_is_recorded_like_the_extractors() {
 async fn a_manual_grant_is_recorded_like_the_extractors() {
     let (parts, mut rx) = parts(&["viewer"]);
 
-    doxa::auth::authorize::<One<Widget>>(1, "read", &(), &parts.extensions)
+    doxa::auth::authorize::<One<Widget>>(WidgetKey { id: 1 }, "read", &(), &parts.extensions)
         .await
         .expect("region us is granted");
 
@@ -517,7 +520,7 @@ struct Ledger {
 
 impl Granting for Ledger {
     type Row = Self;
-    type Key = u32;
+    type Key = LedgerKey;
     type Ctx = Arc<doxa::auth::AuthContext<Session, doxa::auth::OidcClaims>>;
     type State = ();
     type Source = FromState<()>;
@@ -525,7 +528,11 @@ impl Granting for Ledger {
 
     const ACTIONS: &'static [Action] = &[Action::new("read")];
 
-    async fn load(id: u32, _state: &(), _ctx: &Self::Ctx) -> Result<Option<Self>, StatusCode> {
+    async fn load(
+        LedgerKey { id }: LedgerKey,
+        _state: &(),
+        _ctx: &Self::Ctx,
+    ) -> Result<Option<Self>, StatusCode> {
         Ok(Some(Ledger { id }))
     }
 }

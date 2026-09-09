@@ -89,14 +89,24 @@ impl Fetch<Catalog> for Widget {
     type Error = Infallible;
 }
 
-impl FetchByKey<Catalog> for Widget {
-    type Key = String;
+doxa::auth::route_key!(
+    /// The key a route hands the lookup, as a struct rather than a bare
+    /// `String`. A `String` cannot say what it is called, and the route
+    /// reads its segment by name — so the name lives on a field, and
+    /// `Deserialize` does the reading.
+    pub WidgetKey { name: String }
+);
 
-    async fn fetch(key: String, src: &Catalog, scope: &str) -> Result<Option<Self>, Infallible> {
+impl FetchByKey<Catalog> for Widget {
+    type Key = WidgetKey;
+
+    const KEY_NAMES: &'static [&'static str] = &["name"];
+
+    async fn fetch(key: WidgetKey, src: &Catalog, scope: &str) -> Result<Option<Self>, Infallible> {
         Ok(src
             .0
             .iter()
-            .find(|widget| widget.name == key && widget.tenant == scope)
+            .find(|widget| widget.name == key.name && widget.tenant == scope)
             .cloned())
     }
 }
@@ -141,9 +151,15 @@ impl Fetch<Snapshot> for Widget {
 }
 
 impl FetchByKey<Snapshot> for Widget {
-    type Key = String;
+    type Key = WidgetKey;
 
-    async fn fetch(key: String, src: &Snapshot, scope: &str) -> Result<Option<Self>, Infallible> {
+    const KEY_NAMES: &'static [&'static str] = &["name"];
+
+    async fn fetch(
+        key: WidgetKey,
+        src: &Snapshot,
+        scope: &str,
+    ) -> Result<Option<Self>, Infallible> {
         <Widget as FetchByKey<Catalog>>::fetch(key, &src.0, scope).await
     }
 }

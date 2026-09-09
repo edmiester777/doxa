@@ -84,11 +84,13 @@ struct Document {
     id: uuid::Uuid,
 }
 
+doxa::auth::route_key!(pub DocumentKey { id: uuid::Uuid });
+
 impl Granting for Document {
     type Row = Self;
     /// The whole point: `uuid::Uuid` directly, with no local newtype
     /// standing between the route segment and the loader.
-    type Key = uuid::Uuid;
+    type Key = DocumentKey;
     type Ctx = CapabilityContext;
     type State = Store;
     type Source = FromState<Store>;
@@ -97,7 +99,7 @@ impl Granting for Document {
     const ACTIONS: &'static [Action] = &[Action::new("read").capability(&DOCUMENTS_READ)];
 
     async fn load(
-        id: uuid::Uuid,
+        DocumentKey { id }: DocumentKey,
         store: &Store,
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {

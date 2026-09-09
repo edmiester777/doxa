@@ -75,9 +75,11 @@ struct Source {
     id: u32,
 }
 
+doxa::auth::route_key!(pub SourceKey { id: u32 });
+
 impl Granting for Source {
     type Row = Self;
-    type Key = u32;
+    type Key = SourceKey;
     type Ctx = CapabilityContext;
     type State = ();
     type Source = FromState<()>;
@@ -87,7 +89,7 @@ impl Granting for Source {
     const ACTIONS: &'static [Action] = SourceAction::ACTIONS;
 
     async fn load(
-        id: u32,
+        SourceKey { id }: SourceKey,
         _state: &(),
         _ctx: &CapabilityContext,
     ) -> Result<Option<Self>, StatusCode> {
@@ -352,13 +354,11 @@ fn parts(roles: &[&str]) -> axum::http::request::Parts {
 
 struct Listing;
 impl GrantSite for Listing {
-    const PARAMS: &'static [&'static str] = &[];
     const ACTION: &'static str = "read";
 }
 
 struct Purging;
 impl GrantSite for Purging {
-    const PARAMS: &'static [&'static str] = &[];
     const ACTION: &'static str = "delete";
 }
 
@@ -396,7 +396,7 @@ async fn a_generated_marker_is_a_bare_gate() {
 #[tokio::test]
 async fn an_instance_only_action_skips_the_coarse_gate() {
     let parts = parts(&[]);
-    doxa::auth::authorize::<One<Source>>(1, "ping", &(), &parts.extensions)
+    doxa::auth::authorize::<One<Source>>(SourceKey { id: 1 }, "ping", &(), &parts.extensions)
         .await
         .expect("no capability to hold");
 }

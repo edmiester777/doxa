@@ -45,21 +45,26 @@
 //! # #[derive(Clone)]
 //! # struct Widget { name: String, tenant: String }
 //! # struct Store(HashMap<String, Widget>);
+//! /// A struct with one field per segment, so the route's `{name}` binds
+//! /// by name. `doxa_auth::route_key!` writes this and its `RouteKey` impl.
+//! #[derive(serde::Deserialize)]
+//! struct WidgetKey { name: String }
+//!
 //! impl Fetch<Store> for Widget {
 //!     type Error = std::convert::Infallible;
 //! }
 //!
 //! impl FetchByKey<Store> for Widget {
-//!     type Key = String;
+//!     type Key = WidgetKey;
 //!
 //!     async fn fetch(
-//!         key: String,
+//!         key: WidgetKey,
 //!         src: &Store,
 //!         scope: &str,
 //!     ) -> Result<Option<Self>, Self::Error> {
 //!         // The scope is not advisory: a widget owned by someone else is
 //!         // absent, not refused.
-//!         Ok(src.0.get(&key).filter(|w| w.tenant == scope).cloned())
+//!         Ok(src.0.get(&key.name).filter(|w| w.tenant == scope).cloned())
 //!     }
 //! }
 //! ```
@@ -102,19 +107,12 @@ pub trait FetchByKey<Src: ?Sized>: Fetch<Src> {
     /// What the route's key segment parses into.
     type Key: Send;
 
-    /// What the key's parts are called, in key order.
+    /// The *columns* behind [`Key`](Self::Key), in key order.
     ///
-    /// The column names behind [`Key`](Self::Key) — `&["name"]` for a row
-    /// keyed on its `name` column. A route whose path parameter is spelled
-    /// the same way therefore needs no `#[key("…")]` annotation to say
-    /// which segment feeds the lookup, which is the whole reason this is
-    /// here: the key type alone is a `String`, and a `String` cannot say
-    /// what it is called.
-    ///
-    /// `&[]` — the default — means the lookup declines to name its parts,
-    /// and a route over it says which segment it uses. Anything else must
-    /// have one entry per segment the key parses; a route that resolves to
-    /// a list of the wrong length is refused rather than truncated.
+    /// Usually the same list as the key's own field names, and `#[asset]`
+    /// prefers those. This is for the lookup that matches more columns
+    /// than its key parses segments — a qualified name split on the way in
+    /// — where the two lists are not the same. `&[]` declines to say.
     const KEY_NAMES: &'static [&'static str] = &[];
 
     /// The row `key` names within `scope`, or `None`.
@@ -138,12 +136,8 @@ pub trait FetchById<Src: ?Sized>: Fetch<Src> {
     /// The row's own identifier.
     type Id: Send;
 
-    /// What the identifier column is called — `&["id"]` for the usual
-    /// table.
-    ///
-    /// The [`FetchByKey::KEY_NAMES`] of the id route, and read the same
-    /// way: `#[asset(key = pk)]` hands it to the route, so `/widgets/{id}`
-    /// needs no annotation. `&[]` declines to name it.
+    /// The identifier columns, in key order — the
+    /// [`FetchByKey::KEY_NAMES`] of the id route, read the same way.
     const ID_NAMES: &'static [&'static str] = &[];
 
     /// The row `id` names within `scope`, or `None`.
@@ -205,19 +199,16 @@ pub trait Lookup<Src: ?Sized>: Send + Sync + 'static {
     /// The row this way in produces, and what the policy decides about.
     type Row: Send + 'static;
 
-    /// What the route's segments parse into. A tuple for a composite
-    /// lookup, in the order the columns were declared.
+    /// What the route's segments parse into: a struct with one named
+    /// field per segment, which `scoped_lookup!` writes.
     type Key: Send;
 
-    /// What the key's parts are called, in key order — the columns this
-    /// way in matches, as `scoped_lookup!` names them.
+    /// The columns this way in matches, in key order.
     ///
-    /// One entry per segment [`Key`](Self::Key) parses, which for a
-    /// generated key is one per column. A lookup whose key collapses
-    /// several columns into fewer segments — a qualified name matched
-    /// against a namespace and a name, parsed from one path segment — has
-    /// more columns than segments, so it declares the names on its key's
-    /// `RouteKey` impl instead and leaves this at `&[]`.
+    /// Usually the key's own field names, and `#[asset]` prefers those.
+    /// This is for a key that collapses several columns into fewer
+    /// segments — a qualified name parsed out of one — where the two lists
+    /// differ. `&[]` declines to say.
     const KEY_NAMES: &'static [&'static str] = &[];
 
     /// How the lookup fails, before the application has had a say.

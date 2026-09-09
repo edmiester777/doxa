@@ -1,45 +1,39 @@
 //! `#[key(...)]` handling for the `Granted<T>` guard extractor.
 //!
-//! The extractor needs three things the handler body never states: which
-//! path segments carry the key, which Cedar action to check, and which
-//! OpenAPI security scheme to reference. The route macro knows the last
-//! two (the verb, and the default scheme) and the annotation supplies the
-//! first, so this module folds them into one generated marker type per
-//! call site:
+//! The extractor needs two things the handler body never states: which
+//! Cedar action to check, and which OpenAPI security scheme to reference.
+//! The route macro knows both defaults — the verb and the profile's scheme
+//! — so this module folds them into one generated marker type per call
+//! site:
 //!
 //! ```ignore
 //! #[get("/folders/{fid}/widgets/{id}")]
-//! async fn get_widget(#[key("id")] widget: Granted<Widget>) -> Json<Widget>
+//! async fn get_widget(widget: Granted<Widget>) -> Json<Widget>
 //! ```
 //!
-//! becomes a `GrantSite` impl carrying `PARAMS = ["id"]` / `ACTION =
-//! "read"`, with the argument rewritten to `Granted<One<Widget, __Site>>`.
-//! The site rides on the subject rather than on `Granted` itself, which is
-//! what leaves the guard a two-field pair a handler can destructure.
+//! becomes a `GrantSite` impl carrying `ACTION = "read"`, with the argument
+//! rewritten to `Granted<One<Widget, __Site>>`. The site rides on the
+//! subject rather than on `Granted` itself, which is what leaves the guard
+//! a two-field pair a handler can destructure.
 //!
-//! # When the annotation can be left off
+//! # Which parameter carries the key
 //!
-//! Most of the time. The names are resolved in three steps, and only the
-//! first is written here:
+//! The key's own field names. A key is a struct deriving `Deserialize` and
+//! the guard reads it with axum's `Path` or `Query`, so `{id}` binds
+//! `struct WidgetKey { id: Uuid }` and no route says so. A route whose
+//! parameters do not include the key's fails the build, on the
+//! `names_within` assertion emitted below.
 //!
-//! 1. `#[key("a", "b")]`, for the route whose parameter is spelled
-//!    differently from the column behind it.
-//! 2. The route's single path parameter, when it has exactly one — there is
-//!    nothing to choose, and the macro verifies that rather than guessing.
-//! 3. Otherwise nothing is emitted, and `GrantSite::PARAMS` keeps its empty
-//!    default so the asset's own `Granting::KEY_NAMES` answers. That is the
-//!    column the lookup matches, which `#[asset]` already knows — so
-//!    `/widgets/{name}/revisions/{rev}` binds `{name}` without being told,
-//!    and a route naming a parameter the asset's key does not have fails
-//!    the build with a `names_within` assertion rather than at runtime.
+//! Renaming happens at the row — `#[resource(key = "slug")]` — rather than
+//! per route: the name is one fact about a way into a row, and restating it
+//! per call site is how the two came to disagree.
 //!
 //! # Where the key comes from
 //!
 //! `#[key(with = "Query")]` reads the key out of the query string instead
 //! of the path, and sets `GrantSite::IN` so the guard and the OpenAPI
 //! parameter cannot come to disagree about where to look. `with = "Path"`
-//! is the default and may be written out. Step 2 above does not apply to a
-//! query key, which has no route template to count.
+//! is the default and may be written out.
 //!
 //! It is an option on the annotation rather than a second argument to
 //! `Granted` because a source is a fact about the *call site* — the same
@@ -67,10 +61,8 @@ enum Source {
     Query,
 }
 
-/// Parsed `#[key("a", "b", action = "...", scheme = "...", with = "...")]`.
+/// Parsed `#[key(action = "...", scheme = "...", with = "...")]`.
 struct KeyArgs {
-    /// Path parameters feeding the key, in key order.
-    names: Vec<LitStr>,
     action: Option<LitStr>,
     scheme: Option<LitStr>,
     with: Option<Source>,
@@ -78,7 +70,6 @@ struct KeyArgs {
 
 impl Parse for KeyArgs {
     fn parse(input: ParseStream) -> Result<Self> {
-        let mut names = Vec::new();
         let mut action = None;
         let mut scheme = None;
         let mut with = None;
@@ -93,14 +84,16 @@ impl Parse for KeyArgs {
             }
             first = false;
 
-            // Segment names are positional and come first, so a
-            // composite key reads in the order the route binds it.
+            // A bare string used to rename the route's parameter. A key
+            // is now a struct whose field names *are* the parameters, so
+            // there is nothing left for a route to rename — say it here
+            // rather than letting the name be silently ignored.
             if input.peek(LitStr) {
-                if action.is_some() || scheme.is_some() || with.is_some() {
-                    return Err(input.error("segment names must come before the named options"));
-                }
-                names.push(input.parse()?);
-                continue;
+                return Err(input.error(
+                    "a route no longer names its key's segments: the key struct's field names \
+                     are the route parameters. Spell the parameter the way the key spells the \
+                     field, or rename the field itself with `#[resource(key = \"…\")]`",
+                ));
             }
 
             let key: Ident = input.parse()?;
@@ -137,7 +130,6 @@ impl Parse for KeyArgs {
         }
 
         Ok(Self {
-            names,
             action,
             scheme,
             with,
@@ -348,65 +340,27 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
         // Only the instance form reads segments out of the route.
         let takes_key = !matches!(mode.as_deref(), Some("Many") | Some("Cap"));
 
-        // `None` means the site says nothing and the asset's own
-        // `Granting::KEY_NAMES` answers instead — the ordinary case, and
-        // the reason most routes carry no annotation at all.
-        let params: Option<Vec<String>> = if !takes_key {
+        // A collection or capability route reads no key at all, so an
+        // annotation asking where to read it from is a contradiction.
+        if !takes_key {
             if let Some((args, span)) = &annotation {
-                if !args.names.is_empty() || args.with.is_some() {
+                if args.with.is_some() {
                     return Err(syn::Error::new(
                         *span,
                         "`Many<…>` and `Cap<…>` authorize no single object, so they read \
-                         no key — drop the segment names and `with`",
+                         no key — drop `with`",
                     ));
                 }
             }
-            None
-        } else {
-            match annotation.as_ref().map(|(args, _)| &args.names) {
-                Some(names) if !names.is_empty() => Some(names.iter().map(LitStr::value).collect()),
-                // Nothing to choose between: one path parameter is the
-                // key, whatever the asset calls it. Verified rather than
-                // guessed, and only for a key that comes out of the path
-                // — a query source has no template to count.
-                _ if source == Source::Path && path_names.len() == 1 => {
-                    Some(vec![path_names[0].clone()])
-                }
-                // A path key with nothing in the path to read is a route
-                // the asset's names cannot rescue.
-                _ if source == Source::Path && path_names.is_empty() => {
-                    return Err(syn::Error::new_spanned(
-                        &pat_type.ty,
-                        "`Granted<R>` needs a path parameter, but this route has none. \
-                         For a key that arrives in the query string, say so: \
-                         `#[key(with = \"Query\")]`",
-                    ))
-                }
-                _ => None,
-            }
-        };
-
-        // Names written here are checked against the route; names left to
-        // the asset are checked by the assertion below, which is the same
-        // check one indirection later.
-        if source == Source::Path {
-            for name in params.iter().flatten() {
-                if !path_names.contains(name) {
-                    let available = if path_names.is_empty() {
-                        "none".to_string()
-                    } else {
-                        path_names.join(", ")
-                    };
-                    let span = annotation
-                        .as_ref()
-                        .map(|(_, span)| *span)
-                        .unwrap_or_else(|| pat_type.ty.span());
-                    return Err(syn::Error::new(
-                        span,
-                        format!("route has no path parameter `{name}` — available: {available}"),
-                    ));
-                }
-            }
+        } else if source == Source::Path && path_names.is_empty() {
+            // A path key with nothing in the path to read is a route the
+            // asset's names cannot rescue.
+            return Err(syn::Error::new_spanned(
+                &pat_type.ty,
+                "`Granted<R>` needs a path parameter, but this route has none. \
+                 For a key that arrives in the query string, say so: \
+                 `#[key(with = \"Query\")]`",
+            ));
         }
 
         let binding = binding_name(&pat_type.pat, index);
@@ -437,30 +391,19 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             }
         };
 
-        // Emitted only when this call site has something to say. Left off,
-        // the trait's empty default stands and the asset's `KEY_NAMES`
-        // answer — so the column a lookup matches is stated once, beside
-        // the lookup, rather than on every route that reaches it.
-        let params_const = params.as_ref().map(|params| {
-            let lits = params
-                .iter()
-                .map(|name| LitStr::new(name, Span::call_site()));
-            quote! { const PARAMS: &'static [&'static str] = &[#(#lits),*]; }
-        });
-
-        // The route half of the deferred case: the asset names its key's
-        // parameters, and this is where they meet the template. Without it
-        // an asset keyed on a column the route does not expose would be a
-        // 500 on the first request instead of a build failure.
-        let route_check = match (&params, source, takes_key) {
-            (None, Source::Path, true) => instance_asset(&pat_type.ty).map(|asset| {
+        // The asset names its key's parameters and this is where they
+        // meet the template. Without it an asset keyed on a column the
+        // route does not expose would be a 500 on the first request
+        // instead of a build failure.
+        let route_check = match (source, takes_key) {
+            (Source::Path, true) => instance_asset(&pat_type.ty).map(|asset| {
                 let route_lits = path_names
                     .iter()
                     .map(|name| LitStr::new(name, Span::call_site()));
                 let message = format!(
                     "this route's path parameters ({}) do not include the ones this asset's \
-                     key is named after — annotate the argument with `#[key(\"…\")]`, one \
-                     name per key segment",
+                     key is named after — spell the segment the way the key spells its field, \
+                     or rename the field with `#[resource(key = \"…\")]`",
                     path_names.join(", "),
                 );
                 quote! {
@@ -482,8 +425,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             pub struct #marker;
 
             impl ::doxa::auth::GrantSite for #marker {
-                #params_const
-                const ACTION: &'static str = #action;
+                    const ACTION: &'static str = #action;
                 #scheme_const
                 #in_const
             }
@@ -536,10 +478,6 @@ mod tests {
         .expect("rewrites");
 
         assert!(
-            items.contains(r#"const PARAMS : & 'static [& 'static str] = & ["id"]"#),
-            "{items}"
-        );
-        assert!(
             items.contains(r#"const ACTION : & 'static str = "read""#),
             "{items}"
         );
@@ -550,20 +488,16 @@ mod tests {
     }
 
     #[test]
-    fn the_annotation_names_the_segment_and_the_verb_supplies_the_action() {
+    fn the_verb_supplies_the_action() {
         let (items, _) = run(
             "delete",
             &["fid", "id"],
             quote! {
-                async fn drop_widget(#[key("id")] w: Granted<Widget>) {}
+                async fn drop_widget(w: Granted<Widget>) {}
             },
         )
         .expect("rewrites");
 
-        assert!(
-            items.contains(r#"const PARAMS : & 'static [& 'static str] = & ["id"]"#),
-            "{items}"
-        );
         assert!(
             items.contains(r#"const ACTION : & 'static str = "delete""#),
             "{items}"
@@ -573,29 +507,12 @@ mod tests {
     }
 
     #[test]
-    fn a_composite_key_binds_segments_in_the_order_named() {
-        let (items, _) = run(
-            "get",
-            &["fid", "id"],
-            quote! {
-                async fn get_widget(#[key("fid", "id")] w: Granted<Widget>) {}
-            },
-        )
-        .expect("rewrites");
-
-        assert!(
-            items.contains(r#"const PARAMS : & 'static [& 'static str] = & ["fid" , "id"]"#),
-            "{items}"
-        );
-    }
-
-    #[test]
     fn explicit_action_and_scheme_win_over_the_verb() {
         let (items, _) = run(
             "post",
             &["id"],
             quote! {
-                async fn archive(#[key("id", action = "archive", scheme = "oauth")] w: Granted<Widget>) {}
+                async fn archive(#[key(action = "archive", scheme = "oauth")] w: Granted<Widget>) {}
             },
         )
         .expect("rewrites");
@@ -765,10 +682,6 @@ mod tests {
         .expect("rewrites");
 
         assert!(!items.contains("KeyIn"), "{items}");
-        assert!(
-            items.contains(r#"const PARAMS : & 'static [& 'static str] = & ["id"]"#),
-            "the single path parameter is still found: {items}",
-        );
     }
 
     /// A source is one of two things, and anything else is a typo caught
@@ -820,8 +733,11 @@ mod tests {
         assert!(error.contains(r#"#[key(with = "Query")]"#), "{error}");
     }
 
+    /// Renaming a segment at the call site is gone: the key's fields are
+    /// the parameters. A route that tries is told where the rename lives
+    /// rather than having the name quietly ignored.
     #[test]
-    fn a_segment_the_route_does_not_have_is_rejected() {
+    fn naming_a_segment_at_the_call_site_is_rejected() {
         let error = run(
             "get",
             &["id"],
@@ -829,30 +745,16 @@ mod tests {
                 async fn get_widget(#[key("widget_id")] w: Granted<Widget>) {}
             },
         )
-        .expect_err("unknown segment");
+        .expect_err("no longer a thing");
 
         assert!(
-            error.contains("route has no path parameter `widget_id`"),
+            error.contains("a route no longer names its key's segments"),
             "{error}"
         );
-        assert!(error.contains("available: id"), "{error}");
+        assert!(error.contains(r#"#[resource(key = "…")]"#), "{error}");
     }
 
-    #[test]
-    fn a_collection_may_not_name_key_segments() {
-        let error = run(
-            "get",
-            &["id"],
-            quote! {
-                async fn list_widgets(#[key("id")] w: Granted<Many<Widget>>) {}
-            },
-        )
-        .expect_err("no key on a collection");
-
-        assert!(error.contains("read no key"), "{error}");
-    }
-
-    /// Nor may it say where the key it does not read arrives.
+    /// A collection may not say where the key it does not read arrives.
     #[test]
     fn a_collection_may_not_name_a_source() {
         let error = run(
@@ -873,7 +775,7 @@ mod tests {
             "get",
             &["id"],
             quote! {
-                async fn get_widget(#[key("id")] w: Granted<One<Widget, MySite>>) {}
+                async fn get_widget(#[key(action = "read")] w: Granted<One<Widget, MySite>>) {}
             },
         )
         .expect_err("already sited");
