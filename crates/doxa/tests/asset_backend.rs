@@ -167,7 +167,7 @@ async fn get_widget(widget: Granted<One<WidgetByName>>) -> String {
 
 #[get("/widgets", tag = "Widgets")]
 async fn list_widgets(
-    Granted(_, scope, _): Granted<Many<WidgetByName>>,
+    Granted(_, scope): Granted<Many<WidgetByName>>,
     axum::extract::State(catalog): axum::extract::State<Catalog>,
 ) -> String {
     let mut names: Vec<_> = catalog

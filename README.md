@@ -481,27 +481,30 @@ async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
 async fn flush(_: Granted<Cap<WidgetsRead>>) -> StatusCode { StatusCode::OK }
 ```
 
-Destructure for the caller alongside the object — no second `Auth<S, C>` extractor, and the context is shared rather than copied. The trailing `_` is the key's source, which is a type rather than a value:
+Destructure for the caller alongside the object — no second `Auth<S, C>` extractor, and the context is shared rather than copied:
 
 ```rust
-async fn transfer(Granted(caller, widget, _): Granted<Widget>) -> StatusCode { /* ... */ }
+async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode { /* ... */ }
 ```
 
-**Where the key comes from, and what it is called.** Both have defaults worth knowing. The source is the guard's second type argument — the path unless the route says otherwise:
+**Where the key comes from, and what it is called.** Both have defaults worth knowing. The source is the path unless the route says otherwise, and saying so also moves the OpenAPI parameter:
 
 ```rust
 // /widgets/{name}
-async fn get(w: Granted<Widget>) -> Json<Widget> { /* ... */ }
+#[get("/widgets/{name}")]
+async fn get(w: Granted<WidgetByName>) -> Json<Widget> { /* ... */ }
+
 // /widgets?name=…
-async fn find(w: Granted<Widget, Query>) -> Json<Widget> { /* ... */ }
+#[get("/widgets")]
+async fn find(#[key(with = "Query")] w: Granted<WidgetByName>) -> Json<Widget> { /* ... */ }
 ```
 
 *Which* parameter it reads is the asset's to say, not the route's. `#[asset]` takes it off the column the lookup matches, so a route whose parameter is spelled the same way names it nowhere — even with several segments to choose from:
 
 ```rust
-// binds {name}, because that is the column `PipelineByName` is keyed on
-#[get("/pipelines/{name}/runs/{run_id}")]
-async fn get_run(pipeline: Granted<PipelineByName>, /* ... */) -> Json<Run> { /* ... */ }
+// binds {name}, because that is the column `WidgetByName` is keyed on
+#[get("/widgets/{name}/revisions/{rev}")]
+async fn get_revision(widget: Granted<WidgetByName>, /* ... */) -> Json<Revision> { /* ... */ }
 ```
 
 `#[key("slug")]` is left for the route that spells it differently. A route naming a parameter the asset's key does not have fails the build.

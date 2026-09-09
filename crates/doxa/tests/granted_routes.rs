@@ -96,7 +96,7 @@ async fn get_widget(widget: Granted<Widget>) -> String {
 /// guard is destructured in the argument list, which the macro has to
 /// see through to reach the type it rewrites.
 #[delete("/folders/{fid}/widgets/{id}", tag = "Widgets")]
-async fn drop_widget(#[key("id")] Granted(_, _widget, _): Granted<Widget>) -> StatusCode {
+async fn drop_widget(#[key("id")] Granted(_, _widget): Granted<Widget>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 

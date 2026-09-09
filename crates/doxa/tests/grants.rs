@@ -117,7 +117,7 @@ async fn list_widgets(widgets: Granted<Many<Widget>>) -> &'static str {
 /// the whole of it.
 #[delete("/widgets/{id}", tag = "Widgets")]
 async fn delete_widget(
-    #[key("id", action = "delete")] Granted(caller, widget, _): Granted<Widget>,
+    #[key("id", action = "delete")] Granted(caller, widget): Granted<Widget>,
 ) -> &'static str {
     assert_eq!(caller.tenant_id.as_deref(), Some("acme"));
     assert_eq!(widget.id, 7);

@@ -14,9 +14,8 @@
 //!
 //! becomes a `GrantSite` impl carrying `PARAMS = ["id"]` / `ACTION =
 //! "read"`, with the argument rewritten to `Granted<One<Widget, __Site>>`.
-//! The site rides on the subject rather than on `Granted`'s own type
-//! parameters, which is what keeps the guard's fields down to the caller,
-//! the subject and the source marker.
+//! The site rides on the subject rather than on `Granted` itself, which is
+//! what leaves the guard a two-field pair a handler can destructure.
 //!
 //! # When the annotation can be left off
 //!
@@ -30,17 +29,24 @@
 //! 3. Otherwise nothing is emitted, and `GrantSite::PARAMS` keeps its empty
 //!    default so the asset's own `Granting::KEY_NAMES` answers. That is the
 //!    column the lookup matches, which `#[asset]` already knows — so
-//!    `/pipelines/{name}/runs/{run_id}` binds `{name}` without being told,
+//!    `/widgets/{name}/revisions/{rev}` binds `{name}` without being told,
 //!    and a route naming a parameter the asset's key does not have fails
 //!    the build with a `names_within` assertion rather than at runtime.
 //!
 //! # Where the key comes from
 //!
-//! `Granted<Widget, Query>` reads the key out of the query string instead
-//! of the path. The second argument is a `doxa::auth::KeySource`, and the
-//! bare names `Path` and `Query` are resolved to `doxa`'s own — so an
-//! `axum::extract::Query` in scope is not a hazard. Step 2 above does not
-//! apply to a query source, which has no route template to count.
+//! `#[key(with = "Query")]` reads the key out of the query string instead
+//! of the path, and sets `GrantSite::IN` so the guard and the OpenAPI
+//! parameter cannot come to disagree about where to look. `with = "Path"`
+//! is the default and may be written out. Step 2 above does not apply to a
+//! query key, which has no route template to count.
+//!
+//! It is an option on the annotation rather than a second argument to
+//! `Granted` because a source is a fact about the *call site* — the same
+//! asset is read from the path on one route and the query on another —
+//! and because a type parameter would need a third `PhantomData` field to
+//! be used at all, which every `Granted(caller, row)` destructure would
+//! then have to spell.
 //!
 //! `Many<R>` and `Cap<M>` name no object, so they take no key and need no
 //! annotation at all.
@@ -51,12 +57,23 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{FnArg, GenericArgument, Ident, ItemFn, LitStr, Pat, PathArguments, Result, Token, Type};
 
-/// Parsed `#[key("a", "b", action = "...", scheme = "...")]`.
+/// Which half of the request line a key arrives in — `#[key(with = "…")]`,
+/// and `GrantSite::IN` on the other side.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// The route template, which is the default.
+    Path,
+    /// The query string.
+    Query,
+}
+
+/// Parsed `#[key("a", "b", action = "...", scheme = "...", with = "...")]`.
 struct KeyArgs {
     /// Path parameters feeding the key, in key order.
     names: Vec<LitStr>,
     action: Option<LitStr>,
     scheme: Option<LitStr>,
+    with: Option<Source>,
 }
 
 impl Parse for KeyArgs {
@@ -64,6 +81,7 @@ impl Parse for KeyArgs {
         let mut names = Vec::new();
         let mut action = None;
         let mut scheme = None;
+        let mut with = None;
         let mut first = true;
 
         while !input.is_empty() {
@@ -78,8 +96,8 @@ impl Parse for KeyArgs {
             // Segment names are positional and come first, so a
             // composite key reads in the order the route binds it.
             if input.peek(LitStr) {
-                if action.is_some() || scheme.is_some() {
-                    return Err(input.error("segment names must come before `action` / `scheme`"));
+                if action.is_some() || scheme.is_some() || with.is_some() {
+                    return Err(input.error("segment names must come before the named options"));
                 }
                 names.push(input.parse()?);
                 continue;
@@ -91,11 +109,27 @@ impl Parse for KeyArgs {
             match key.to_string().as_str() {
                 "action" => action = Some(value),
                 "scheme" => scheme = Some(value),
+                "with" => {
+                    with = Some(match value.value().as_str() {
+                        "Path" | "path" => Source::Path,
+                        "Query" | "query" => Source::Query,
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                &value,
+                                format!(
+                                    "unknown key source `{other}` — expected \
+                                     `\"Path\"` or `\"Query\"`"
+                                ),
+                            ))
+                        }
+                    })
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown `#[key]` option `{other}` — expected `action` or `scheme`"
+                            "unknown `#[key]` option `{other}` — expected `action`, \
+                             `scheme` or `with`"
                         ),
                     ))
                 }
@@ -106,6 +140,7 @@ impl Parse for KeyArgs {
             names,
             action,
             scheme,
+            with,
         })
     }
 }
@@ -135,74 +170,6 @@ fn granted_arity(ty: &Type) -> Option<usize> {
     match &last.arguments {
         PathArguments::AngleBracketed(args) => Some(args.args.len()),
         _ => Some(0),
-    }
-}
-
-/// Which half of the request line a `Granted<…, Src>` reads its key from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Source {
-    /// `Path`, or nothing at all.
-    Path,
-    /// `Query`.
-    Query,
-    /// A `KeySource` of the consumer's own, which the macro cannot read.
-    /// Treated as neither — no route template is consulted, and no
-    /// assertion about one is emitted.
-    Custom,
-}
-
-/// Classify — and canonicalize — the source argument of `Granted<T, Src>`.
-///
-/// A bare `Path` or `Query` is rewritten to `::doxa::auth::…`, so the
-/// `axum::extract::Query` a handler in the same module almost certainly
-/// imports cannot be picked up by mistake. Anything with a qualifying path
-/// on it is left as written, which is how a consumer names a marker of
-/// their own — or `doxa::auth::Query` explicitly.
-fn source_arg(ty: &mut Type) -> Source {
-    let Type::Path(type_path) = ty else {
-        return Source::Path;
-    };
-    let Some(last) = type_path.path.segments.last_mut() else {
-        return Source::Path;
-    };
-    let Some(arg) = (match &mut last.arguments {
-        PathArguments::AngleBracketed(args) => args.args.iter_mut().nth(1),
-        _ => None,
-    }) else {
-        return Source::Path;
-    };
-    let GenericArgument::Type(source) = arg else {
-        return Source::Custom;
-    };
-
-    let Type::Path(source_path) = &*source else {
-        return Source::Custom;
-    };
-    if source_path.qself.is_some() {
-        return Source::Custom;
-    }
-    let Some(last) = source_path.path.segments.last() else {
-        return Source::Custom;
-    };
-
-    // Classified on the last segment, so `doxa::auth::Query` written out
-    // in full is a query source too. Rewritten only when it is a bare
-    // name, which is the case that could have meant something else.
-    let bare = source_path.path.segments.len() == 1;
-    match last.ident.to_string().as_str() {
-        "Path" => {
-            if bare {
-                *source = syn::parse_quote!(::doxa::auth::Path);
-            }
-            Source::Path
-        }
-        "Query" => {
-            if bare {
-                *source = syn::parse_quote!(::doxa::auth::Query);
-            }
-            Source::Query
-        }
-        _ => Source::Custom,
     }
 }
 
@@ -346,19 +313,21 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             continue;
         };
 
-        if arity != 1 && arity != 2 {
+        if arity != 1 {
             if let Some((_, span)) = &annotation {
                 return Err(syn::Error::new(
                     *span,
-                    "`Granted<…>` takes the subject — which names its own site as \
-                     `One<Widget, MySite>` — and optionally where its key is read \
-                     from, as `Granted<Widget, Query>`",
+                    "`Granted<…>` takes one type argument — the subject, which names \
+                     its own site as `One<Widget, MySite>`",
                 ));
             }
             continue;
         }
 
-        let source = source_arg(&mut pat_type.ty);
+        let source = annotation
+            .as_ref()
+            .and_then(|(args, _)| args.with)
+            .unwrap_or(Source::Path);
         let mode = subject_arg(&pat_type.ty).and_then(subject_mode);
 
         // A subject that spells out its own site was written by hand.
@@ -384,11 +353,11 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
         // the reason most routes carry no annotation at all.
         let params: Option<Vec<String>> = if !takes_key {
             if let Some((args, span)) = &annotation {
-                if !args.names.is_empty() {
+                if !args.names.is_empty() || args.with.is_some() {
                     return Err(syn::Error::new(
                         *span,
-                        "`Many<…>` and `Cap<…>` authorize no single object, so they take \
-                         no key segments",
+                        "`Many<…>` and `Cap<…>` authorize no single object, so they read \
+                         no key — drop the segment names and `with`",
                     ));
                 }
             }
@@ -410,7 +379,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
                         &pat_type.ty,
                         "`Granted<R>` needs a path parameter, but this route has none. \
                          For a key that arrives in the query string, say so: \
-                         `Granted<R, Query>`",
+                         `#[key(with = \"Query\")]`",
                     ))
                 }
                 _ => None,
@@ -456,6 +425,16 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
         {
             Some(scheme) => quote! { const SCHEME: &'static str = #scheme; },
             None => quote! {},
+        };
+
+        // One constant the guard and the OpenAPI parameter both read, so
+        // a route documented `in: query` cannot be one that looks in the
+        // path. `Path` is the default and stays unwritten.
+        let in_const = match source {
+            Source::Path => quote! {},
+            Source::Query => {
+                quote! { const IN: ::doxa::auth::KeyIn = ::doxa::auth::KeyIn::Query; }
+            }
         };
 
         // Emitted only when this call site has something to say. Left off,
@@ -506,6 +485,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
                 #params_const
                 const ACTION: &'static str = #action;
                 #scheme_const
+                #in_const
             }
 
             #route_check
@@ -741,24 +721,24 @@ mod tests {
         assert!(items.contains("(fid, id)"), "{items}");
     }
 
-    /// A key that arrives in the query string is read from there and
-    /// documented there, and the bare name resolves to doxa's marker — so
-    /// the `axum::extract::Query` a handler in the same module imports
-    /// cannot be picked up by mistake.
+    /// A key that arrives in the query string sets the source constant the
+    /// guard and the spec both read, and consults no route template.
     #[test]
-    fn a_query_source_is_canonicalized_and_checks_no_template() {
+    fn a_query_key_says_so_on_the_site() {
         let (items, sig) = run(
             "get",
             &[],
             quote! {
-                async fn get_widget(w: Granted<Widget, Query>) {}
+                async fn get_widget(#[key(with = "Query")] w: Granted<Widget>) {}
             },
         )
         .expect("rewrites");
 
         assert!(
-            sig.contains(":: doxa :: auth :: Query"),
-            "the bare `Query` resolves to doxa's marker: {sig}",
+            items.contains(
+                "const IN : :: doxa :: auth :: KeyIn = :: doxa :: auth :: KeyIn :: Query"
+            ),
+            "{items}",
         );
         assert!(
             sig.contains(":: doxa :: auth :: One < Widget , __doxa_grant_site_get_widget_w >"),
@@ -771,9 +751,60 @@ mod tests {
         );
     }
 
-    /// A path source with nothing in the path is the one instance route
-    /// the asset's names cannot rescue, and the message says what to do
-    /// about it.
+    /// `with = "Path"` is the default written out, so it leaves the
+    /// trait's own constant in place rather than restating it.
+    #[test]
+    fn a_path_key_written_out_emits_no_source_constant() {
+        let (items, _) = run(
+            "get",
+            &["id"],
+            quote! {
+                async fn get_widget(#[key(with = "Path")] w: Granted<Widget>) {}
+            },
+        )
+        .expect("rewrites");
+
+        assert!(!items.contains("KeyIn"), "{items}");
+        assert!(
+            items.contains(r#"const PARAMS : & 'static [& 'static str] = & ["id"]"#),
+            "the single path parameter is still found: {items}",
+        );
+    }
+
+    /// A source is one of two things, and anything else is a typo caught
+    /// where it was written.
+    #[test]
+    fn an_unknown_source_is_rejected() {
+        let error = run(
+            "get",
+            &["id"],
+            quote! {
+                async fn get_widget(#[key(with = "Header")] w: Granted<Widget>) {}
+            },
+        )
+        .expect_err("not a source");
+
+        assert!(error.contains("unknown key source `Header`"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_option_names_the_ones_that_exist() {
+        let error = run(
+            "get",
+            &["id"],
+            quote! {
+                async fn get_widget(#[key(from = "Query")] w: Granted<Widget>) {}
+            },
+        )
+        .expect_err("not an option");
+
+        assert!(error.contains("unknown `#[key]` option `from`"), "{error}");
+        assert!(error.contains("`with`"), "{error}");
+    }
+
+    /// A path key with nothing in the path is the one instance route the
+    /// asset's names cannot rescue, and the message says what to do about
+    /// it.
     #[test]
     fn an_instance_route_with_no_path_parameter_points_at_the_query_form() {
         let error = run(
@@ -786,61 +817,7 @@ mod tests {
         .expect_err("no parameter");
 
         assert!(error.contains("needs a path parameter"), "{error}");
-        assert!(error.contains("Granted<R, Query>"), "{error}");
-    }
-
-    /// A marker the macro does not recognise is left exactly as written —
-    /// that is how a consumer names a `KeySource` of their own — and no
-    /// assertion about the route template is emitted for it.
-    #[test]
-    fn an_unrecognized_source_is_left_alone() {
-        let (items, sig) = run(
-            "get",
-            &["id"],
-            quote! {
-                async fn get_widget(w: Granted<Widget, MySource>) {}
-            },
-        )
-        .expect("rewrites");
-
-        assert!(sig.contains("MySource"), "{sig}");
-        assert!(!sig.contains(":: doxa :: auth :: MySource"), "{sig}");
-        assert!(!items.contains("names_within"), "{items}");
-    }
-
-    /// An explicit `doxa::auth::Query` is a query source too — the macro
-    /// reads the last segment, so a consumer who qualifies it does not
-    /// silently get the path behaviour.
-    #[test]
-    fn a_qualified_query_marker_is_still_a_query_source() {
-        let (items, sig) = run(
-            "get",
-            &["id"],
-            quote! {
-                async fn get_widget(w: Granted<Widget, doxa::auth::Query>) {}
-            },
-        )
-        .expect("rewrites");
-
-        assert!(sig.contains("doxa :: auth :: Query"), "{sig}");
-        assert!(
-            !items.contains("PARAMS"),
-            "a qualified `Query` must not fall back to the single path parameter: {items}",
-        );
-    }
-
-    #[test]
-    fn an_instance_route_with_no_path_parameter_is_rejected() {
-        let error = run(
-            "get",
-            &[],
-            quote! {
-                async fn get_widget(w: Granted<Widget>) {}
-            },
-        )
-        .expect_err("no parameter");
-
-        assert!(error.contains("needs a path parameter"), "{error}");
+        assert!(error.contains(r#"#[key(with = "Query")]"#), "{error}");
     }
 
     #[test]
@@ -872,7 +849,22 @@ mod tests {
         )
         .expect_err("no key on a collection");
 
-        assert!(error.contains("take no key segments"), "{error}");
+        assert!(error.contains("read no key"), "{error}");
+    }
+
+    /// Nor may it say where the key it does not read arrives.
+    #[test]
+    fn a_collection_may_not_name_a_source() {
+        let error = run(
+            "get",
+            &["id"],
+            quote! {
+                async fn list_widgets(#[key(with = "Query")] w: Granted<Many<Widget>>) {}
+            },
+        )
+        .expect_err("no key on a collection");
+
+        assert!(error.contains("read no key"), "{error}");
     }
 
     #[test]
