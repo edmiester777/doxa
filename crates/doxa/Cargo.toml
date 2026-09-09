@@ -113,6 +113,10 @@ name = "granted_routes"
 required-features = ["full"]
 
 [[test]]
+name = "granted_key_source"
+required-features = ["full"]
+
+[[test]]
 name = "catalog"
 required-features = ["full"]
 

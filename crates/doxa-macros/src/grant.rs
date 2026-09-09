@@ -14,12 +14,33 @@
 //!
 //! becomes a `GrantSite` impl carrying `PARAMS = ["id"]` / `ACTION =
 //! "read"`, with the argument rewritten to `Granted<One<Widget, __Site>>`.
-//! The site rides on the subject rather than on `Granted` itself, which is
-//! what leaves the guard a two-field pair a handler can destructure.
+//! The site rides on the subject rather than on `Granted`'s own type
+//! parameters, which is what keeps the guard's fields down to the caller,
+//! the subject and the source marker.
 //!
-//! The annotation may be omitted only when the route has exactly one path
-//! parameter — then there is nothing to choose, and the macro verifies
-//! that rather than guessing.
+//! # When the annotation can be left off
+//!
+//! Most of the time. The names are resolved in three steps, and only the
+//! first is written here:
+//!
+//! 1. `#[key("a", "b")]`, for the route whose parameter is spelled
+//!    differently from the column behind it.
+//! 2. The route's single path parameter, when it has exactly one — there is
+//!    nothing to choose, and the macro verifies that rather than guessing.
+//! 3. Otherwise nothing is emitted, and `GrantSite::PARAMS` keeps its empty
+//!    default so the asset's own `Granting::KEY_NAMES` answers. That is the
+//!    column the lookup matches, which `#[asset]` already knows — so
+//!    `/pipelines/{name}/runs/{run_id}` binds `{name}` without being told,
+//!    and a route naming a parameter the asset's key does not have fails
+//!    the build with a `names_within` assertion rather than at runtime.
+//!
+//! # Where the key comes from
+//!
+//! `Granted<Widget, Query>` reads the key out of the query string instead
+//! of the path. The second argument is a `doxa::auth::KeySource`, and the
+//! bare names `Path` and `Query` are resolved to `doxa`'s own — so an
+//! `axum::extract::Query` in scope is not a hazard. Step 2 above does not
+//! apply to a query source, which has no route template to count.
 //!
 //! `Many<R>` and `Cap<M>` name no object, so they take no key and need no
 //! annotation at all.
@@ -117,6 +138,74 @@ fn granted_arity(ty: &Type) -> Option<usize> {
     }
 }
 
+/// Which half of the request line a `Granted<…, Src>` reads its key from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// `Path`, or nothing at all.
+    Path,
+    /// `Query`.
+    Query,
+    /// A `KeySource` of the consumer's own, which the macro cannot read.
+    /// Treated as neither — no route template is consulted, and no
+    /// assertion about one is emitted.
+    Custom,
+}
+
+/// Classify — and canonicalize — the source argument of `Granted<T, Src>`.
+///
+/// A bare `Path` or `Query` is rewritten to `::doxa::auth::…`, so the
+/// `axum::extract::Query` a handler in the same module almost certainly
+/// imports cannot be picked up by mistake. Anything with a qualifying path
+/// on it is left as written, which is how a consumer names a marker of
+/// their own — or `doxa::auth::Query` explicitly.
+fn source_arg(ty: &mut Type) -> Source {
+    let Type::Path(type_path) = ty else {
+        return Source::Path;
+    };
+    let Some(last) = type_path.path.segments.last_mut() else {
+        return Source::Path;
+    };
+    let Some(arg) = (match &mut last.arguments {
+        PathArguments::AngleBracketed(args) => args.args.iter_mut().nth(1),
+        _ => None,
+    }) else {
+        return Source::Path;
+    };
+    let GenericArgument::Type(source) = arg else {
+        return Source::Custom;
+    };
+
+    let Type::Path(source_path) = &*source else {
+        return Source::Custom;
+    };
+    if source_path.qself.is_some() {
+        return Source::Custom;
+    }
+    let Some(last) = source_path.path.segments.last() else {
+        return Source::Custom;
+    };
+
+    // Classified on the last segment, so `doxa::auth::Query` written out
+    // in full is a query source too. Rewritten only when it is a bare
+    // name, which is the case that could have meant something else.
+    let bare = source_path.path.segments.len() == 1;
+    match last.ident.to_string().as_str() {
+        "Path" => {
+            if bare {
+                *source = syn::parse_quote!(::doxa::auth::Path);
+            }
+            Source::Path
+        }
+        "Query" => {
+            if bare {
+                *source = syn::parse_quote!(::doxa::auth::Query);
+            }
+            Source::Query
+        }
+        _ => Source::Custom,
+    }
+}
+
 /// The subject named inside `Granted<…>`.
 fn subject_arg(ty: &Type) -> Option<&Type> {
     let Type::Path(type_path) = ty else {
@@ -190,6 +279,21 @@ fn site_subject(ty: &mut Type, marker: &Ident, wrap: bool) {
     }
 }
 
+/// The asset behind an instance-form `Granted<…>`, for the assertion that
+/// checks its key names against the route.
+///
+/// `Granted<Widget>` and `Granted<One<Widget>>` are the same subject
+/// written two ways, so both answer `Widget`. A subject that already names
+/// its site never reaches here, and `Many` / `Cap` have no key to check.
+fn instance_asset(ty: &Type) -> Option<Type> {
+    let subject = subject_arg(ty)?;
+    match subject_mode(subject) {
+        Some((name, _)) if name == "One" => subject_arg(subject).cloned(),
+        Some(_) => None,
+        None => Some(subject.clone()),
+    }
+}
+
 /// Binding name for marker naming; falls back to the position for
 /// wildcard or destructuring patterns.
 fn binding_name(pat: &Pat, index: usize) -> String {
@@ -242,17 +346,19 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             continue;
         };
 
-        if arity != 1 {
+        if arity != 1 && arity != 2 {
             if let Some((_, span)) = &annotation {
                 return Err(syn::Error::new(
                     *span,
-                    "`Granted<…>` takes one type argument — the subject, which names \
-                     its own site as `One<Widget, MySite>`",
+                    "`Granted<…>` takes the subject — which names its own site as \
+                     `One<Widget, MySite>` — and optionally where its key is read \
+                     from, as `Granted<Widget, Query>`",
                 ));
             }
             continue;
         }
 
+        let source = source_arg(&mut pat_type.ty);
         let mode = subject_arg(&pat_type.ty).and_then(subject_mode);
 
         // A subject that spells out its own site was written by hand.
@@ -273,7 +379,10 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
         // Only the instance form reads segments out of the route.
         let takes_key = !matches!(mode.as_deref(), Some("Many") | Some("Cap"));
 
-        let params: Vec<String> = if !takes_key {
+        // `None` means the site says nothing and the asset's own
+        // `Granting::KEY_NAMES` answers instead — the ordinary case, and
+        // the reason most routes carry no annotation at all.
+        let params: Option<Vec<String>> = if !takes_key {
             if let Some((args, span)) = &annotation {
                 if !args.names.is_empty() {
                     return Err(syn::Error::new(
@@ -283,50 +392,51 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
                     ));
                 }
             }
-            Vec::new()
+            None
         } else {
             match annotation.as_ref().map(|(args, _)| &args.names) {
-                Some(names) if !names.is_empty() => names.iter().map(LitStr::value).collect(),
+                Some(names) if !names.is_empty() => Some(names.iter().map(LitStr::value).collect()),
                 // Nothing to choose between: one path parameter is the
-                // key. Verified rather than guessed.
-                _ => match path_names.len() {
-                    1 => vec![path_names[0].clone()],
-                    0 => {
-                        return Err(syn::Error::new_spanned(
-                            &pat_type.ty,
-                            "`Granted<R>` needs a path parameter, but this route has none",
-                        ))
-                    }
-                    _ => {
-                        return Err(syn::Error::new_spanned(
-                            &pat_type.ty,
-                            format!(
-                                "ambiguous: this route has {} path parameters ({}) — \
-                                 annotate the argument with `#[key(\"…\")]`",
-                                path_names.len(),
-                                path_names.join(", "),
-                            ),
-                        ))
-                    }
-                },
+                // key, whatever the asset calls it. Verified rather than
+                // guessed, and only for a key that comes out of the path
+                // — a query source has no template to count.
+                _ if source == Source::Path && path_names.len() == 1 => {
+                    Some(vec![path_names[0].clone()])
+                }
+                // A path key with nothing in the path to read is a route
+                // the asset's names cannot rescue.
+                _ if source == Source::Path && path_names.is_empty() => {
+                    return Err(syn::Error::new_spanned(
+                        &pat_type.ty,
+                        "`Granted<R>` needs a path parameter, but this route has none. \
+                         For a key that arrives in the query string, say so: \
+                         `Granted<R, Query>`",
+                    ))
+                }
+                _ => None,
             }
         };
 
-        for name in &params {
-            if !path_names.contains(name) {
-                let available = if path_names.is_empty() {
-                    "none".to_string()
-                } else {
-                    path_names.join(", ")
-                };
-                let span = annotation
-                    .as_ref()
-                    .map(|(_, span)| *span)
-                    .unwrap_or_else(|| pat_type.ty.span());
-                return Err(syn::Error::new(
-                    span,
-                    format!("route has no path parameter `{name}` — available: {available}"),
-                ));
+        // Names written here are checked against the route; names left to
+        // the asset are checked by the assertion below, which is the same
+        // check one indirection later.
+        if source == Source::Path {
+            for name in params.iter().flatten() {
+                if !path_names.contains(name) {
+                    let available = if path_names.is_empty() {
+                        "none".to_string()
+                    } else {
+                        path_names.join(", ")
+                    };
+                    let span = annotation
+                        .as_ref()
+                        .map(|(_, span)| *span)
+                        .unwrap_or_else(|| pat_type.ty.span());
+                    return Err(syn::Error::new(
+                        span,
+                        format!("route has no path parameter `{name}` — available: {available}"),
+                    ));
+                }
             }
         }
 
@@ -348,9 +458,44 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             None => quote! {},
         };
 
-        let param_lits = params
-            .iter()
-            .map(|name| LitStr::new(name, Span::call_site()));
+        // Emitted only when this call site has something to say. Left off,
+        // the trait's empty default stands and the asset's `KEY_NAMES`
+        // answer — so the column a lookup matches is stated once, beside
+        // the lookup, rather than on every route that reaches it.
+        let params_const = params.as_ref().map(|params| {
+            let lits = params
+                .iter()
+                .map(|name| LitStr::new(name, Span::call_site()));
+            quote! { const PARAMS: &'static [&'static str] = &[#(#lits),*]; }
+        });
+
+        // The route half of the deferred case: the asset names its key's
+        // parameters, and this is where they meet the template. Without it
+        // an asset keyed on a column the route does not expose would be a
+        // 500 on the first request instead of a build failure.
+        let route_check = match (&params, source, takes_key) {
+            (None, Source::Path, true) => instance_asset(&pat_type.ty).map(|asset| {
+                let route_lits = path_names
+                    .iter()
+                    .map(|name| LitStr::new(name, Span::call_site()));
+                let message = format!(
+                    "this route's path parameters ({}) do not include the ones this asset's \
+                     key is named after — annotate the argument with `#[key(\"…\")]`, one \
+                     name per key segment",
+                    path_names.join(", "),
+                );
+                quote! {
+                    const _: () = assert!(
+                        ::doxa::auth::names_within(
+                            <#asset as ::doxa::auth::Granting>::KEY_NAMES,
+                            &[#(#route_lits),*],
+                        ),
+                        #message,
+                    );
+                }
+            }),
+            _ => None,
+        };
 
         items.extend(quote! {
             #[doc(hidden)]
@@ -358,10 +503,12 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             pub struct #marker;
 
             impl ::doxa::auth::GrantSite for #marker {
-                const PARAMS: &'static [&'static str] = &[#(#param_lits),*];
+                #params_const
                 const ACTION: &'static str = #action;
                 #scheme_const
             }
+
+            #route_check
         });
 
         // A bare `Granted<Widget>` means the instance form; the mode
@@ -494,10 +641,10 @@ mod tests {
         )
         .expect("rewrites");
 
-        assert!(
-            items.contains(r#"const PARAMS : & 'static [& 'static str] = & []"#),
-            "{items}"
-        );
+        // Nothing emitted: the trait's empty default is already right for
+        // a form that names no object, and writing it out would be a
+        // second statement of the same thing.
+        assert!(!items.contains("PARAMS"), "{items}");
         assert!(
             !sig.contains("One <"),
             "an explicit mode marker is left alone: {sig}"
@@ -519,14 +666,14 @@ mod tests {
         )
         .expect("rewrites");
 
-        assert!(
-            items.contains(r#"const PARAMS : & 'static [& 'static str] = & []"#),
-            "{items}"
-        );
+        assert!(!items.contains("PARAMS"), "{items}");
         assert!(
             items.contains(r#"const ACTION : & 'static str = "create""#),
             "{items}"
         );
+        // Nothing to check against a template either: a capability names
+        // no object, so there is no key that could miss one.
+        assert!(!items.contains("names_within"), "{items}");
     }
 
     #[test]
@@ -546,19 +693,140 @@ mod tests {
         );
     }
 
+    /// Several path parameters and no annotation is no longer a choice the
+    /// macro has to make: the asset's key names which one it is, and the
+    /// route is only checked for having it.
     #[test]
-    fn several_path_parameters_without_an_annotation_is_ambiguous() {
-        let error = run(
+    fn several_path_parameters_defer_to_the_assets_key_names() {
+        let (items, _) = run(
             "get",
             &["fid", "id"],
             quote! {
                 async fn get_widget(w: Granted<Widget>) {}
             },
         )
-        .expect_err("ambiguous");
+        .expect("rewrites");
 
-        assert!(error.contains("ambiguous"), "{error}");
-        assert!(error.contains("fid, id"), "{error}");
+        assert!(
+            !items.contains("PARAMS"),
+            "the site says nothing, so `Granting::KEY_NAMES` answers: {items}",
+        );
+        assert!(
+            items.contains(
+                "names_within (< Widget as :: doxa :: auth :: Granting > :: KEY_NAMES , \
+                 & [\"fid\" , \"id\"] ,)"
+            ),
+            "{items}",
+        );
+    }
+
+    /// The deferred case is still checked, just one indirection later: an
+    /// asset keyed on a column this route does not expose fails the build
+    /// rather than the first request.
+    #[test]
+    fn the_deferred_case_names_the_routes_parameters_in_its_message() {
+        let (items, _) = run(
+            "get",
+            &["fid", "id"],
+            quote! {
+                async fn get_widget(w: Granted<Widget>) {}
+            },
+        )
+        .expect("rewrites");
+
+        assert!(
+            items.contains("do not include the ones this asset's key"),
+            "{items}"
+        );
+        assert!(items.contains("(fid, id)"), "{items}");
+    }
+
+    /// A key that arrives in the query string is read from there and
+    /// documented there, and the bare name resolves to doxa's marker — so
+    /// the `axum::extract::Query` a handler in the same module imports
+    /// cannot be picked up by mistake.
+    #[test]
+    fn a_query_source_is_canonicalized_and_checks_no_template() {
+        let (items, sig) = run(
+            "get",
+            &[],
+            quote! {
+                async fn get_widget(w: Granted<Widget, Query>) {}
+            },
+        )
+        .expect("rewrites");
+
+        assert!(
+            sig.contains(":: doxa :: auth :: Query"),
+            "the bare `Query` resolves to doxa's marker: {sig}",
+        );
+        assert!(
+            sig.contains(":: doxa :: auth :: One < Widget , __doxa_grant_site_get_widget_w >"),
+            "the subject is still sited: {sig}",
+        );
+        assert!(!items.contains("PARAMS"), "{items}");
+        assert!(
+            !items.contains("names_within"),
+            "there is no route template to check a query key against: {items}",
+        );
+    }
+
+    /// A path source with nothing in the path is the one instance route
+    /// the asset's names cannot rescue, and the message says what to do
+    /// about it.
+    #[test]
+    fn an_instance_route_with_no_path_parameter_points_at_the_query_form() {
+        let error = run(
+            "get",
+            &[],
+            quote! {
+                async fn get_widget(w: Granted<Widget>) {}
+            },
+        )
+        .expect_err("no parameter");
+
+        assert!(error.contains("needs a path parameter"), "{error}");
+        assert!(error.contains("Granted<R, Query>"), "{error}");
+    }
+
+    /// A marker the macro does not recognise is left exactly as written —
+    /// that is how a consumer names a `KeySource` of their own — and no
+    /// assertion about the route template is emitted for it.
+    #[test]
+    fn an_unrecognized_source_is_left_alone() {
+        let (items, sig) = run(
+            "get",
+            &["id"],
+            quote! {
+                async fn get_widget(w: Granted<Widget, MySource>) {}
+            },
+        )
+        .expect("rewrites");
+
+        assert!(sig.contains("MySource"), "{sig}");
+        assert!(!sig.contains(":: doxa :: auth :: MySource"), "{sig}");
+        assert!(!items.contains("names_within"), "{items}");
+    }
+
+    /// An explicit `doxa::auth::Query` is a query source too — the macro
+    /// reads the last segment, so a consumer who qualifies it does not
+    /// silently get the path behaviour.
+    #[test]
+    fn a_qualified_query_marker_is_still_a_query_source() {
+        let (items, sig) = run(
+            "get",
+            &["id"],
+            quote! {
+                async fn get_widget(w: Granted<Widget, doxa::auth::Query>) {}
+            },
+        )
+        .expect("rewrites");
+
+        assert!(sig.contains("doxa :: auth :: Query"), "{sig}");
+        assert!(
+            !items.contains("PARAMS"),
+            "a qualified `Query` must not fall back to the single path parameter: {items}",
+        );
     }
 
     #[test]

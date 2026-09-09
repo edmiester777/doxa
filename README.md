@@ -481,11 +481,30 @@ async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
 async fn flush(_: Granted<Cap<WidgetsRead>>) -> StatusCode { StatusCode::OK }
 ```
 
-Destructure for the caller alongside the object — no second `Auth<S, C>` extractor, and the context is shared rather than copied:
+Destructure for the caller alongside the object — no second `Auth<S, C>` extractor, and the context is shared rather than copied. The trailing `_` is the key's source, which is a type rather than a value:
 
 ```rust
-async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode { /* ... */ }
+async fn transfer(Granted(caller, widget, _): Granted<Widget>) -> StatusCode { /* ... */ }
 ```
+
+**Where the key comes from, and what it is called.** Both have defaults worth knowing. The source is the guard's second type argument — the path unless the route says otherwise:
+
+```rust
+// /widgets/{name}
+async fn get(w: Granted<Widget>) -> Json<Widget> { /* ... */ }
+// /widgets?name=…
+async fn find(w: Granted<Widget, Query>) -> Json<Widget> { /* ... */ }
+```
+
+*Which* parameter it reads is the asset's to say, not the route's. `#[asset]` takes it off the column the lookup matches, so a route whose parameter is spelled the same way names it nowhere — even with several segments to choose from:
+
+```rust
+// binds {name}, because that is the column `PipelineByName` is keyed on
+#[get("/pipelines/{name}/runs/{run_id}")]
+async fn get_run(pipeline: Granted<PipelineByName>, /* ... */) -> Json<Run> { /* ... */ }
+```
+
+`#[key("slug")]` is left for the route that spells it differently. A route naming a parameter the asset's key does not have fails the build.
 
 **What the route owes.** One trait says what the asset is and what may be done to it:
 
