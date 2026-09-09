@@ -38,7 +38,9 @@ async fn whoami(Auth(ctx): Auth<MySession, MyClaims>) -> String {
 
 ### Auth layer with OpenAPI
 
-`AuthLayer` runs the full pipeline (validate token, resolve claims, evaluate policy) on every request. Apply it with `layer_documented` and the OpenAPI spec is annotated automatically — Authorization header, 401 response, bearer security scheme.
+`AuthLayer` runs the full pipeline (validate token, resolve claims, evaluate policy) on every request. Apply it with `layer_documented` and the OpenAPI spec is annotated automatically — bearer security requirement and 401 response.
+
+The credential is documented as a security scheme and nothing else. OpenAPI reserves `Authorization` as a header parameter name, and the security requirement says strictly more than a parameter can: the scheme's type, and the scopes the operation needs.
 
 ```rust
 use doxa_auth::{AuthLayer, AuthState};

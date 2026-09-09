@@ -102,4 +102,4 @@ pub use middleware::AuthState;
 #[cfg(all(feature = "axum", feature = "audit"))]
 pub use off_request::OffRequest;
 #[cfg(feature = "axum")]
-pub use openapi::{auth_contribution, BearerAuthorization};
+pub use openapi::auth_contribution;

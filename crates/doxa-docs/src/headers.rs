@@ -23,17 +23,27 @@ use utoipa::openapi::{Object, RefOr, Required, Schema, Type};
 /// ```rust
 /// use doxa::DocumentedHeader;
 ///
-/// pub struct BearerAuthorization;
-/// impl DocumentedHeader for BearerAuthorization {
-///     fn name() -> &'static str { "Authorization" }
+/// pub struct IdempotencyKey;
+/// impl DocumentedHeader for IdempotencyKey {
+///     fn name() -> &'static str { "Idempotency-Key" }
 ///     fn description() -> &'static str {
-///         "Bearer JWT issued by the configured identity provider."
+///         "Names this operation so a retry is recognised as the same work."
 ///     }
 ///     fn example() -> Option<&'static str> {
-///         Some("Bearer eyJhbGc...")
+///         Some("6b3f1c2e-...")
 ///     }
 /// }
 /// ```
+///
+/// Credentials are not headers in this sense. `Authorization` — and
+/// `Accept` and `Content-Type` with it — is a name OpenAPI reserves for
+/// its own keywords, and [`crate::ApiDocBuilder::try_build`] refuses a
+/// document declaring one as a parameter. Describe a credential with
+/// [`ApiDocBuilder::bearer_security`](crate::ApiDocBuilder::bearer_security)
+/// or [`security_scheme`](crate::ApiDocBuilder::security_scheme) instead,
+/// including custom key headers: an `apiKey` scheme names the header
+/// itself, and unlike a parameter it wires up to a doc UI's authorize
+/// control and a generated client's auth config.
 ///
 /// All accessors are runtime functions (not associated consts) so a
 /// future blanket impl can adapt foreign traits whose names are only
@@ -43,7 +53,7 @@ pub trait DocumentedHeader {
     /// Wire name of the header. HTTP header names are case-insensitive,
     /// but OpenAPI viewers (Scalar, Swagger UI) render the name
     /// verbatim — use the title-cased form your consumers expect to
-    /// see (`Authorization`, not `authorization`).
+    /// see (`Idempotency-Key`, not `idempotency-key`).
     fn name() -> &'static str;
 
     /// Human description rendered in the docs UI. Empty string omits

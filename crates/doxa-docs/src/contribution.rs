@@ -11,7 +11,7 @@
 //! calling [`apply_contribution`] explicitly.
 
 use utoipa::openapi::content::Content;
-use utoipa::openapi::path::Operation;
+use utoipa::openapi::path::{Operation, ParameterIn};
 use utoipa::openapi::response::{Response, ResponseBuilder};
 use utoipa::openapi::security::SecurityRequirement;
 use utoipa::openapi::{Ref, RefOr};
@@ -221,8 +221,8 @@ impl LayerContribution {
 ///
 /// ```rust,ignore
 /// use doxa::{
-///     DocumentedLayer, HeaderParam, LayerContribution,
-///     ResponseContribution, SecurityContribution,
+///     DocumentedLayer, LayerContribution, ResponseContribution,
+///     SecurityContribution,
 /// };
 ///
 /// pub struct MyAuthLayer { /* … */ }
@@ -234,12 +234,20 @@ impl LayerContribution {
 /// impl DocumentedLayer for MyAuthLayer {
 ///     fn contribution(&self) -> LayerContribution {
 ///         LayerContribution::new()
-///             .with_header(HeaderParam::required("Authorization"))
 ///             .with_response(ResponseContribution::unauthorized())
 ///             .with_security(SecurityContribution::new("bearer"))
 ///     }
 /// }
 /// ```
+///
+/// Note what the credential is *not*: a header. An authenticating layer
+/// contributes a [`SecurityContribution`] and stops there — adding
+/// `.with_header(HeaderParam::required("Authorization"))` alongside says
+/// the same thing a second time, in the one place OpenAPI reserves for
+/// its own keywords, and [`crate::ApiDocBuilder::try_build`] refuses the
+/// document that results. [`crate::HeaderParam`] is for the headers a
+/// layer adds that are not credentials — `Idempotency-Key`,
+/// `X-Request-Id` — where there is no keyword already saying it.
 pub trait DocumentedLayer {
     /// Return the OpenAPI contribution this layer adds to every
     /// operation it covers. Called once at router-build time, on
@@ -481,6 +489,66 @@ pub(crate) fn path_item_operations(
 }
 
 /// Iterate the eight HTTP-method [`Operation`] slots on a
+/// [`utoipa::openapi::PathItem`] by shared reference, each paired with
+/// its method name, for messages that have to say where a defect is.
+fn path_item_operations_named(
+    path_item: &utoipa::openapi::path::PathItem,
+) -> impl Iterator<Item = (&'static str, &Operation)> {
+    [
+        ("GET", path_item.get.as_ref()),
+        ("PUT", path_item.put.as_ref()),
+        ("POST", path_item.post.as_ref()),
+        ("DELETE", path_item.delete.as_ref()),
+        ("OPTIONS", path_item.options.as_ref()),
+        ("HEAD", path_item.head.as_ref()),
+        ("PATCH", path_item.patch.as_ref()),
+        ("TRACE", path_item.trace.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(method, op)| op.map(|op| (method, op)))
+}
+
+/// The header names OpenAPI keeps for itself. A parameter with
+/// `in: header` and one of these names SHALL be ignored (OAS 3.x,
+/// Parameter Object) because a keyword already describes it:
+/// `Authorization` belongs to `securitySchemes`, `Accept` and
+/// `Content-Type` to the request and response `content` maps.
+pub(crate) const RESERVED_HEADER_PARAMS: [&str; 3] = ["Authorization", "Accept", "Content-Type"];
+
+/// Every operation declaring a reserved header as a parameter, keyed by
+/// the reserved name and listing the offenders as `METHOD /path`.
+///
+/// Matched case-insensitively, because HTTP header names are and a
+/// document writing `authorization` means the reserved one.
+pub(crate) fn reserved_header_parameters(
+    doc: &utoipa::openapi::OpenApi,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut found: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+
+    for (path, path_item) in &doc.paths.paths {
+        for (method, op) in path_item_operations_named(path_item) {
+            for param in op.parameters.iter().flatten() {
+                if !matches!(param.parameter_in, ParameterIn::Header) {
+                    continue;
+                }
+                let Some(reserved) = RESERVED_HEADER_PARAMS
+                    .iter()
+                    .find(|name| param.name.eq_ignore_ascii_case(name))
+                else {
+                    continue;
+                };
+                found
+                    .entry((*reserved).to_string())
+                    .or_default()
+                    .push(format!("{method} {path}"));
+            }
+        }
+    }
+
+    found
+}
+
+/// Iterate the eight HTTP-method [`Operation`] slots on a
 /// [`utoipa::openapi::PathItem`]. utoipa models each verb as a
 /// distinct `Option<Operation>` field rather than a map, so we
 /// flatten them here for callers that want method-agnostic mutation.
@@ -702,7 +770,7 @@ mod tests {
     fn apply_contribution_adds_headers_responses_security_tags_to_operation() {
         let mut op = empty_op();
         let c = LayerContribution::new()
-            .with_header(HeaderParam::required("Authorization"))
+            .with_header(HeaderParam::required("X-Request-Id"))
             .with_response(ResponseContribution::unauthorized())
             .with_security(SecurityContribution::new("bearer"))
             .with_tag("auth");
@@ -710,7 +778,7 @@ mod tests {
         apply_contribution_to_operation(&mut op, &c);
 
         let params = op.parameters.expect("parameters set");
-        assert!(params.iter().any(|p| p.name == "Authorization"));
+        assert!(params.iter().any(|p| p.name == "X-Request-Id"));
         assert!(op.responses.responses.contains_key("401"));
         let security = op.security.expect("security set");
         assert_eq!(security.len(), 1);
