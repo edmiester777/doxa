@@ -69,6 +69,23 @@ pub enum BuildError {
         /// The names that were registered, so the message can suggest one.
         registered: Vec<String>,
     },
+    /// An operation declares an `in: header` parameter whose name
+    /// OpenAPI reserves for one of its own keywords.
+    ///
+    /// The document is not merely redundant, it is ambiguous: OAS 3.x
+    /// says the parameter definition SHALL be ignored, so a reader that
+    /// honours the rule drops it and one that does not takes it
+    /// literally — the same document describes two different APIs
+    /// depending on who reads it. Generators are squarely in the second
+    /// camp, and turn a reserved header into an argument every call site
+    /// has to pass. Refuse rather than publish it.
+    ReservedHeaderParameter {
+        /// The reserved name, in the spelling OpenAPI uses for it.
+        header: String,
+        /// The operations declaring it, as `METHOD /path`, so the
+        /// message says where to look.
+        operations: Vec<String>,
+    },
 }
 
 impl fmt::Display for BuildError {
@@ -96,6 +113,42 @@ impl fmt::Display for BuildError {
                     )
                 }
             }
+            Self::ReservedHeaderParameter { header, operations } => {
+                let shown = operations
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let rest = operations.len().saturating_sub(3);
+                write!(
+                    f,
+                    "`{header}` is declared as an `in: header` parameter on {shown}"
+                )?;
+                if rest > 0 {
+                    write!(f, " and {rest} more")?;
+                }
+                write!(
+                    f,
+                    " — OpenAPI reserves that name, and requires the parameter definition to be \
+                     ignored"
+                )?;
+                if header == "Authorization" {
+                    write!(
+                        f,
+                        ". A credential is a security scheme: register it with \
+                         `.bearer_security(\"…\")` / `.security_scheme(…)` and require it per \
+                         operation, which also carries the scheme's type and the operation's \
+                         scopes"
+                    )
+                } else {
+                    write!(
+                        f,
+                        ". `{header}` is described by the request and response `content` maps, \
+                         which utoipa derives from the handler's body and response types"
+                    )
+                }
+            }
         }
     }
 }
@@ -104,7 +157,7 @@ impl std::error::Error for BuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serialize(e) => Some(e),
-            Self::DanglingSecurityScheme { .. } => None,
+            Self::DanglingSecurityScheme { .. } | Self::ReservedHeaderParameter { .. } => None,
         }
     }
 }
@@ -518,6 +571,22 @@ impl ApiDocBuilder {
                     return Err(BuildError::DanglingSecurityScheme { scheme, registered });
                 }
             }
+        }
+
+        // No operation may describe as a parameter what OpenAPI has a
+        // keyword for. Deleting the one contribution that did it fixes
+        // today; the check is what stops the next layer author from
+        // writing `HeaderParam::required("Authorization")` by hand and
+        // shipping a document whose meaning depends on which generator
+        // reads it. Every header on every operation funnels through the
+        // document eventually, so this is the one place that sees them
+        // all — including the ones handlers declare directly, which no
+        // contribution ever passes through.
+        if let Some((header, operations)) = crate::contribution::reserved_header_parameters(&doc)
+            .into_iter()
+            .next()
+        {
+            return Err(BuildError::ReservedHeaderParameter { header, operations });
         }
 
         // Guards compose their scope strings per call site, so the
@@ -1233,6 +1302,123 @@ mod tests {
         assert_eq!(
             parsed["components"]["securitySchemes"]["bearer"]["type"],
             "http"
+        );
+    }
+
+    /// A `POST /a` declaring `name` as an `in: header` parameter.
+    fn openapi_with_header_param(name: &str) -> OpenApi {
+        use utoipa::openapi::path::{
+            HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItem,
+        };
+        use utoipa::openapi::PathsBuilder;
+
+        let op = OperationBuilder::new()
+            .parameter(
+                ParameterBuilder::new()
+                    .name(name)
+                    .parameter_in(ParameterIn::Header)
+                    .build(),
+            )
+            .build();
+        let paths = PathsBuilder::new().path("/a", PathItem::new(HttpMethod::Post, op));
+        OpenApiBuilder::new().paths(paths.build()).build()
+    }
+
+    /// The credential belongs to `securitySchemes`. Declared as a
+    /// parameter as well, the document says one thing to a reader that
+    /// applies the reserved-name rule and another to a generator that
+    /// does not — so it is refused, and the message says where to put it
+    /// instead.
+    #[test]
+    fn an_authorization_header_parameter_is_refused() {
+        let error = ApiDocBuilder::new()
+            .title("t")
+            .version("0.1")
+            .merge(openapi_with_header_param("Authorization"))
+            .try_build()
+            .expect_err("`Authorization` is reserved");
+
+        assert!(
+            matches!(
+                error,
+                BuildError::ReservedHeaderParameter { ref header, .. } if header == "Authorization"
+            ),
+            "wrong variant: {error:?}",
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("POST /a"),
+            "names the operation: {message}"
+        );
+        assert!(
+            message.contains("bearer_security"),
+            "says where the credential goes: {message}"
+        );
+    }
+
+    /// HTTP header names are case-insensitive, so a document spelling it
+    /// `authorization` means the reserved one and cannot slip through.
+    #[test]
+    fn a_lowercased_authorization_parameter_is_refused() {
+        let error = ApiDocBuilder::new()
+            .title("t")
+            .version("0.1")
+            .merge(openapi_with_header_param("authorization"))
+            .try_build()
+            .expect_err("`authorization` is the same reserved name");
+
+        assert!(
+            matches!(
+                error,
+                BuildError::ReservedHeaderParameter { ref header, .. } if header == "Authorization"
+            ),
+            "reported under OpenAPI's spelling: {error:?}",
+        );
+    }
+
+    /// `Accept` and `Content-Type` are reserved for the same reason but
+    /// have a different answer — the `content` maps — so the message
+    /// must not send the reader to the security schemes.
+    #[test]
+    fn a_content_negotiation_header_parameter_is_refused_and_points_at_content() {
+        for name in ["Accept", "Content-Type"] {
+            let error = ApiDocBuilder::new()
+                .title("t")
+                .version("0.1")
+                .merge(openapi_with_header_param(name))
+                .try_build()
+                .err()
+                .unwrap_or_else(|| panic!("`{name}` is reserved"));
+
+            let message = error.to_string();
+            assert!(message.contains(name), "names the header: {message}");
+            assert!(
+                message.contains("`content` maps"),
+                "sends the reader to the content maps: {message}"
+            );
+            assert!(
+                !message.contains("bearer_security"),
+                "`{name}` is not a credential: {message}"
+            );
+        }
+    }
+
+    /// The counterpart: an ordinary header is still a parameter, and the
+    /// refusal above would pass just as well on a check that refused
+    /// every header there is.
+    #[test]
+    fn an_ordinary_header_parameter_builds() {
+        let doc = ApiDocBuilder::new()
+            .title("t")
+            .version("0.1")
+            .merge(openapi_with_header_param("Idempotency-Key"))
+            .try_build()
+            .expect("`Idempotency-Key` is doxa's to describe");
+
+        let parsed: serde_json::Value = serde_json::from_slice(&doc.spec_json).unwrap();
+        assert_eq!(
+            parsed["paths"]["/a"]["post"]["parameters"][0]["name"],
+            "Idempotency-Key"
         );
     }
 

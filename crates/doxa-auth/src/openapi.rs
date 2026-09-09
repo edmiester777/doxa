@@ -1,42 +1,36 @@
 //! OpenAPI metadata for [`crate::AuthLayer`].
 //!
-//! [`auth_contribution`] returns the bundle of [`HeaderParam`],
-//! security scheme, and 401 response that the auth pipeline adds to
-//! every operation behind it. [`crate::AuthLayer`] reads this via the
+//! [`auth_contribution`] returns the bundle of security requirement and
+//! 401 response that the auth pipeline adds to every operation behind
+//! it. [`crate::AuthLayer`] reads this via the
 //! [`doxa::DocumentedLayer`] trait so the layer is fully
 //! self-describing — call sites use
 //! [`doxa::OpenApiRouterExt::layer_documented`] with a single
 //! argument and the contribution is inferred automatically.
+//!
+//! # Why there is no `Authorization` header parameter
+//!
+//! The credential is a security scheme, and a security scheme only.
+//! OpenAPI reserves `Authorization` as an `in: header` parameter name —
+//! a definition using it SHALL be ignored — because `securitySchemes`
+//! already describes the credential, and describes it better: the
+//! scheme's type and the scopes the operation needs are both things a
+//! header parameter has no way to say.
+//!
+//! Declaring both stated the same requirement twice with nothing
+//! reconciling the two, and the copies drifted. Worse, generators that
+//! overlook the reserved-name rule read the parameter literally: every
+//! operation grew a mandatory `Authorization` argument, so callers had
+//! to thread a raw token through each call site to satisfy a header
+//! their client already set centrally.
 
-use doxa::{
-    DocumentedHeader, HeaderParam, LayerContribution, ResponseContribution, SecurityContribution,
-};
+use doxa::{LayerContribution, ResponseContribution, SecurityContribution};
 
-/// Marker type for the `Authorization` header carrying a Bearer JWT.
+/// Full OpenAPI contribution made by [`crate::AuthLayer`]: a security
+/// requirement naming the scheme `scheme_name`, and the 401 the pipeline
+/// returns when no acceptable credential arrives.
 ///
-/// Implements [`DocumentedHeader`] so the same marker can be reused
-/// on the layer side via [`HeaderParam::typed`] and on the
-/// handler side via [`doxa::Header`] / the `headers(...)`
-/// macro argument once those land in commits 6–7.
-pub struct BearerAuthorization;
-
-impl DocumentedHeader for BearerAuthorization {
-    fn name() -> &'static str {
-        "Authorization"
-    }
-    fn description() -> &'static str {
-        "Bearer JWT issued by the configured identity provider."
-    }
-    fn example() -> Option<&'static str> {
-        Some("Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...")
-    }
-}
-
-/// Full OpenAPI contribution made by [`crate::AuthLayer`]: the
-/// `Authorization` header parameter and a security requirement naming the
-/// scheme `scheme_name`.
-///
-/// The 401 response schema is no longer declared here — it is inferred
+/// The 401 response schema is not declared here — it is inferred
 /// from [`AuthError`](doxa_policy::AuthError)'s `#[derive(ApiError)]`
 /// which generates typed per-status-code schemas directly on the error
 /// enum.
@@ -49,7 +43,6 @@ impl DocumentedHeader for BearerAuthorization {
 /// value is `"bearer"`.
 pub fn auth_contribution(scheme_name: impl Into<String>) -> LayerContribution {
     LayerContribution::new()
-        .with_header(HeaderParam::typed::<BearerAuthorization>())
         .with_security(SecurityContribution::new(scheme_name))
         .with_response(ResponseContribution::unauthorized())
 }
@@ -57,74 +50,56 @@ pub fn auth_contribution(scheme_name: impl Into<String>) -> LayerContribution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use utoipa::openapi::path::{HttpMethod, Operation, OperationBuilder, PathItem};
 
-    #[test]
-    fn bearer_authorization_uses_titlecase_name_at_runtime() {
-        assert_eq!(BearerAuthorization::name(), "Authorization");
-    }
-
-    #[test]
-    fn bearer_authorization_has_description_and_example() {
-        assert!(!BearerAuthorization::description().is_empty());
-        assert!(BearerAuthorization::example().is_some());
-    }
-
-    #[test]
-    fn auth_contribution_lists_authorization_header_required() {
-        let c = auth_contribution("bearer");
-        // Round-trip via apply_contribution to confirm the header
-        // ends up with `in: header, required: true`.
+    /// Apply `c` to a lone `GET /x` and hand back the operation it
+    /// landed on. What the contribution *means* is only visible once
+    /// stamped, so every assertion below reads the applied form.
+    fn applied(c: &LayerContribution) -> Operation {
         let mut openapi = utoipa::openapi::OpenApiBuilder::new().build();
         openapi.paths.paths.insert(
             "/x".to_string(),
-            utoipa::openapi::path::PathItem::new(
-                utoipa::openapi::path::HttpMethod::Get,
-                utoipa::openapi::path::OperationBuilder::new().build(),
-            ),
+            PathItem::new(HttpMethod::Get, OperationBuilder::new().build()),
         );
-        doxa::apply_contribution(&mut openapi, &c);
-        let op = openapi.paths.paths["/x"].get.as_ref().unwrap();
-        let params = op.parameters.as_ref().expect("parameters");
-        let auth = params
+        doxa::apply_contribution(&mut openapi, c);
+        openapi.paths.paths["/x"]
+            .get
+            .as_ref()
+            .expect("the operation applied to")
+            .clone()
+    }
+
+    /// The credential travels as `security` alone. A header parameter
+    /// naming it is the thing OpenAPI reserves and every generator
+    /// reads differently, so the contribution must not contain one —
+    /// asserted here rather than left to the document builder's refusal,
+    /// which would only catch it once someone assembled a whole spec.
+    #[test]
+    fn auth_contribution_declares_no_authorization_header_parameter() {
+        let op = applied(&auth_contribution("bearer"));
+        let declared: Vec<&str> = op
+            .parameters
             .iter()
-            .find(|p| p.name.eq_ignore_ascii_case("authorization"))
-            .expect("authorization header present");
-        assert!(matches!(
-            auth.parameter_in,
-            utoipa::openapi::path::ParameterIn::Header
-        ));
-        assert!(matches!(auth.required, utoipa::openapi::Required::True));
+            .flatten()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(
+            !declared
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("authorization")),
+            "the credential is a security scheme, not a parameter: {declared:?}",
+        );
     }
 
     #[test]
     fn auth_contribution_includes_401_response() {
-        let c = auth_contribution("bearer");
-        let mut openapi = utoipa::openapi::OpenApiBuilder::new().build();
-        openapi.paths.paths.insert(
-            "/x".to_string(),
-            utoipa::openapi::path::PathItem::new(
-                utoipa::openapi::path::HttpMethod::Get,
-                utoipa::openapi::path::OperationBuilder::new().build(),
-            ),
-        );
-        doxa::apply_contribution(&mut openapi, &c);
-        let op = openapi.paths.paths["/x"].get.as_ref().unwrap();
+        let op = applied(&auth_contribution("bearer"));
         assert!(op.responses.responses.contains_key("401"));
     }
 
     #[test]
     fn auth_contribution_uses_supplied_scheme_name() {
-        let c = auth_contribution("jwt");
-        let mut openapi = utoipa::openapi::OpenApiBuilder::new().build();
-        openapi.paths.paths.insert(
-            "/x".to_string(),
-            utoipa::openapi::path::PathItem::new(
-                utoipa::openapi::path::HttpMethod::Get,
-                utoipa::openapi::path::OperationBuilder::new().build(),
-            ),
-        );
-        doxa::apply_contribution(&mut openapi, &c);
-        let op = openapi.paths.paths["/x"].get.as_ref().unwrap();
+        let op = applied(&auth_contribution("jwt"));
         let security = op.security.as_ref().expect("security set");
         // Serialize and look for the scheme name to confirm override.
         let rendered = serde_json::to_string(security).unwrap();
@@ -136,17 +111,7 @@ mod tests {
 
     #[test]
     fn auth_contribution_includes_bearer_security() {
-        let c = auth_contribution("bearer");
-        let mut openapi = utoipa::openapi::OpenApiBuilder::new().build();
-        openapi.paths.paths.insert(
-            "/x".to_string(),
-            utoipa::openapi::path::PathItem::new(
-                utoipa::openapi::path::HttpMethod::Get,
-                utoipa::openapi::path::OperationBuilder::new().build(),
-            ),
-        );
-        doxa::apply_contribution(&mut openapi, &c);
-        let op = openapi.paths.paths["/x"].get.as_ref().unwrap();
+        let op = applied(&auth_contribution("bearer"));
         let security = op.security.as_ref().expect("security set");
         assert_eq!(security.len(), 1);
     }

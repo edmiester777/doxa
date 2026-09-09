@@ -279,7 +279,7 @@ JWKS fetch and caching, JWT signature verification, RFC 7662 introspection fallb
 
 ### 6. Auth layer + documented middleware
 
-`AuthLayer` is a tower layer that runs the full auth pipeline (validate → resolve claims → evaluate policy) on every request. Apply it with `layer_documented` and the OpenAPI spec is annotated automatically — Authorization header, 401 response, bearer security scheme — no manual wiring.
+`AuthLayer` is a tower layer that runs the full auth pipeline (validate → resolve claims → evaluate policy) on every request. Apply it with `layer_documented` and the OpenAPI spec is annotated automatically — bearer security requirement and 401 response — no manual wiring. The credential is documented as a security scheme and never as an `Authorization` header parameter: OpenAPI reserves that name, and the requirement carries the scheme's type and the operation's scopes besides.
 
 ```rust
 use doxa::auth::{AuthLayer, AuthState, Claims, OidcClaims};
@@ -368,7 +368,7 @@ async fn main() {
 }
 ```
 
-`/docs` shows Scalar with the auth lock icon on protected operations. The spec has the `Authorization` header, `401` response, and `security` requirement on `/widgets` but not on `/health`.
+`/docs` shows Scalar with the auth lock icon on protected operations. The spec has the `401` response and the `security` requirement on `/widgets` but not on `/health`.
 
 ### 8. Cedar authorization
 
