@@ -21,14 +21,15 @@
 //! ```
 //!
 //! Which parameter it reads is the key's fields — a route names nothing.
-//! `#[key(with = "Query")]` is for the route that puts the key in the query
-//! string rather than the path:
+//! Where it reads them from is inferred: an instance route whose template
+//! names no parameter can only be reading its key from the query string.
 //!
 //! ```ignore
-//! async fn get(w: Granted<Widget>) -> Json<Widget>   // /widgets/{name}
+//! #[get("/widgets/{name}")]                          // /widgets/{name}
+//! async fn get(w: Granted<Widget>) -> Json<Widget>
 //!
 //! #[get("/widgets")]                                 // /widgets?name=…
-//! async fn find(#[key(with = "Query")] w: Granted<Widget>) -> Json<Widget>
+//! async fn find(w: Granted<Widget>) -> Json<Widget>
 //! ```
 //!
 //! The three forms run the same chain and differ only in what the policy
@@ -608,42 +609,47 @@ pub enum KeyIn {
 // Call sites
 // ---------------------------------------------------------------------------
 
-/// Route-specific facts the macro bakes in per call site: which
-/// parameters carry the key, where they arrive, and which Cedar action the
-/// verb implies.
+/// Route-specific facts the macro bakes in per call site: where the key
+/// arrives, and which security scheme to document.
 ///
-/// Hand-written routes implement it directly — it is a handful of consts.
+/// Not the action — that is a type parameter on the form, so it can be
+/// held to the asset's own vocabulary by a bound rather than by a
+/// comparison of names. What is left here is what has no vocabulary to be
+/// checked against.
+///
+/// Hand-written routes implement it directly; it is two consts, both
+/// defaulted, so the common case is a unit struct and an empty impl.
 /// Everything per-route rides on the form marker rather than on
-/// [`Granted`] itself, so a route names `Granted<One<Widget, __Site>>` and
-/// the guard stays a plain pair of caller and subject that a handler can
-/// destructure. That is why the source is a const here and not a second
-/// type parameter on the guard: an unused type parameter needs a
-/// `PhantomData` field, and a third field is a third thing every
+/// [`Granted`] itself, so a route names `Granted<One<Widget, Read, __Site>>`
+/// and the guard stays a plain pair of caller and subject that a handler
+/// can destructure — a third field is a third thing every
 /// `Granted(caller, widget)` pattern in every consumer would have to
 /// match.
 pub trait GrantSite: Send + Sync + 'static {
-    /// Cedar action to authorize, from the HTTP verb.
-    const ACTION: &'static str;
     /// Which half of the request line the key arrives in.
     ///
-    /// `#[key(with = "Query")]` writes it; `with = "Path"` is the default
-    /// and writes nothing. A hand-written site sets it here. It is one
-    /// constant rather than two because the guard and the OpenAPI
-    /// parameter both read it, and a route documented `in: query` that
-    /// looked in the path would be a spec nobody could use.
+    /// Inferred by the route macro — an instance route with no path
+    /// parameters can only be reading its key from the query string — and
+    /// set here by a hand-written site. It is one constant rather than two
+    /// because the guard and the OpenAPI parameter both read it, and a
+    /// route documented `in: query` that looked in the path would be a
+    /// spec nobody could use.
     const IN: KeyIn = KeyIn::Path;
     /// OpenAPI security scheme the requirement references.
+    ///
+    /// Checked when the document is built: a name no scheme was registered
+    /// under is a dangling `$ref`, so [`ApiDocBuilder`] refuses it rather
+    /// than publishing a spec that cannot be used.
+    ///
+    /// [`ApiDocBuilder`]: https://docs.rs/doxa-docs
     const SCHEME: &'static str = "bearer";
 }
 
-/// Site used by hand-written routes: the asset's own key names, out of the
-/// path, `read`, bearer. The route macro generates a real one per call
-/// site.
+/// Site used by hand-written routes: the key out of the path, bearer. The
+/// route macro generates one per call site.
 pub struct DefaultSite;
 
-impl GrantSite for DefaultSite {
-    const ACTION: &'static str = "read";
-}
+impl GrantSite for DefaultSite {}
 
 // ---------------------------------------------------------------------------
 // Subjects
@@ -699,8 +705,8 @@ mod sealed {
         /// What was checked: the Cedar action for an instance or
         /// collection, the capability name for a bare gate.
         ///
-        /// Not always the route's own `GrantSite::ACTION` — a `Cap<M>`
-        /// route ignores the verb and asks about the capability. Naming
+        /// Not always the route's own action — a `Cap<M>` route names no
+        /// action and asks about the capability. Naming
         /// what was actually checked is what keeps a grant and a refusal
         /// on the same route describing the same thing.
         pub action: Cow<'static, str>,
@@ -718,13 +724,12 @@ mod sealed {
     /// not the same capability. This half records nothing, and
     /// [`authorize`](super::authorize) is the only caller there is.
     pub trait Chain: Subject {
-        /// Domain event category this subject's routes are filed under,
-        /// for `action`.
+        /// Domain event category this subject's routes are filed under.
         ///
-        /// Read off the asset's `Action` row for the two asset-backed
-        /// forms; a bare capability has no asset to ask, so it declares
+        /// Read off the action's own row for the two asset-backed forms;
+        /// a bare capability has no action to ask, so it declares
         /// nothing.
-        fn event_type(_action: &str) -> Option<&'static str> {
+        fn event_type() -> Option<&'static str> {
             None
         }
 
@@ -733,7 +738,6 @@ mod sealed {
         /// one has no other caller.
         fn authorize(
             key: Self::Key,
-            action: &'static str,
             state: &Self::State,
             ctx: &Self::Ctx,
             checker: &dyn CapabilityChecker,
@@ -792,15 +796,24 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     /// for a capability, which names no object. See [`resolved_params`].
     const KEY_NAMES: &'static [&'static str] = &[];
 
-    /// Compile-time proof that this subject's action table is coherent
-    /// and permits the action its [`Site`](Self::Site) names.
+    /// The Cedar action this subject authorizes, for the audit event and
+    /// the published document.
     ///
-    /// Forced where the extractor is instantiated, so a route whose
-    /// [`GrantSite::ACTION`] is missing from its asset's
-    /// [`Granting::ACTIONS`] — or whose asset names one action twice, so
-    /// that the gate would silently use whichever row came first — fails
-    /// to build rather than being discovered the first time someone
-    /// exercises it.
+    /// Read off the form's action marker for the two asset-backed forms.
+    /// A capability names no action, so it answers with the capability it
+    /// gates — which is what a grant on such a route records anyway.
+    const ACTION: &'static str;
+
+    /// Compile-time proof that this subject's action table is coherent.
+    ///
+    /// That the action belongs to this asset is the
+    /// `Table = R::Actions` bound's job and needs no assertion. What is
+    /// left is what a bound cannot say: that the asset does not name one
+    /// action twice — the gate would silently take whichever row came
+    /// first — and that its key names line up with the key's segments.
+    ///
+    /// Forced where the extractor is instantiated, so both fail the build
+    /// rather than the first request that exercises them.
     #[doc(hidden)]
     const SITE_DECLARED: ();
 
@@ -808,8 +821,8 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     /// entity type for a resource, the capability name for a bare gate.
     fn doc_name() -> Cow<'static, str>;
 
-    /// Permission name for the OpenAPI badge, given the route's action.
-    fn permission(action: &str) -> Cow<'static, str>;
+    /// Permission name for the OpenAPI badge.
+    fn permission() -> Cow<'static, str>;
 }
 
 /// The parameter names a subject's key is read from — which are the key
@@ -859,7 +872,7 @@ pub const fn resolved_params<T: Subject>() -> &'static [&'static str] {
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct Action {
-    /// Cedar action name, as a route's [`GrantSite::ACTION`] names it.
+    /// Cedar action name, as the marker naming this row spells it.
     pub name: &'static str,
     /// Coarse capability covering it, checked before any load so an
     /// unauthorized caller costs no query.
@@ -922,7 +935,7 @@ inventory::collect!(&'static Action);
 ///
 /// ## What it cannot see
 ///
-/// A hand-written [`Granting::ACTIONS`] table. Registration happens in the
+/// A hand-written [`ActionTable`] impl. Registration happens in the
 /// derive, so a table written out by hand is absent here with no error —
 /// as is any action in a crate the binary does not link. Assert the count
 /// in a test if the set matters.
@@ -962,10 +975,9 @@ pub fn actions() -> Vec<&'static Action> {
 /// An asset's action vocabulary, as a bound rather than an inherent const.
 ///
 /// `#[derive(Actions)]` has always emitted `WidgetAction::ACTIONS`, and for
-/// the ordinary wiring — `const ACTIONS = WidgetAction::ACTIONS;` — that is
-/// enough, because a path substitution resolves an inherent const as
-/// readily as a trait one. The derive still emits it, and this trait is
-/// where the array now lives.
+/// the ordinary wiring — `type Actions = WidgetAction;` — that is the
+/// whole of it. The derive still emits the inherent const, and this trait
+/// is where the array lives.
 ///
 /// The bound is for the code that cannot name the enum: something generic
 /// over the vocabulary it authorizes against, or a startup seeding Cedar's
@@ -996,38 +1008,99 @@ pub fn actions() -> Vec<&'static Action> {
 /// so a type parameterized by its vocabulary carries them without adding
 /// any of its own.
 pub trait ActionTable: Send + Sync + 'static {
-    /// Every action this vocabulary permits, as [`Granting::ACTIONS`]
-    /// takes it.
+    /// Every action this vocabulary permits.
+    ///
+    /// [`Granting::ACTIONS`] forwards to it, so an asset states its
+    /// vocabulary once by naming the type rather than by copying rows.
     const ACTIONS: &'static [Action];
 }
 
-/// A type standing for one Cedar action.
+/// A type standing for one Cedar action, carrying its row and the
+/// vocabulary it came from.
 ///
-/// Actions are named by string almost everywhere — [`Action::new`] takes
-/// one, [`GrantSite::ACTION`] is one — because a `const` table is what
-/// makes [`Subject::SITE_DECLARED`] possible, and a trait method cannot be
-/// called in a `const`. A route pays nothing for that: the macro's site
-/// type carries the string, and the assertion runs where the route is
-/// instantiated.
+/// [`Table`](Self::Table) is what holds a route to its own asset. The
+/// subject forms bound on `Table = R::Actions`, so an action belonging to
+/// a different asset does not compile — even where the two vocabularies
+/// spell it identically, which a check on the name alone cannot tell
+/// apart.
 ///
-/// [`AuthorizeLoaded`] has no site, so until this trait existed it was the
-/// one door that checked its action when the request arrived. Naming a
-/// type instead of a string moves that check back to the build, and
-/// `#[derive(Actions)]` emits one of these per variant, so an asset with a
-/// derived vocabulary has the types already.
+/// [`ROW`](Self::ROW) is a reference to the row [`ActionTable::ACTIONS`]
+/// already holds, not a copy. Carrying it means the capability and the
+/// audit category are read off the type; without it the name is searched
+/// for in the table on every request, and a name absent from it is a
+/// refusal raised at request time for something the bound above has
+/// already ruled out.
 ///
-/// For a hand-written [`Granting::ACTIONS`] table it is three lines:
+/// `#[derive(Actions)]` emits one per variant. Written out:
 ///
 /// ```
-/// # use doxa_auth::granted::DeclaredAction;
+/// # use doxa_auth::granted::{Action, ActionTable, DeclaredAction};
+/// pub enum WidgetActions {}
+/// const READ_WIDGET: Action = Action::new("read_widget");
+///
+/// impl ActionTable for WidgetActions {
+///     const ACTIONS: &'static [Action] = &[READ_WIDGET];
+/// }
+///
 /// pub struct ReadWidget;
 /// impl DeclaredAction for ReadWidget {
-///     const ACTION: &'static str = "read_widget";
+///     type Table = WidgetActions;
+///     const ROW: &'static Action = &READ_WIDGET;
 /// }
 /// ```
 pub trait DeclaredAction: Send + Sync + 'static {
-    /// The Cedar action name, as [`Granting::ACTIONS`] spells it.
-    const ACTION: &'static str;
+    /// The vocabulary this action belongs to.
+    type Table: ActionTable;
+
+    /// This action's row, by reference, so the vocabulary and the catalog
+    /// cannot come to describe one action differently.
+    const ROW: &'static Action;
+
+    /// The Cedar action name. Read off [`ROW`](Self::ROW) — overriding it
+    /// would be a second spelling of one name.
+    const ACTION: &'static str = Self::ROW.name;
+}
+
+/// Which action a route's HTTP verb means, when the route does not say.
+///
+/// Four traits, one per action the verbs imply — `GET` reads, `POST`
+/// creates, `PUT` and `PATCH` update, `DELETE` deletes. Each names a
+/// member of the vocabulary that implements it, and `#[derive(Actions)]`
+/// writes the impl from `#[action(verb = …)]` on a variant.
+///
+/// The mapping is declared once beside the actions rather than derived
+/// from a name. A vocabulary calling its read action `View` says so; one
+/// with no read action at all says that too, by not implementing
+/// [`verb::ReadAction`]. A route with no `#[grant(action = …)]` resolves through
+/// the trait its verb selects, so `#[get]` on an asset whose vocabulary
+/// implements none of them fails to build naming the missing impl —
+/// rather than checking an action the asset never declared.
+pub mod verb {
+    use super::{ActionTable, DeclaredAction};
+
+    /// The action `GET` and any verb without a mapping of its own means.
+    pub trait ReadAction: ActionTable {
+        /// The action this vocabulary reads with.
+        type Action: DeclaredAction<Table = Self>;
+    }
+
+    /// The action `POST` means.
+    pub trait CreateAction: ActionTable {
+        /// The action this vocabulary creates with.
+        type Action: DeclaredAction<Table = Self>;
+    }
+
+    /// The action `PUT` and `PATCH` mean.
+    pub trait UpdateAction: ActionTable {
+        /// The action this vocabulary updates with.
+        type Action: DeclaredAction<Table = Self>;
+    }
+
+    /// The action `DELETE` means.
+    pub trait DeleteAction: ActionTable {
+        /// The action this vocabulary deletes with.
+        type Action: DeclaredAction<Table = Self>;
+    }
 }
 
 /// `&str` equality in a const context, which `==` is not.
@@ -1044,22 +1117,6 @@ const fn str_eq(a: &str, b: &str) -> bool {
         i += 1;
     }
     true
-}
-
-/// Whether `actions` permits `name`.
-///
-/// `const`, so a route can prove at build time that the action it names is
-/// one its asset declares — which is what [`Subject::SITE_DECLARED`] does
-/// for every route the macro generates.
-pub const fn declares(actions: &[Action], name: &str) -> bool {
-    let mut i = 0;
-    while i < actions.len() {
-        if str_eq(actions[i].name, name) {
-            return true;
-        }
-        i += 1;
-    }
-    false
 }
 
 /// Whether every row in `actions` names a different action.
@@ -1088,17 +1145,6 @@ pub const fn distinct(actions: &[Action]) -> bool {
         i += 1;
     }
     true
-}
-
-/// The row covering `action`, or `None` if the asset does not permit it.
-///
-/// Takes the first match; [`distinct`] is what makes that unambiguous.
-///
-/// Deliberately not a [`Granting`] method: the gate reads the table
-/// directly, so no override can put the capability an action is checked
-/// against out of step with whether that action exists.
-fn declared<R: Granting>(action: &str) -> Option<&'static Action> {
-    R::ACTIONS.iter().find(|declared| declared.name == action)
 }
 
 /// The caller shape, state and loader failure an application uses
@@ -1204,22 +1250,25 @@ pub trait Granting: Sized + Send + Sync + 'static {
     /// `IntoResponse`, so any audit outcome it attaches survives.
     type Error: IntoResponse + Send;
 
+    /// This asset's action vocabulary.
+    ///
+    /// A type rather than a list, because that is what holds a route to
+    /// it: every form bounds its action on `Table = Self::Actions`, so an
+    /// action from another asset's vocabulary does not compile here. The
+    /// `#[derive(Actions)]` enum is what this names.
+    ///
+    /// ```ignore
+    /// type Actions = SourceAction;
+    /// ```
+    type Actions: ActionTable;
+
     /// Every action this asset permits, and what each one costs.
     ///
-    /// The vocabulary, not a hint: an action absent from here is refused
-    /// before anything is loaded and before [`Scoping::scope`] is
-    /// consulted, so a route that names one an asset does not declare
-    /// cannot fall through to an unchecked grant. Routes are held to it at
-    /// compile time — see [`Subject::SITE_DECLARED`].
-    ///
-    /// ```
-    /// # use doxa_auth::granted::Action;
-    /// const ACTIONS: &[Action] = &[
-    ///     Action::new("read_source").event("data_access"),
-    ///     Action::new("delete_source").event("admin_delete"),
-    /// ];
-    /// ```
-    const ACTIONS: &'static [Action];
+    /// The vocabulary flattened, for the const assertions and for code
+    /// reading the table as data. Defaults to
+    /// [`Actions`](Self::Actions)' own rows, which is where an asset
+    /// declares them; there is no reason to override it.
+    const ACTIONS: &'static [Action] = <Self::Actions as ActionTable>::ACTIONS;
 
     /// What this asset calls its key's parameters, in key order — and so
     /// the route parameters it binds.
@@ -1308,7 +1357,16 @@ pub trait Scoping: Granting {
 
 /// Authorize one object: load it, then decide with its own attributes in
 /// scope.
-pub struct One<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
+///
+/// `A` is the action, named as one of the asset's own
+/// [`DeclaredAction`] markers — the same way [`Scoped`] names one. `S`
+/// carries the rest of the call site and the route macro writes it.
+// `fn() -> (…)` rather than the parameters directly: it is the variance
+// and auto-trait behaviour that is wanted, not ownership. Factoring it
+// into an alias would name the three parameters twice to say the same
+// thing.
+#[allow(clippy::type_complexity)]
+pub struct One<R, A, S = DefaultSite>(PhantomData<fn() -> (R, A, S)>);
 
 /// Authorize the whole collection rather than one member: the policy's
 /// residual becomes a filter the handler applies to its query.
@@ -1320,7 +1378,12 @@ pub struct One<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
 /// Requires [`Scoping`] rather than [`Granting`]: an asset that cannot
 /// be listed does not implement it, and this form will not compile
 /// against one.
-pub struct Many<R, S = DefaultSite>(PhantomData<fn() -> (R, S)>);
+// `fn() -> (…)` rather than the parameters directly: it is the variance
+// and auto-trait behaviour that is wanted, not ownership. Factoring it
+// into an alias would name the three parameters twice to say the same
+// thing.
+#[allow(clippy::type_complexity)]
+pub struct Many<R, A, S = DefaultSite>(PhantomData<fn() -> (R, A, S)>);
 
 /// Authorize a bare capability with no asset behind it.
 ///
@@ -1449,10 +1512,10 @@ impl<St: Send + Sync> FromRequestParts<St> for NoState {
 /// Shared by the instance and collection forms, which ask the same
 /// question of the same asset — so a listing and a fetch cannot end up
 /// documenting different permissions for the same verb.
-fn asset_permission<R: Granting>(action: &str) -> Cow<'static, str> {
-    match declared::<R>(action).and_then(|declared| declared.capability) {
+fn asset_permission<R: Granting, A: DeclaredAction>() -> Cow<'static, str> {
+    match A::ROW.capability {
         Some(cap) => Cow::Borrowed(cap.name),
-        None => Cow::Owned(format!("{}:{action}", entity_type::<R>())),
+        None => Cow::Owned(format!("{}:{}", entity_type::<R>(), A::ACTION)),
     }
 }
 
@@ -1464,9 +1527,12 @@ const fn entity_type<R: Granting>() -> &'static str {
     <R::Row as PolicyResource>::ENTITY_TYPE
 }
 
-impl<R: Granting, S: GrantSite> sealed::Sealed for One<R, S> {}
+impl<R: Granting, A: DeclaredAction<Table = R::Actions>, S: GrantSite> sealed::Sealed
+    for One<R, A, S>
+{
+}
 
-impl<R: Granting, S: GrantSite> Subject for One<R, S> {
+impl<R: Granting, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Subject for One<R, A, S> {
     type Loaded = R::Row;
     type Ctx = R::Ctx;
     type State = R::State;
@@ -1477,14 +1543,11 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
 
     const FORM: SubjectForm = SubjectForm::Instance;
     const KEY_NAMES: &'static [&'static str] = R::KEY_NAMES;
+    const ACTION: &'static str = A::ACTION;
     const SITE_DECLARED: () = {
         assert!(
             distinct(R::ACTIONS),
             "`Granting::ACTIONS` names one action twice; the later row never runs",
-        );
-        assert!(
-            declares(R::ACTIONS, S::ACTION),
-            "this route's action is missing from the asset's `Granting::ACTIONS`",
         );
         // Naming fewer parameters than the key parses would have the
         // surplus silently dropped. `KEY_NAMES` defaults to the key's own
@@ -1500,27 +1563,28 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
         Cow::Borrowed(entity_type::<R>())
     }
 
-    fn permission(action: &str) -> Cow<'static, str> {
-        asset_permission::<R>(action)
+    fn permission() -> Cow<'static, str> {
+        asset_permission::<R, A>()
     }
 }
 
-impl<R: Granting, S: GrantSite> Chain for One<R, S> {
-    fn event_type(action: &str) -> Option<&'static str> {
-        declared::<R>(action).and_then(|declared| declared.event_type)
+impl<R: Granting, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Chain for One<R, A, S> {
+    fn event_type() -> Option<&'static str> {
+        A::ROW.event_type
     }
 
     async fn authorize(
         key: Self::Key,
-        action: &'static str,
         state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
     ) -> Result<Authorized<R::Row>, Refusal<R::Error>> {
+        let action = A::ACTION;
+
         // Gate first: a caller who may not touch this kind of thing at
         // all should not cost a query, and must not be able to tell a
         // missing object from one they may not see.
-        gate::<R>(action, ctx, checker).await?;
+        gate::<A>(ctx, checker).await?;
 
         let resource = R::load(key, state, ctx)
             .await
@@ -1556,9 +1620,12 @@ impl<R: Granting, S: GrantSite> Chain for One<R, S> {
     }
 }
 
-impl<R: Scoping, S: GrantSite> sealed::Sealed for Many<R, S> {}
+impl<R: Scoping, A: DeclaredAction<Table = R::Actions>, S: GrantSite> sealed::Sealed
+    for Many<R, A, S>
+{
+}
 
-impl<R: Scoping, S: GrantSite> Subject for Many<R, S> {
+impl<R: Scoping, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Subject for Many<R, A, S> {
     type Loaded = R::Filter;
     type Ctx = R::Ctx;
     type State = R::State;
@@ -1568,14 +1635,11 @@ impl<R: Scoping, S: GrantSite> Subject for Many<R, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Collection;
+    const ACTION: &'static str = A::ACTION;
     const SITE_DECLARED: () = {
         assert!(
             distinct(R::ACTIONS),
             "`Granting::ACTIONS` names one action twice; the later row never runs",
-        );
-        assert!(
-            declares(R::ACTIONS, S::ACTION),
-            "this route's action is missing from the asset's `Granting::ACTIONS`",
         );
     };
 
@@ -1583,24 +1647,25 @@ impl<R: Scoping, S: GrantSite> Subject for Many<R, S> {
         Cow::Borrowed(entity_type::<R>())
     }
 
-    fn permission(action: &str) -> Cow<'static, str> {
-        asset_permission::<R>(action)
+    fn permission() -> Cow<'static, str> {
+        asset_permission::<R, A>()
     }
 }
 
-impl<R: Scoping, S: GrantSite> Chain for Many<R, S> {
-    fn event_type(action: &str) -> Option<&'static str> {
-        declared::<R>(action).and_then(|declared| declared.event_type)
+impl<R: Scoping, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Chain for Many<R, A, S> {
+    fn event_type() -> Option<&'static str> {
+        A::ROW.event_type
     }
 
     async fn authorize(
         _key: (),
-        action: &'static str,
         _state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
     ) -> Result<Authorized<R::Filter>, Refusal<R::Error>> {
-        gate::<R>(action, ctx, checker).await?;
+        let action = A::ACTION;
+
+        gate::<A>(ctx, checker).await?;
 
         // The same function the dependency door reaches, rather than a
         // second copy of it. Two spellings of one decision drift: this one
@@ -1631,15 +1696,17 @@ impl<M: Capable, S: GrantSite> Subject for Cap<M, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Capability;
-    // Nothing to hold to a vocabulary: this form ignores the route's
-    // action and asks about the capability itself.
+    // Nothing to hold to a vocabulary: this form names no action and asks
+    // about the capability itself, so it takes no action parameter to be
+    // held to one.
+    const ACTION: &'static str = M::CAPABILITY.name;
     const SITE_DECLARED: () = ();
 
     fn doc_name() -> Cow<'static, str> {
         Cow::Borrowed(M::CAPABILITY.name)
     }
 
-    fn permission(_action: &str) -> Cow<'static, str> {
+    fn permission() -> Cow<'static, str> {
         Cow::Borrowed(M::CAPABILITY.name)
     }
 }
@@ -1647,7 +1714,6 @@ impl<M: Capable, S: GrantSite> Subject for Cap<M, S> {
 impl<M: Capable, S: GrantSite> Chain for Cap<M, S> {
     async fn authorize(
         _key: (),
-        _action: &'static str,
         _state: &NoState,
         ctx: &CapabilityContext,
         checker: &dyn CapabilityChecker,
@@ -1703,39 +1769,20 @@ pub(crate) fn capability_resource(
         .unwrap_or(("capability", Cow::Borrowed(cap.name)))
 }
 
-/// The asset's own row for this action, or a refusal.
-///
-/// What makes [`Granting::ACTIONS`] a vocabulary rather than a lookup
-/// table: an action absent from it is refused before anything else runs.
-/// A collection route performs no instance check, so without this an
-/// action the asset never heard of would reach [`Scoping::scope`] and be
-/// answered with whatever subset that returns.
-///
-/// Every door checks it — [`gate`] on the way to a capability, and
-/// [`AuthorizeLoaded`] on a resource that is already in hand — so an
-/// undeclared action is refused identically however the check was
-/// reached.
-fn declared_action<R: Granting>(action: &'static str) -> Result<&'static Action, Denial> {
-    declared::<R>(action).ok_or(Denial::Denied {
-        action: Cow::Borrowed(action),
-        resource_type: Cow::Borrowed(entity_type::<R>()),
-        // The refusal is about the action, not about an object: for a
-        // collection there will never be one, and for a resource already
-        // loaded the asset does not admit the verb being asked about.
-        resource_id: Cow::Borrowed("*"),
-        reason: "action not declared",
-    })
-}
-
 /// The gate both asset-backed chains pass through before they load or
-/// scope anything: is this action one the asset permits, and if it is
-/// gated behind a capability, does the caller hold it?
-async fn gate<R: Granting>(
-    action: &'static str,
-    ctx: &R::Ctx,
+/// scope anything: if this action is gated behind a capability, does the
+/// caller hold it?
+///
+/// It no longer asks whether the asset permits the action. That was a
+/// search through [`ActionTable::ACTIONS`] on every request, answering a
+/// question [`DeclaredAction::Table`] settles at compile time — a subject
+/// naming an action from another vocabulary does not build, so there is no
+/// request left for it to refuse.
+async fn gate<A: DeclaredAction>(
+    ctx: &impl FromAuthExtensions,
     checker: &dyn CapabilityChecker,
 ) -> Result<&'static Action, Denial> {
-    let declared = declared_action::<R>(action)?;
+    let declared = A::ROW;
 
     let Some(cap) = declared.capability else {
         return Ok(declared);
@@ -1782,14 +1829,15 @@ async fn gate<R: Granting>(
 /// path:
 ///
 /// ```ignore
-/// async fn get(w: Granted<Widget>) -> Json<Widget>   // /widgets/{name}
+/// #[get("/widgets/{name}")]                          // /widgets/{name}
+/// async fn get(w: Granted<Widget>) -> Json<Widget>
 ///
 /// #[get("/widgets")]                                 // /widgets?name=…
-/// async fn find(#[key(with = "Query")] w: Granted<Widget>) -> Json<Widget>
+/// async fn find(w: Granted<Widget>) -> Json<Widget>
 /// ```
 ///
-/// It lands on the generated site as [`GrantSite::IN`], alongside the
-/// parameter names and the action, rather than on this struct. A second
+/// It lands on the generated site as [`GrantSite::IN`] rather than on this
+/// struct. A second
 /// type parameter here would have to be held in a `PhantomData`, and the
 /// third field that implies is a third thing every `Granted(caller,
 /// widget)` pattern would have to match, forever, to carry a marker
@@ -1864,8 +1912,7 @@ where
 
         // Same entry point a handler uses, so the refusal is recorded by
         // the same code either way.
-        let loaded =
-            authorize::<T>(key, T::Site::ACTION, source.state(), &parts.extensions).await?;
+        let loaded = authorize::<T>(key, source.state(), &parts.extensions).await?;
         Ok(Granted(ctx, loaded))
     }
 }
@@ -1904,18 +1951,17 @@ where
 /// does, because a request that ends on a denial is about that denial.
 pub async fn authorize<T: Chain>(
     key: T::Key,
-    action: &'static str,
     state: &T::State,
     extensions: &Extensions,
 ) -> Result<T::Loaded, Refusal<T::Error>> {
     let (ctx, checker) = caller_and_checker::<T::Ctx>(extensions)?;
 
-    match T::authorize(key, action, state, &ctx, checker.as_ref()).await {
+    match T::authorize(key, state, &ctx, checker.as_ref()).await {
         Ok(authorized) => {
             crate::record::grant(
                 extensions,
                 crate::record::Grant {
-                    event_type: T::event_type(action),
+                    event_type: T::event_type(),
                     action: authorized.action,
                     resource_type: authorized.resource_type,
                     resource_id: authorized.resource_id,
@@ -2037,12 +2083,17 @@ pub trait AuthorizeLoaded: PolicyResource {
     ///
     /// ```
     /// # use doxa_auth::granted::{
-    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// #     Action, ActionTable, AuthorizeLoaded, DeclaredAction, FromState, Granting,
     /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
     /// # doxa_auth::route_key!(pub WidgetKey { name: String });
+    /// # const READ: Action = Action::new("read");
+    /// # pub enum WidgetActions {}
+    /// # impl ActionTable for WidgetActions {
+    /// #     const ACTIONS: &'static [Action] = &[READ];
+    /// # }
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2055,13 +2106,14 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
-    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     type Actions = WidgetActions;
     /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
     /// # }
     /// struct Read;
     /// impl DeclaredAction for Read {
-    ///     const ACTION: &'static str = "read";
+    ///     type Table = WidgetActions;
+    ///     const ROW: &'static Action = &READ;
     /// }
     ///
     /// # let extensions = http::Extensions::new();
@@ -2072,12 +2124,17 @@ pub trait AuthorizeLoaded: PolicyResource {
     ///
     /// ```compile_fail
     /// # use doxa_auth::granted::{
-    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// #     Action, ActionTable, AuthorizeLoaded, DeclaredAction, FromState, Granting,
     /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
     /// # doxa_auth::route_key!(pub WidgetKey { name: String });
+    /// # const READ: Action = Action::new("read");
+    /// # pub enum WidgetActions {}
+    /// # impl ActionTable for WidgetActions {
+    /// #     const ACTIONS: &'static [Action] = &[READ];
+    /// # }
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2090,20 +2147,28 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
-    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     type Actions = WidgetActions;
     /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
     /// # }
+    /// // Belongs to another asset's vocabulary — which is the whole of
+    /// // what makes the call below fail to resolve.
+    /// # const PURGE: Action = Action::new("purge");
+    /// # pub enum OtherActions {}
+    /// # impl ActionTable for OtherActions {
+    /// #     const ACTIONS: &'static [Action] = &[PURGE];
+    /// # }
     /// struct Purge;
     /// impl DeclaredAction for Purge {
-    ///     const ACTION: &'static str = "purge";
+    ///     type Table = OtherActions;
+    ///     const ROW: &'static Action = &PURGE;
     /// }
     ///
     /// # let extensions = http::Extensions::new();
     /// // error: this action is missing from the asset's `Granting::ACTIONS`
     /// let _ = Widget.authorize::<Widget, _>(Purge, &extensions);
     /// ```
-    fn authorize<R: Granting<Row = Self>, A: DeclaredAction>(
+    fn authorize<R: Granting<Row = Self>, A: DeclaredAction<Table = R::Actions>>(
         self,
         action: A,
         extensions: &Extensions,
@@ -2125,12 +2190,17 @@ pub trait AuthorizeLoaded: PolicyResource {
     ///
     /// ```
     /// # use doxa_auth::granted::{
-    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// #     Action, ActionTable, AuthorizeLoaded, DeclaredAction, FromState, Granting,
     /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
     /// # doxa_auth::route_key!(pub WidgetKey { name: String });
+    /// # const READ: Action = Action::new("read");
+    /// # pub enum WidgetActions {}
+    /// # impl ActionTable for WidgetActions {
+    /// #     const ACTIONS: &'static [Action] = &[READ];
+    /// # }
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2145,7 +2215,7 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
-    ///     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    ///     type Actions = WidgetActions;
     /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Widget>, Infallible> { Ok(None) }
     ///     // …
@@ -2153,7 +2223,8 @@ pub trait AuthorizeLoaded: PolicyResource {
     ///
     /// # struct Read;
     /// # impl DeclaredAction for Read {
-    /// #     const ACTION: &'static str = "read";
+    /// #     type Table = WidgetActions;
+    /// #     const ROW: &'static Action = &READ;
     /// # }
     /// # let extensions = http::Extensions::new();
     /// let _ = Widget.authorize_dependency::<WidgetById, _>(Read, &extensions);
@@ -2167,12 +2238,17 @@ pub trait AuthorizeLoaded: PolicyResource {
     ///
     /// ```compile_fail
     /// # use doxa_auth::granted::{
-    /// #     Action, AuthorizeLoaded, DeclaredAction, FromState, Granting,
+    /// #     Action, ActionTable, AuthorizeLoaded, DeclaredAction, FromState, Granting,
     /// # };
     /// # use doxa_auth::CapabilityContext;
     /// # use doxa_policy::PolicyResource;
     /// # use std::convert::Infallible;
     /// # doxa_auth::route_key!(pub WidgetKey { name: String });
+    /// # const READ: Action = Action::new("read");
+    /// # pub enum WidgetActions {}
+    /// # impl ActionTable for WidgetActions {
+    /// #     const ACTIONS: &'static [Action] = &[READ];
+    /// # }
     /// # struct Widget;
     /// # impl PolicyResource for Widget {
     /// #     const ENTITY_TYPE: &'static str = "Widget";
@@ -2186,19 +2262,25 @@ pub trait AuthorizeLoaded: PolicyResource {
     /// #     type State = ();
     /// #     type Source = FromState<()>;
     /// #     type Error = Infallible;
-    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     type Actions = WidgetActions;
     /// #     async fn load(_: WidgetKey, _: &(), _: &CapabilityContext)
     /// #         -> Result<Option<Widget>, Infallible> { Ok(None) }
     /// # }
+    /// # const PURGE: Action = Action::new("purge");
+    /// # pub enum OtherActions {}
+    /// # impl ActionTable for OtherActions {
+    /// #     const ACTIONS: &'static [Action] = &[PURGE];
+    /// # }
     /// # struct Purge;
     /// # impl DeclaredAction for Purge {
-    /// #     const ACTION: &'static str = "purge";
+    /// #     type Table = OtherActions;
+    /// #     const ROW: &'static Action = &PURGE;
     /// # }
     /// # let extensions = http::Extensions::new();
     /// // error: this action is missing from the asset's `Granting::ACTIONS`
     /// let _ = Widget.authorize_dependency::<WidgetById, _>(Purge, &extensions);
     /// ```
-    fn authorize_dependency<R: Granting<Row = Self>, A: DeclaredAction>(
+    fn authorize_dependency<R: Granting<Row = Self>, A: DeclaredAction<Table = R::Actions>>(
         self,
         action: A,
         extensions: &Extensions,
@@ -2222,22 +2304,22 @@ impl<T: PolicyResource> AuthorizeLoaded for T {
     // discharged when the method is *called*, not when the future is
     // first polled. A caller who names an action their asset does not
     // permit gets the error at the call site, awaited or not.
-    fn authorize<R: Granting<Row = Self>, A: DeclaredAction>(
+    fn authorize<R: Granting<Row = Self>, A: DeclaredAction<Table = R::Actions>>(
         self,
         _action: A,
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Self, Denial>> + Send {
         let () = Declares::<R, A>::PROOF;
-        decide::<R>(self, A::ACTION, extensions, Coarse::Check)
+        decide::<R, A>(self, extensions, Coarse::Check)
     }
 
-    fn authorize_dependency<R: Granting<Row = Self>, A: DeclaredAction>(
+    fn authorize_dependency<R: Granting<Row = Self>, A: DeclaredAction<Table = R::Actions>>(
         self,
         _action: A,
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Self, Denial>> + Send {
         let () = Declares::<R, A>::PROOF;
-        decide::<R>(self, A::ACTION, extensions, Coarse::Skip)
+        decide::<R, A>(self, extensions, Coarse::Skip)
     }
 }
 
@@ -2277,7 +2359,7 @@ impl<T: PolicyResource> AuthorizeLoaded for T {
 /// request is over.
 pub trait AuthorizeLoadedAll<T: PolicyResource>: Sized {
     /// The coarse capability once, then an instance check per row.
-    fn authorize_all<R: Granting<Row = T>, A: DeclaredAction>(
+    fn authorize_all<R: Granting<Row = T>, A: DeclaredAction<Table = R::Actions>>(
         self,
         action: A,
         extensions: &Extensions,
@@ -2290,7 +2372,7 @@ pub trait AuthorizeLoadedAll<T: PolicyResource>: Sized {
     /// exactly what that skips: a caller who may write a pipeline naming
     /// sources they may read should not be refused because they may not
     /// *list* sources.
-    fn authorize_all_dependency<R: Granting<Row = T>, A: DeclaredAction>(
+    fn authorize_all_dependency<R: Granting<Row = T>, A: DeclaredAction<Table = R::Actions>>(
         self,
         action: A,
         extensions: &Extensions,
@@ -2300,22 +2382,22 @@ pub trait AuthorizeLoadedAll<T: PolicyResource>: Sized {
 /// Blanket for the same reason [`AuthorizeLoaded`]'s is, and on `Vec` so
 /// the rows a plural loader returns go straight through.
 impl<T: PolicyResource> AuthorizeLoadedAll<T> for Vec<T> {
-    fn authorize_all<R: Granting<Row = T>, A: DeclaredAction>(
+    fn authorize_all<R: Granting<Row = T>, A: DeclaredAction<Table = R::Actions>>(
         self,
         _action: A,
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Vec<T>, Denial>> + Send {
         let () = Declares::<R, A>::PROOF;
-        decide_all::<R>(self, A::ACTION, extensions, Coarse::Check)
+        decide_all::<R, A>(self, extensions, Coarse::Check)
     }
 
-    fn authorize_all_dependency<R: Granting<Row = T>, A: DeclaredAction>(
+    fn authorize_all_dependency<R: Granting<Row = T>, A: DeclaredAction<Table = R::Actions>>(
         self,
         _action: A,
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Vec<T>, Denial>> + Send {
         let () = Declares::<R, A>::PROOF;
-        decide_all::<R>(self, A::ACTION, extensions, Coarse::Skip)
+        decide_all::<R, A>(self, extensions, Coarse::Skip)
     }
 }
 
@@ -2364,7 +2446,7 @@ impl<T: PolicyResource> AuthorizeLoadedAll<T> for Vec<T> {
 /// record, exactly as the other doors do.
 pub trait AuthorizeScope: Scoping {
     /// Coarse gate, then the caller's authorized subset.
-    fn authorize_scope<A: DeclaredAction>(
+    fn authorize_scope<A: DeclaredAction<Table = Self::Actions>>(
         action: A,
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Self::Filter, Denial>> + Send;
@@ -2372,10 +2454,9 @@ pub trait AuthorizeScope: Scoping {
     /// The caller's authorized subset, for an asset this route's own guard
     /// has already cleared the coarse question for.
     ///
-    /// Skips the capability gate *and nothing else* — the action must still
-    /// be one the asset declares, and the scope is still the one the policy
-    /// assembled.
-    fn authorize_scope_dependency<A: DeclaredAction>(
+    /// Skips the capability gate *and nothing else* — the scope is still
+    /// the one the policy assembled.
+    fn authorize_scope_dependency<A: DeclaredAction<Table = Self::Actions>>(
         action: A,
         extensions: &Extensions,
     ) -> Result<Self::Filter, Denial>;
@@ -2385,27 +2466,24 @@ pub trait AuthorizeScope: Scoping {
 /// the scope, through [`Scoping`], and cannot supply a way of reaching one
 /// that records nothing.
 impl<R: Scoping> AuthorizeScope for R {
-    fn authorize_scope<A: DeclaredAction>(
+    fn authorize_scope<A: DeclaredAction<Table = Self::Actions>>(
         _action: A,
         extensions: &Extensions,
     ) -> impl Future<Output = Result<Self::Filter, Denial>> + Send {
-        let () = Declares::<R, A>::PROOF;
-        gated_scope::<R>(A::ACTION, extensions)
+        gated_scope::<R, A>(extensions)
     }
 
-    fn authorize_scope_dependency<A: DeclaredAction>(
+    fn authorize_scope_dependency<A: DeclaredAction<Table = Self::Actions>>(
         _action: A,
         extensions: &Extensions,
     ) -> Result<Self::Filter, Denial> {
-        let () = Declares::<R, A>::PROOF;
-        dependency_scope::<R>(A::ACTION, extensions).map(|(_, filter)| filter)
+        dependency_scope::<R, A>(extensions).map(|(_, filter)| filter)
     }
 }
 
 /// [`AuthorizeScope::authorize_scope_dependency`]'s body, handing back the
 /// caller as well so [`Scoped`] does not have to recover it a second time.
-fn dependency_scope<R: Scoping>(
-    action: &'static str,
+fn dependency_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
     extensions: &Extensions,
 ) -> Result<(R::Ctx, R::Filter), Denial> {
     // The checker is recovered and dropped on purpose: this path makes no
@@ -2414,27 +2492,25 @@ fn dependency_scope<R: Scoping>(
     // rather than quietly answering from an empty session.
     let (ctx, _) = caller_and_checker::<R::Ctx>(extensions)?;
 
-    let reached = declared_action::<R>(action)
-        .and_then(|declared| Ok((declared, subset::<R>(action, &ctx)?)));
+    let reached = subset::<R>(A::ACTION, &ctx).map(|filter| (A::ROW, filter));
 
-    let filter = record_scope::<R>(reached, action, &ctx, extensions)?;
+    let filter = record_scope::<R>(reached, A::ACTION, &ctx, extensions)?;
     Ok((ctx, filter))
 }
 
 /// [`AuthorizeScope::authorize_scope`]'s body, split out so the trait
-/// method can discharge its proof before the future is polled.
-async fn gated_scope<R: Scoping>(
-    action: &'static str,
+/// method returns a future rather than being one.
+async fn gated_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
     extensions: &Extensions,
 ) -> Result<R::Filter, Denial> {
     let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
 
-    let reached = match gate::<R>(action, &ctx, checker.as_ref()).await {
-        Ok(declared) => subset::<R>(action, &ctx).map(|filter| (declared, filter)),
+    let reached = match gate::<A>(&ctx, checker.as_ref()).await {
+        Ok(declared) => subset::<R>(A::ACTION, &ctx).map(|filter| (declared, filter)),
         Err(denial) => Err(denial),
     };
 
-    record_scope::<R>(reached, action, &ctx, extensions)
+    record_scope::<R>(reached, A::ACTION, &ctx, extensions)
 }
 
 /// The scope itself, with the asset's answer for a caller who was granted
@@ -2531,7 +2607,7 @@ fn record_scope<R: Scoping>(
 /// type parameter, so a tuple struct would have a third element that is
 /// nothing but [`PhantomData`] and would spoil
 /// the destructuring the pair form exists for.
-pub struct Scoped<R: Scoping, A: DeclaredAction> {
+pub struct Scoped<R: Scoping, A: DeclaredAction<Table = R::Actions>> {
     /// The caller the subset was computed for.
     pub caller: R::Ctx,
     /// The authorized subset, as this asset's queries take it.
@@ -2539,7 +2615,7 @@ pub struct Scoped<R: Scoping, A: DeclaredAction> {
     _action: PhantomData<fn() -> A>,
 }
 
-impl<R: Scoping, A: DeclaredAction> Scoped<R, A> {
+impl<R: Scoping, A: DeclaredAction<Table = R::Actions>> Scoped<R, A> {
     /// Consume the guard and return just the filter.
     pub fn into_inner(self) -> R::Filter {
         self.filter
@@ -2553,7 +2629,7 @@ impl<R: Scoping, A: DeclaredAction> Scoped<R, A> {
 
 /// Reach the filter without naming it, so a query builds straight off the
 /// guard.
-impl<R: Scoping, A: DeclaredAction> std::ops::Deref for Scoped<R, A> {
+impl<R: Scoping, A: DeclaredAction<Table = R::Actions>> std::ops::Deref for Scoped<R, A> {
     type Target = R::Filter;
 
     fn deref(&self) -> &R::Filter {
@@ -2564,7 +2640,7 @@ impl<R: Scoping, A: DeclaredAction> std::ops::Deref for Scoped<R, A> {
 impl<R, A, St> FromRequestParts<St> for Scoped<R, A>
 where
     R: Scoping,
-    A: DeclaredAction,
+    A: DeclaredAction<Table = R::Actions>,
     St: Send + Sync,
 {
     type Rejection = Denial;
@@ -2573,11 +2649,11 @@ where
         parts: &mut http::request::Parts,
         _state: &St,
     ) -> Result<Self, Self::Rejection> {
-        // Forces the assertion that the action is one the asset declares.
+        // Forces the assertion that the asset's vocabulary is coherent.
         // Costs nothing at runtime; fails the build if not.
         let () = Declares::<R, A>::PROOF;
 
-        let (caller, filter) = dependency_scope::<R>(A::ACTION, &parts.extensions)?;
+        let (caller, filter) = dependency_scope::<R, A>(&parts.extensions)?;
 
         Ok(Scoped {
             caller,
@@ -2587,19 +2663,23 @@ where
     }
 }
 
-impl<R: Scoping, A: DeclaredAction> doxa::DocOperationSecurity for Scoped<R, A> {
+impl<R: Scoping, A: DeclaredAction<Table = R::Actions>> doxa::DocOperationSecurity
+    for Scoped<R, A>
+{
     fn describe(op: &mut utoipa::openapi::path::Operation) {
         let display = format!("{} on {} (subset)", A::ACTION, entity_type::<R>());
         doxa::record_required_permission(
             op,
             DefaultSite::SCHEME,
-            &asset_permission::<R>(A::ACTION),
+            &asset_permission::<R, A>(),
             &display,
         );
     }
 }
 
-impl<R: Scoping, A: DeclaredAction> doxa::DocOperationContribution for Scoped<R, A> {
+impl<R: Scoping, A: DeclaredAction<Table = R::Actions>> doxa::DocOperationContribution
+    for Scoped<R, A>
+{
     fn contribution() -> doxa::OperationContribution {
         doxa::OperationContribution::new()
             .with_response(doxa::ResponseContribution::unauthorized())
@@ -2610,27 +2690,22 @@ impl<R: Scoping, A: DeclaredAction> doxa::DocOperationContribution for Scoped<R,
     }
 }
 
-/// Compile-time proof that `R` permits `A`, forced by both
+/// Compile-time proof that `R`'s vocabulary is coherent, forced by both
 /// [`AuthorizeLoaded`] methods.
 ///
-/// The same two assertions [`Subject::SITE_DECLARED`] makes for a route,
-/// reached the same way — a const in a generic impl, evaluated where the
-/// pair is instantiated. Without it this door checked its action at
-/// request time and answered an undeclared one with a `403`, which is the
-/// status a real denial uses: a handler naming an action its asset does
-/// not have would read, in the trail and to the caller, exactly like a
-/// caller who was refused.
+/// The assertion [`Subject::SITE_DECLARED`] makes for a route, reached the
+/// same way — a const in a generic impl, evaluated where the pair is
+/// instantiated. That the action is one of `R`'s is no longer asserted
+/// here: `A: DeclaredAction<Table = R::Actions>` is on the methods
+/// themselves, so an action from another vocabulary fails to resolve
+/// rather than failing an assertion.
 struct Declares<R, A>(PhantomData<fn() -> (R, A)>);
 
-impl<R: Granting, A: DeclaredAction> Declares<R, A> {
+impl<R: Granting, A: DeclaredAction<Table = R::Actions>> Declares<R, A> {
     const PROOF: () = {
         assert!(
             distinct(R::ACTIONS),
             "`Granting::ACTIONS` names one action twice; the later row never runs",
-        );
-        assert!(
-            declares(R::ACTIONS, A::ACTION),
-            "this action is missing from the asset's `Granting::ACTIONS`",
         );
     };
 }
@@ -2645,15 +2720,15 @@ enum Coarse {
 
 /// The body of both [`AuthorizeLoaded`] methods, and the third door onto
 /// a decision — recording through the same path as the other two.
-async fn decide<R: Granting>(
+async fn decide<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     resource: R::Row,
-    action: &'static str,
     extensions: &Extensions,
     coarse: Coarse,
 ) -> Result<R::Row, Denial> {
+    let action = A::ACTION;
     let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
 
-    match verdict::<R>(&resource, action, &ctx, checker.as_ref(), coarse).await {
+    match verdict::<R, A>(&resource, &ctx, checker.as_ref(), coarse).await {
         Ok((declared, entity_id)) => {
             crate::record::grant(
                 extensions,
@@ -2687,24 +2762,26 @@ async fn decide<R: Granting>(
 /// to the refusal deposited as a grant, then the refusal — which the audit
 /// builder keeps in preference to any of them, because one event carries
 /// one decision and a denial outranks a grant.
-async fn decide_all<R: Granting>(
+async fn decide_all<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     resources: Vec<R::Row>,
-    action: &'static str,
     extensions: &Extensions,
     coarse: Coarse,
 ) -> Result<Vec<R::Row>, Denial> {
+    let action = A::ACTION;
     let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
 
     let declared = match coarse {
-        Coarse::Check => gate::<R>(action, &ctx, checker.as_ref()).await,
-        Coarse::Skip => declared_action::<R>(action),
-    };
-    let declared = match declared {
-        Ok(declared) => declared,
-        Err(denial) => {
-            record_denial(&denial, extensions, ctx.tenant());
-            return Err(denial);
-        }
+        Coarse::Check => match gate::<A>(&ctx, checker.as_ref()).await {
+            Ok(declared) => declared,
+            Err(denial) => {
+                record_denial(&denial, extensions, ctx.tenant());
+                return Err(denial);
+            }
+        },
+        // A dependency is exempt from the coarse question. That it is an
+        // action of this asset's is the `Table = R::Actions` bound's job,
+        // so there is nothing left here to refuse.
+        Coarse::Skip => A::ROW,
     };
 
     // An empty set asks nothing, so it deposits nothing. Recording a
@@ -2770,19 +2847,19 @@ async fn decide_all<R: Granting>(
 /// Hands back the object's Cedar id rather than recomputing it — the
 /// qualified identity the policy actually saw, which is not always what
 /// the handler used to find the row.
-async fn verdict<R: Granting>(
+async fn verdict<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     resource: &R::Row,
-    action: &'static str,
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
     coarse: Coarse,
 ) -> Result<(&'static Action, String), Denial> {
+    let action = A::ACTION;
     let declared = match coarse {
-        Coarse::Check => gate::<R>(action, ctx, checker).await?,
-        // Still the asset's vocabulary, just not its capability: a
-        // dependency is exempt from the coarse question, not from the
-        // rule that an asset only permits what it declares.
-        Coarse::Skip => declared_action::<R>(action)?,
+        Coarse::Check => gate::<A>(ctx, checker).await?,
+        // A dependency is exempt from the coarse question, not from the
+        // rule that an asset only permits what it declares — which the
+        // `Table = R::Actions` bound now settles at compile time.
+        Coarse::Skip => A::ROW,
     };
 
     let tenant = ctx.tenant().unwrap_or("");
@@ -2987,21 +3064,21 @@ impl<T: Subject> doxa::DocPathParams for Granted<T> {
 impl<T: Subject> doxa::DocOperationSecurity for Granted<T> {
     fn describe(op: &mut utoipa::openapi::path::Operation) {
         let name_of = T::doc_name();
-        let action = <T::Site as GrantSite>::ACTION;
+        let action = T::ACTION;
         let display = match T::FORM {
             SubjectForm::Instance => format!("{action} on {name_of} (instance)"),
             SubjectForm::Collection => format!("{action} on {name_of} (collection)"),
             SubjectForm::Capability => format!("`{name_of}` capability"),
         };
         let scheme = <T::Site as GrantSite>::SCHEME;
-        doxa::record_required_permission(op, scheme, &T::permission(action), &display);
+        doxa::record_required_permission(op, scheme, &T::permission(), &display);
     }
 }
 
 impl<T: Subject> doxa::DocOperationContribution for Granted<T> {
     fn contribution() -> doxa::OperationContribution {
         let name_of = T::doc_name();
-        let action = <T::Site as GrantSite>::ACTION;
+        let action = T::ACTION;
 
         let denied = match T::FORM {
             SubjectForm::Instance => format!("Policy denied `{action}` on this {name_of}"),

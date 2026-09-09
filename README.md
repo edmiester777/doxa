@@ -487,7 +487,7 @@ Destructure for the caller alongside the object — no second `Auth<S, C>` extra
 async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode { /* ... */ }
 ```
 
-**Where the key comes from, and what it is called.** Both have defaults worth knowing. The source is the path unless the route says otherwise, and saying so also moves the OpenAPI parameter:
+**Where the key comes from, and what it is called.** Neither is stated. The source is inferred — an instance route whose template names no parameter can only be reading its key from the query string — and the OpenAPI parameter moves with it:
 
 ```rust
 // /widgets/{name}
@@ -496,7 +496,7 @@ async fn get(w: Granted<WidgetByName>) -> Json<Widget> { /* ... */ }
 
 // /widgets?name=…
 #[get("/widgets")]
-async fn find(#[key(with = "Query")] w: Granted<WidgetByName>) -> Json<Widget> { /* ... */ }
+async fn find(w: Granted<WidgetByName>) -> Json<Widget> { /* ... */ }
 ```
 
 *Which* parameter it reads is the key's, not the route's. A key is a struct deriving `Deserialize` and the guard reads it with axum's own `Path` / `Query`, so the field names are the route parameters — even with several segments to choose from:
@@ -522,19 +522,17 @@ impl Granting for Widget {
     type Source = FromState<DatabaseConnection>; // how the guard gets hold of it
     type Error = DbLoadError;
 
-    /// The whole vocabulary. An action absent here is refused, and a
-    /// route naming one fails to build rather than at runtime.
-    const ACTIONS: &'static [Action] = &[
-        Action::new("read").capability(&WIDGETS_READ).event("data_access"),
-        Action::new("delete").capability(&WIDGETS_ADMIN).event("admin_delete"),
-    ];
+    /// The whole vocabulary, as a type. Every form bounds its action on
+    /// `Table = Self::Actions`, so an action from another asset does not
+    /// compile here — even where the two spell it the same.
+    type Actions = WidgetAction;
 
     async fn load(WidgetKey { id }: WidgetKey, db: &Self::State, ctx: &Self::Ctx)
         -> Result<Option<Self>, Self::Error> { /* ... */ }
 }
 ```
 
-The action comes from the HTTP method — `post` → `create`, `put` / `patch` → `update`, `delete` → `delete`, anything else → `read` — and `#[key(…, action = "archive")]` names one the method does not imply. The spec gets the same treatment `Require<M>` gives: `security`, the `x-badges` chip, and the `401` / `403` responses the guard itself can return — plus `400` and `404` on the instance form, which is the only one that parses a key and loads an object.
+The action is a type, one of the markers `#[derive(Actions)]` emits per variant. A route that names none resolves through its method — `get` → `ReadAction`, `post` → `CreateAction`, `put` / `patch` → `UpdateAction`, `delete` → `DeleteAction` — against the mapping the vocabulary itself declares with `#[action(verb = get)]`. Nothing is derived from a name, so a vocabulary calling its read action `View` needs no special case. `#[grant(action = Archive)]` names one the method does not imply. The spec gets the same treatment `Require<M>` gives: `security`, the `x-badges` chip, and the `401` / `403` responses the guard itself can return — plus `400` and `404` on the instance form, which is the only one that parses a key and loads an object.
 
 **Most of that is derivable.** With the `policy-sea-orm` feature, `#[derive(PolicyResource)]` writes both the Cedar identity and the scoped lookup from field roles, and `#[asset]` writes the `Granting` impl:
 
@@ -671,10 +669,14 @@ The split is natural: routes registered *before* the layers get auth + audit; ro
 **A guarded route needs none of this.** `Granted<T>` (example 10) already resolved which action it checked and which object it checked against, and the audit category sits beside the action in the same `ACTIONS` table:
 
 ```rust
-const ACTIONS: &'static [Action] = &[
-    Action::new("read").event(EventType::DataAccess.as_static()),
-    Action::new("delete").event(EventType::AdminDelete.as_static()),
-];
+#[derive(Actions)]
+#[actions(resource = "Document")]
+pub enum DocumentAction {
+    #[action(verb = get, event = EventType::DataAccess.as_static())]
+    Read,
+    #[action(verb = delete, event = EventType::AdminDelete.as_static())]
+    Delete,
+}
 
 #[get("/documents/{id}")]
 async fn get_document(doc: Granted<Document>) -> Json<Document> {
@@ -684,7 +686,7 @@ async fn get_document(doc: Granted<Document>) -> Json<Document> {
 }
 ```
 
-The guard deposits all three and the layer folds them in after the response, so the handler writes nothing. A refusal takes the same path, so the grant and the denial name the same action and the same resource. Declaring the table by hand is one option; `#[derive(Actions)]` writes it from the enum variants, and `#[action(event = "…")]` appears only where a default is wrong.
+The guard deposits all three and the layer folds them in after the response, so the handler writes nothing. A refusal takes the same path, so the grant and the denial name the same action and the same resource. `#[derive(Actions)]` writes the table, the markers and the verb mapping from the variants; `#[action(…)]` appears only where a default is wrong. Writing an `ActionTable` impl and its markers by hand is the other option.
 
 What follows is the unguarded case — a route with no `Granted` on it, or a handler that knows something the guard cannot. Anything set here wins over the deposit, in any order:
 

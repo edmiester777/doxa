@@ -49,8 +49,10 @@ impl ActiveModelBehavior for ActiveModel {}
 #[actions(resource = "Widget", prefix = "widgets")]
 pub enum WidgetAction {
     /// List and view data widgets.
+    #[action(verb = get)]
     Read,
     /// Remove data widgets.
+    #[action(verb = delete)]
     Delete,
 }
 
@@ -434,15 +436,7 @@ impl CapabilityChecker for Allow {
     }
 }
 
-struct GetWidget;
-impl doxa::auth::GrantSite for GetWidget {
-    const ACTION: &'static str = "read";
-}
-
-struct DeleteWidget;
-impl doxa::auth::GrantSite for DeleteWidget {
-    const ACTION: &'static str = "delete";
-}
+use widget_action::{Delete as DeleteWidget, Read as GetWidget};
 
 /// A request through a real router, so the key comes off the path exactly
 /// as it would in the application.
@@ -451,7 +445,7 @@ async fn call<S>(
     roles: &'static [&'static str],
 ) -> axum::http::Response<axum::body::Body>
 where
-    S: doxa::auth::GrantSite,
+    S: doxa::auth::DeclaredAction<Table = WidgetAction>,
     Granted<One<WidgetByName, S>>: axum::extract::FromRequestParts<DatabaseConnection>,
 {
     use tower::ServiceExt;

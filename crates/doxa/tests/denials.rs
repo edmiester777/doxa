@@ -13,11 +13,11 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{Action, CapabilityContext, FromState, Granted, Granting, Require};
+use doxa::auth::{CapabilityContext, FromState, Granted, Granting, Require};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
-use doxa::{get, routes, OpenApiRouter, PolicyResource, ToSchema};
+use doxa::{get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- domain -----------------------------------------------------------------
 
@@ -46,6 +46,13 @@ struct Widget {
 
 doxa::auth::route_key!(pub WidgetKey { id: u32 });
 
+#[derive(Actions)]
+#[actions(resource = "Widget")]
+pub enum WidgetActions {
+    #[action(verb = get, instance_only)]
+    Read,
+}
+
 /// No coarse capability, so the chain goes straight to the instance
 /// check — this file is about what an *instance* denial records.
 impl Granting for Widget {
@@ -56,7 +63,7 @@ impl Granting for Widget {
     type Source = FromState<()>;
     type Error = StatusCode;
 
-    const ACTIONS: &'static [Action] = &[Action::new("read")];
+    type Actions = WidgetActions;
 
     async fn load(
         WidgetKey { id }: WidgetKey,

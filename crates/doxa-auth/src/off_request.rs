@@ -152,10 +152,9 @@ impl<C: FromAuthExtensions> OffRequest<C> {
     pub async fn authorize<T: Chain<Ctx = C>>(
         &self,
         key: T::Key,
-        action: &'static str,
         state: &T::State,
     ) -> Result<T::Loaded, Refusal<T::Error>> {
-        authorize::<T>(key, action, state, &self.extensions).await
+        authorize::<T>(key, state, &self.extensions).await
     }
 
     /// The extensions a chain reads, for the doors that take them directly.

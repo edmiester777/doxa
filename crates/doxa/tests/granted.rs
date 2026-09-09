@@ -1,7 +1,6 @@
 //! The three forms of `Granted<T>` run one chain: a coarse capability
-//! gate, then whatever the subject is about. These exercise it with
-//! hand-written `GrantSite` impls, which is what the route macro will
-//! generate per call site.
+//! gate, then whatever the subject is about. These exercise it by naming
+//! the action and the site the way the route macro generates them.
 
 use std::sync::Arc;
 
@@ -15,13 +14,11 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{
-    Action, Cap, CapabilityContext, FromState, GrantSite, Granted, Granting, Many, One, Scoping,
-};
+use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, One, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
-use doxa::{PolicyResource, ToSchema};
+use doxa::{Actions, PolicyResource, ToSchema};
 
 // ---- domain -----------------------------------------------------------------
 
@@ -58,6 +55,18 @@ doxa::auth::route_key!(pub WidgetKey { id: u32 });
 doxa::auth::route_key!(pub GadgetKey { id: u32 });
 doxa::auth::route_key!(pub LedgerKey { id: u32 });
 
+#[derive(Actions)]
+#[actions(resource = "Widget")]
+pub enum WidgetActions {
+    #[action(verb = get, capable = WidgetsRead)]
+    Read,
+    // Behind the same coarse capability as `read`, so the only thing
+    // separating listing widgets from bulk-purging them is what `scope`
+    // makes of the action.
+    #[action(capable = WidgetsRead)]
+    Purge,
+}
+
 impl Granting for Widget {
     type Row = Self;
     type Key = WidgetKey;
@@ -65,14 +74,7 @@ impl Granting for Widget {
     type State = ();
     type Source = FromState<()>;
     type Error = StatusCode;
-
-    const ACTIONS: &'static [Action] = &[
-        Action::new("read").capability(&WIDGETS_READ),
-        // Behind the same coarse capability as `read`, so the only thing
-        // separating listing widgets from bulk-purging them is what
-        // `scope` makes of the action.
-        Action::new("purge").capability(&WIDGETS_READ),
-    ];
+    type Actions = WidgetActions;
 
     async fn load(
         WidgetKey { id }: WidgetKey,
@@ -122,6 +124,13 @@ struct Gadget {
     id: u32,
 }
 
+#[derive(Actions)]
+#[actions(resource = "Gadget")]
+pub enum GadgetActions {
+    #[action(verb = get, instance_only)]
+    Read,
+}
+
 impl Granting for Gadget {
     type Row = Self;
     type Key = GadgetKey;
@@ -129,8 +138,7 @@ impl Granting for Gadget {
     type State = ();
     type Source = FromState<()>;
     type Error = StatusCode;
-
-    const ACTIONS: &'static [Action] = &[Action::new("read")];
+    type Actions = GadgetActions;
 
     async fn load(
         GadgetKey { id: _ }: GadgetKey,
@@ -155,24 +163,14 @@ impl Scoping for Gadget {
     }
 }
 
-// ---- sites (what the route macro will generate) -----------------------------
+// ---- actions (what a route names, and the macro resolves) -------------------
 
-struct GetWidget;
-impl GrantSite for GetWidget {
-    const ACTION: &'static str = "read";
-}
-
-struct Listing;
-impl GrantSite for Listing {
-    const ACTION: &'static str = "read";
-}
-
-/// The same collection asked about under a different action, which is the
-/// only difference between these two routes.
-struct Purging;
-impl GrantSite for Purging {
-    const ACTION: &'static str = "purge";
-}
+// Each asset's own, which is the point: one `Listing` site used to stand
+// in for the read action of three different assets. An action now belongs
+// to a vocabulary, so `Many<Gadget, widget_actions::Read>` does not build.
+use gadget_actions::Read as ListGadgets;
+use ledger_actions::Read as ListLedgers;
+use widget_actions::{Purge as Purging, Read as GetWidget};
 
 // ---- policy stub ------------------------------------------------------------
 
@@ -238,7 +236,7 @@ fn parts(
 async fn a_collection_yields_the_authorized_scope() {
     let (mut parts, _rx) = parts(&["viewer"]);
     let Granted(caller, scope) =
-        Granted::<Many<Widget, Listing>>::from_request_parts(&mut parts, &())
+        Granted::<Many<Widget, GetWidget>>::from_request_parts(&mut parts, &())
             .await
             .expect("viewer may list");
 
@@ -259,7 +257,7 @@ async fn a_collection_yields_the_authorized_scope() {
 #[tokio::test]
 async fn the_scope_is_per_action_not_per_asset() {
     let (mut listing, _rx) = parts(&["viewer"]);
-    Granted::<Many<Widget, Listing>>::from_request_parts(&mut listing, &())
+    Granted::<Many<Widget, GetWidget>>::from_request_parts(&mut listing, &())
         .await
         .expect("a viewer may list");
 
@@ -275,36 +273,20 @@ async fn the_scope_is_per_action_not_per_asset() {
     assert_eq!(event.error_message.as_deref(), Some("no authorized scope"));
 }
 
-/// An action the asset never declared is refused before anything is
-/// loaded and before `scope` is consulted.
-///
-/// A route cannot reach this — `Subject::SITE_DECLARED` fails the build
-/// first — but a handler authorizing an action it assembled at runtime
-/// can, and that is the path where a collection would otherwise be
-/// answered with a filter no policy ever approved.
-#[tokio::test]
-async fn an_undeclared_action_is_refused_rather_than_scoped() {
-    let (parts, mut rx) = parts(&["viewer"]);
-
-    let refused = doxa::auth::authorize::<Many<Widget>>((), "raed", &(), &parts.extensions)
-        .await
-        .err()
-        .expect("Widget declares no `raed`");
-
-    assert_eq!(refused.into_response().status(), StatusCode::FORBIDDEN);
-    let event = rx.try_recv().expect("recorded");
-    assert_eq!(event.outcome, Outcome::Denied);
-    assert_eq!(event.action, "raed");
-    assert_eq!(event.resource_type.as_deref(), Some("Widget"));
-    assert_eq!(event.error_message.as_deref(), Some("action not declared"));
-}
+// An action the asset never declared used to be refused here, at request
+// time, with `reason: "action not declared"`. There is no such request to
+// make any more: an action is a type belonging to a vocabulary, and
+// `authorize::<Many<Widget, A>>` will not accept one whose `Table` is not
+// `Widget`'s. The `DeclaredAction` doctests in doxa-auth are where that is
+// held — a `compile_fail` naming another asset's action, beside the
+// passing one it differs from.
 
 /// The coarse gate runs first, so a caller without the capability never
 /// reaches the scope lookup.
 #[tokio::test]
 async fn the_coarse_gate_refuses_before_the_scope_lookup() {
     let (mut parts, mut rx) = parts(&["stranger"]);
-    let rejection = Granted::<Many<Widget, Listing>>::from_request_parts(&mut parts, &())
+    let rejection = Granted::<Many<Widget, GetWidget>>::from_request_parts(&mut parts, &())
         .await
         .err()
         .expect("no capability");
@@ -323,7 +305,7 @@ async fn the_coarse_gate_refuses_before_the_scope_lookup() {
 async fn a_caller_with_no_scope_is_refused_by_default() {
     // `lister` satisfies the capability but `Widget::scope` returns None.
     let (mut parts, mut rx) = parts(&["lister"]);
-    let rejection = Granted::<Many<Widget, Listing>>::from_request_parts(&mut parts, &())
+    let rejection = Granted::<Many<Widget, GetWidget>>::from_request_parts(&mut parts, &())
         .await
         .err()
         .expect("no scope");
@@ -339,7 +321,7 @@ async fn a_caller_with_no_scope_is_refused_by_default() {
 #[tokio::test]
 async fn empty_scope_can_be_an_empty_page_instead_of_a_refusal() {
     let (mut parts, _rx) = parts(&["stranger"]);
-    let granted = Granted::<Many<Gadget, Listing>>::from_request_parts(&mut parts, &())
+    let granted = Granted::<Many<Gadget, ListGadgets>>::from_request_parts(&mut parts, &())
         .await
         .expect("Gadget opts into an empty page");
 
@@ -351,7 +333,7 @@ async fn empty_scope_can_be_an_empty_page_instead_of_a_refusal() {
 #[tokio::test]
 async fn a_bare_capability_gate_records_its_refusal() {
     let (mut parts, mut rx) = parts(&["stranger"]);
-    let rejection = Granted::<Cap<WidgetsRead, Listing>>::from_request_parts(&mut parts, &())
+    let rejection = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
         .await
         .err()
         .expect("no capability");
@@ -443,10 +425,13 @@ async fn an_unparseable_key_is_rejected_early() {
 async fn a_handler_can_authorize_an_id_from_its_body() {
     let (parts, _rx) = parts(&["viewer"]);
 
-    let widget =
-        doxa::auth::authorize::<One<Widget>>(WidgetKey { id: 1 }, "read", &(), &parts.extensions)
-            .await
-            .expect("region us is granted");
+    let widget = doxa::auth::authorize::<One<Widget, GetWidget>>(
+        WidgetKey { id: 1 },
+        &(),
+        &parts.extensions,
+    )
+    .await
+    .expect("region us is granted");
 
     assert_eq!(widget.region, "us");
 }
@@ -459,10 +444,13 @@ async fn a_handler_can_authorize_an_id_from_its_body() {
 async fn a_manual_refusal_is_recorded_like_the_extractors() {
     let (parts, mut rx) = parts(&["viewer"]);
 
-    let refused =
-        doxa::auth::authorize::<One<Widget>>(WidgetKey { id: 2 }, "read", &(), &parts.extensions)
-            .await
-            .expect_err("region eu is denied");
+    let refused = doxa::auth::authorize::<One<Widget, GetWidget>>(
+        WidgetKey { id: 2 },
+        &(),
+        &parts.extensions,
+    )
+    .await
+    .expect_err("region eu is denied");
 
     assert_eq!(refused.into_response().status(), StatusCode::FORBIDDEN);
 
@@ -479,7 +467,7 @@ async fn a_manual_refusal_is_recorded_like_the_extractors() {
 async fn a_manual_grant_is_recorded_like_the_extractors() {
     let (parts, mut rx) = parts(&["viewer"]);
 
-    doxa::auth::authorize::<One<Widget>>(WidgetKey { id: 1 }, "read", &(), &parts.extensions)
+    doxa::auth::authorize::<One<Widget, GetWidget>>(WidgetKey { id: 1 }, &(), &parts.extensions)
         .await
         .expect("region us is granted");
 
@@ -518,6 +506,13 @@ struct Ledger {
     id: u32,
 }
 
+#[derive(Actions)]
+#[actions(resource = "Ledger")]
+pub enum LedgerActions {
+    #[action(verb = get, instance_only)]
+    Read,
+}
+
 impl Granting for Ledger {
     type Row = Self;
     type Key = LedgerKey;
@@ -525,8 +520,7 @@ impl Granting for Ledger {
     type State = ();
     type Source = FromState<()>;
     type Error = StatusCode;
-
-    const ACTIONS: &'static [Action] = &[Action::new("read")];
+    type Actions = LedgerActions;
 
     async fn load(
         LedgerKey { id }: LedgerKey,
@@ -578,7 +572,7 @@ fn typed_parts() -> axum::http::request::Parts {
 async fn a_guard_and_an_auth_extractor_share_one_context() {
     let mut parts = typed_parts();
 
-    let guard = Granted::<Many<Ledger, Listing>>::from_request_parts(&mut parts, &())
+    let guard = Granted::<Many<Ledger, ListLedgers>>::from_request_parts(&mut parts, &())
         .await
         .expect("the session grants a scope");
     let doxa::auth::Auth(auth) =

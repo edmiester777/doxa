@@ -17,17 +17,20 @@
 //!   like any `#[capability]` and namable as `Granted<Cap<…>>`.
 //! - One `Action` const per variant, registered so `doxa::auth::actions()`
 //!   can answer without a hand-maintained list.
-//! - `impl ActionTable for SourceAction`, holding the table
-//!   `Granting::ACTIONS` wants, plus `SourceAction::ACTIONS` forwarding to
-//!   it. The inherent const is what the one-line wiring names; the trait is
-//!   what code generic over a vocabulary can bound on.
+//! - `impl ActionTable for SourceAction`, holding the vocabulary
+//!   `Granting::Actions` names, plus `SourceAction::ACTIONS` forwarding to
+//!   it. The trait is what an asset points at and what code generic over a
+//!   vocabulary bounds on.
+//! - One `verb::…Action` impl per variant that claims a verb, so a route
+//!   with no `#[grant(action = …)]` resolves through the one its method
+//!   selects.
 //! - `SourceAction::ALL` and `as_static`, so the enum is usable as a
 //!   value too.
 //!
 //! Deliberately no `impl Granting`: an asset's loader and context are its
 //! own, and a resource that is generic over a descriptor rather than a
 //! concrete struct is not something a derive can attach to at all.
-//! Wiring is one line: `const ACTIONS = SourceAction::ACTIONS;`.
+//! Wiring is one line: `type Actions = SourceAction;`.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -61,6 +64,58 @@ struct Variant {
     entity_type: Option<LitStr>,
     entity_id: Option<EntityId>,
     instance_only: bool,
+    /// The HTTP verb this action is what a route means, when the route
+    /// does not say. Written as a bare ident — `verb = get` — because it
+    /// is one of five, not an arbitrary string.
+    verb: Option<Verb>,
+}
+
+/// A verb a route can imply an action from, and the trait that carries the
+/// mapping.
+///
+/// `PUT` and `PATCH` are one slot: both mean "update", and a vocabulary
+/// that wanted to tell them apart would be naming two actions, which is
+/// what `#[grant(action = …)]` is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Read,
+    Create,
+    Update,
+    Delete,
+}
+
+impl Verb {
+    /// The verb as written in `#[action(verb = …)]`.
+    fn parse(ident: &Ident) -> Option<Self> {
+        match ident.to_string().as_str() {
+            "get" => Some(Verb::Read),
+            "post" => Some(Verb::Create),
+            "put" | "patch" => Some(Verb::Update),
+            "delete" => Some(Verb::Delete),
+            _ => None,
+        }
+    }
+
+    /// The trait in `doxa::auth::verb` that names this slot.
+    fn trait_ident(self) -> Ident {
+        let name = match self {
+            Verb::Read => "ReadAction",
+            Verb::Create => "CreateAction",
+            Verb::Update => "UpdateAction",
+            Verb::Delete => "DeleteAction",
+        };
+        Ident::new(name, proc_macro2::Span::call_site())
+    }
+
+    /// How the slot reads in a diagnostic.
+    fn label(self) -> &'static str {
+        match self {
+            Verb::Read => "get",
+            Verb::Create => "post",
+            Verb::Update => "put/patch",
+            Verb::Delete => "delete",
+        }
+    }
 }
 
 /// The Cedar id a coarse check asks about, when the enum does not say.
@@ -132,9 +187,12 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let mut rows = Vec::new();
     let mut arms = Vec::new();
     let mut all = Vec::new();
+    let mut verb_impls = Vec::new();
     // Cedar action name -> the variant that claimed it, so a repeat can
     // point at both ends.
     let mut claimed: Vec<(String, Ident)> = Vec::new();
+    // The same, for the verb a variant is the default action of.
+    let mut claimed_verbs: Vec<(Verb, Ident)> = Vec::new();
 
     for variant in &data.variants {
         if !matches!(variant.fields, Fields::Unit) {
@@ -267,11 +325,41 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             pub struct #ident;
 
             impl ::doxa::auth::DeclaredAction for #ident {
-                const ACTION: &'static str = #action;
+                type Table = super::#enum_name;
+
+                // The row the table and the catalog already hold, by
+                // reference — not a second copy that could describe this
+                // action differently.
+                const ROW: &'static ::doxa::auth::Action = &super::#row_const;
             }
 
             #declaration
         });
+
+        // The verb mapping, where the variant claims one. Emitted beside
+        // the enum rather than in the module: it is an impl on the enum,
+        // and the marker it names is one module deeper.
+        if let Some(verb) = parsed.verb {
+            if let Some((_, first)) = claimed_verbs.iter().find(|(v, _)| *v == verb) {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "`{first}` is already what a `{}` route means, so this row would \
+                         never be the one a route resolved to. One action per verb: name \
+                         this one on the route with `#[grant(action = …)]`",
+                        verb.label(),
+                    ),
+                ));
+            }
+            claimed_verbs.push((verb, ident.clone()));
+
+            let verb_trait = verb.trait_ident();
+            verb_impls.push(quote! {
+                impl ::doxa::auth::verb::#verb_trait for #enum_name {
+                    type Action = #module::#ident;
+                }
+            });
+        }
 
         consts.push(quote! {
             #[doc(hidden)]
@@ -313,9 +401,11 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             const ACTIONS: &'static [::doxa::auth::Action] = &[#(#rows),*];
         }
 
+        #(#verb_impls)*
+
         impl #enum_name {
-            /// Every action this asset permits, as `Granting::ACTIONS`
-            /// takes it.
+            /// Every action this asset permits, as `ActionTable`
+            /// holds them.
             ///
             /// The same table as `ActionTable::ACTIONS` and not a copy of
             /// it, spelled without the trait so the common wiring needs no
@@ -389,6 +479,23 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
                 return Ok(());
             }
 
+            // A bare ident rather than a string: the set is closed, so a
+            // typo should be caught here and named, not carried through
+            // as a slot nothing maps to.
+            if meta.path.is_ident("verb") {
+                let ident = meta.value()?.parse::<Ident>()?;
+                out.verb = Some(Verb::parse(&ident).ok_or_else(|| {
+                    syn::Error::new(
+                        ident.span(),
+                        format!(
+                            "unknown verb `{ident}` — expected `get`, `post`, `put`, \
+                             `patch` or `delete`"
+                        ),
+                    )
+                })?);
+                return Ok(());
+            }
+
             if meta.path.is_ident("entity_id") {
                 out.entity_id = Some(parse_entity_id(meta.value()?)?);
                 return Ok(());
@@ -405,7 +512,8 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
             } else {
                 return Err(meta.error(
                     "unknown `action` option; expected `name`, `capability`, `capable`, \
-                     `description`, `event`, `entity_type`, `entity_id` or `instance_only`",
+                     `description`, `event`, `entity_type`, `entity_id`, `verb` or \
+                     `instance_only`",
                 ));
             };
             *target = Some(meta.value()?.parse()?);
@@ -587,9 +695,19 @@ mod tests {
 
         assert!(!out.contains("CapabilityCheck"), "{out}");
         assert!(out.contains("pub struct Ping"), "{out}");
+        // The marker carries the vocabulary it belongs to and the row
+        // itself — by reference, so the table and the catalog cannot come
+        // to describe one action differently.
         assert!(
-            out.contains(r#"const ACTION : & 'static str = "ping""#),
+            out.contains("type Table = super :: WidgetAction ;"),
             "{out}"
+        );
+        assert!(
+            out.contains(
+                "const ROW : & 'static :: doxa :: auth :: Action = \
+                 & super :: _DOXA_ACTION_WidgetAction_Ping"
+            ),
+            "{out}",
         );
         assert!(out.contains(r#"Action :: new ("ping")"#), "{out}");
         // The row is the whole of it: no `.capability(…)` to resolve.

@@ -424,8 +424,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             type Source = #source;
             type Error = #error;
 
-            const ACTIONS: &'static [::doxa::auth::Action] =
-                <#actions as ::doxa::auth::ActionTable>::ACTIONS;
+            type Actions = #actions;
 
             const KEY_NAMES: &'static [&'static str] = ::doxa::auth::key_names(
                 <#key as ::doxa::auth::RouteKey>::NAMES,
@@ -483,10 +482,9 @@ mod tests {
             out.contains("type Error = < AppGrants as :: doxa :: auth :: GrantProfile > :: Error"),
             "{out}",
         );
-        assert!(
-            out.contains("< WidgetAction as :: doxa :: auth :: ActionTable > :: ACTIONS"),
-            "{out}",
-        );
+        // The vocabulary as a type, not flattened to its rows: that is
+        // what holds a route's action to this asset.
+        assert!(out.contains("type Actions = WidgetAction ;"), "{out}");
     }
 
     /// Nothing the attribute writes names an ORM, so the whole of it is

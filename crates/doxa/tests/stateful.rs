@@ -23,11 +23,11 @@ use serde::Serialize;
 use serde_json::json;
 use tower::ServiceExt;
 
-use doxa::auth::{Action, Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
+use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
-use doxa::{get, routes, OpenApiRouter, PolicyResource, ToSchema};
+use doxa::{get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- state ------------------------------------------------------------------
 
@@ -77,6 +77,11 @@ impl Capable for DocumentsReindex {
     const CAPABILITY: &'static Capability = &DOCUMENTS_REINDEX;
 }
 
+struct DocumentsRead;
+impl Capable for DocumentsRead {
+    const CAPABILITY: &'static Capability = &DOCUMENTS_READ;
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, PolicyResource)]
 #[resource(entity_type = "Document")]
 struct Document {
@@ -85,6 +90,13 @@ struct Document {
 }
 
 doxa::auth::route_key!(pub DocumentKey { id: uuid::Uuid });
+
+#[derive(Actions)]
+#[actions(resource = "Document")]
+pub enum DocumentActions {
+    #[action(verb = get, capable = DocumentsRead)]
+    Read,
+}
 
 impl Granting for Document {
     type Row = Self;
@@ -96,7 +108,7 @@ impl Granting for Document {
     type Source = FromState<Store>;
     type Error = StatusCode;
 
-    const ACTIONS: &'static [Action] = &[Action::new("read").capability(&DOCUMENTS_READ)];
+    type Actions = DocumentActions;
 
     async fn load(
         DocumentKey { id }: DocumentKey,

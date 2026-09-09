@@ -62,6 +62,7 @@ impl ActiveModelBehavior for ActiveModel {}
 #[actions(resource = "Version", prefix = "versions")]
 pub enum VersionAction {
     /// Read one version.
+    #[action(verb = get)]
     Read,
 }
 

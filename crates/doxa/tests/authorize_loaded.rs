@@ -22,7 +22,8 @@ use serde_json::json;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLogger, Outcome};
 use doxa::auth::{
-    Action, AuthorizeLoaded, CapabilityContext, DeclaredAction, Denial, FromState, Granting,
+    Action, ActionTable, AuthorizeLoaded, CapabilityContext, DeclaredAction, Denial, FromState,
+    Granting,
 };
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, ResourceEntity, ResourceId,
@@ -56,6 +57,19 @@ struct Source {
 
 doxa::auth::route_key!(pub SourceKey { name: String });
 
+/// A vocabulary written out, which is what `#[derive(Actions)]` would
+/// otherwise emit. The row is a named const so the table and the marker
+/// below point at the same one.
+const READ_SOURCE: Action = Action::new("read_source")
+    .capability(&SOURCES_READ)
+    .event("data_access");
+
+pub enum SourceActions {}
+
+impl ActionTable for SourceActions {
+    const ACTIONS: &'static [Action] = &[READ_SOURCE];
+}
+
 impl Granting for Source {
     type Row = Self;
     type Key = SourceKey;
@@ -63,10 +77,7 @@ impl Granting for Source {
     type State = ();
     type Source = FromState<()>;
     type Error = StatusCode;
-
-    const ACTIONS: &'static [Action] = &[Action::new("read_source")
-        .capability(&SOURCES_READ)
-        .event("data_access")];
+    type Actions = SourceActions;
 
     /// The panic is the point. `AuthorizeLoaded` decides about a row the
     /// caller already has, so reaching for `State` — which for a real
@@ -81,14 +92,18 @@ impl Granting for Source {
     }
 }
 
-/// The three lines a hand-written [`Granting::ACTIONS`] table pays for
-/// the marker `#[derive(Actions)]` would have generated. Naming a type
-/// rather than a string is what moves "does this asset permit this verb"
-/// to the build — see the compile-fail case on `DeclaredAction`.
+/// The marker `#[derive(Actions)]` would have generated, written out.
+///
+/// `Table` is what ties it to this asset: a marker whose table is another
+/// vocabulary's does not resolve on `Source`'s doors, even if the two
+/// spell the action identically. `ROW` is the table's own row by
+/// reference, so the capability the gate checks and the category the
+/// audit records are read off the type rather than searched for by name.
 struct ReadSource;
 
 impl DeclaredAction for ReadSource {
-    const ACTION: &'static str = "read_source";
+    type Table = SourceActions;
+    const ROW: &'static Action = &READ_SOURCE;
 }
 
 fn source(region: &str) -> Source {
@@ -264,31 +279,41 @@ async fn a_dependency_is_still_held_to_the_instance_check() {
     assert_eq!(reason, "instance denied");
 }
 
-/// `Granting::ACTIONS` is the asset's vocabulary either way, and a verb
-/// it never declared cannot be smuggled past the gate by calling the
-/// dependency form.
+/// An action from a different vocabulary cannot be smuggled past the gate
+/// by calling the dependency form.
 ///
-/// There is no runtime test for that here because there is no longer a
-/// runtime failure to observe: `Purge` is a perfectly good
-/// [`DeclaredAction`], and `Declares::<Source, Purge>::PROOF` refuses to
-/// evaluate, so neither line below builds. Both are pinned as
-/// `compile_fail` doctests on `AuthorizeLoaded::authorize` — where the
-/// error message they produce is also on show.
+/// There is no runtime test because there is no longer a runtime failure
+/// to observe. `Purge` is a perfectly good [`DeclaredAction`] — it just
+/// belongs to `OtherActions`, and both doors bound their action on
+/// `Table = Source::Actions`, so neither line below resolves. Both are
+/// pinned as `compile_fail` doctests on `AuthorizeLoaded::authorize`,
+/// where the error they produce is also on show.
 ///
 /// ```ignore
 /// source("us").authorize::<Source, _>(Purge, &parts.extensions).await
 /// source("us").authorize_dependency::<Source, _>(Purge, &parts.extensions).await
 /// ```
 ///
-/// This is the whole of what the typed action bought. Before it, both
-/// lines compiled and answered `403 action not declared` — a status
-/// indistinguishable, to the caller and in the audit trail, from a
-/// caller who was genuinely refused.
+/// This is what the typed action bought. Before it, both lines compiled
+/// and answered `403 action not declared` — a status indistinguishable,
+/// to the caller and in the audit trail, from a caller who was genuinely
+/// refused. And a `Purge` spelled the same as one of `Source`'s own
+/// actions would have passed the check outright, because the check was on
+/// the name.
+const PURGE: Action = Action::new("purge");
+
+pub enum OtherActions {}
+
+impl ActionTable for OtherActions {
+    const ACTIONS: &'static [Action] = &[PURGE];
+}
+
 #[allow(dead_code)]
 struct Purge;
 
 impl DeclaredAction for Purge {
-    const ACTION: &'static str = "purge";
+    type Table = OtherActions;
+    const ROW: &'static Action = &PURGE;
 }
 
 /// No auth layer above, so there is no caller to decide about. A missing

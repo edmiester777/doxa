@@ -52,6 +52,7 @@ pub struct Widget {
 #[actions(resource = "Widget", prefix = "widgets")]
 pub enum WidgetAction {
     /// View widgets.
+    #[action(verb = get)]
     Read,
 }
 

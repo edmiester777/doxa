@@ -76,6 +76,7 @@ impl ActiveModelBehavior for ActiveModel {}
 #[actions(resource = "Widget", prefix = "widgets")]
 pub enum WidgetAction {
     /// List and view widgets.
+    #[action(verb = get)]
     Read,
 }
 
@@ -440,9 +441,10 @@ async fn the_listing_route_seats_an_admin_the_way_the_dependency_does() {
     let (mut parts, _rx) = parts_as(&["widgets.read"], granted(), true);
     let db = MockDatabase::new(DbBackend::Postgres).into_connection();
 
-    let granted = Granted::<Many<WidgetByName>>::from_request_parts(&mut parts, &db)
-        .await
-        .expect("holds widgets.read");
+    let granted =
+        Granted::<Many<WidgetByName, widget_action::Read>>::from_request_parts(&mut parts, &db)
+            .await
+            .expect("holds widgets.read");
 
     let sql = sql(granted.into_inner());
     assert!(
@@ -459,9 +461,10 @@ async fn the_listing_route_scopes_an_ordinary_caller() {
     let (mut parts, _rx) = parts(&["widgets.read"], granted());
     let db = MockDatabase::new(DbBackend::Postgres).into_connection();
 
-    let granted = Granted::<Many<WidgetByName>>::from_request_parts(&mut parts, &db)
-        .await
-        .expect("holds widgets.read");
+    let granted =
+        Granted::<Many<WidgetByName, widget_action::Read>>::from_request_parts(&mut parts, &db)
+            .await
+            .expect("holds widgets.read");
 
     let sql = sql(granted.into_inner());
     assert!(sql.contains(r#""region" = 'us'"#), "{sql}");

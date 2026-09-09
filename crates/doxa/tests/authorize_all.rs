@@ -26,7 +26,8 @@ use serde_json::json;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLogger, Outcome};
 use doxa::auth::{
-    Action, AuthorizeLoadedAll, CapabilityContext, DeclaredAction, Denial, FromState, Granting,
+    Action, ActionTable, AuthorizeLoadedAll, CapabilityContext, DeclaredAction, Denial, FromState,
+    Granting,
 };
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, ResourceEntity, ResourceId,
@@ -69,9 +70,7 @@ impl Granting for SourceByName {
     type Source = FromState<()>;
     type Error = StatusCode;
 
-    const ACTIONS: &'static [Action] = &[Action::new("read_source")
-        .capability(&SOURCES_READ)
-        .event("data_access")];
+    type Actions = SourceActions;
 
     /// As in the singular case: reaching the state would mean going back
     /// to a pool that cannot see the caller's open transaction, which is
@@ -85,10 +84,22 @@ impl Granting for SourceByName {
     }
 }
 
+/// The vocabulary written out, as `#[derive(Actions)]` would emit it.
+const READ_SOURCE: Action = Action::new("read_source")
+    .capability(&SOURCES_READ)
+    .event("data_access");
+
+pub enum SourceActions {}
+
+impl ActionTable for SourceActions {
+    const ACTIONS: &'static [Action] = &[READ_SOURCE];
+}
+
 struct ReadSource;
 
 impl DeclaredAction for ReadSource {
-    const ACTION: &'static str = "read_source";
+    type Table = SourceActions;
+    const ROW: &'static Action = &READ_SOURCE;
 }
 
 fn source(name: &str, region: &str) -> Source {
