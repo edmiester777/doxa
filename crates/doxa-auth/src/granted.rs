@@ -17,21 +17,21 @@
 //! [`caller`](Granted::caller), or destructure for both:
 //!
 //! ```ignore
-//! async fn transfer(Granted(caller, widget, _): Granted<Widget>) -> StatusCode
-//! ```
-//!
-//! The trailing `_` is the key's source, which is a type rather than a
-//! value: [`Path`] unless the route says [`Query`].
-//!
-//! ```ignore
-//! async fn get(w: Granted<Widget>) -> Json<Widget>          // /widgets/{name}
-//! async fn get(w: Granted<Widget, Query>) -> Json<Widget>   // /widgets?name=…
+//! async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode
 //! ```
 //!
 //! Which parameter it reads is the asset's to say — [`Granting::KEY_NAMES`],
 //! written by `#[asset]` from the column the lookup matches — so a route
 //! whose parameter is spelled the same way names it nowhere. `#[key("…")]`
-//! is for the route that spells it differently.
+//! is for the route that spells it differently, and `#[key(with = "Query")]`
+//! for the route that puts it in the query string rather than the path:
+//!
+//! ```ignore
+//! async fn get(w: Granted<Widget>) -> Json<Widget>   // /widgets/{name}
+//!
+//! #[get("/widgets")]                                 // /widgets?name=…
+//! async fn find(#[key(with = "Query")] w: Granted<Widget>) -> Json<Widget>
+//! ```
 //!
 //! The three forms run the same chain and differ only in what the policy
 //! is asked about:
@@ -590,92 +590,23 @@ pub enum KeyIn {
     Query,
 }
 
-/// Where a route's key parameters live.
-///
-/// The second argument of [`Granted`], defaulting to [`Path`]:
-///
-/// ```ignore
-/// async fn get(model: Granted<ModelByName>) -> Json<Model>          // /models/{name}
-/// async fn get(model: Granted<ModelByName, Query>) -> Json<Model>   // /models?name=…
-/// ```
-///
-/// Only the two exist, and the trait is sealed: a key is read out of the
-/// request line, and the request line has a path and a query in it.
-/// Anything else — a header, a body — is not a route key, and the doors in
-/// [`authorize`] and [`AuthorizeLoaded`] are what reach those.
-pub trait KeySource: sealed_source::Sealed + Send + Sync + 'static {
-    /// Which half of the request line this reads.
-    const IN: KeyIn;
-}
-
-mod sealed_source {
-    /// Blocks outside implementations of [`KeySource`](super::KeySource).
-    pub trait Sealed {}
-}
-
-/// Key parameters read from the route's path segments — the default.
-///
-/// Named `Path` so `Granted<Widget, Path>` reads as it means. It is not
-/// [`axum::extract::Path`], and inside a `#[get]`-style route the macro
-/// resolves the bare name to this one, so an `axum::extract::Path` import
-/// in the same module is not a hazard.
-pub struct Path;
-
-impl sealed_source::Sealed for Path {}
-
-impl KeySource for Path {
-    const IN: KeyIn = KeyIn::Path;
-}
-
-/// Key parameters read from the query string.
-///
-/// For the route that identifies its object without a path segment to put
-/// it in — a name with slashes in it, or a lookup whose key is awkward to
-/// percent-encode. Everything else is unchanged: the same gate, the same
-/// load, the same instance check, and the same audit record under the
-/// row's Cedar identity.
-///
-/// A missing parameter is a 400, as an unparseable path segment is — the
-/// route named it, so its absence is a malformed request rather than a
-/// wiring fault.
-///
-/// # It is not [`axum::extract::Query`]
-///
-/// The handler beside it almost certainly imports that one, so inside a
-/// `#[get]`-style route the bare name is resolved to *this* marker
-/// whatever `Query` means in the surrounding module — and a handler can
-/// take both without either shadowing the other:
-///
-/// ```ignore
-/// use axum::extract::Query;
-///
-/// #[get("/widgets")]
-/// async fn find(w: Granted<Widget, Query>, Query(f): Query<Filters>) -> String
-/// ```
-///
-/// Which means the import is for the *handler's* extractor, not for this:
-/// importing `doxa::auth::Query` as well would read as unused, because the
-/// macro never looks the name up. A hand-written route, with no macro to
-/// rewrite the type, names it in full.
-pub struct Query;
-
-impl sealed_source::Sealed for Query {}
-
-impl KeySource for Query {
-    const IN: KeyIn = KeyIn::Query;
-}
-
 // ---------------------------------------------------------------------------
 // Call sites
 // ---------------------------------------------------------------------------
 
-/// Route-specific facts the macro bakes in per call site: which segments
-/// carry the key, and which Cedar action the verb implies.
+/// Route-specific facts the macro bakes in per call site: which
+/// parameters carry the key, where they arrive, and which Cedar action the
+/// verb implies.
 ///
-/// Hand-written routes implement it directly — it is two consts. The site
-/// rides on the form marker rather than on [`Granted`] itself, so a route
-/// names `Granted<One<Widget, __Site>>` and the guard stays a plain pair
-/// of caller and subject that a handler can destructure.
+/// Hand-written routes implement it directly — it is a handful of consts.
+/// Everything per-route rides on the form marker rather than on
+/// [`Granted`] itself, so a route names `Granted<One<Widget, __Site>>` and
+/// the guard stays a plain pair of caller and subject that a handler can
+/// destructure. That is why the source is a const here and not a second
+/// type parameter on the guard: an unused type parameter needs a
+/// `PhantomData` field, and a third field is a third thing every
+/// `Granted(caller, widget)` pattern in every consumer would have to
+/// match.
 pub trait GrantSite: Send + Sync + 'static {
     /// Parameters feeding the key, in key order.
     ///
@@ -760,12 +691,21 @@ pub trait GrantSite: Send + Sync + 'static {
     const PARAMS: &'static [&'static str] = &[];
     /// Cedar action to authorize, from the HTTP verb.
     const ACTION: &'static str;
+    /// Which half of the request line the key arrives in.
+    ///
+    /// `#[key(with = "Query")]` writes it; `with = "Path"` is the default
+    /// and writes nothing. A hand-written site sets it here. It is one
+    /// constant rather than two because the guard and the OpenAPI
+    /// parameter both read it, and a route documented `in: query` that
+    /// looked in the path would be a spec nobody could use.
+    const IN: KeyIn = KeyIn::Path;
     /// OpenAPI security scheme the requirement references.
     const SCHEME: &'static str = "bearer";
 }
 
-/// Site used by hand-written routes: the asset's own key names, `read`,
-/// bearer. The route macro generates a real one per call site.
+/// Site used by hand-written routes: the asset's own key names, out of the
+/// path, `read`, bearer. The route macro generates a real one per call
+/// site.
 pub struct DefaultSite;
 
 impl GrantSite for DefaultSite {
@@ -1916,37 +1856,37 @@ async fn gate<R: Granting>(
 /// the request's audit event without the handler doing anything; a
 /// denial is additionally logged at `warn`.
 ///
-/// Two values and a marker: the caller, the subject, and where the key
-/// was read from. The call site is not carried here but on the subject,
-/// as [`Subject::Site`], so the two that matter stay at the front and are
-/// public. `Granted(caller, widget, _)` is therefore a pattern a handler
-/// can write — in the argument list, even.
+/// A plain pair: the call site is not carried here but on the subject, as
+/// [`Subject::Site`], so the type holds exactly the two things the
+/// handler asked for and both fields are public. `Granted(caller,
+/// widget)` is therefore a pattern a handler can write — in the argument
+/// list, even, since the guard is nothing but those two values.
 ///
 /// # The source
 ///
-/// `E` says which half of the request line the key came from, and
-/// defaults to [`Path`]:
+/// A route says where its key arrives on the annotation, defaulting to the
+/// path:
 ///
 /// ```ignore
-/// async fn get(w: Granted<Widget>) -> Json<Widget>          // /widgets/{name}
-/// async fn get(w: Granted<Widget, Query>) -> Json<Widget>   // /widgets?name=…
+/// async fn get(w: Granted<Widget>) -> Json<Widget>   // /widgets/{name}
+///
+/// #[get("/widgets")]                                 // /widgets?name=…
+/// async fn find(#[key(with = "Query")] w: Granted<Widget>) -> Json<Widget>
 /// ```
 ///
-/// It is one const ([`KeySource::IN`]) read in two places — the guard, and
-/// the OpenAPI parameter this route advertises — so a route cannot come to
-/// read one thing and document another.
+/// It lands on the generated site as [`GrantSite::IN`], alongside the
+/// parameter names and the action, rather than on this struct. A second
+/// type parameter here would have to be held in a `PhantomData`, and the
+/// third field that implies is a third thing every `Granted(caller,
+/// widget)` pattern would have to match, forever, to carry a marker
+/// nothing reads at runtime.
 ///
-/// The third field is a marker and carries nothing, but it is public and
-/// has to be matched: `Granted(caller, widget, _)`. A private field would
-/// make the pattern unwritable outside this crate, which is the whole
-/// point of the first two being public.
-pub struct Granted<T: Subject, E: KeySource = Path>(
-    pub T::Ctx,
-    pub T::Loaded,
-    pub PhantomData<fn() -> E>,
-);
+/// [`GrantSite::IN`] is read in two places — the guard, and the OpenAPI
+/// parameter this route advertises — so a route cannot come to read one
+/// thing and document another.
+pub struct Granted<T: Subject>(pub T::Ctx, pub T::Loaded);
 
-impl<T: Subject, E: KeySource> Granted<T, E> {
+impl<T: Subject> Granted<T> {
     /// Consume the guard and return just the authorized value.
     pub fn into_inner(self) -> T::Loaded {
         self.1
@@ -1972,7 +1912,7 @@ impl<T: Subject, E: KeySource> Granted<T, E> {
 /// or a `#[tracing::instrument]` span field, evaluated before the handler
 /// body can unwrap anything. Without it a consumer has to write an
 /// extension trait whose whole job is to hand back `&self.1`.
-impl<T: Subject, E: KeySource> std::ops::Deref for Granted<T, E> {
+impl<T: Subject> std::ops::Deref for Granted<T> {
     type Target = T::Loaded;
 
     fn deref(&self) -> &T::Loaded {
@@ -1980,10 +1920,9 @@ impl<T: Subject, E: KeySource> std::ops::Deref for Granted<T, E> {
     }
 }
 
-impl<T, E, St> axum::extract::FromRequestParts<St> for Granted<T, E>
+impl<T, St> axum::extract::FromRequestParts<St> for Granted<T>
 where
     T: Chain,
-    E: KeySource,
     St: Send + Sync,
     T::Source: FromRequestParts<St>,
 {
@@ -2000,7 +1939,7 @@ where
         let ctx = T::Ctx::from_extensions(&parts.extensions)
             .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
 
-        let key = fetch_key::<T, E, St>(parts, state).await?;
+        let key = fetch_key::<T, St>(parts, state).await?;
 
         // The source is extracted, not read out of the router state, so a
         // loader may be handed something the request owns — a transaction
@@ -2013,7 +1952,7 @@ where
         // the same code either way.
         let loaded =
             authorize::<T>(key, T::Site::ACTION, source.state(), &parts.extensions).await?;
-        Ok(Granted(ctx, loaded, PhantomData))
+        Ok(Granted(ctx, loaded))
     }
 }
 
@@ -2647,7 +2586,7 @@ fn record_scope<R: Scoping>(
 ///
 /// ```ignore
 /// async fn create(
-///     Granted(caller, pipeline, _): Granted<One<Pipeline>>,
+///     Granted(caller, pipeline): Granted<One<Pipeline>>,
 ///     sources: Scoped<SourceByName, source_action::Read>,
 ///     Json(body): Json<NewPipeline>,
 /// ) -> Result<StatusCode, Error> {
@@ -2998,12 +2937,13 @@ fn record_denial(denial: &Denial, extensions: &Extensions, tenant: Option<&str>)
 }
 
 /// Pull the key's parameters out of the request, in the order the route
-/// names them, from wherever [`KeySource`] says they live.
+/// names them, from whichever half of the request line the site says they
+/// live in.
 ///
 /// The names come from [`resolved_params`] and the location from
-/// `E::IN` — the same two the OpenAPI impls read, which is what keeps the
-/// spec describing the request this actually parses.
-async fn fetch_key<T: Subject, E: KeySource, St: Send + Sync>(
+/// [`GrantSite::IN`] — the same two the OpenAPI impls read, which is what
+/// keeps the spec describing the request this actually parses.
+async fn fetch_key<T: Subject, St: Send + Sync>(
     parts: &mut http::request::Parts,
     state: &St,
 ) -> Result<T::Key, Refusal<T::Error>> {
@@ -3026,7 +2966,7 @@ async fn fetch_key<T: Subject, E: KeySource, St: Send + Sync>(
         return Ok(T::Key::parse(&[])?);
     }
 
-    match E::IN {
+    match <T::Site as GrantSite>::IN {
         KeyIn::Path => {
             // `RawPathParams` borrows `UrlParams` rather than removing it,
             // so a handler may still take its own `Path`.
@@ -3154,13 +3094,13 @@ fn segment_schema(kind: ResourceIdType) -> utoipa::openapi::RefOr<utoipa::openap
 /// route and its asset are authoritative about which parameters feed the
 /// key, and in what order.
 ///
-/// Where they live comes from the same `E::IN` the guard reads, so a
-/// `Granted<Widget, Query>` documents `?name=` because that is what it
-/// parses. Contributed through `DocPathParams` whichever it is: the
+/// Where they live comes from the same [`GrantSite::IN`] the guard reads,
+/// so a `#[key(with = "Query")]` route documents `?name=` because that is
+/// what it parses. Contributed through `DocPathParams` whichever it is: the
 /// location is a field on the parameter, and routing a query key through
 /// the query-side trait instead would be a second place for the two to
 /// disagree.
-impl<T: Subject, E: KeySource> doxa::DocPathParams for Granted<T, E> {
+impl<T: Subject> doxa::DocPathParams for Granted<T> {
     fn describe(op: &mut utoipa::openapi::path::Operation, _positional: &[&'static str]) {
         use utoipa::openapi::path::{ParameterBuilder, ParameterIn};
         use utoipa::openapi::Required;
@@ -3168,7 +3108,7 @@ impl<T: Subject, E: KeySource> doxa::DocPathParams for Granted<T, E> {
         let name_of = T::doc_name();
         let params_named = resolved_params::<T>();
         let composite = params_named.len() > 1;
-        let location = match E::IN {
+        let location = match <T::Site as GrantSite>::IN {
             KeyIn::Path => ParameterIn::Path,
             KeyIn::Query => ParameterIn::Query,
         };
@@ -3195,7 +3135,7 @@ impl<T: Subject, E: KeySource> doxa::DocPathParams for Granted<T, E> {
     }
 }
 
-impl<T: Subject, E: KeySource> doxa::DocOperationSecurity for Granted<T, E> {
+impl<T: Subject> doxa::DocOperationSecurity for Granted<T> {
     fn describe(op: &mut utoipa::openapi::path::Operation) {
         let name_of = T::doc_name();
         let action = <T::Site as GrantSite>::ACTION;
@@ -3209,7 +3149,7 @@ impl<T: Subject, E: KeySource> doxa::DocOperationSecurity for Granted<T, E> {
     }
 }
 
-impl<T: Subject, E: KeySource> doxa::DocOperationContribution for Granted<T, E> {
+impl<T: Subject> doxa::DocOperationContribution for Granted<T> {
     fn contribution() -> doxa::OperationContribution {
         let name_of = T::doc_name();
         let action = <T::Site as GrantSite>::ACTION;

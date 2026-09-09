@@ -13,7 +13,7 @@
 //! `KEY_NAMES` is what lets a route stop naming its own key segment. The
 //! column a lookup matches is a fact about the lookup, so it travels with
 //! it: `#[resource(key)] name: String` reaches the route as `&["name"]`,
-//! and `/pipelines/{name}/runs/{run_id}` binds the right one of the two
+//! and `/widgets/{name}/revisions/{rev}` binds the right one of the two
 //! segments without an annotation. `#[key("…")]` is left for the route
 //! whose parameter is spelled differently from the column.
 //!
@@ -722,7 +722,7 @@ mod tests {
 
     /// The column a lookup matches is a fact about the lookup, so the name
     /// travels with it rather than being repeated on every route. This is
-    /// what lets `/pipelines/{name}/runs/{run_id}` bind without a
+    /// what lets `/widgets/{name}/revisions/{rev}` bind without a
     /// `#[key("name")]`.
     #[test]
     fn the_key_names_come_off_the_lookup_that_was_selected() {

@@ -3,8 +3,8 @@
 //! Two facts used to be written at every call site. Which parameter feeds
 //! the lookup is now the asset's to say — `Granting::KEY_NAMES`, the column
 //! the lookup matches — so a route repeats it only when it spells it
-//! differently. Where that parameter *lives* is the guard's second type
-//! argument, `Path` by default and `Query` when the route says so.
+//! differently. Where that parameter *lives* is `#[key(with = "…")]`, the
+//! path by default and the query string when the route says so.
 //!
 //! Both are read twice: once by the guard, once by the OpenAPI
 //! description. These tests assert the two halves agree, which is the
@@ -21,9 +21,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tower::ServiceExt;
 
-// Deliberately the *axum* `Query`, which is what a handler reading its own
-// query string imports — and exactly the name `Granted<Widget, Query>`
-// would pick up if the route macro did not resolve the marker itself.
+// The *axum* `Query`, which is what a handler reading its own query string
+// imports. It sits beside a key that also comes out of the query string
+// without the two having anything to do with each other, since the guard's
+// source is a string on the annotation rather than a type in scope.
 use axum::extract::Query;
 use doxa::auth::{Action, CapabilityContext, FromState, Granted, Granting};
 use doxa::policy::{
@@ -94,7 +95,10 @@ async fn get_widget(widget: Granted<Widget>) -> String {
 /// real [`axum::extract::Query`] the handler reads for itself, so the two
 /// meanings of the word are both in scope at once.
 #[get("/widgets", tag = "Widgets")]
-async fn find_widget(widget: Granted<Widget, Query>, Query(filters): Query<Filters>) -> String {
+async fn find_widget(
+    #[key(with = "Query")] widget: Granted<Widget>,
+    Query(filters): Query<Filters>,
+) -> String {
     let name = widget.into_inner().name;
     match filters.upper {
         Some(true) => name.to_uppercase(),
@@ -273,8 +277,8 @@ async fn a_path_key_is_documented_in_the_path() {
     );
 }
 
-/// The half that would otherwise drift. `Granted<Widget, Query>` reads
-/// `?name=`, so the spec says `in: query` — off the same `KeySource::IN`
+/// The half that would otherwise drift. `#[key(with = "Query")]` reads
+/// `?name=`, so the spec says `in: query` — off the same `GrantSite::IN`
 /// the guard read.
 #[tokio::test]
 async fn a_query_key_is_documented_in_the_query() {

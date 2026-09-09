@@ -85,7 +85,7 @@ async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
 }
 ```
 
-Destructure for the caller alongside the object — `Granted(caller, widget, _)` — rather than pairing the guard with a second `Auth<S, C>`; the context is shared, not copied. The trailing `_` is where the key was read from, `Granted<Widget, Query>` being the other option.
+Destructure for the caller alongside the object — `Granted(caller, widget)` — rather than pairing the guard with a second `Auth<S, C>`; the context is shared, not copied. The key comes out of the path unless the route says `#[key(with = "Query")]`, which moves the OpenAPI parameter with it.
 
 One trait per asset says what it is and what may be done to it:
 

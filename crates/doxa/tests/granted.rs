@@ -236,7 +236,7 @@ fn parts(
 #[tokio::test]
 async fn a_collection_yields_the_authorized_scope() {
     let (mut parts, _rx) = parts(&["viewer"]);
-    let Granted(caller, scope, _) =
+    let Granted(caller, scope) =
         Granted::<Many<Widget, Listing>>::from_request_parts(&mut parts, &())
             .await
             .expect("viewer may list");
