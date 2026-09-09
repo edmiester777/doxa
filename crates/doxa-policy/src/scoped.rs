@@ -344,16 +344,39 @@ impl From<DbErr> for DbLoadError {
 /// and [`FetchSubset`](crate::fetch::FetchSubset) are written, which is
 /// right for a table no route addresses by a column: it can still be
 /// listed and still be reached by its own id.
+///
+/// # Naming the columns
+///
+/// The column *names* are what lets a route skip `#[key("…")]`, and they
+/// are not recoverable from `Column::Name` — that is a variant, and the
+/// key type behind it is a bare `String`. So they are said here:
+///
+/// ```ignore
+/// doxa_policy::fetch_from_scoped!(Model, key, id = "id", key = "name");
+/// ```
+///
+/// `#[derive(PolicyResource)]` writes that form from the field idents it
+/// already has. The shorter arms leave the names empty, which means the
+/// lookup declines to name its columns and a route over it says which
+/// segment it uses — the behaviour before there was anywhere to put them.
 #[cfg(feature = "sea-orm")]
 #[macro_export]
 macro_rules! fetch_from_scoped {
     ($row:ty) => {
+        $crate::fetch_from_scoped!($row, id = []);
+    };
+    ($row:ty, key) => {
+        $crate::fetch_from_scoped!($row, key, id = [], key = []);
+    };
+    ($row:ty, id = [$($id:literal),* $(,)?]) => {
         impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::Fetch<C> for $row {
             type Error = $crate::__private::sea_orm::DbErr;
         }
 
         impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::FetchById<C> for $row {
             type Id = $crate::PrimaryKeyOf<$row>;
+
+            const ID_NAMES: &'static [&'static str] = &[$($id),*];
 
             fn fetch_by_id(
                 id: Self::Id,
@@ -377,11 +400,13 @@ macro_rules! fetch_from_scoped {
             }
         }
     };
-    ($row:ty, key) => {
-        $crate::fetch_from_scoped!($row);
+    ($row:ty, key, id = [$($id:literal),* $(,)?], key = [$($name:literal),* $(,)?]) => {
+        $crate::fetch_from_scoped!($row, id = [$($id),*]);
 
         impl<C: $crate::__private::sea_orm::ConnectionTrait> $crate::fetch::FetchByKey<C> for $row {
             type Key = <$row as $crate::ScopedRow>::Key;
+
+            const KEY_NAMES: &'static [&'static str] = &[$($name),*];
 
             fn fetch(
                 key: Self::Key,
@@ -438,11 +463,13 @@ macro_rules! fetch_from_scoped {
 /// lookup cannot drift from the listing. That is the same reason
 /// [`ScopedRow::load_scoped`] is written that way.
 ///
-/// The field names on the left are bindings for the key's parts, and are
-/// there to make the declaration readable rather than to be matched against
-/// anything — `macro_rules` hygiene keeps them from colliding with the
-/// generated function's own `key`, `src` and `scope`, so a column genuinely
-/// called `scope` is fine.
+/// The field names on the left are bindings for the key's parts, and they
+/// are also what the lookup reports as
+/// [`Lookup::KEY_NAMES`](crate::fetch::Lookup::KEY_NAMES) — so a route
+/// whose path parameter is spelled the same way needs no `#[key("…")]` to
+/// say which segment feeds this lookup. `macro_rules` hygiene keeps them
+/// from colliding with the generated function's own `key`, `src` and
+/// `scope`, so a column genuinely called `scope` is fine.
 #[cfg(feature = "sea-orm")]
 #[macro_export]
 macro_rules! scoped_lookup {
@@ -460,6 +487,8 @@ macro_rules! scoped_lookup {
             type Row = $row;
             type Key = $ty;
             type Error = $crate::__private::sea_orm::DbErr;
+
+            const KEY_NAMES: &'static [&'static str] = &[::core::stringify!($field)];
 
             fn fetch(
                 key: Self::Key,
@@ -513,6 +542,14 @@ macro_rules! scoped_lookup {
             type Row = $row;
             type Key = $key;
             type Error = $crate::__private::sea_orm::DbErr;
+
+            // One per column, which is one per segment for the key this
+            // macro generates. A hand-written `RouteKey` that parses
+            // *fewer* segments than there are columns — one path segment
+            // split into two — names them on that impl instead, and
+            // `RouteKey::NAMES` wins where both are present.
+            const KEY_NAMES: &'static [&'static str] =
+                &[$(::core::stringify!($field)),+];
 
             fn fetch(
                 key: Self::Key,

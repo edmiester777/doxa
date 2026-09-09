@@ -85,7 +85,7 @@ async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
 }
 ```
 
-Destructure for the caller alongside the object — `Granted(caller, widget)` — rather than pairing the guard with a second `Auth<S, C>`; the context is shared, not copied.
+Destructure for the caller alongside the object — `Granted(caller, widget, _)` — rather than pairing the guard with a second `Auth<S, C>`; the context is shared, not copied. The trailing `_` is where the key was read from, `Granted<Widget, Query>` being the other option.
 
 One trait per asset says what it is and what may be done to it:
 
@@ -93,6 +93,7 @@ One trait per asset says what it is and what may be done to it:
 impl Granting for Widget {
     type Row = Self;              // Cedar identity, from #[derive(PolicyResource)]
     type Key = u32;               // what the {id} segment parses into
+    const KEY_NAMES: &[&str] = &["id"]; // …and what the route calls it
     type Ctx = CapabilityContext; // tenant + roles, or your own Auth context
     type State = DatabaseConnection;      // what load() is handed
     type Source = FromState<DatabaseConnection>; // how the guard gets hold of it

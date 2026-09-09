@@ -110,9 +110,18 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let mut key: Option<(Ident, Type)> = None;
     let mut named: Vec<NamedLookup> = Vec::new();
     let mut scope: Option<Ident> = None;
+    // What the identifier columns are called, for the `key = pk` route.
+    // Read off SeaORM's own marker rather than `#[resource(…)]`, because a
+    // primary key is a fact about the table that the row has already
+    // stated once. Plural for the composite key, whose `PrimaryKeyOf` is a
+    // tuple and whose route therefore has a segment each.
+    let mut primary_key: Vec<Ident> = Vec::new();
 
     for field in &fields.named {
         let name = field.ident.clone().expect("named field");
+        if is_primary_key(field) {
+            primary_key.push(name.clone());
+        }
         for role in field_roles(field)? {
             match role {
                 Role::Id => {
@@ -213,6 +222,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let scoped = scoped_impl(
         ident,
         key.as_ref(),
+        &primary_key,
         &named,
         scope.as_ref(),
         &container.filters,
@@ -283,6 +293,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 fn scoped_impl(
     ident: &Ident,
     key: Option<&(Ident, Type)>,
+    primary_key: &[Ident],
     named: &[NamedLookup],
     scope: Option<&Ident>,
     filters: &[Expr],
@@ -367,9 +378,23 @@ fn scoped_impl(
     //
     // `key` selects the arm: without one there is no `ScopedRow` to build
     // `FetchByKey` from, and the table keeps its id route and its listing.
+    //
+    // The column names go across with them. They are the field idents this
+    // derive already read, and they are what lets a route addressing the
+    // row by that column stop repeating the name in a `#[key("…")]`.
+    let id_names = primary_key
+        .iter()
+        .map(|field| LitStr::new(&field.to_string(), field.span()));
     let fetch = match key {
-        Some(_) => quote!(::doxa::policy::fetch_from_scoped!(#ident, key);),
-        None => quote!(::doxa::policy::fetch_from_scoped!(#ident);),
+        Some((field, _)) => {
+            let key_name = LitStr::new(&field.to_string(), field.span());
+            quote! {
+                ::doxa::policy::fetch_from_scoped!(
+                    #ident, key, id = [#(#id_names),*], key = [#key_name]
+                );
+            }
+        }
+        None => quote!(::doxa::policy::fetch_from_scoped!(#ident, id = [#(#id_names),*]);),
     };
 
     // One marker type per named lookup, each carrying its own key and its
@@ -501,10 +526,18 @@ fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
         }
     });
 
+    let names = columns
+        .iter()
+        .map(|(field, _)| LitStr::new(&field.to_string(), field.span()));
+
     quote! {
         #[automatically_derived]
         impl ::doxa::auth::RouteKey for #key {
             const SEGMENTS: &'static [::doxa::policy::ResourceIdType] = &[#(#kinds),*];
+
+            // Declared beside `SEGMENTS`, so the names and the kinds are
+            // one list and cannot come to describe different segments.
+            const NAMES: &'static [&'static str] = &[#(#names),*];
 
             fn parse(
                 __segments: &[&str],
@@ -513,6 +546,27 @@ fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
             }
         }
     }
+}
+
+/// Whether SeaORM's own `#[sea_orm(primary_key)]` marks this field.
+///
+/// Read as tokens rather than through `parse_nested_meta`, because the
+/// attribute is not ours: it carries `auto_increment`, `column_type` and
+/// whatever SeaORM adds next, and a parser that has to recognise all of
+/// them would fail the build over a key it was never asked about.
+fn is_primary_key(field: &syn::Field) -> bool {
+    field.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("sea_orm") {
+            return false;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        list.tokens.clone().into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => ident == "primary_key",
+            _ => false,
+        })
+    })
 }
 
 /// `company_id` -> `CompanyId`, matching the `Column` variant
@@ -854,6 +908,77 @@ mod tests {
         assert!(out.contains("Column :: CompanyId"), "{out}");
     }
 
+    /// The column names go across with the lookups, because `Column::Name`
+    /// is a variant and the key behind it is a bare `String` — neither can
+    /// say what a route's parameter should be called. This is the field
+    /// ident, which the derive is already holding.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn the_key_and_identifier_columns_are_named_for_the_route() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Connection")]
+            struct Model {
+                #[sea_orm(primary_key, auto_increment = false)]
+                #[resource(id)]
+                id: Uuid,
+                #[resource(attr, key)]
+                name: String,
+                #[resource(scope)]
+                company_id: String,
+            }
+        });
+
+        assert!(
+            out.contains(r#"fetch_from_scoped ! (Model , key , id = ["id"] , key = ["name"])"#),
+            "{out}",
+        );
+    }
+
+    /// A composite primary key is a segment each, so it is a name each —
+    /// taking only the first would leave the id route a parameter short.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn a_composite_primary_key_names_every_column() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Membership")]
+            struct Model {
+                #[sea_orm(primary_key)]
+                #[resource(id)]
+                user_id: Uuid,
+                #[sea_orm(primary_key)]
+                group_id: Uuid,
+                #[resource(scope)]
+                company_id: String,
+            }
+        });
+
+        assert!(
+            out.contains(r#"fetch_from_scoped ! (Model , id = ["user_id" , "group_id"])"#),
+            "{out}",
+        );
+    }
+
+    /// A table with no `#[sea_orm(primary_key)]` in sight names none,
+    /// which is the same "say nothing" every route falls back from.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn a_row_with_no_marked_primary_key_names_none() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Connection")]
+            struct Model {
+                #[resource(id, key)]
+                name: String,
+                #[resource(scope)]
+                company_id: String,
+            }
+        });
+
+        assert!(
+            out.contains(r#"fetch_from_scoped ! (Model , key , id = [] , key = ["name"])"#),
+            "{out}",
+        );
+    }
+
     /// The attributes a policy may name resolve to the columns they sit
     /// in, so a residual mentioning `resource.region` can become a `WHERE`
     /// clause. Written from the same fields as `cedar_attrs`, which is
@@ -991,6 +1116,12 @@ mod tests {
             ),
             "{out}",
         );
+        // And a name per segment, from the same list — so the names and
+        // the kinds cannot come to describe different segments.
+        assert!(
+            out.contains(r#"const NAMES : & 'static [& 'static str] = & ["dataset" , "version"]"#),
+            "{out}",
+        );
     }
 
     /// A single-column lookup keys on the scalar, which already has a
@@ -1032,7 +1163,10 @@ mod tests {
         });
 
         assert!(out.contains("pub FindByPair for Model"), "{out}");
-        assert!(out.contains("fetch_from_scoped ! (Model)"), "{out}");
+        assert!(
+            out.contains("fetch_from_scoped ! (Model , id = [])"),
+            "{out}"
+        );
         assert!(
             !out.contains("impl :: doxa :: policy :: ScopedRow for Model"),
             "{out}",

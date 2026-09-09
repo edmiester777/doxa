@@ -17,8 +17,21 @@
 //! [`caller`](Granted::caller), or destructure for both:
 //!
 //! ```ignore
-//! async fn transfer(Granted(caller, widget): Granted<Widget>) -> StatusCode
+//! async fn transfer(Granted(caller, widget, _): Granted<Widget>) -> StatusCode
 //! ```
+//!
+//! The trailing `_` is the key's source, which is a type rather than a
+//! value: [`Path`] unless the route says [`Query`].
+//!
+//! ```ignore
+//! async fn get(w: Granted<Widget>) -> Json<Widget>          // /widgets/{name}
+//! async fn get(w: Granted<Widget, Query>) -> Json<Widget>   // /widgets?name=…
+//! ```
+//!
+//! Which parameter it reads is the asset's to say — [`Granting::KEY_NAMES`],
+//! written by `#[asset]` from the column the lookup matches — so a route
+//! whose parameter is spelled the same way names it nowhere. `#[key("…")]`
+//! is for the route that spells it differently.
 //!
 //! The three forms run the same chain and differ only in what the policy
 //! is asked about:
@@ -231,8 +244,70 @@ pub trait RouteKey: Sized + Send {
     /// parameter types without a runtime call.
     const SEGMENTS: &'static [ResourceIdType];
 
+    /// What each segment is called, in key order — the names a route's
+    /// parameters would have to carry for the key to bind without an
+    /// annotation.
+    ///
+    /// `&[]` — the default — means the key declines to name its segments,
+    /// which is the only answer a bare scalar has: a `String` is a
+    /// `String` whether the column behind it is `name` or `slug`. Those
+    /// keys are named one level up, by the *lookup* that produces them
+    /// ([`FetchByKey::KEY_NAMES`]), and `#[asset]` reads whichever of the
+    /// two is non-empty.
+    ///
+    /// A key that does answer wins over its lookup, because it is the
+    /// closer statement: a lookup matching two columns whose key parses
+    /// one segment — a qualified name split on the way in — is the case
+    /// where the columns and the segments are not the same list, and this
+    /// is the one that has to agree with [`SEGMENTS`](Self::SEGMENTS).
+    ///
+    /// [`FetchByKey::KEY_NAMES`]: doxa_policy::fetch::FetchByKey::KEY_NAMES
+    const NAMES: &'static [&'static str] = &[];
+
     /// Parse the raw segments the route supplied.
     fn parse(raw: &[&str]) -> Result<Self, KeyError>;
+}
+
+/// Whether every name in `needles` appears in `haystack`.
+///
+/// `const`, so the route macro can prove at build time that the parameters
+/// an asset's key is named after are ones the route actually has — the
+/// check that used to be `#[key("…")]`'s reason for existing on a
+/// multi-parameter route.
+pub const fn names_within(needles: &[&str], haystack: &[&str]) -> bool {
+    let mut i = 0;
+    while i < needles.len() {
+        let mut found = false;
+        let mut j = 0;
+        while j < haystack.len() {
+            if str_eq(needles[i], haystack[j]) {
+                found = true;
+                break;
+            }
+            j += 1;
+        }
+        if !found {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Whichever of two name lists is not empty, preferring the first.
+///
+/// `const`, because it resolves [`Granting::KEY_NAMES`] where the two
+/// halves are declared: the key's own [`RouteKey::NAMES`] if it has any,
+/// and the lookup's otherwise. `#[asset]` writes the call.
+pub const fn key_names(
+    preferred: &'static [&'static str],
+    fallback: &'static [&'static str],
+) -> &'static [&'static str] {
+    if preferred.is_empty() {
+        fallback
+    } else {
+        preferred
+    }
 }
 
 /// A route segment that did not parse into its key component.
@@ -497,6 +572,100 @@ impl IntoResponse for Denial {
 }
 
 // ---------------------------------------------------------------------------
+// Where the key comes from
+// ---------------------------------------------------------------------------
+
+/// Which part of the request a key's parameters are read from.
+///
+/// One value, read twice: the guard uses it to decide where to look, and
+/// the OpenAPI impls use it to decide what to document. That is the
+/// whole point of it being a single const — a guard reading `?name=` while
+/// the spec advertises `/{name}` is a discrepancy nothing else would
+/// catch, because both halves would be individually correct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyIn {
+    /// Path segments, matched by name against the route template.
+    Path,
+    /// Query string parameters.
+    Query,
+}
+
+/// Where a route's key parameters live.
+///
+/// The second argument of [`Granted`], defaulting to [`Path`]:
+///
+/// ```ignore
+/// async fn get(model: Granted<ModelByName>) -> Json<Model>          // /models/{name}
+/// async fn get(model: Granted<ModelByName, Query>) -> Json<Model>   // /models?name=…
+/// ```
+///
+/// Only the two exist, and the trait is sealed: a key is read out of the
+/// request line, and the request line has a path and a query in it.
+/// Anything else — a header, a body — is not a route key, and the doors in
+/// [`authorize`] and [`AuthorizeLoaded`] are what reach those.
+pub trait KeySource: sealed_source::Sealed + Send + Sync + 'static {
+    /// Which half of the request line this reads.
+    const IN: KeyIn;
+}
+
+mod sealed_source {
+    /// Blocks outside implementations of [`KeySource`](super::KeySource).
+    pub trait Sealed {}
+}
+
+/// Key parameters read from the route's path segments — the default.
+///
+/// Named `Path` so `Granted<Widget, Path>` reads as it means. It is not
+/// [`axum::extract::Path`], and inside a `#[get]`-style route the macro
+/// resolves the bare name to this one, so an `axum::extract::Path` import
+/// in the same module is not a hazard.
+pub struct Path;
+
+impl sealed_source::Sealed for Path {}
+
+impl KeySource for Path {
+    const IN: KeyIn = KeyIn::Path;
+}
+
+/// Key parameters read from the query string.
+///
+/// For the route that identifies its object without a path segment to put
+/// it in — a name with slashes in it, or a lookup whose key is awkward to
+/// percent-encode. Everything else is unchanged: the same gate, the same
+/// load, the same instance check, and the same audit record under the
+/// row's Cedar identity.
+///
+/// A missing parameter is a 400, as an unparseable path segment is — the
+/// route named it, so its absence is a malformed request rather than a
+/// wiring fault.
+///
+/// # It is not [`axum::extract::Query`]
+///
+/// The handler beside it almost certainly imports that one, so inside a
+/// `#[get]`-style route the bare name is resolved to *this* marker
+/// whatever `Query` means in the surrounding module — and a handler can
+/// take both without either shadowing the other:
+///
+/// ```ignore
+/// use axum::extract::Query;
+///
+/// #[get("/widgets")]
+/// async fn find(w: Granted<Widget, Query>, Query(f): Query<Filters>) -> String
+/// ```
+///
+/// Which means the import is for the *handler's* extractor, not for this:
+/// importing `doxa::auth::Query` as well would read as unused, because the
+/// macro never looks the name up. A hand-written route, with no macro to
+/// rewrite the type, names it in full.
+pub struct Query;
+
+impl sealed_source::Sealed for Query {}
+
+impl KeySource for Query {
+    const IN: KeyIn = KeyIn::Query;
+}
+
+// ---------------------------------------------------------------------------
 // Call sites
 // ---------------------------------------------------------------------------
 
@@ -508,21 +677,98 @@ impl IntoResponse for Denial {
 /// names `Granted<One<Widget, __Site>>` and the guard stays a plain pair
 /// of caller and subject that a handler can destructure.
 pub trait GrantSite: Send + Sync + 'static {
-    /// Path parameters feeding the key, in key order. Empty for
-    /// collection and capability routes.
-    const PARAMS: &'static [&'static str];
+    /// Parameters feeding the key, in key order.
+    ///
+    /// Empty means two different things, and the key tells them apart. For
+    /// a collection or capability route there is nothing to name and
+    /// nothing to read. For an instance route it means *this site does not
+    /// override*, and the names come from the asset instead
+    /// ([`Granting::KEY_NAMES`], via [`Subject::KEY_NAMES`]) — which is the
+    /// ordinary case, since a route addressing a widget by the column the
+    /// widget is keyed on has nothing to add.
+    ///
+    /// Override it where the route's parameter is spelled differently from
+    /// the column, which is what `#[key("…")]` writes.
+    ///
+    /// Whichever of the two answers, the count has to match the key. An
+    /// asset that names its key's column has an instance route that
+    /// builds:
+    ///
+    /// ```
+    /// # use doxa_auth::granted::{
+    /// #     Action, DefaultSite, FromState, Granting, One, Subject,
+    /// # };
+    /// # use doxa_auth::CapabilityContext;
+    /// # use doxa_policy::PolicyResource;
+    /// # use std::convert::Infallible;
+    /// # struct Widget;
+    /// # impl PolicyResource for Widget {
+    /// #     const ENTITY_TYPE: &'static str = "Widget";
+    /// #     fn resource_id(&self) -> String { String::new() }
+    /// # }
+    /// impl Granting for Widget {
+    ///     type Key = String;
+    ///     const KEY_NAMES: &'static [&'static str] = &["name"];
+    /// #     type Row = Self;
+    /// #     type Ctx = CapabilityContext;
+    /// #     type State = ();
+    /// #     type Source = FromState<()>;
+    /// #     type Error = Infallible;
+    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
+    ///     // …
+    /// }
+    ///
+    /// let () = <One<Widget, DefaultSite> as Subject>::SITE_DECLARED;
+    /// ```
+    ///
+    /// One that names none has nothing for the route to bind, and the same
+    /// route will not build. The only difference from the call above is the
+    /// missing `KEY_NAMES`, so this is a test of the resolution rather than
+    /// of the surrounding impl:
+    ///
+    /// ```compile_fail
+    /// # use doxa_auth::granted::{
+    /// #     Action, DefaultSite, FromState, Granting, One, Subject,
+    /// # };
+    /// # use doxa_auth::CapabilityContext;
+    /// # use doxa_policy::PolicyResource;
+    /// # use std::convert::Infallible;
+    /// # struct Widget;
+    /// # impl PolicyResource for Widget {
+    /// #     const ENTITY_TYPE: &'static str = "Widget";
+    /// #     fn resource_id(&self) -> String { String::new() }
+    /// # }
+    /// impl Granting for Widget {
+    ///     type Key = String;
+    /// #     type Row = Self;
+    /// #     type Ctx = CapabilityContext;
+    /// #     type State = ();
+    /// #     type Source = FromState<()>;
+    /// #     type Error = Infallible;
+    /// #     const ACTIONS: &'static [Action] = &[Action::new("read")];
+    /// #     async fn load(_: String, _: &(), _: &CapabilityContext)
+    /// #         -> Result<Option<Self>, Infallible> { Ok(None) }
+    ///     // …
+    /// }
+    ///
+    /// // error: this route names a different number of key parameters
+    /// // than its key parses
+    /// let () = <One<Widget, DefaultSite> as Subject>::SITE_DECLARED;
+    /// ```
+    const PARAMS: &'static [&'static str] = &[];
     /// Cedar action to authorize, from the HTTP verb.
     const ACTION: &'static str;
     /// OpenAPI security scheme the requirement references.
     const SCHEME: &'static str = "bearer";
 }
 
-/// Site used by hand-written routes: no path parameters, `read`, bearer.
-/// The route macro generates a real one per call site.
+/// Site used by hand-written routes: the asset's own key names, `read`,
+/// bearer. The route macro generates a real one per call site.
 pub struct DefaultSite;
 
 impl GrantSite for DefaultSite {
-    const PARAMS: &'static [&'static str] = &[];
     const ACTION: &'static str = "read";
 }
 
@@ -667,6 +913,13 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
     /// Which of the three forms this is.
     const FORM: SubjectForm;
 
+    /// What the asset calls its key's parameters, in key order.
+    ///
+    /// [`Granting::KEY_NAMES`] for the two asset-backed forms, and empty
+    /// for a capability, which names no object. Read only where the site
+    /// declines to say — see [`resolved_params`].
+    const KEY_NAMES: &'static [&'static str] = &[];
+
     /// Compile-time proof that this subject's action table is coherent
     /// and permits the action its [`Site`](Self::Site) names.
     ///
@@ -685,6 +938,17 @@ pub trait Subject: sealed::Sealed + Send + Sync + 'static {
 
     /// Permission name for the OpenAPI badge, given the route's action.
     fn permission(action: &str) -> Cow<'static, str>;
+}
+
+/// The parameter names a subject's key is actually read from: the site's
+/// where it names any, the asset's otherwise.
+///
+/// `const`, and the only place the two are combined — so the guard and the
+/// OpenAPI description cannot resolve them differently. A route that reads
+/// `?name=` while its spec advertises a `{name}` segment is the failure
+/// this and [`KeyIn`] exist to make unwritable.
+pub const fn resolved_params<T: Subject>() -> &'static [&'static str] {
+    key_names(<T::Site as GrantSite>::PARAMS, T::KEY_NAMES)
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1348,29 @@ pub trait Granting: Sized + Send + Sync + 'static {
     /// ```
     const ACTIONS: &'static [Action];
 
+    /// What this asset calls its key's parameters, in key order.
+    ///
+    /// The half of the lookup a route cannot see. [`Key`](Self::Key) says
+    /// what the value parses into and the route says where it comes from;
+    /// this says what it is *called*, so a route whose parameter is spelled
+    /// the same way binds without naming it twice.
+    ///
+    /// `#[asset]` writes it from whichever lookup it selected — the key
+    /// column for the default loader, the identifier for `key = pk`, the
+    /// named lookup's own columns for `with = …` — preferring the key's own
+    /// [`RouteKey::NAMES`] where it has any.
+    ///
+    /// `&[]` means the asset declines to name them, and every route over it
+    /// says which parameter it uses. That is also what a hand-written impl
+    /// gets by default, so nothing that compiled before this existed
+    /// changed behaviour.
+    ///
+    /// One entry per segment [`Key`](Self::Key) parses. A list of the wrong
+    /// length is refused rather than truncated — see
+    /// [`GrantSite::PARAMS`], where the two are resolved against each
+    /// other at build time.
+    const KEY_NAMES: &'static [&'static str] = &[];
+
     /// Fetch one object, or `None` if there is no such thing.
     fn load(
         key: Self::Key,
@@ -1326,6 +1613,7 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
     type Site = S;
 
     const FORM: SubjectForm = SubjectForm::Instance;
+    const KEY_NAMES: &'static [&'static str] = R::KEY_NAMES;
     const SITE_DECLARED: () = {
         assert!(
             distinct(R::ACTIONS),
@@ -1334,6 +1622,17 @@ impl<R: Granting, S: GrantSite> Subject for One<R, S> {
         assert!(
             declares(R::ACTIONS, S::ACTION),
             "this route's action is missing from the asset's `Granting::ACTIONS`",
+        );
+        // A site naming fewer parameters than the key parses would have
+        // the surplus silently dropped — a folder-scoped route loading an
+        // object from another folder. The asset's own `KEY_NAMES` covers
+        // this for most routes; a site that overrides them, or an asset
+        // that names none, is where it can go wrong, and it goes wrong at
+        // build time rather than on the first request.
+        assert!(
+            key_names(S::PARAMS, R::KEY_NAMES).len() == <R::Key as RouteKey>::SEGMENTS.len(),
+            "this route names a different number of key parameters than its key parses; \
+             annotate the argument with `#[key(\"…\")]`, one name per segment",
         );
     };
 
@@ -1617,14 +1916,37 @@ async fn gate<R: Granting>(
 /// the request's audit event without the handler doing anything; a
 /// denial is additionally logged at `warn`.
 ///
-/// A plain pair: the call site is not carried here but on the subject, as
-/// [`Subject::Site`], so the type holds exactly the two things the
-/// handler asked for and both fields are public. `Granted(caller,
-/// widget)` is therefore a pattern a handler can write — in the argument
-/// list, even, since the guard is nothing but those two values.
-pub struct Granted<T: Subject>(pub T::Ctx, pub T::Loaded);
+/// Two values and a marker: the caller, the subject, and where the key
+/// was read from. The call site is not carried here but on the subject,
+/// as [`Subject::Site`], so the two that matter stay at the front and are
+/// public. `Granted(caller, widget, _)` is therefore a pattern a handler
+/// can write — in the argument list, even.
+///
+/// # The source
+///
+/// `E` says which half of the request line the key came from, and
+/// defaults to [`Path`]:
+///
+/// ```ignore
+/// async fn get(w: Granted<Widget>) -> Json<Widget>          // /widgets/{name}
+/// async fn get(w: Granted<Widget, Query>) -> Json<Widget>   // /widgets?name=…
+/// ```
+///
+/// It is one const ([`KeySource::IN`]) read in two places — the guard, and
+/// the OpenAPI parameter this route advertises — so a route cannot come to
+/// read one thing and document another.
+///
+/// The third field is a marker and carries nothing, but it is public and
+/// has to be matched: `Granted(caller, widget, _)`. A private field would
+/// make the pattern unwritable outside this crate, which is the whole
+/// point of the first two being public.
+pub struct Granted<T: Subject, E: KeySource = Path>(
+    pub T::Ctx,
+    pub T::Loaded,
+    pub PhantomData<fn() -> E>,
+);
 
-impl<T: Subject> Granted<T> {
+impl<T: Subject, E: KeySource> Granted<T, E> {
     /// Consume the guard and return just the authorized value.
     pub fn into_inner(self) -> T::Loaded {
         self.1
@@ -1650,7 +1972,7 @@ impl<T: Subject> Granted<T> {
 /// or a `#[tracing::instrument]` span field, evaluated before the handler
 /// body can unwrap anything. Without it a consumer has to write an
 /// extension trait whose whole job is to hand back `&self.1`.
-impl<T: Subject> std::ops::Deref for Granted<T> {
+impl<T: Subject, E: KeySource> std::ops::Deref for Granted<T, E> {
     type Target = T::Loaded;
 
     fn deref(&self) -> &T::Loaded {
@@ -1658,9 +1980,10 @@ impl<T: Subject> std::ops::Deref for Granted<T> {
     }
 }
 
-impl<T, St> axum::extract::FromRequestParts<St> for Granted<T>
+impl<T, E, St> axum::extract::FromRequestParts<St> for Granted<T, E>
 where
     T: Chain,
+    E: KeySource,
     St: Send + Sync,
     T::Source: FromRequestParts<St>,
 {
@@ -1677,7 +2000,7 @@ where
         let ctx = T::Ctx::from_extensions(&parts.extensions)
             .ok_or(Refusal::Auth(AuthError::MissingCredentials))?;
 
-        let key = fetch_key::<T, St>(parts, state).await?;
+        let key = fetch_key::<T, E, St>(parts, state).await?;
 
         // The source is extracted, not read out of the router state, so a
         // loader may be handed something the request owns — a transaction
@@ -1690,7 +2013,7 @@ where
         // the same code either way.
         let loaded =
             authorize::<T>(key, T::Site::ACTION, source.state(), &parts.extensions).await?;
-        Ok(Granted(ctx, loaded))
+        Ok(Granted(ctx, loaded, PhantomData))
     }
 }
 
@@ -2324,7 +2647,7 @@ fn record_scope<R: Scoping>(
 ///
 /// ```ignore
 /// async fn create(
-///     Granted(caller, pipeline): Granted<One<Pipeline>>,
+///     Granted(caller, pipeline, _): Granted<One<Pipeline>>,
 ///     sources: Scoped<SourceByName, source_action::Read>,
 ///     Json(body): Json<NewPipeline>,
 /// ) -> Result<StatusCode, Error> {
@@ -2674,20 +2997,26 @@ fn record_denial(denial: &Denial, extensions: &Extensions, tenant: Option<&str>)
     );
 }
 
-/// Pull the key's segments out of the route, in the order the site names
-/// them.
-async fn fetch_key<T: Subject, St: Send + Sync>(
+/// Pull the key's parameters out of the request, in the order the route
+/// names them, from wherever [`KeySource`] says they live.
+///
+/// The names come from [`resolved_params`] and the location from
+/// `E::IN` — the same two the OpenAPI impls read, which is what keeps the
+/// spec describing the request this actually parses.
+async fn fetch_key<T: Subject, E: KeySource, St: Send + Sync>(
     parts: &mut http::request::Parts,
     state: &St,
 ) -> Result<T::Key, Refusal<T::Error>> {
-    let params_named = <T::Site as GrantSite>::PARAMS;
+    let params_named = resolved_params::<T>();
 
-    // A site that names fewer segments than the key parses would have
+    // A route that names fewer parameters than the key parses would have
     // the surplus silently dropped — a folder-scoped route loading an
-    // object from another folder. Refuse instead.
+    // object from another folder. `One::SITE_DECLARED` refuses that at
+    // build time; this is the same refusal for anything that reached here
+    // without it.
     if params_named.len() != T::Key::SEGMENTS.len() {
         return Err(Refusal::Auth(AuthError::PolicyFailed(format!(
-            "route names {} key segment(s) but the key takes {}",
+            "route names {} key parameter(s) but the key takes {}",
             params_named.len(),
             T::Key::SEGMENTS.len(),
         ))));
@@ -2697,34 +3026,105 @@ async fn fetch_key<T: Subject, St: Send + Sync>(
         return Ok(T::Key::parse(&[])?);
     }
 
-    // `RawPathParams` borrows `UrlParams` rather than removing it, so a
-    // handler may still take its own `Path`.
-    let params = axum::extract::RawPathParams::from_request_parts(parts, state)
-        .await
-        // A route that names key segments but exposes no path parameters
-        // is a router the macro and the site disagree about, not a bad
-        // request.
-        .map_err(|rejection| {
-            Refusal::Auth(AuthError::PolicyFailed(format!(
-                "route path parameters unavailable: {rejection}"
-            )))
-        })?;
+    match E::IN {
+        KeyIn::Path => {
+            // `RawPathParams` borrows `UrlParams` rather than removing it,
+            // so a handler may still take its own `Path`.
+            let params = axum::extract::RawPathParams::from_request_parts(parts, state)
+                .await
+                // A route that names key segments but exposes no path
+                // parameters is a router the macro and the site disagree
+                // about, not a bad request.
+                .map_err(|rejection| {
+                    Refusal::Auth(AuthError::PolicyFailed(format!(
+                        "route path parameters unavailable: {rejection}"
+                    )))
+                })?;
 
-    let mut raw = Vec::with_capacity(params_named.len());
-    for name in params_named {
-        let value = params
-            .iter()
-            .find(|(param, _)| param == name)
-            .map(|(_, value)| value)
-            .ok_or_else(|| {
-                Refusal::Auth(AuthError::PolicyFailed(format!(
-                    "route has no path parameter `{name}`"
-                )))
-            })?;
-        raw.push(value);
+            let mut raw = Vec::with_capacity(params_named.len());
+            for name in params_named {
+                let value = params
+                    .iter()
+                    .find(|(param, _)| param == name)
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| {
+                        Refusal::Auth(AuthError::PolicyFailed(format!(
+                            "route has no path parameter `{name}`"
+                        )))
+                    })?;
+                raw.push(value);
+            }
+
+            Ok(T::Key::parse(&raw)?)
+        }
+        KeyIn::Query => {
+            let query = query_pairs(parts.uri.query().unwrap_or_default());
+
+            let mut raw = Vec::with_capacity(params_named.len());
+            for name in params_named {
+                // Absent is a bad request, not a wiring fault: the route
+                // said the caller supplies this, and the caller did not.
+                // `KeyError` renders it as the 400 an unparseable path
+                // segment gets, so the two ways of naming an object fail
+                // the same way.
+                let value = query
+                    .iter()
+                    .find(|(param, _)| param == name)
+                    .map(|(_, value)| value.as_str())
+                    .ok_or_else(|| KeyError {
+                        position: raw.len(),
+                        raw: format!("missing query parameter `{name}`"),
+                    })?;
+                raw.push(value);
+            }
+
+            Ok(T::Key::parse(&raw)?)
+        }
+    }
+}
+
+/// Decode an `application/x-www-form-urlencoded` query string into
+/// name/value pairs.
+///
+/// Hand-rolled rather than pulled from a crate because it is twenty lines
+/// and the alternative is a public dependency on somebody's parser in the
+/// one code path that decides what object a policy is asked about. `+` is
+/// a space and `%XX` is a byte, which is the whole of the encoding;
+/// anything that does not decode as UTF-8 is dropped, so it cannot reach a
+/// lookup as a lossy replacement character.
+fn query_pairs(query: &str) -> Vec<(String, String)> {
+    fn decode(raw: &str) -> Option<String> {
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                b'%' if i + 2 < bytes.len() => {
+                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                    out.push(u8::from_str_radix(hex, 16).ok()?);
+                    i += 3;
+                }
+                byte => {
+                    out.push(byte);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(out).ok()
     }
 
-    Ok(T::Key::parse(&raw)?)
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            Some((decode(name)?, decode(value)?))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2749,29 +3149,43 @@ fn segment_schema(kind: ResourceIdType) -> utoipa::openapi::RefOr<utoipa::openap
     RefOr::T(Schema::Object(b.build()))
 }
 
-/// Segments come from [`GrantSite::PARAMS`] paired with the key's own
+/// Names come from [`resolved_params`] paired with the key's own
 /// [`RouteKey::SEGMENTS`], never from the positional template list — the
-/// site is authoritative about which segments feed the key, and in what
-/// order.
-impl<T: Subject> doxa::DocPathParams for Granted<T> {
+/// route and its asset are authoritative about which parameters feed the
+/// key, and in what order.
+///
+/// Where they live comes from the same `E::IN` the guard reads, so a
+/// `Granted<Widget, Query>` documents `?name=` because that is what it
+/// parses. Contributed through `DocPathParams` whichever it is: the
+/// location is a field on the parameter, and routing a query key through
+/// the query-side trait instead would be a second place for the two to
+/// disagree.
+impl<T: Subject, E: KeySource> doxa::DocPathParams for Granted<T, E> {
     fn describe(op: &mut utoipa::openapi::path::Operation, _positional: &[&'static str]) {
         use utoipa::openapi::path::{ParameterBuilder, ParameterIn};
         use utoipa::openapi::Required;
 
         let name_of = T::doc_name();
-        let params_named = <T::Site as GrantSite>::PARAMS;
+        let params_named = resolved_params::<T>();
         let composite = params_named.len() > 1;
+        let location = match E::IN {
+            KeyIn::Path => ParameterIn::Path,
+            KeyIn::Query => ParameterIn::Query,
+        };
 
         for (segment, kind) in params_named.iter().zip(T::Key::SEGMENTS) {
             let description = if composite {
-                format!("`{segment}` segment of the {name_of} identifier")
+                format!("`{segment}` part of the {name_of} identifier")
             } else {
                 format!("Identifier of the {name_of}")
             };
 
             let param = ParameterBuilder::new()
                 .name(*segment)
-                .parameter_in(ParameterIn::Path)
+                .parameter_in(location.clone())
+                // Required either way: the route identifies one object, so
+                // a query key that may be omitted is a route that may fail
+                // to name what it is about.
                 .required(Required::True)
                 .description(Some(description))
                 .schema(Some(segment_schema(*kind)))
@@ -2781,7 +3195,7 @@ impl<T: Subject> doxa::DocPathParams for Granted<T> {
     }
 }
 
-impl<T: Subject> doxa::DocOperationSecurity for Granted<T> {
+impl<T: Subject, E: KeySource> doxa::DocOperationSecurity for Granted<T, E> {
     fn describe(op: &mut utoipa::openapi::path::Operation) {
         let name_of = T::doc_name();
         let action = <T::Site as GrantSite>::ACTION;
@@ -2795,7 +3209,7 @@ impl<T: Subject> doxa::DocOperationSecurity for Granted<T> {
     }
 }
 
-impl<T: Subject> doxa::DocOperationContribution for Granted<T> {
+impl<T: Subject, E: KeySource> doxa::DocOperationContribution for Granted<T, E> {
     fn contribution() -> doxa::OperationContribution {
         let name_of = T::doc_name();
         let action = <T::Site as GrantSite>::ACTION;

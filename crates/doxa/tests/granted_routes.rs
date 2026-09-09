@@ -96,7 +96,7 @@ async fn get_widget(widget: Granted<Widget>) -> String {
 /// guard is destructured in the argument list, which the macro has to
 /// see through to reach the type it rewrites.
 #[delete("/folders/{fid}/widgets/{id}", tag = "Widgets")]
-async fn drop_widget(#[key("id")] Granted(_, _widget): Granted<Widget>) -> StatusCode {
+async fn drop_widget(#[key("id")] Granted(_, _widget, _): Granted<Widget>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
@@ -578,34 +578,7 @@ fn a_composite_key_documents_every_segment() {
     );
 }
 
-/// A site and a key that disagree about how many segments there are used
-/// to truncate silently. `DefaultSite` names none, so an instance key is
-/// exactly that mismatch.
-#[tokio::test]
-async fn a_site_that_names_too_few_segments_is_refused() {
-    let (mut parts, _rx) = {
-        let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
-        request.extensions_mut().insert(CapabilityContext {
-            tenant_id: Some("acme".into()),
-            roles: vec!["viewer".into()],
-        });
-        let checker: Arc<dyn CapabilityChecker> = Arc::new(RegionChecker);
-        request.extensions_mut().insert(checker);
-        let (parts, _) = request.into_parts();
-        (parts, ())
-    };
-
-    use axum::extract::FromRequestParts;
-    use axum::response::IntoResponse;
-
-    let rejection = Granted::<doxa::auth::One<Widget>>::from_request_parts(&mut parts, &())
-        .await
-        .err()
-        .expect("the site names no segments but the key takes one");
-
-    assert_eq!(
-        rejection.into_response().status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "a route/key mismatch is a misconfiguration, not a bad request",
-    );
-}
+// A site and a key that disagree about how many parameters there are used
+// to truncate silently, and then to fail on the first request. It now
+// fails the build, so the pair of tests that pin it are the `compile_fail`
+// doctests on `GrantSite::PARAMS` rather than anything runnable here.

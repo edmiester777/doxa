@@ -1,14 +1,21 @@
 //! `#[asset]` — the `Granting` impl an application would otherwise
 //! transcribe.
 //!
-//! Six of `Granting`'s seven items are not decisions. `Ctx`, `State`,
+//! Seven of `Granting`'s eight items are not decisions. `Ctx`, `State`,
 //! `Source` and `Error` belong to the application and are the same for
-//! every asset in it; `Key` and `load` are the lookup the row already
-//! declares through [`FetchByKey`] — or, for `key = pk`, through
+//! every asset in it; `Key`, `KEY_NAMES` and `load` are the lookup the row
+//! already declares through [`FetchByKey`] — or, for `key = pk`, through
 //! [`FetchById`], which is why the id route reaches a row that declares no
 //! key column at all; `Row` is `Self` unless the attribute says otherwise.
 //! Only `ACTIONS` is a fact about this asset, and the attribute takes it
 //! as one word.
+//!
+//! `KEY_NAMES` is what lets a route stop naming its own key segment. The
+//! column a lookup matches is a fact about the lookup, so it travels with
+//! it: `#[resource(key)] name: String` reaches the route as `&["name"]`,
+//! and `/pipelines/{name}/runs/{run_id}` binds the right one of the two
+//! segments without an annotation. `#[key("…")]` is left for the route
+//! whose parameter is spelled differently from the column.
 //!
 //! `with` names a [`Lookup`] instead — one of the markers
 //! `#[resource(key(Name))]` emits, for the row reached more ways than
@@ -271,6 +278,31 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         (None, None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::Key),
     };
 
+    // What the key's parameters are called, which is the half a route
+    // cannot work out: the key type is a `String`, and a `String` does not
+    // know whether the column behind it is `name` or `slug`. Read off
+    // whichever lookup was selected just above, so the answer moves with
+    // the way in rather than being restated per route.
+    //
+    // The key's own `RouteKey::NAMES` wins where it has any. That is the
+    // lookup matching more columns than its key parses segments — a
+    // qualified name split on the way in — where the columns and the
+    // segments are not the same list and only the key can say which is
+    // which. An explicit `key = T` names no lookup at all, so it is the
+    // only source there is.
+    let lookup_names = match (&args.key, &args.with, args.by_primary_key) {
+        (Some(_), _, _) => quote!(&[]),
+        (None, Some(with), _) => {
+            quote!(<#with as ::doxa::policy::Lookup<#state>>::KEY_NAMES)
+        }
+        (None, None, true) => {
+            quote!(<#row as ::doxa::policy::FetchById<#state>>::ID_NAMES)
+        }
+        (None, None, false) => {
+            quote!(<#row as ::doxa::policy::FetchByKey<#state>>::KEY_NAMES)
+        }
+    };
+
     let error = match &args.error {
         Some(error) => quote!(#error),
         None => quote!(<#profile as ::doxa::auth::GrantProfile>::Error),
@@ -402,6 +434,11 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
 
             const ACTIONS: &'static [::doxa::auth::Action] =
                 <#actions as ::doxa::auth::ActionTable>::ACTIONS;
+
+            const KEY_NAMES: &'static [&'static str] = ::doxa::auth::key_names(
+                <#key as ::doxa::auth::RouteKey>::NAMES,
+                #lookup_names,
+            );
 
             #load
         }
@@ -681,6 +718,128 @@ mod tests {
             )
         )
         .contains("`actions = …`"),);
+    }
+
+    /// The column a lookup matches is a fact about the lookup, so the name
+    /// travels with it rather than being repeated on every route. This is
+    /// what lets `/pipelines/{name}/runs/{run_id}` bind without a
+    /// `#[key("name")]`.
+    #[test]
+    fn the_key_names_come_off_the_lookup_that_was_selected() {
+        let out = expand_ok(
+            quote!(profile = AppGrants, actions = WidgetAction),
+            quote!(
+                pub struct Widget;
+            ),
+        );
+
+        assert!(
+            out.contains(
+                "const KEY_NAMES : & 'static [& 'static str] = :: doxa :: auth :: key_names \
+                 (< < Self as :: doxa :: policy :: FetchByKey"
+            ),
+            "{out}",
+        );
+        assert!(out.contains(":: KEY_NAMES ,) ;"), "{out}");
+    }
+
+    /// `key = pk` reaches a different lookup, so it reaches a different
+    /// name — the identifier column, not the key column, which the row may
+    /// not even have.
+    #[test]
+    fn key_pk_takes_its_name_from_the_identifier() {
+        let out = expand_ok(
+            quote!(
+                row = Widget,
+                key = pk,
+                profile = AppGrants,
+                actions = WidgetAction
+            ),
+            quote!(
+                pub struct WidgetById;
+            ),
+        );
+
+        assert!(
+            out.contains("< Widget as :: doxa :: policy :: FetchById <"),
+            "{out}",
+        );
+        assert!(out.contains(":: ID_NAMES ,) ;"), "{out}");
+        assert!(!out.contains("KEY_NAMES ,) ;"), "{out}");
+    }
+
+    /// A named lookup carries its own columns, so `with = …` reaches those
+    /// rather than the row's unnamed key — which it may not have.
+    #[test]
+    fn with_takes_its_names_off_the_named_lookup() {
+        let out = expand_ok(
+            quote!(
+                with = FindByPair,
+                profile = AppGrants,
+                actions = VersionAction
+            ),
+            quote!(
+                pub struct VersionByPair;
+            ),
+        );
+
+        assert!(
+            out.contains("< FindByPair as :: doxa :: policy :: Lookup <"),
+            "{out}",
+        );
+        assert!(out.contains(":: KEY_NAMES ,) ;"), "{out}");
+    }
+
+    /// The key's own `RouteKey::NAMES` is the first argument, so it wins
+    /// where it has any. That is the lookup matching more columns than its
+    /// key parses segments — a qualified name split on the way in — where
+    /// the columns and the segments are not the same list.
+    #[test]
+    fn the_keys_own_names_are_preferred_over_the_lookups() {
+        let out = expand_ok(
+            quote!(
+                with = ByQualifiedName,
+                profile = AppGrants,
+                actions = ModelAction
+            ),
+            quote!(
+                pub struct ModelByName;
+            ),
+        );
+
+        let call = out
+            .split("key_names (")
+            .nth(1)
+            .expect("the resolution is emitted");
+        let (preferred, _) = call.split_once(", <").expect("two arguments");
+        assert!(
+            preferred.contains(":: doxa :: auth :: RouteKey > :: NAMES"),
+            "the key's own names come first: {preferred}",
+        );
+    }
+
+    /// An explicit `key = T` names no lookup at all, so the key type is the
+    /// only source there is — asking a `FetchByKey` the row may not
+    /// implement would be a bound invented by the attribute.
+    #[test]
+    fn an_explicit_key_type_consults_no_lookup() {
+        let out = expand_ok(
+            quote!(
+                row = Source,
+                profile = AppGrants,
+                actions = WidgetAction,
+                key = Uuid,
+                load_with = load
+            ),
+            quote!(
+                pub struct WidgetById;
+            ),
+        );
+
+        assert!(
+            out.contains("key_names (< Uuid as :: doxa :: auth :: RouteKey > :: NAMES , & [] ,)"),
+            "{out}",
+        );
     }
 
     /// `pk` changes the lookup, not just the key type — which is why it

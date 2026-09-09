@@ -102,6 +102,21 @@ pub trait FetchByKey<Src: ?Sized>: Fetch<Src> {
     /// What the route's key segment parses into.
     type Key: Send;
 
+    /// What the key's parts are called, in key order.
+    ///
+    /// The column names behind [`Key`](Self::Key) — `&["name"]` for a row
+    /// keyed on its `name` column. A route whose path parameter is spelled
+    /// the same way therefore needs no `#[key("…")]` annotation to say
+    /// which segment feeds the lookup, which is the whole reason this is
+    /// here: the key type alone is a `String`, and a `String` cannot say
+    /// what it is called.
+    ///
+    /// `&[]` — the default — means the lookup declines to name its parts,
+    /// and a route over it says which segment it uses. Anything else must
+    /// have one entry per segment the key parses; a route that resolves to
+    /// a list of the wrong length is refused rather than truncated.
+    const KEY_NAMES: &'static [&'static str] = &[];
+
     /// The row `key` names within `scope`, or `None`.
     ///
     /// `None` covers both "no such key" and "not this caller's" — and must
@@ -122,6 +137,14 @@ pub trait FetchByKey<Src: ?Sized>: Fetch<Src> {
 pub trait FetchById<Src: ?Sized>: Fetch<Src> {
     /// The row's own identifier.
     type Id: Send;
+
+    /// What the identifier column is called — `&["id"]` for the usual
+    /// table.
+    ///
+    /// The [`FetchByKey::KEY_NAMES`] of the id route, and read the same
+    /// way: `#[asset(key = pk)]` hands it to the route, so `/widgets/{id}`
+    /// needs no annotation. `&[]` declines to name it.
+    const ID_NAMES: &'static [&'static str] = &[];
 
     /// The row `id` names within `scope`, or `None`.
     ///
@@ -185,6 +208,17 @@ pub trait Lookup<Src: ?Sized>: Send + Sync + 'static {
     /// What the route's segments parse into. A tuple for a composite
     /// lookup, in the order the columns were declared.
     type Key: Send;
+
+    /// What the key's parts are called, in key order — the columns this
+    /// way in matches, as `scoped_lookup!` names them.
+    ///
+    /// One entry per segment [`Key`](Self::Key) parses, which for a
+    /// generated key is one per column. A lookup whose key collapses
+    /// several columns into fewer segments — a qualified name matched
+    /// against a namespace and a name, parsed from one path segment — has
+    /// more columns than segments, so it declares the names on its key's
+    /// `RouteKey` impl instead and leaves this at `&[]`.
+    const KEY_NAMES: &'static [&'static str] = &[];
 
     /// How the lookup fails, before the application has had a say.
     type Error: Send;
