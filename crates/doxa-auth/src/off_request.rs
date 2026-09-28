@@ -1,7 +1,7 @@
 //! The same authorization, where there is no request to hang it on.
 //!
 //! A background job, a queue consumer and a scheduled task all decide the
-//! same things a route does — may this caller read this dataset, which
+//! same things a route does — may this caller read this widget, which
 //! subset may they see — and none of them has an [`http::Extensions`] to
 //! read a caller out of. The chain never needed one: [`authorize`] takes a
 //! caller, a checker and a state, and a worker has all three. What it did
@@ -10,8 +10,8 @@
 //! ```ignore
 //! let work = OffRequest::new(caller, checker, logger).actor("job:reindex");
 //!
-//! let dataset = work
-//!     .authorize::<One<DatasetByName>>(name, "read_dataset", &db)
+//! let widget = work
+//!     .authorize::<One<WidgetByName>>(name, "read", &db)
 //!     .await?;
 //! ```
 //!
@@ -80,7 +80,7 @@ use crate::granted::{authorize, Chain, FromAuthExtensions, Refusal};
 /// before dropping, through [`event`](Self::event):
 ///
 /// ```ignore
-/// if let Err(error) = reindex(&dataset).await {
+/// if let Err(error) = reindex(&widget).await {
 ///     work.event().emit_error(&error.to_string());
 /// }
 /// ```
@@ -166,8 +166,8 @@ impl<C: FromAuthExtensions> OffRequest<C> {
     /// the way [`Refusal`] does.
     ///
     /// ```ignore
-    /// let dataset = load_dataset(&db, &name).await?
-    ///     .authorize::<DatasetByName, _>(Read, work.extensions())
+    /// let widget = load_widget(&db, &name).await?
+    ///     .authorize::<WidgetByName, _>(Read, work.extensions())
     ///     .await?;
     /// ```
     pub fn extensions(&self) -> &Extensions {

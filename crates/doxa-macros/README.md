@@ -188,12 +188,12 @@ With the `sea-orm` feature, `scope` emits a `ScopedTable` impl — the confineme
 Bare `key` is the *unnamed* lookup, and there is one per struct. A row reached three ways runs out of it, so name them instead — a column may carry several names, and several columns may carry one, which makes a composite key and a column serving two routes the same declaration:
 
 ```rust
-#[resource(entity_type = "Version", filter = Column::DeletedAt.is_null())]
+#[resource(entity_type = "Revision", filter = Column::DeletedAt.is_null())]
 pub struct Model {
-    #[sea_orm(primary_key)]                         pub id: Uuid,
-    #[resource(id, key(FindByDataset, FindByPair))] pub dataset: String,
-    #[resource(key(FindByPair))]                    pub version: i64,
-    #[resource(scope)]                              pub tenant_id: String,
+    #[sea_orm(primary_key)]                        pub id: Uuid,
+    #[resource(id, key(FindByWidget, FindByPair))] pub widget: String,
+    #[resource(key(FindByPair))]                   pub revision: i64,
+    #[resource(scope)]                             pub tenant_id: String,
     pub deleted_at: Option<DateTimeUtc>,
 }
 ```
@@ -273,11 +273,11 @@ pub struct WidgetById;
 
 It calls `FetchById`, not `FetchByKey`, so it is reachable from a row marked `#[resource(scope)]` and nothing else. That is the case it most needs to cover: a table whose name route resolves through logic has no key column to mark, and would otherwise be left writing out the very lookup this exists to replace.
 
-`with` is for the row reached more ways than `FetchByKey` and `FetchById` can spell between them. Those two are facets of the row, so a row gets one of each; a version addressed by uuid, by name and by `(dataset, version)` runs out. `#[resource(key(FindByPair))]` emits a marker per named way in, and `with = FindByPair` selects one — carrying the row and the key with it, so nothing else is restated:
+`with` is for the row reached more ways than `FetchByKey` and `FetchById` can spell between them. Those two are facets of the row, so a row gets one of each; a revision addressed by uuid, by name and by `(widget, revision)` runs out. `#[resource(key(FindByPair))]` emits a marker per named way in, and `with = FindByPair` selects one — carrying the row and the key with it, so nothing else is restated:
 
 ```rust
-#[asset(with = FindByPair, profile = AppGrants, actions = VersionAction)]
-pub struct VersionByPair;
+#[asset(with = FindByPair, profile = AppGrants, actions = RevisionAction)]
+pub struct RevisionByPair;
 ```
 
 A named lookup is handed the same `&str` scope as an unnamed one, so it buys a second way in rather than a way out. Reach for it before `load_with`, which does not.

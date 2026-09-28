@@ -142,8 +142,8 @@ A background job, a queue consumer and a scheduled task decide the same things a
 ```rust
 let work = OffRequest::new(caller, checker, logger).actor("job:reindex");
 
-let dataset = work
-    .authorize::<One<DatasetByName>>(name, "read", &db)
+let widget = work
+    .authorize::<One<WidgetByName>>(name, "read", &db)
     .await?;
 ```
 

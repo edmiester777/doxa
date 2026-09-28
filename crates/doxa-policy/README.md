@@ -132,17 +132,17 @@ Use with `doxa-auth`'s `Require<WidgetsRead>` extractor for runtime enforcement 
 ```rust
 use doxa_policy::fetch::{Fetch, FetchByKey, FetchSubset};
 
-impl Fetch<Catalog> for Widget {
+impl Fetch<Store> for Widget {
     type Error = Infallible;
 }
 
 // One named field per route segment, so `{name}` binds by name.
 doxa_auth::route_key!(pub WidgetKey { name: String });
 
-impl FetchByKey<Catalog> for Widget {
+impl FetchByKey<Store> for Widget {
     type Key = WidgetKey;
 
-    async fn fetch(key: WidgetKey, src: &Catalog, scope: &str) -> Result<Option<Self>, Infallible> {
+    async fn fetch(key: WidgetKey, src: &Store, scope: &str) -> Result<Option<Self>, Infallible> {
         // The scope is not advisory: a widget owned by someone else is
         // absent, not refused.
         Ok(src.get(&key.name).filter(|w| w.tenant == scope).cloned())
@@ -161,20 +161,20 @@ The three-way split is deliberate: a key is a fact about a *route*, an id and a 
 
 ### When a row has more ways in than that
 
-Those three are facets of a row, so a row gets one of each. A dataset version has three ways in — a uuid, a dataset name, and a `(dataset, version)` pair — and the surplus used to become an `#[asset(load_with = …)]`, which is the one door that gives up the scope guarantee. So the row with the most ways in was the row most likely to lose it.
+Those three are facets of a row, so a row gets one of each. A widget revision has three ways in — a uuid, a widget name, and a `(widget, revision)` pair — and the surplus used to become an `#[asset(load_with = …)]`, which is the one door that gives up the scope guarantee. So the row with the most ways in was the row most likely to lose it.
 
 `Lookup` makes each one a named type instead. `Self` is a marker carrying the row, the key and the query together, and `fetch` takes the same `&str` scope and nothing else that `FetchByKey` does — a second way in, not a way out:
 
 ```rust
 use doxa_policy::fetch::Lookup;
 
-impl Lookup<Catalog> for FindByPair {
-    type Row = Version;
+impl Lookup<Store> for FindByPair {
+    type Row = Revision;
     type Key = FindByPairKey;
     type Error = Infallible;
 
-    async fn fetch(key: FindByPairKey, src: &Catalog, scope: &str)
-        -> Result<Option<Version>, Infallible>
+    async fn fetch(key: FindByPairKey, src: &Store, scope: &str)
+        -> Result<Option<Revision>, Infallible>
     { /* … confined to `scope`, as every fetch is */ }
 }
 ```
@@ -215,11 +215,11 @@ They are separate because a scope is a fact about the *table* and a key is a fac
 
 ```rust
 doxa_policy::scoped_lookup!(pub FindByPair as FindByPairKey for Model {
-    dataset: String => Column::Dataset,
-    version: i64    => Column::Version,
+    widget:   String => Column::Widget,
+    revision: i64    => Column::Revision,
 });
 
-let key = FindByPairKey { dataset: "sales".into(), version: 3 };
+let key = FindByPairKey { widget: "sprocket".into(), revision: 3 };
 ```
 
 `ScopedTable::table_condition` is a condition every query carries on top of the scope — the soft-delete tombstone being the case it exists for. It hangs on the table so the key lookup, the id lookup, the listing and the residual filter all inherit it; applied by hand to three of those four, the symptom is not a compile error but a deleted row coming back on the fourth. `#[derive(PolicyResource)]` writes it from `#[resource(filter = …)]`, splicing the expression rather than interpreting it.

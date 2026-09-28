@@ -32,8 +32,8 @@
 //! serve.
 //!
 //! Those three are facets of the row, so a row gets one of each. [`Lookup`]
-//! is for the row that has more ways in than that — a version addressed by
-//! uuid, by name, and by `(dataset, version)` — and makes each one a named
+//! is for the row that has more ways in than that — a revision addressed by
+//! uuid, by name, and by `(widget, revision)` — and makes each one a named
 //! type rather than a fourth trait. Reach for it when you run out of the
 //! three, not before.
 //!
@@ -160,8 +160,8 @@ pub trait FetchById<Src: ?Sized>: Fetch<Src> {
 /// identifier. That is the whole vocabulary for most rows, and they should
 /// keep using it — `#[asset]` finds those two without being told.
 ///
-/// It runs out when a row is reached three ways. A dataset version has a
-/// uuid, a name, and a `(dataset, version)` pair, and only two of those fit.
+/// It runs out when a row is reached three ways. A widget revision has a
+/// uuid, a name, and a `(widget, revision)` pair, and only two of those fit.
 /// The third used to become a descriptor with `load_with`, which is the one
 /// door that gives up the scope guarantee — so the row with the most ways in
 /// was the row most likely to lose it.
@@ -171,16 +171,16 @@ pub trait FetchById<Src: ?Sized>: Fetch<Src> {
 ///
 /// ```ignore
 /// #[derive(PolicyResource)]
-/// #[resource(entity_type = "Version")]
+/// #[resource(entity_type = "Revision")]
 /// struct Model {
-///     #[resource(key(FindByPair))] dataset: String,
-///     #[resource(key(FindByPair))] version: i64,
+///     #[resource(key(FindByPair))] widget: String,
+///     #[resource(key(FindByPair))] revision: i64,
 ///     #[resource(scope)]           tenant_id: String,
 /// }
 ///
 /// // …and the asset names the way in rather than the row:
-/// #[asset(with = FindByPair, profile = AppGrants, actions = VersionAction)]
-/// pub struct VersionByPair;
+/// #[asset(with = FindByPair, profile = AppGrants, actions = RevisionAction)]
+/// pub struct RevisionByPair;
 /// ```
 ///
 /// [`Row`](Self::Row) is here rather than on the asset because a marker is
