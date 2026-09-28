@@ -508,11 +508,11 @@ macro_rules! __fetch_by_key {
 /// });
 ///
 /// doxa_policy::scoped_lookup!(pub FindByPair as FindByPairKey for Model {
-///     dataset: String => Column::Dataset,
-///     version: i64    => Column::Version,
+///     widget:   String => Column::Widget,
+///     revision: i64    => Column::Revision,
 /// });
 ///
-/// let key = FindByPairKey { dataset: "sales".into(), version: 3 };
+/// let key = FindByPairKey { widget: "sprocket".into(), revision: 3 };
 /// ```
 ///
 /// The key is a struct rather than a tuple or a bare value for two

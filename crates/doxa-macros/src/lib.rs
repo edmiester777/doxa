@@ -467,7 +467,7 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// ## More ways in than one
 ///
 /// `#[resource(key)]` is the *unnamed* lookup, and there is one per struct.
-/// A row reached three ways — a uuid, a name, and a `(dataset, version)`
+/// A row reached three ways — a uuid, a name, and a `(widget, revision)`
 /// pair — runs out of it, and used to give the surplus to `#[asset]`'s
 /// `load_with`, which is the one door that gives up the scope guarantee.
 ///
@@ -476,17 +476,17 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// names, and several columns may carry one:
 ///
 /// ```ignore
-/// #[resource(entity_type = "Version")]
+/// #[resource(entity_type = "Revision")]
 /// pub struct Model {
-///     #[sea_orm(primary_key)]                      pub id: Uuid,
-///     #[resource(id, key(FindByDataset, FindByPair))] pub dataset: String,
-///     #[resource(key(FindByPair))]                 pub version: i64,
-///     #[resource(scope)]                           pub tenant_id: String,
+///     #[sea_orm(primary_key)]                        pub id: Uuid,
+///     #[resource(id, key(FindByWidget, FindByPair))] pub widget: String,
+///     #[resource(key(FindByPair))]                   pub revision: i64,
+///     #[resource(scope)]                             pub tenant_id: String,
 /// }
 ///
 /// // …and the asset names the way in rather than the row:
-/// #[asset(with = FindByPair, profile = AppGrants, actions = VersionAction)]
-/// pub struct VersionByPair;
+/// #[asset(with = FindByPair, profile = AppGrants, actions = RevisionAction)]
+/// pub struct RevisionByPair;
 /// ```
 ///
 /// A composite lookup also gets a key struct — `FindByPairKey` above, with
@@ -506,7 +506,7 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// the scope — the soft-delete tombstone being the case it exists for:
 ///
 /// ```ignore
-/// #[resource(entity_type = "Version", filter = Column::DeletedAt.is_null())]
+/// #[resource(entity_type = "Revision", filter = Column::DeletedAt.is_null())]
 /// ```
 ///
 /// Repeatable, and `AND`ed. The expression is spliced rather than
@@ -689,8 +689,8 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// marker carries its row and its key, so `with` is the whole declaration:
 ///
 /// ```ignore
-/// #[asset(with = FindByPair, profile = AppGrants, actions = VersionAction)]
-/// pub struct VersionByPair;
+/// #[asset(with = FindByPair, profile = AppGrants, actions = RevisionAction)]
+/// pub struct RevisionByPair;
 /// ```
 ///
 /// Reach for it before `load_with`, and for the reason below: a named
