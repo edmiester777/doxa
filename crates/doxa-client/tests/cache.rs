@@ -1,16 +1,18 @@
 //! What reaches the network: re-reads, revalidation, mutations, streams.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::IntoFuture;
 use std::rc::Rc;
+use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use doxa_client::cache::{self, Observer};
-use doxa_client::transport::MockTransport;
+use doxa_client::transport::{Body, MockTransport, Request, Response, Transport};
 use doxa_client::{
     task, CacheConfig, Cached, Call, Client, ClientConfig, Granted, Json, Query, SseStream,
 };
 use doxa_wire::{Identity, Keyed, Method, RouteSpec};
+use futures_util::future::LocalBoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -87,6 +89,114 @@ fn install(mock: &MockTransport, stale: Duration) -> Rc<Client> {
 
 fn wait<F: IntoFuture>(call: F) -> F::Output {
     task::block_on(call.into_future())
+}
+
+/// Holds every request until the test answers it.
+#[derive(Clone, Default)]
+struct Manual(Rc<RefCell<Vec<Rc<Held>>>>);
+
+#[derive(Default)]
+struct Held {
+    url: String,
+    reply: RefCell<Option<Canned>>,
+    waker: RefCell<Option<Waker>>,
+}
+
+type Canned = (u16, Vec<(String, String)>, Vec<u8>);
+
+impl Manual {
+    fn answer(&self, i: usize, status: u16, session: Option<&str>, body: serde_json::Value) {
+        let held = self.0.borrow()[i].clone();
+        let headers = session
+            .map(|s| vec![(doxa_wire::SESSION_HEADER.to_owned(), s.to_owned())])
+            .unwrap_or_default();
+        *held.reply.borrow_mut() = Some((status, headers, serde_json::to_vec(&body).unwrap()));
+        if let Some(w) = held.waker.borrow_mut().take() {
+            w.wake();
+        }
+        task::run_until_stalled();
+    }
+
+    fn urls(&self) -> Vec<String> {
+        self.0.borrow().iter().map(|h| h.url.clone()).collect()
+    }
+}
+
+impl Transport for Manual {
+    fn send(&self, request: Request) -> LocalBoxFuture<'static, Result<Response, String>> {
+        let held = Rc::new(Held {
+            url: request.url,
+            ..Held::default()
+        });
+        self.0.borrow_mut().push(held.clone());
+        Box::pin(std::future::poll_fn(move |cx| {
+            match held.reply.borrow_mut().take() {
+                Some((status, headers, body)) => Poll::Ready(Ok(Response {
+                    status,
+                    headers,
+                    body: Body::Full(body),
+                })),
+                None => {
+                    *held.waker.borrow_mut() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }))
+    }
+}
+
+fn spawn<F: IntoFuture + 'static>(call: F) {
+    let fut = call.into_future();
+    task::spawn(async move {
+        let _ = fut.await;
+    });
+    task::run_until_stalled();
+}
+
+#[test]
+fn a_late_response_from_the_old_session_is_dropped() {
+    let manual = Manual::default();
+    let client = ClientConfig::default()
+        .transport(manual.clone())
+        .cache(CacheConfig::default().stale_time(Duration::from_secs(60)))
+        .install();
+    let changes = Rc::new(Cell::new(0));
+    let c = changes.clone();
+    client.on_session_change(move || c.set(c.get() + 1));
+
+    spawn(get("gear"));
+    manual.answer(0, 200, Some("a"), widget(2, "gear"));
+    spawn(get("cog"));
+    spawn(list());
+    manual.answer(2, 200, Some("b"), json!([]));
+    assert_eq!(changes.get(), 1);
+    manual.answer(1, 200, Some("a"), widget(1, "old"));
+    assert_eq!(changes.get(), 1, "the old epoch came back");
+
+    // The dropped `cog` call is retried in the new session.
+    assert_eq!(manual.urls(), ["/w/gear", "/w/cog", "/w", "/w/cog"]);
+    manual.answer(3, 200, Some("b"), widget(1, "cog"));
+    assert_eq!(wait(get("cog")).unwrap().name, "cog");
+    wait(list()).unwrap();
+    assert_eq!(changes.get(), 1);
+    assert_eq!(manual.urls().len(), 4);
+}
+
+#[test]
+fn a_revalidation_from_before_a_clear_does_not_overwrite_the_new_entry() {
+    let manual = Manual::default();
+    let client = ClientConfig::default()
+        .transport(manual.clone())
+        .cache(CacheConfig::default().stale_time(Duration::ZERO))
+        .install();
+    spawn(get("cog"));
+    manual.answer(0, 200, None, widget(1, "v1"));
+    assert_eq!(wait(get("cog")).unwrap().name, "v1");
+    client.clear_cache();
+    spawn(get("cog"));
+    manual.answer(2, 200, None, widget(1, "v2"));
+    manual.answer(1, 200, None, widget(1, "old"));
+    assert_eq!(wait(get("cog")).unwrap().name, "v2");
 }
 
 #[derive(Default)]

@@ -1,6 +1,6 @@
 //! The installed client: transport, credentials, cache, and session.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::cache::{Cache, CacheConfig};
@@ -75,6 +75,8 @@ pub struct Client {
     auth: Auth,
     pub(crate) cache: Cache,
     epoch: RefCell<Option<String>>,
+    /// Bumped on every session change; a response to an older one is dropped.
+    session: Cell<u64>,
     on_session: RefCell<Vec<Box<dyn Fn()>>>,
     streams: RefCell<HashMap<String, Weak<Hub>>>,
 }
@@ -92,6 +94,7 @@ impl Client {
             auth: config.auth,
             cache,
             epoch: RefCell::new(None),
+            session: Cell::new(0),
             on_session: RefCell::new(Vec::new()),
             streams: RefCell::default(),
         }
@@ -154,10 +157,19 @@ impl Client {
         }
     }
 
-    /// Clear everything tied to the old session when the server names a new one.
-    pub(crate) fn observe_session(&self, response: &Response) {
+    /// The session counter to tag a request with as it is sent.
+    pub(crate) fn session(&self) -> u64 {
+        self.session.get()
+    }
+
+    /// Whether a response to a request sent in session `sent` is still current.
+    /// Clears everything tied to the old session when the server names a new one.
+    pub(crate) fn observe_session(&self, response: &Response, sent: u64) -> bool {
+        if sent != self.session.get() {
+            return false;
+        }
         let Some(epoch) = response.header(doxa_wire::SESSION_HEADER) else {
-            return;
+            return true;
         };
         let changed = {
             let mut current = self.epoch.borrow_mut();
@@ -166,12 +178,14 @@ impl Client {
             changed
         };
         if changed {
+            self.session.set(sent + 1);
             self.cache.clear();
             self.streams.borrow_mut().clear();
             for f in self.on_session.borrow().iter() {
                 f();
             }
         }
+        true
     }
 }
 

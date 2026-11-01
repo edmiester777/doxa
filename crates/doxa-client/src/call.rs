@@ -200,19 +200,28 @@ enum Sent<R: FromResponse> {
     Failed(Fetch),
 }
 
+/// What came back, and whether it still belongs to the current session.
 async fn send<R: FromResponse>(
     client: &Client,
     mut request: Request,
     etag: Option<&str>,
-) -> Sent<R> {
+) -> (Sent<R>, bool) {
     if let Some(etag) = etag {
         request.headers.push(("if-none-match".into(), etag.into()));
     }
+    let session = client.session();
     let response = match client.transport.send(request).await {
         Ok(r) => r,
-        Err(e) => return Sent::Failed(Fetch::Network(e)),
+        Err(e) => {
+            let current = client.session() == session;
+            return (Sent::Failed(Fetch::Network(e)), current);
+        }
     };
-    client.observe_session(&response);
+    let current = client.observe_session(&response, session);
+    (decode::<R>(response).await, current)
+}
+
+async fn decode<R: FromResponse>(response: crate::transport::Response) -> Sent<R> {
     let mut meta = Meta {
         now: now(),
         max_age: max_age(response.header("cache-control")),
@@ -271,17 +280,22 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
     let key = format!("{} {url}", call.route.method.as_str());
-    if let Some(hub) = client.open_stream(&key) {
-        return Ok(R::stream(hub));
-    }
-    let request = call.request(&client, url, "text/event-stream");
-    client.cache.count_request();
-    let response = client
-        .transport
-        .send(request.clone())
-        .await
-        .map_err(Fetch::Network)?;
-    client.observe_session(&response);
+    let (request, response) = loop {
+        if let Some(hub) = client.open_stream(&key) {
+            return Ok(R::stream(hub));
+        }
+        let request = call.request(&client, url.clone(), "text/event-stream");
+        client.cache.count_request();
+        let session = client.session();
+        let response = client
+            .transport
+            .send(request.clone())
+            .await
+            .map_err(Fetch::Network)?;
+        if client.observe_session(&response, session) {
+            break (request, response);
+        }
+    };
     if response.status >= 400 {
         let body = response.body.bytes().await.map_err(Fetch::Network)?;
         return Err(Fetch::from_status(response.status, &body));
@@ -297,41 +311,59 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
 async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
-    let request = call.request(&client, url.clone(), "application/json");
-
     let key = format!("GET {url}");
+    loop {
+        if let Some(result) = query_once(&call, &client, &url, &key).await {
+            return result;
+        }
+    }
+}
+
+/// One attempt; `None` when the session changed while it was in flight.
+async fn query_once<R: FromResponse>(
+    call: &Call<R>,
+    client: &Rc<Client>,
+    url: &str,
+    key: &str,
+) -> Option<Result<R::Output, Fetch<R::Error>>> {
+    let request = call.request(client, url.to_owned(), "application/json");
     if !call.fresh {
-        match client.cache.lookup(&key, now()) {
-            Lookup::Fresh(v) => return out_of::<R>(&v),
+        match client.cache.lookup(key, now()) {
+            Lookup::Fresh(v) => return Some(out_of::<R>(&v)),
             Lookup::Revalidate(v, claim) => {
-                revalidate::<R>(&client, key, request, claim);
-                return out_of::<R>(&v);
+                revalidate::<R>(client, key.to_owned(), request, claim);
+                return Some(out_of::<R>(&v));
             }
             Lookup::Pending(slot) => {
                 let outcome = slot.wait().await;
                 if !matches!(*outcome, Outcome::Failed(Fetch::Aborted)) {
-                    client.cache.watch(&key);
-                    return from_outcome::<R>(&outcome);
+                    client.cache.watch(key);
+                    return Some(from_outcome::<R>(&outcome));
                 }
+                return None;
             }
             Lookup::Miss => {}
         }
     }
 
-    let slot = client.cache.begin(&key);
+    let slot = client.cache.begin(key);
     let guard = Inflight {
-        client: &client,
-        key: &key,
+        client,
+        key,
         slot: &slot,
     };
-    let result = match send::<R>(&client, request, None).await {
+    let (sent, current) = send::<R>(client, request, None).await;
+    if !current {
+        return None;
+    }
+    let result = match sent {
         Sent::Value(v, meta, _) => {
             match R::store(&v) {
                 Some(stored) => {
                     let route_key = call.out.first_key().cloned();
                     client
                         .cache
-                        .store(key.clone(), call.route, route_key, stored.clone(), meta);
+                        .store(key.to_owned(), call.route, route_key, stored.clone(), meta);
                     slot.finish(Outcome::Value(stored));
                 }
                 None => slot.finish(Outcome::Failed(Fetch::Decode("not cacheable".into()))),
@@ -353,7 +385,7 @@ async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Err
         }
     };
     drop(guard);
-    result
+    Some(result)
 }
 
 /// Ends an in-flight entry even if the caller drops the call, so waiters retry
@@ -369,7 +401,7 @@ impl Drop for Inflight<'_> {
         if self.slot.outcome.borrow().is_none() {
             self.slot.finish(Outcome::Failed(Fetch::Aborted));
         }
-        self.client.cache.end(self.key);
+        self.client.cache.end(self.key, self.slot);
     }
 }
 
@@ -382,7 +414,11 @@ fn revalidate<R: FromResponse>(
     let client = client.clone();
     crate::task::spawn(async move {
         client.cache.count_request();
-        let result = match send::<R>(&client, request, claim.etag.as_deref()).await {
+        let (sent, current) = send::<R>(&client, request, claim.etag.as_deref()).await;
+        if !current {
+            return;
+        }
+        let result = match sent {
             Sent::Value(v, meta, _) => match R::store(&v) {
                 Some(stored) => Revalidated::Value(stored, meta),
                 None => Revalidated::Failed,
@@ -401,8 +437,13 @@ async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Er
     let key = call.out.first_key().cloned();
     let previous = call.patch.map(|p| p(&client, key.as_ref()));
     client.cache.count_request();
-    match send::<R>(&client, request, None).await {
+    // A mutation that outlived its session still reports, but leaves the new cache alone.
+    let (sent, current) = send::<R>(&client, request, None).await;
+    match sent {
         Sent::Value(v, _, extra) => {
+            if !current {
+                return Ok(v);
+            }
             if let (Some(settle), Some(stored)) = (call.settle, R::store(&v)) {
                 settle(&client, &*stored, key.as_ref());
             }
@@ -412,7 +453,7 @@ async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Er
             Ok(v)
         }
         other => {
-            if let Some(previous) = previous {
+            if let (Some(previous), true) = (previous, current) {
                 client.cache.restore(previous);
             }
             Err(match other {

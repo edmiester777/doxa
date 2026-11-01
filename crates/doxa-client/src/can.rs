@@ -69,32 +69,34 @@ impl IntoFuture for Probe {
             };
             let client = Client::current();
             let key = format!("CAN {} {url}", self.route.method.as_str());
-            if let Some(v) = client.cache.fresh(&key, now()) {
-                if let Some(p) = v.downcast_ref::<Permission>() {
-                    return *p;
-                }
-            }
-            client.cache.count_request();
-            let mut request = Request {
-                method: self.route.method,
-                url,
-                headers: vec![(doxa_wire::DRY_RUN_HEADER.into(), "1".into())],
-                body: None,
-                credentials: false,
-            };
-            client.authorize(&mut request);
-            let permission = match client.transport.send(request).await {
-                Ok(resp) => {
-                    client.observe_session(&resp);
-                    let echoed =
-                        resp.header(doxa_wire::DRY_RUN_HEADER) == Some(doxa_wire::DRY_RUN_OK);
-                    match resp.status {
-                        204 if echoed => Permission::Allowed,
-                        401 | 403 | 404 => Permission::Denied,
-                        _ => Permission::Unknown,
+            let permission = loop {
+                if let Some(v) = client.cache.fresh(&key, now()) {
+                    if let Some(p) = v.downcast_ref::<Permission>() {
+                        return *p;
                     }
                 }
-                Err(_) => Permission::Unknown,
+                client.cache.count_request();
+                let mut request = Request {
+                    method: self.route.method,
+                    url: url.clone(),
+                    headers: vec![(doxa_wire::DRY_RUN_HEADER.into(), "1".into())],
+                    body: None,
+                    credentials: false,
+                };
+                client.authorize(&mut request);
+                let session = client.session();
+                let Ok(resp) = client.transport.send(request).await else {
+                    break Permission::Unknown;
+                };
+                if !client.observe_session(&resp, session) {
+                    continue;
+                }
+                let echoed = resp.header(doxa_wire::DRY_RUN_HEADER) == Some(doxa_wire::DRY_RUN_OK);
+                break match resp.status {
+                    204 if echoed => Permission::Allowed,
+                    401 | 403 | 404 => Permission::Denied,
+                    _ => Permission::Unknown,
+                };
             };
             client.cache.store(
                 key,

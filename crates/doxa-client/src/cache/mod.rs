@@ -4,7 +4,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::task::Waker;
 use std::time::Duration;
@@ -153,7 +153,8 @@ pub(crate) struct Entry {
     key: Option<Value>,
     at: f64,
     stale: bool,
-    /// Bumped by every invalidation, so a revalidation that started before one is discarded.
+    /// Renewed by every store and invalidation, unique across clears, so a
+    /// revalidation that started before one is discarded.
     generation: u64,
     max_age: Option<Duration>,
     etag: Option<String>,
@@ -221,7 +222,9 @@ pub(crate) struct Cache {
     pub config: RefCell<CacheConfig>,
     entries: RefCell<HashMap<String, Entry>>,
     inflight: RefCell<HashMap<String, Rc<Slot>>>,
-    revalidating: RefCell<HashSet<String>>,
+    /// Each claimed revalidation, by the generation it claimed.
+    revalidating: RefCell<HashMap<String, u64>>,
+    generations: Cell<u64>,
     requests: Cell<u64>,
 }
 
@@ -233,10 +236,12 @@ impl Cache {
         let mut entries = self.entries.borrow_mut();
         if let Some(entry) = entries.get_mut(key) {
             observe(entry, observer.as_ref());
-            if !self.is_stale(entry, now) || self.revalidating.borrow().contains(key) {
+            if !self.is_stale(entry, now) || self.revalidating.borrow().contains_key(key) {
                 return Lookup::Fresh(entry.value.clone());
             }
-            self.revalidating.borrow_mut().insert(key.to_owned());
+            self.revalidating
+                .borrow_mut()
+                .insert(key.to_owned(), entry.generation);
             entry.at = now;
             entry.stale = false;
             return Lookup::Revalidate(
@@ -291,8 +296,18 @@ impl Cache {
         slot
     }
 
-    pub fn end(&self, key: &str) {
-        self.inflight.borrow_mut().remove(key);
+    /// Retire `slot`, unless a clear already replaced it.
+    pub fn end(&self, key: &str, slot: &Slot) {
+        let mut inflight = self.inflight.borrow_mut();
+        if inflight.get(key).is_some_and(|s| std::ptr::eq(&**s, slot)) {
+            inflight.remove(key);
+        }
+    }
+
+    fn next_generation(&self) -> u64 {
+        let g = self.generations.get() + 1;
+        self.generations.set(g);
+        g
     }
 
     pub fn store(
@@ -305,9 +320,9 @@ impl Cache {
     ) {
         let observer = current_observer();
         let mut entries = self.entries.borrow_mut();
-        let (observers, generation) = entries
+        let observers = entries
             .remove(&key)
-            .map(|e| (e.observers, e.generation))
+            .map(|e| e.observers)
             .unwrap_or_default();
         let mut entry = Entry {
             value,
@@ -315,7 +330,7 @@ impl Cache {
             key: route_key,
             at: meta.now,
             stale: false,
-            generation,
+            generation: self.next_generation(),
             max_age: meta.max_age,
             etag: meta.etag,
             digest: meta.digest,
@@ -329,7 +344,12 @@ impl Cache {
 
     /// Finish the revalidation `claim` of `key`, telling readers if the value changed.
     pub fn revalidated(&self, key: &str, claim: Revalidation, result: Revalidated) {
-        self.revalidating.borrow_mut().remove(key);
+        {
+            let mut revalidating = self.revalidating.borrow_mut();
+            if revalidating.get(key) == Some(&claim.generation) {
+                revalidating.remove(key);
+            }
+        }
         let observers = {
             let mut entries = self.entries.borrow_mut();
             let Some(e) = entries.get_mut(key) else {
@@ -375,7 +395,7 @@ impl Cache {
                 .filter(|e| hit(e))
                 .flat_map(|e| {
                     e.stale = true;
-                    e.generation += 1;
+                    e.generation = self.next_generation();
                     e.observers.clone()
                 })
                 .collect()
@@ -423,6 +443,8 @@ impl Cache {
 
     /// Forget everything, e.g. on a new session.
     pub fn clear(&self) {
+        self.inflight.borrow_mut().clear();
+        self.revalidating.borrow_mut().clear();
         let observers: Vec<_> = self
             .entries
             .borrow_mut()
