@@ -174,14 +174,25 @@ fn reconcile_keyed(
     end: Option<NodeId>,
 ) {
     let mut previous: Vec<Option<Mounted>> = std::mem::take(old).into_iter().map(Some).collect();
+    // Unkeyed children match the old unkeyed ones in order.
+    let mut unkeyed = previous
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.as_ref().is_some_and(|m| m.key().is_none()))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>()
+        .into_iter();
     let mut placed: Vec<(Mounted, Option<usize>)> = Vec::with_capacity(new.len());
     for n in new {
-        let found = node_key(&n).and_then(|k| {
-            previous.iter().position(|m| {
+        let found = match node_key(&n) {
+            Some(k) => previous.iter().position(|m| {
                 m.as_ref()
                     .is_some_and(|m| m.key() == Some(k) && same_kind(m, &n))
-            })
-        });
+            }),
+            None => unkeyed
+                .next()
+                .filter(|&i| previous[i].as_ref().is_some_and(|m| same_kind(m, &n))),
+        };
         match found {
             Some(i) => {
                 let mut m = previous[i].take().expect("matched once");

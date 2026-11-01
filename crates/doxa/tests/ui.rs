@@ -461,6 +461,46 @@ fn context_survives_a_failed_render() {
     context_survives_an_uncommitted_render(2);
 }
 
+#[component]
+fn Tally() -> View {
+    let n = state(0u32);
+    view! { <b on:click={move |_| n.update(|n| *n += 1)}>{n.get()}</b> }
+}
+
+#[component]
+fn MixedList() -> View {
+    let ids = ORDER.with(|o| o.borrow().clone());
+    let tick = state(0);
+    let _ = tick.get();
+    view! {
+        <div>
+            <input/>
+            {ids.iter().map(|&id| view! { <Item key={id} id={id}/> }).collect::<View>()}
+            <Tally/>
+            <button on:click={move |_| tick.update(|t| *t += 1)}>"x"</button>
+        </div>
+    }
+}
+
+#[test]
+fn unkeyed_siblings_of_a_keyed_list_are_kept() {
+    ORDER.with(|o| *o.borrow_mut() = vec![1, 2]);
+    let dom = mount(|| view! { <MixedList/> });
+    let input = dom.find_tag("input").unwrap();
+    dom.click(dom.find_tag("b").unwrap());
+    settle();
+    ORDER.with(|o| *o.borrow_mut() = vec![2, 1, 3]);
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert_eq!(dom.find_tag("input"), Some(input));
+    assert_eq!(
+        dom.text(dom.find_tag("b").unwrap()),
+        "1",
+        "Tally kept its state"
+    );
+    assert_eq!(dom.text(dom.find_tag("div").unwrap()), "2131x");
+}
+
 
 const LIGHT: Theme = Theme::new("light", &[("--bg", "white"), ("--fg", "black")]);
 const DIM: Theme = Theme::new("dim", &[("--bg", "grey")]);
