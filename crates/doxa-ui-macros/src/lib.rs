@@ -5,6 +5,7 @@ use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
 mod component;
+mod npm;
 mod page;
 mod react;
 mod view;

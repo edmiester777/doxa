@@ -11,7 +11,7 @@ use crate::component::RenderFuture;
 use crate::dom::{NodeRef, Phase};
 use crate::runtime::{self, Instance};
 use crate::view::{el, Callback};
-use crate::{IntoView, Thrown};
+use crate::{IntoView, Thrown, View};
 
 /// Where a `#[react]` component's JS lives.
 #[derive(Debug)]
@@ -37,6 +37,10 @@ pub trait IslandProps: Clone + 'static {
     fn same_data(&self, other: &Self) -> bool;
     fn data(&self, out: &mut Data);
     fn events(&self, out: &mut Events);
+    /// A `children: View` prop, rendered by doxa into a host React adopts.
+    fn children(&self) -> Option<View> {
+        None
+    }
 }
 
 /// The non-event props, as a JSON object.
@@ -93,12 +97,14 @@ fn parse<T: DeserializeOwned>(json: &str) -> serde_json::Result<T> {
 /// The JS side of islands. [`set_bridge`] swaps it, e.g. for a fake in native tests.
 pub trait Bridge {
     /// Render `island` into `host` with `props`, a JSON object, and `events`; returns its id.
+    /// `children` holds doxa's `View` children, for React to place as its `children`.
     fn mount(
         &self,
         host: NodeRef,
         island: &Island,
         props: &str,
         events: Vec<(&'static str, EventFn)>,
+        children: Option<NodeRef>,
     ) -> u32;
     /// Give a mounted island new non-event props.
     fn update(&self, id: u32, props: &str);
@@ -129,7 +135,14 @@ fn default_bridge() -> Rc<dyn Bridge> {
 fn default_bridge() -> Rc<dyn Bridge> {
     struct Inert;
     impl Bridge for Inert {
-        fn mount(&self, _: NodeRef, _: &Island, _: &str, _: Vec<(&'static str, EventFn)>) -> u32 {
+        fn mount(
+            &self,
+            _: NodeRef,
+            _: &Island,
+            _: &str,
+            _: Vec<(&'static str, EventFn)>,
+            _: Option<NodeRef>,
+        ) -> u32 {
             0
         }
         fn update(&self, _: u32, _: &str) {}
@@ -142,6 +155,7 @@ type Slot = Rc<RefCell<EventFn>>;
 
 struct Live<P> {
     id: Cell<Option<u32>>,
+    children: Cell<Option<NodeRef>>,
     shown: RefCell<Option<P>>,
     events: RefCell<Vec<(&'static str, Slot)>>,
 }
@@ -174,7 +188,13 @@ impl<P: IslandProps> Live<P> {
                         (*name, f)
                     })
                     .collect();
-                let id = bridge().mount(host, &P::ISLAND, &json(props), forwarders);
+                let id = bridge().mount(
+                    host,
+                    &P::ISLAND,
+                    &json(props),
+                    forwarders,
+                    self.children.get(),
+                );
                 self.id.set(Some(id));
                 *self.shown.borrow_mut() = Some(props.clone());
             }
@@ -211,6 +231,7 @@ fn json<P: IslandProps>(props: &P) -> String {
 pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     let (inst, _, live) = crate::hooks::slot("island", || Live::<P> {
         id: Cell::new(None),
+        children: Cell::new(None),
         shown: RefCell::new(None),
         events: RefCell::new(Vec::new()),
     });
@@ -220,9 +241,22 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     };
     props.events(&mut events);
     live.retarget(events.list);
+    // The children host mounts before the island host, so its node is known by then.
+    let children = props.children().map(|v| {
+        let live = live.clone();
+        el("div")
+            .attr("data-island-children", true)
+            .attr("style", "display: contents")
+            .lifecycle(move |phase, node| {
+                live.children
+                    .set((phase != Phase::Unmounting).then_some(node))
+            })
+            .child(v)
+    });
     let host = el("div")
         .attr("data-island", P::ISLAND.name)
         .attr("style", "display: contents")
+        .child(children)
         .lifecycle(move |phase, node| live.on(phase, node, &props));
     RenderFuture::ready(Ok(host.into_view()))
 }
@@ -245,6 +279,7 @@ mod web {
             component: &JsValue,
             props: &str,
             events: &js_sys::Object,
+            children: Option<web_sys::Node>,
         ) -> u32;
         #[wasm_bindgen(js_name = update)]
         fn js_update(id: u32, props: &str);
@@ -265,8 +300,10 @@ mod web {
             island: &Island,
             props: &str,
             events: Vec<(&'static str, EventFn)>,
+            children: Option<NodeRef>,
         ) -> u32 {
             let host = host.raw().expect("an island's host is in the document");
+            let children = children.and_then(NodeRef::raw);
             let obj = js_sys::Object::new();
             let handlers: Handlers = events
                 .into_iter()
@@ -276,7 +313,7 @@ mod web {
                     c
                 })
                 .collect();
-            let id = js_mount(&host, &(island.load)(), props, &obj);
+            let id = js_mount(&host, &(island.load)(), props, &obj, children);
             self.0.borrow_mut().insert(id, handlers);
             id
         }

@@ -74,6 +74,8 @@ enum Role {
     Data,
     Optional,
     Event,
+    /// `children: View`, rendered by doxa rather than serialized.
+    Children,
 }
 
 struct Field {
@@ -184,6 +186,9 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 ))
             }
             (false, true) => Role::Event,
+            (false, false) if name == "children" && last_segment_is(&f.ty, "View") => {
+                Role::Children
+            }
             (false, false) => Role::Data,
         };
         fields.push(Field {
@@ -199,6 +204,16 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
     let name_str = name.to_string();
     let props_ty = format_ident!("{}Props", name);
     let module = specifier(&args.module)?;
+    let mut tracked = Vec::new();
+    if !module.starts_with("doxa-island:") {
+        let dir = std::env::var_os("CARGO_MANIFEST_DIR").map(std::path::PathBuf::from);
+        if let Some(declared) = dir.as_deref().and_then(crate::npm::declared) {
+            crate::npm::check(&module, &declared)
+                .map_err(|e| syn::Error::new(args.module.span(), e))?;
+            tracked = declared.package_json;
+        }
+    }
+    let tracked = tracked.iter().map(|p| p.to_string_lossy().into_owned());
     let export = args.export.value();
     let lazy = args.lazy;
     let spec = format!(
@@ -227,7 +242,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
 
     let same = fields
         .iter()
-        .filter(|f| !matches!(f.role, Role::Event))
+        .filter(|f| matches!(f.role, Role::Data | Role::Optional))
         .map(|f| {
             let n = &f.name;
             quote_spanned! { f.ty.span() => && self.#n == other.#n }
@@ -237,9 +252,20 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         match f.role {
             Role::Data => Some(quote_spanned! { f.ty.span() => out.set(#js, &self.#n); }),
             Role::Optional => Some(quote_spanned! { f.ty.span() => out.opt(#js, &self.#n); }),
-            Role::Event => None,
+            Role::Event | Role::Children => None,
         }
     });
+    let children = fields
+        .iter()
+        .find(|f| matches!(f.role, Role::Children))
+        .map(|f| {
+            let n = &f.name;
+            quote! {
+                fn children(&self) -> ::core::option::Option<::doxa::ui::View> {
+                    ::core::option::Option::Some(::core::clone::Clone::clone(&self.#n))
+                }
+            }
+        });
     let events = fields.iter().filter_map(|f| {
         let (n, js) = (&f.name, &f.js);
         matches!(f.role, Role::Event)
@@ -256,6 +282,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         #vis struct #props_ty { #(#struct_fields),* }
 
         #builder
+
+        #(const _: &[u8] = ::core::include_bytes!(#tracked);)*
 
         #[cfg(target_arch = "wasm32")]
         #[doc(hidden)]
@@ -285,6 +313,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             fn data(&self, out: &mut ::doxa::ui::react::Data) {
                 #(#data)*
             }
+
+            #children
 
             #[allow(unused_variables)]
             fn events(&self, out: &mut ::doxa::ui::react::Events) {

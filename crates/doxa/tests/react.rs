@@ -28,10 +28,17 @@ pub struct Monaco {
     pub value: String,
 }
 
+#[react(module = "./ts/dialog.tsx", export = "Dialog")]
+pub struct Dialog {
+    pub title: String,
+    pub children: View,
+}
+
 #[derive(Default)]
 struct Calls {
     log: Vec<String>,
     hosts: Vec<u32>,
+    children: Vec<Option<u32>>,
     events: HashMap<u32, Vec<(&'static str, EventFn)>>,
     next: u32,
 }
@@ -52,6 +59,7 @@ impl Bridge for Fake {
         island: &Island,
         props: &str,
         events: Vec<(&'static str, EventFn)>,
+        children: Option<NodeRef>,
     ) -> u32 {
         let mut c = self.0.borrow_mut();
         c.next += 1;
@@ -59,6 +67,7 @@ impl Bridge for Fake {
         c.log
             .push(format!("mount {} {id} {}", island.name, sorted(props)));
         c.hosts.push(host.id());
+        c.children.push(children.map(NodeRef::id));
         c.events.insert(id, events);
         id
     }
@@ -209,4 +218,33 @@ fn an_optional_prop_is_left_out_only_when_none() {
         fake.log(),
         [r#"mount Editor 1 {"aria-label":"l","children":"","readOnly":true,"value":"v"}"#]
     );
+}
+
+#[component]
+fn Confirm() -> View {
+    let n = state(0u32);
+    view! {
+        <Dialog title="Sure?">
+            <button on:click={move |_| n.update(|n| *n += 1)}>{n.get()}</button>
+        </Dialog>
+    }
+}
+
+#[test]
+fn view_children_render_into_a_host_the_island_is_given() {
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    App::new(|| view! { <Confirm/> }).mount_on(Rc::new(dom.clone()), dom.body());
+    assert_eq!(fake.log(), [r#"mount Dialog 1 {"title":"Sure?"}"#]);
+
+    let host = dom
+        .find("data-island-children", "")
+        .expect("a children host");
+    assert_eq!(fake.0.borrow().children, [Some(host)]);
+    let button = dom.find_tag("button").unwrap();
+    dom.click(button);
+    doxa::client::task::run_until_stalled();
+    assert_eq!(dom.text(host), "1", "doxa keeps rendering the children");
+    assert_eq!(fake.log(), Vec::<String>::new(), "React sees no new props");
 }

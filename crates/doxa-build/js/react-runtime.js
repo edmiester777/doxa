@@ -1,6 +1,6 @@
 // The React side of doxa islands: one root, created on first mount, renders
 // every island as a portal into the host element doxa gave it.
-import { createElement, Suspense, useSyncExternalStore } from "react";
+import { createElement, Suspense, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -18,6 +18,19 @@ function publish() {
 function subscribe(l) {
   listeners.add(l);
   return () => listeners.delete(l);
+}
+
+// Moves the element doxa renders an island's `View` children into to where React puts `children`.
+function Adopt({ node }) {
+  const ref = useRef(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    el.appendChild(node);
+    return () => {
+      if (node.parentNode === el) el.removeChild(node);
+    };
+  }, [node]);
+  return createElement("div", { ref, style: { display: "contents" } });
 }
 
 function Islands() {
@@ -39,7 +52,13 @@ function toJson(value) {
   }
 }
 
-export function mount(host, component, json, handlers) {
+function propsOf(island, json) {
+  const props = { ...JSON.parse(json), ...island.events };
+  if (island.children) props.children = createElement(Adopt, { node: island.children });
+  return props;
+}
+
+export function mount(host, component, json, handlers, children) {
   if (root === null) {
     const el = document.createElement("div");
     el.hidden = true;
@@ -48,14 +67,14 @@ export function mount(host, component, json, handlers) {
     root.render(createElement(Islands));
   }
   const id = ++next;
-  const island = { key: String(id), host, component, live: true, events: {}, props: null };
+  const island = { key: String(id), host, component, children, live: true, events: {}, props: null };
   for (const [name, f] of Object.entries(handlers)) {
     // Created once per island, so React sees the same function on every update.
     island.events[name] = (arg) => {
       if (island.live) f(toJson(arg));
     };
   }
-  island.props = { ...JSON.parse(json), ...island.events };
+  island.props = propsOf(island, json);
   islands.set(id, island);
   publish();
   return id;
@@ -64,7 +83,7 @@ export function mount(host, component, json, handlers) {
 export function update(id, json) {
   const island = islands.get(id);
   if (island === undefined) return;
-  island.props = { ...JSON.parse(json), ...island.events };
+  island.props = propsOf(island, json);
   publish();
 }
 
