@@ -73,7 +73,9 @@ fn RenameForm(widget: Widget) -> View {
     });
     view! {
         <input class="name" bind:value={name}/>
-        <button class="save" disabled={save.pending()} on:click={move |_| save.run(name.get())}>"Save"</button>
+        <button class="save" disabled={save.pending()} on:click={move |_| save.run(name.get())}>
+            "Save"
+        </button>
         {save.error().map(|e| view! { <p class="error">{e.to_string()}</p> })}
     }
 }

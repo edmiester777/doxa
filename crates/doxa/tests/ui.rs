@@ -132,7 +132,12 @@ fn a_conditional_hook_panics_with_both_locations() {
 
 #[page("/things/{id}")]
 fn Thing(id: u32, tab: Option<String>) -> View {
-    view! { <p>{id} {tab.unwrap_or_default()}</p> }
+    view! {
+        <p>
+            {id}
+            {tab.unwrap_or_default()}
+        </p>
+    }
 }
 
 #[test]
