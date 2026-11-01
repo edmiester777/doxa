@@ -69,7 +69,29 @@ impl<'a> Printer<'a> {
         let path = self.range_of(&mac.path)?;
         let group = mac.delimiter.span().join().byte_range();
         self.check_range(&group)?;
+        let nested = base.is_some();
         let base = base.unwrap_or_else(|| self.line_indent(path.start));
+        let out = self.render_macro(mac, &path, &group, base, None)?;
+        // rustfmt puts a multi-line closure body in a block; do it here so the two agree.
+        let closure_body = self.src[..path.start].trim_end().ends_with('|');
+        if out.contains('\n') && closure_body && !nested {
+            let indent = base + self.cfg.tab_spaces;
+            let inner = self.render_macro(mac, &path, &group, indent, Some(indent))?;
+            let block = format!("{{\n{}{inner}\n{}}}", spaces(indent), spaces(base));
+            return Ok((path.start..group.end, block));
+        }
+        Ok((path.start..group.end, out))
+    }
+
+    /// The macro printed at indent `base`; `column` is where it starts, if not where it is now.
+    fn render_macro(
+        &self,
+        mac: &syn::Macro,
+        path: &Range<usize>,
+        group: &Range<usize>,
+        base: usize,
+        column: Option<usize>,
+    ) -> Res<String> {
         let inner = group.start + 1..group.end - 1;
 
         // A brace-delimited macro followed by `.`/`?` would parse as a statement.
@@ -79,14 +101,16 @@ impl<'a> Printer<'a> {
             syn::MacroDelimiter::Bracket(_) if postfix.starts_with(['.', '?']) => ("[", "]"),
             _ => (" {", "}"),
         };
-        let mut out = format!("{}!{open}", squash(&self.src[path.clone()]));
+        let mut out = format!("{}!{open}", squash(&self.src[path.start..path.end]));
 
         let nodes = parser()
             .parse_simple(mac.tokens.clone())
             .map_err(|e| format!("parse error: {e}"))?;
         let body = self.render_seq(&nodes, inner.clone(), base + self.cfg.tab_spaces)?;
         // One short line stays inline, as rustfmt keeps short expressions.
-        let column = path.start - self.src[..path.start].rfind('\n').map_or(0, |n| n + 1);
+        let column = column.unwrap_or_else(|| {
+            path.start - self.src[..path.start].rfind('\n').map_or(0, |n| n + 1)
+        });
         let inline = match body.as_slice() {
             [one] if open == " {" => Some(format!("{out} {} {close}", one.trim_start())),
             [one] => Some(format!("{out}{}{close}", one.trim_start())),
@@ -108,7 +132,7 @@ impl<'a> Printer<'a> {
         if comments(&out).len() != before {
             return Err("a comment could not be placed".into());
         }
-        Ok((path.start..group.end, out))
+        Ok(out)
     }
 
     fn render_seq(&self, nodes: &[Node], gap: Range<usize>, indent: usize) -> Res<Vec<String>> {

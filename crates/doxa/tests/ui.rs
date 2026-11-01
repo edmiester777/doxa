@@ -316,10 +316,12 @@ fn an_unmatched_path_under_a_layout_is_not_found() {
 
 #[test]
 fn an_outlet_outside_a_layout_is_empty() {
-    let dom = mount(|| view! {
-        <div>
-            <Outlet/>
-        </div>
+    let dom = mount(|| {
+        view! {
+            <div>
+                <Outlet/>
+            </div>
+        }
     });
     assert_eq!(dom.text(dom.find_tag("div").unwrap()), "");
 }

@@ -58,6 +58,27 @@ fn a_short_view_stays_inline_and_empty_self_closes() {
 }
 
 #[test]
+fn a_multiline_closure_body_gets_the_block_rustfmt_would_add() {
+    golden(
+        "fn f() {\n    let dom = mount(|| view!{<div><Outlet/></div>});\n}\n",
+        r#"fn f() {
+    let dom = mount(|| {
+        view! {
+            <div>
+                <Outlet/>
+            </div>
+        }
+    });
+}
+"#,
+    );
+    golden(
+        "fn f() {\n    mount(move || view!{<A/>});\n}\n",
+        "fn f() {\n    mount(move || view! { <A/> });\n}\n",
+    );
+}
+
+#[test]
 fn key_moves_first() {
     golden(
         "fn f() {\n    view! { <Row a=\"1\" key={id} b=\"2\"/> }\n}\n",
