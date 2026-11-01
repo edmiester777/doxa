@@ -11,8 +11,7 @@ pub const DARK: Theme = Theme::new("dark", &[("--bg", "#111"), ("--fg", "#eee")]
 /// Everything the browser runs, ready to mount.
 pub fn app() -> App {
     let router = Router::new()
-        .page::<WidgetsPage>()
-        .page::<WidgetPage>()
+        .layout::<Shell>(|r| r.page::<WidgetsPage>().page::<WidgetPage>())
         .not_found(|| view! { <p class="missing">"No such page"</p> });
     App::new(router).theme(LIGHT)
 }
@@ -22,13 +21,26 @@ fn start() {
     app().mount("#app");
 }
 
+/// The frame around every page; it stays mounted as pages change.
+#[page("/")]
+fn Shell() -> View {
+    view! {
+        <header>
+            <Link to={WidgetsPage::route()}>"All widgets"</Link>
+            <ThemeToggle/>
+        </header>
+        <main>
+            <Outlet/>
+        </main>
+    }
+}
+
 /// Every widget, optionally filtered by `?contains=`.
 #[page("/", load = |p| list_widgets(Filter { contains: p.contains.clone() }))]
 async fn WidgetsPage(contains: Option<String>) -> Result<View> {
     let widgets = list_widgets(Filter { contains }).await?;
     Ok(view! {
         <h1>"Widgets"</h1>
-        <ThemeToggle/>
         <ul>
             {widgets.iter().map(|w| view! { <WidgetRow key={w.id} widget={w.clone()}/> }).collect::<View>()}
         </ul>
@@ -56,7 +68,6 @@ async fn WidgetPage(name: String) -> Result<View> {
             <button class="edit" on:click={move |_| editing.toggle()}>"Rename"</button>
         </Can>
         {editing.get().then(|| view! { <RenameForm widget={widget.clone()}/> })}
-        <Link to={WidgetsPage::route()}>"All widgets"</Link>
     })
 }
 

@@ -30,8 +30,8 @@ pub use hooks::{
 };
 pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
 pub use router::{
-    location, match_path, navigate, Link, LinkBuilder, LinkProps, Page, Prefetch, Route, Router,
-    Segments,
+    location, match_path, navigate, Link, LinkBuilder, LinkProps, Outlet, OutletBuilder,
+    OutletProps, Page, Prefetch, Route, Router, Segments,
 };
 pub use theme::{set_theme, theme, Theme};
 pub use view::{
@@ -60,8 +60,8 @@ pub mod prelude {
     pub use crate::{
         action, component, context, effect, memo, navigate, page, provide, set_theme, state, theme,
         try_context, view, Action, App, Callback, Can, Catch, DangerousHtml, Event, IntoView, Link,
-        Page, Plugin, Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State, Suspense,
-        Theme, Thrown, View,
+        Outlet, Page, Plugin, Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State,
+        Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{CacheConfig, ClientConfig};
 }

@@ -52,6 +52,11 @@ impl Segments {
 
 /// Match `path` against `template`.
 pub fn match_path(template: &str, url: &str) -> Option<Segments> {
+    match_template(template, url, false)
+}
+
+/// `prefix`: `url` may continue past the end of `template`.
+fn match_template(template: &str, url: &str, prefix: bool) -> Option<Segments> {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let mut params = Vec::new();
     let mut t = template
@@ -62,6 +67,7 @@ pub fn match_path(template: &str, url: &str) -> Option<Segments> {
     loop {
         match (t.next(), p.next()) {
             (None, None) => break,
+            (None, Some(_)) if prefix => break,
             (Some(seg), rest) if seg.starts_with("{*") => {
                 let mut tail: Vec<&str> = rest.into_iter().collect();
                 tail.extend(p.by_ref());
@@ -149,14 +155,35 @@ impl Prefetch {
             let _ = fut.await;
         }))
     }
+
+    fn both(a: Option<Prefetch>, b: Option<Prefetch>) -> Option<Prefetch> {
+        match (a, b) {
+            (Some(Prefetch(a)), Some(Prefetch(b))) => Some(Prefetch(Box::pin(async move {
+                futures_util::future::join(a, b).await;
+            }))),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
-type Matcher = fn(&Segments) -> Option<(View, Option<Prefetch>)>;
+type Resolved = Option<(View, Option<Prefetch>)>;
+type Matcher = fn(&Segments) -> Resolved;
+type Wrap = fn(&Segments, View) -> Resolved;
+
+#[derive(Clone)]
+enum Entry {
+    Page(&'static str, Matcher),
+    Layout {
+        prefix: &'static str,
+        wrap: Wrap,
+        inner: Router,
+    },
+}
 
 /// The app's pages.
 #[derive(Clone, Default)]
 pub struct Router {
-    pages: Vec<(&'static str, Matcher)>,
+    entries: Vec<Entry>,
     not_found: Option<Rc<dyn Fn() -> View>>,
 }
 
@@ -168,7 +195,7 @@ impl Router {
 
     /// Add a page.
     pub fn page<P: Page>(mut self) -> Self {
-        self.pages.push((P::PATH, |s| {
+        self.entries.push(Entry::Page(P::PATH, |s| {
             let props = P::parse(s)?;
             let load = P::load(&props);
             // Keyed by params too, so `/w/a` → `/w/b` remounts rather than keeping a's state.
@@ -178,16 +205,66 @@ impl Router {
         self
     }
 
+    /// Add pages under `L`, a page whose path prefixes theirs and which shows them at `<Outlet/>`.
+    /// `L` stays mounted while its children change, and remounts when its own params do.
+    pub fn layout<L: Page>(mut self, children: impl FnOnce(Router) -> Router) -> Self {
+        let inner = children(Router::new());
+        for template in inner.templates() {
+            assert!(
+                under(L::PATH, template),
+                "`{template}` isn't under the layout `{}` at `{}`",
+                L::NAME,
+                L::PATH
+            );
+        }
+        self.entries.push(Entry::Layout {
+            prefix: L::PATH,
+            wrap: |s, child| {
+                let props = L::parse(s)?;
+                let load = L::load(&props);
+                let inner = comp::<L>(props).into_view();
+                let host = comp::<LayoutHost>(HostProps { inner, child });
+                Some((host.key((L::PATH, &s.params)).into_view(), load))
+            },
+            inner,
+        });
+        self
+    }
+
+    fn templates(&self) -> Vec<&'static str> {
+        self.entries
+            .iter()
+            .flat_map(|e| match e {
+                Entry::Page(t, _) => vec![*t],
+                Entry::Layout { prefix, inner, .. } => {
+                    let mut all = vec![*prefix];
+                    all.extend(inner.templates());
+                    all
+                }
+            })
+            .collect()
+    }
+
     /// What to show when no page matches.
     pub fn not_found<V: IntoView>(mut self, f: impl Fn() -> V + 'static) -> Self {
         self.not_found = Some(Rc::new(move || f().into_view()));
         self
     }
 
-    fn resolve(&self, url: &str) -> Option<(View, Option<Prefetch>)> {
-        self.pages
-            .iter()
-            .find_map(|(template, m)| match_path(template, url).and_then(|s| m(&s)))
+    fn resolve(&self, url: &str) -> Resolved {
+        self.entries.iter().find_map(|e| match e {
+            Entry::Page(template, m) => match_path(template, url).and_then(|s| m(&s)),
+            Entry::Layout {
+                prefix,
+                wrap,
+                inner,
+            } => {
+                let s = match_template(prefix, url, true)?;
+                let (child, load) = inner.resolve(url)?;
+                let (view, own) = wrap(&s, child)?;
+                Some((view, Prefetch::both(own, load)))
+            }
+        })
     }
 
     pub(crate) fn view(&self) -> View {
@@ -202,6 +279,72 @@ impl Router {
         if let Some((_, Some(Prefetch(fut)))) = self.resolve(url) {
             doxa_client::task::spawn(fut);
         }
+    }
+}
+
+fn under(prefix: &str, template: &str) -> bool {
+    let segments = |t: &str| {
+        t.split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    segments(template).starts_with(&segments(prefix))
+}
+
+/// Gives a layout's `<Outlet/>` the matched child.
+struct LayoutHost;
+
+#[derive(Clone)]
+struct HostProps {
+    inner: View,
+    child: View,
+}
+
+#[derive(Clone)]
+struct OutletChild(View);
+
+impl Component for LayoutHost {
+    type Props = HostProps;
+    const NAME: &'static str = "Layout";
+
+    fn render(props: HostProps) -> RenderFuture {
+        crate::hooks::provide(OutletChild(props.child));
+        RenderFuture::ready(Ok(props.inner))
+    }
+}
+
+/// Where a layout shows the page under it; nothing outside a layout.
+pub struct Outlet;
+
+/// Props of [`Outlet`]: none.
+#[derive(Clone)]
+pub struct OutletProps;
+
+/// Builds [`OutletProps`].
+pub struct OutletBuilder;
+
+impl Outlet {
+    /// Start building its props.
+    pub fn props() -> OutletBuilder {
+        OutletBuilder
+    }
+}
+
+impl OutletBuilder {
+    /// Finish.
+    pub fn build(self) -> OutletProps {
+        OutletProps
+    }
+}
+
+impl Component for Outlet {
+    type Props = OutletProps;
+    const NAME: &'static str = "Outlet";
+
+    fn render(_: OutletProps) -> RenderFuture {
+        let child = crate::hooks::try_context::<OutletChild>();
+        RenderFuture::ready(Ok(child.map(|c| c.0).unwrap_or_default()))
     }
 }
 

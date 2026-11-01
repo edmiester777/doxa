@@ -214,6 +214,122 @@ fn a_page_remounts_when_its_params_change() {
     assert!(dom.find_tag("input").is_none(), "cog's open form is gone");
 }
 
+#[page("/shop/{store}")]
+fn Shop(store: String) -> View {
+    let visits = state(0);
+    view! {
+        <h2>{store}</h2>
+        <button id="visit" on:click={move |_| visits.update(|v| *v += 1)}>{visits.get()}</button>
+        <main>
+            <Outlet/>
+        </main>
+    }
+}
+
+#[page("/shop/{store}")]
+fn ShopHome(store: String) -> View {
+    view! { <p>{format!("home of {store}")}</p> }
+}
+
+#[page("/shop/{store}/items")]
+fn Items(store: String) -> View {
+    view! { <p>{format!("items of {store}")}</p> }
+}
+
+#[page("/shop/{store}/admin")]
+fn Admin(store: String) -> View {
+    view! {
+        <h3>{format!("admin of {store}")}</h3>
+        <section>
+            <Outlet/>
+        </section>
+    }
+}
+
+#[page("/shop/{store}/admin/users")]
+fn Users(store: String) -> View {
+    view! { <p>{format!("users of {store}")}</p> }
+}
+
+fn shop() -> MemDom {
+    let dom = MemDom::new();
+    let router = Router::new()
+        .layout::<Shop>(|r| {
+            r.page::<ShopHome>()
+                .page::<Items>()
+                .layout::<Admin>(|r| r.page::<Users>())
+        })
+        .not_found(|| view! { <p>"no such page"</p> });
+    App::new(router).mount_on(Rc::new(dom.clone()), dom.body());
+    dom
+}
+
+#[test]
+fn a_layout_stays_mounted_while_its_pages_change() {
+    let dom = shop();
+    navigate("/shop/acme");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("main").unwrap()), "home of acme");
+    let visit = dom.find("id", "visit").unwrap();
+    dom.click(visit);
+    settle();
+
+    navigate("/shop/acme/items");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("main").unwrap()), "items of acme");
+    assert_eq!(dom.find("id", "visit"), Some(visit), "the same node");
+    assert_eq!(dom.text(visit), "1", "and the same state");
+}
+
+#[test]
+fn a_layout_remounts_when_its_own_params_change() {
+    let dom = shop();
+    navigate("/shop/acme/items");
+    settle();
+    dom.click(dom.find("id", "visit").unwrap());
+    settle();
+
+    navigate("/shop/zenith/items");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("h2").unwrap()), "zenith");
+    assert_eq!(dom.text(dom.find("id", "visit").unwrap()), "0");
+}
+
+#[test]
+fn layouts_nest() {
+    let dom = shop();
+    navigate("/shop/acme/admin/users");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("h2").unwrap()), "acme");
+    assert_eq!(dom.text(dom.find_tag("h3").unwrap()), "admin of acme");
+    assert_eq!(dom.text(dom.find_tag("section").unwrap()), "users of acme");
+}
+
+#[test]
+fn an_unmatched_path_under_a_layout_is_not_found() {
+    let dom = shop();
+    navigate("/shop/acme/nope");
+    settle();
+    assert!(dom.find_tag("h2").is_none());
+    assert_eq!(dom.text(dom.find_tag("p").unwrap()), "no such page");
+}
+
+#[test]
+fn an_outlet_outside_a_layout_is_empty() {
+    let dom = mount(|| view! {
+        <div>
+            <Outlet/>
+        </div>
+    });
+    assert_eq!(dom.text(dom.find_tag("div").unwrap()), "");
+}
+
+#[test]
+#[should_panic(expected = "`/gizmos/{name}` isn't under the layout `Shop` at `/shop/{store}`")]
+fn a_page_outside_its_layout_is_refused() {
+    let _ = Router::new().layout::<Shop>(|r| r.page::<Gizmo>());
+}
+
 struct Sidebar;
 
 impl Plugin for Sidebar {

@@ -53,6 +53,17 @@ async fn a_link_navigates_and_the_rename_button_follows_the_guard() {
 }
 
 #[tokio::test]
+async fn the_shell_stays_mounted_across_pages() {
+    let dom = mount("viewer");
+    settle().await;
+    let header = dom.find_tag("header").unwrap();
+    dom.click(dom.find("href", "/widgets/gear").unwrap());
+    settle().await;
+    assert_eq!(dom.text(dom.find_tag("h1").unwrap()), "gear");
+    assert_eq!(dom.find_tag("header"), Some(header));
+}
+
+#[tokio::test]
 async fn renaming_updates_the_page_and_the_url() {
     let dom = mount("editor");
     navigate("/widgets/cog");
