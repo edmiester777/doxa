@@ -448,3 +448,142 @@ fn identical_streams_share_one_connection() {
     let urls: Vec<String> = mock.requests().into_iter().map(|r| r.url).collect();
     assert_eq!(urls, ["/w/cog/events", "/w/gear/events"]);
 }
+
+/// Answers from a queue of responses whose bodies may stream.
+#[derive(Clone, Default)]
+struct Scripted {
+    queue: Rc<RefCell<std::collections::VecDeque<Response>>>,
+    seen: Rc<RefCell<Vec<Request>>>,
+}
+
+impl Scripted {
+    fn push(&self, status: u16, headers: Vec<(String, String)>, body: Body) -> &Self {
+        self.queue.borrow_mut().push_back(Response {
+            status,
+            headers,
+            body,
+        });
+        self
+    }
+
+    fn text(&self, status: u16, headers: Vec<(String, String)>, body: &str) -> &Self {
+        self.push(status, headers, Body::Full(body.into()))
+    }
+}
+
+impl Transport for Scripted {
+    fn send(&self, request: Request) -> LocalBoxFuture<'static, Result<Response, String>> {
+        self.seen.borrow_mut().push(request);
+        let next = self.queue.borrow_mut().pop_front();
+        Box::pin(async move { next.ok_or_else(|| "nothing queued".to_owned()) })
+    }
+}
+
+/// A body that never ends, and records being dropped.
+struct Open(Rc<Cell<bool>>);
+
+impl futures_util::Stream for Open {
+    type Item = Result<Vec<u8>, String>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.set(true);
+    }
+}
+
+const RENAMED: &str = "id: 1\ndata: {\"event\":\"renamed\",\"data\":{\"name\":\"x\"}}\n\n";
+
+fn fast() -> doxa_client::Backoff {
+    doxa_client::Backoff {
+        initial: Duration::from_millis(1),
+        max: Duration::from_millis(1),
+    }
+}
+
+#[test]
+fn a_reconnect_sends_the_current_credentials() {
+    let script = Scripted::default();
+    script.text(200, vec![], RENAMED).text(200, vec![], RENAMED);
+    let token = Rc::new(RefCell::new("t1".to_owned()));
+    let t = token.clone();
+    ClientConfig::default()
+        .bearer(move || Some(t.borrow().clone()))
+        .transport(script.clone())
+        .install();
+    task::block_on(async {
+        let mut s = events("cog").await.unwrap().reconnect(fast());
+        s.next().await.unwrap();
+        *token.borrow_mut() = "t2".into();
+        s.next().await.unwrap();
+    });
+    let auth: Vec<_> = script
+        .seen
+        .borrow()
+        .iter()
+        .map(|r| r.header("authorization").map(str::to_owned))
+        .collect();
+    assert_eq!(auth, [Some("Bearer t1".into()), Some("Bearer t2".into())]);
+}
+
+#[test]
+fn a_refused_reconnect_ends_the_stream_with_the_error() {
+    let script = Scripted::default();
+    script
+        .text(200, vec![], RENAMED)
+        .text(403, vec![], "{}")
+        .text(200, vec![], RENAMED);
+    ClientConfig::default().transport(script.clone()).install();
+    task::block_on(async {
+        let mut s = events("cog").await.unwrap().reconnect(fast());
+        s.next().await.unwrap();
+        let err = s.next().await.unwrap_err();
+        assert_eq!(err.status(), Some(403), "{err:?}");
+        assert_eq!(s.next().await.unwrap(), None);
+    });
+}
+
+#[test]
+fn a_session_change_closes_open_streams() {
+    let script = Scripted::default();
+    let dropped = Rc::new(Cell::new(false));
+    script
+        .text(200, session("a"), &widget(2, "gear").to_string())
+        .push(200, vec![], Body::Stream(Box::pin(Open(dropped.clone()))))
+        .text(200, session("b"), &widget(1, "cog").to_string());
+    ClientConfig::default().transport(script.clone()).install();
+    wait(get("gear")).unwrap();
+    let mut s = wait(events("cog")).unwrap();
+    wait(get("cog")).unwrap();
+    assert!(dropped.get(), "the old session's connection is still open");
+    assert!(wait(s.next()).is_err());
+}
+
+#[test]
+fn a_reconnect_reports_its_session() {
+    let script = Scripted::default();
+    script
+        .text(200, session("a"), &widget(2, "gear").to_string())
+        .text(200, vec![], RENAMED)
+        .text(200, session("b"), RENAMED)
+        .text(200, session("b"), &widget(2, "gear").to_string());
+    let client = ClientConfig::default().transport(script.clone()).install();
+    let changes = Rc::new(Cell::new(0));
+    let c = changes.clone();
+    client.on_session_change(move || c.set(c.get() + 1));
+    wait(get("gear")).unwrap();
+    task::block_on(async {
+        let mut s = events("cog").await.unwrap().reconnect(fast());
+        s.next().await.unwrap();
+        assert!(s.next().await.is_err());
+    });
+    assert_eq!(changes.get(), 1);
+    wait(get("gear")).unwrap();
+    assert_eq!(script.seen.borrow().len(), 4);
+}

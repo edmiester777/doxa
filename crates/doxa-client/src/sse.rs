@@ -14,8 +14,9 @@ use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 
+use crate::client::Client;
 use crate::fetch::Fetch;
-use crate::transport::{Body, Request, Response, Transport};
+use crate::transport::{Body, Request, Response};
 
 /// How long to wait between reconnect attempts.
 #[derive(Debug, Clone, Copy)]
@@ -143,15 +144,19 @@ impl Wake for Waiting {
 /// One open event stream, shared by every subscriber to the same route and arguments.
 #[doc(hidden)]
 pub struct Hub {
+    /// The request without credentials; each reconnect authorizes it afresh.
     request: Request,
-    transport: Rc<dyn Transport>,
+    client: Rc<Client>,
     waiting: Arc<Waiting>,
     state: RefCell<HubState>,
 }
 
+/// A reconnect's answer, with the session it was sent in.
+type Reopened = (u64, Result<Response, String>);
+
 struct HubState {
     body: Option<Body>,
-    reopening: Option<LocalBoxFuture<'static, Result<Response, String>>>,
+    reopening: Option<LocalBoxFuture<'static, Reopened>>,
     buffer: Vec<u8>,
     last_id: Option<String>,
     backoff: Option<(Backoff, Duration)>,
@@ -160,10 +165,10 @@ struct HubState {
 }
 
 impl Hub {
-    pub(crate) fn new(request: Request, transport: Rc<dyn Transport>, body: Body) -> Self {
+    pub(crate) fn new(request: Request, client: Rc<Client>, body: Body) -> Self {
         Self {
             request,
-            transport,
+            client,
             waiting: Arc::default(),
             state: RefCell::new(HubState {
                 body: Some(body),
@@ -182,6 +187,23 @@ impl Hub {
         !self.state.borrow().done
     }
 
+    /// Drop the connection, ending every subscriber's stream with an error.
+    pub(crate) fn close(&self) {
+        let mut s = self.state.borrow_mut();
+        if s.done {
+            return;
+        }
+        s.body = None;
+        s.reopening = None;
+        s.done = true;
+        broadcast(
+            &mut s,
+            Item::Failed(Fetch::Stream("the session changed".into())),
+        );
+        drop(s);
+        self.waiting.wake_by_ref();
+    }
+
     /// Read what the connection has. `Ready(true)`: progress, look again;
     /// `Ready(false)`: the stream is over.
     fn pump(&self) -> Poll<bool> {
@@ -192,10 +214,23 @@ impl Hub {
             return Poll::Ready(false);
         }
         if let Some(reopening) = s.reopening.as_mut() {
-            let Poll::Ready(result) = reopening.as_mut().poll(&mut cx) else {
+            let Poll::Ready((session, result)) = reopening.as_mut().poll(&mut cx) else {
                 return Poll::Pending;
             };
             s.reopening = None;
+            // Observing a new session closes this hub, which borrows its state.
+            drop(s);
+            let current = match &result {
+                Ok(resp) => self.client.observe_session(resp, session),
+                Err(_) => self.client.session() == session,
+            };
+            let mut s = self.state.borrow_mut();
+            if !current {
+                s.done = true;
+            }
+            if s.done {
+                return Poll::Ready(true);
+            }
             match result {
                 Ok(resp) if resp.status < 400 => {
                     s.body = Some(resp.body);
@@ -203,6 +238,14 @@ impl Hub {
                     if let Some((policy, delay)) = s.backoff.as_mut() {
                         *delay = policy.initial;
                     }
+                }
+                Ok(Response {
+                    status: status @ (401 | 403 | 404),
+                    body: Body::Full(body),
+                    ..
+                }) => {
+                    broadcast(&mut s, Item::Failed(Fetch::from_status(status, &body)));
+                    s.done = true;
                 }
                 _ => {}
             }
@@ -245,17 +288,26 @@ impl Hub {
         Poll::Ready(true)
     }
 
-    fn reopen(&self, s: &mut HubState) -> LocalBoxFuture<'static, Result<Response, String>> {
+    fn reopen(&self, s: &mut HubState) -> LocalBoxFuture<'static, Reopened> {
         let (policy, delay) = s.backoff.expect("reopened only with a backoff");
         s.backoff = Some((policy, (delay * 2).min(policy.max)));
         let mut request = self.request.clone();
         if let Some(id) = &s.last_id {
             request.headers.push(("last-event-id".into(), id.clone()));
         }
-        let transport = self.transport.clone();
+        let client = self.client.clone();
         Box::pin(async move {
             futures_timer::Delay::new(delay).await;
-            transport.send(request).await
+            client.authorize(&mut request);
+            let session = client.session();
+            let mut result = client.transport.send(request).await;
+            if let Ok(resp) = &mut result {
+                if resp.status >= 400 {
+                    let body = std::mem::replace(&mut resp.body, Body::Full(Vec::new()));
+                    resp.body = Body::Full(body.bytes().await.unwrap_or_default());
+                }
+            }
+            (session, result)
         })
     }
 }
@@ -341,7 +393,9 @@ mod tests {
     fn hub(raw: &str, transport: MockTransport) -> Rc<Hub> {
         Rc::new(Hub::new(
             request(),
-            Rc::new(transport),
+            Rc::new(Client::new(
+                crate::ClientConfig::default().transport(transport),
+            )),
             Body::Full(raw.as_bytes().to_vec()),
         ))
     }

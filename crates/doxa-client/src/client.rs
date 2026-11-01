@@ -86,7 +86,7 @@ thread_local! {
 }
 
 impl Client {
-    fn new(config: ClientConfig) -> Self {
+    pub(crate) fn new(config: ClientConfig) -> Self {
         let cache = Cache::default();
         *cache.config.borrow_mut() = config.cache;
         Self {
@@ -180,7 +180,10 @@ impl Client {
         if changed {
             self.session.set(sent + 1);
             self.cache.clear();
-            self.streams.borrow_mut().clear();
+            let hubs: Vec<_> = self.streams.borrow_mut().drain().collect();
+            for hub in hubs.iter().filter_map(|(_, h)| h.upgrade()) {
+                hub.close();
+            }
             for f in self.on_session.borrow().iter() {
                 f();
             }

@@ -123,21 +123,25 @@ impl<R> Call<R> {
     }
 
     pub(crate) fn request(&self, client: &Client, url: String, accept: &str) -> Request {
+        let mut request = self.unauthorized(url, accept);
+        client.authorize(&mut request);
+        request
+    }
+
+    fn unauthorized(&self, url: String, accept: &str) -> Request {
         let mut headers = self.out.headers().to_vec();
         headers.push(("accept".into(), accept.into()));
         let body = self.out.body().map(|(content_type, bytes)| {
             headers.push(("content-type".into(), (*content_type).into()));
             bytes.clone()
         });
-        let mut request = Request {
+        Request {
             method: self.route.method,
             url,
             headers,
             body,
             credentials: false,
-        };
-        client.authorize(&mut request);
-        request
+        }
     }
 }
 
@@ -280,7 +284,7 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
     let key = format!("{} {url}", call.route.method.as_str());
-    let (request, response) = loop {
+    let response = loop {
         if let Some(hub) = client.open_stream(&key) {
             return Ok(R::stream(hub));
         }
@@ -289,11 +293,11 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
         let session = client.session();
         let response = client
             .transport
-            .send(request.clone())
+            .send(request)
             .await
             .map_err(Fetch::Network)?;
         if client.observe_session(&response, session) {
-            break (request, response);
+            break response;
         }
     };
     if response.status >= 400 {
@@ -303,7 +307,8 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     if let Some(hub) = client.open_stream(&key) {
         return Ok(R::stream(hub));
     }
-    let hub = Rc::new(Hub::new(request, client.transport.clone(), response.body));
+    let request = call.unauthorized(url, "text/event-stream");
+    let hub = Rc::new(Hub::new(request, client.clone(), response.body));
     client.share_stream(key, &hub);
     Ok(R::stream(hub))
 }
