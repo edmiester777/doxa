@@ -7,7 +7,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::config::{Layout, WebCrate};
-use crate::error::{run, IoContext, Result};
+use crate::error::{run, Error, IoContext, Result};
 
 /// A JS package manager, chosen by the lockfile beside `package.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,9 +69,23 @@ pub enum Source {
     None,
     /// The app's own `package.json` in this directory.
     Own(PathBuf),
-    /// `[package.metadata.doxa.npm]`, written to a generated `package.json` here.
-    Synced(PathBuf, BTreeMap<String, String>),
+    /// `[package.metadata.doxa.npm]`, written to a generated `package.json`.
+    Synced {
+        /// Where the `package.json` and `node_modules` go.
+        dir: PathBuf,
+        /// Package name to version range.
+        deps: BTreeMap<String, String>,
+        /// Where its lockfile is kept and committed: the web crate.
+        lock_dir: PathBuf,
+    },
 }
+
+const LOCKFILES: [&str; 4] = [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "bun.lock",
+    "bun.lockb",
+];
 
 impl Source {
     /// The app's `package.json` beside the web crate or at the workspace root wins
@@ -85,7 +99,11 @@ impl Source {
         if web.config.npm.is_empty() {
             Source::None
         } else {
-            Source::Synced(layout.js(), web.config.npm.clone())
+            Source::Synced {
+                dir: layout.js(),
+                deps: web.config.npm.clone(),
+                lock_dir: web.dir.clone(),
+            }
         }
     }
 
@@ -93,7 +111,7 @@ impl Source {
     pub fn dir(&self) -> Option<&Path> {
         match self {
             Source::None => None,
-            Source::Own(d) | Source::Synced(d, _) => Some(d),
+            Source::Own(d) | Source::Synced { dir: d, .. } => Some(d),
         }
     }
 }
@@ -116,41 +134,65 @@ pub fn frozen(locked: bool) -> bool {
 /// Install dependencies for `source`, skipping when nothing changed since the last
 /// install.
 pub fn install(source: &Source, locked: bool) -> Result<()> {
-    let dir = match source {
+    let frozen = frozen(locked);
+    let (dir, lock_dir) = match source {
         Source::None => return Ok(()),
-        Source::Own(dir) => dir,
-        Source::Synced(dir, deps) => {
+        Source::Own(dir) => (dir, None),
+        Source::Synced {
+            dir,
+            deps,
+            lock_dir,
+        } => {
             std::fs::create_dir_all(dir).at(dir)?;
             let path = dir.join("package.json");
             let body = package_json(deps);
             if std::fs::read_to_string(&path).ok().as_deref() != Some(body.as_str()) {
                 std::fs::write(&path, body).at(&path)?;
             }
-            dir
+            if !copy_lockfiles(lock_dir, dir)? && frozen {
+                return Err(Error::config(
+                    format!("no npm lockfile in {}", lock_dir.display()),
+                    "run `doxa build` once without --locked, then commit the lockfile it writes there",
+                ));
+            }
+            (dir, Some(lock_dir))
         }
     };
     let manager = Manager::detect(dir);
     let stamp_path = dir.join("node_modules").join(".doxa-stamp");
-    if std::fs::read_to_string(&stamp_path).ok() == Some(stamp(dir)) {
-        return Ok(());
+    if std::fs::read_to_string(&stamp_path).ok() != Some(stamp(dir)) {
+        let mut cmd = Command::new(manager.program());
+        cmd.args(manager.install_args(frozen)).current_dir(dir);
+        run(manager.program(), &mut cmd, manager.fix())?;
+        // Taken after the install, which may have written the lockfile.
+        std::fs::write(&stamp_path, stamp(dir)).at(&stamp_path)?;
     }
-    let mut cmd = Command::new(manager.program());
-    cmd.args(manager.install_args(frozen(locked)))
-        .current_dir(dir);
-    run(manager.program(), &mut cmd, manager.fix())?;
-    // Taken after the install, which may have written the lockfile.
-    std::fs::write(&stamp_path, stamp(dir)).at(&stamp_path)
+    if let (Some(lock_dir), false) = (lock_dir, frozen) {
+        copy_lockfiles(dir, lock_dir)?;
+    }
+    Ok(())
+}
+
+/// Copy whichever lockfiles `from` has into `to`, where they differ; whether there were any.
+fn copy_lockfiles(from: &Path, to: &Path) -> Result<bool> {
+    let mut any = false;
+    for name in LOCKFILES {
+        let src = from.join(name);
+        let Ok(bytes) = std::fs::read(&src) else {
+            continue;
+        };
+        any = true;
+        let dst = to.join(name);
+        if std::fs::read(&dst).ok().as_deref() != Some(bytes.as_slice()) {
+            std::fs::write(&dst, bytes).at(&dst)?;
+        }
+    }
+    Ok(any)
 }
 
 fn stamp(dir: &Path) -> String {
     let mut hash = Sha256::new();
-    for name in [
-        "package.json",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "bun.lock",
-        "bun.lockb",
-    ] {
+    for name in std::iter::once("package.json").chain(LOCKFILES) {
         if let Ok(bytes) = std::fs::read(dir.join(name)) {
             hash.update(name.as_bytes());
             hash.update(&bytes);
@@ -190,6 +232,38 @@ mod tests {
     }
 
     #[test]
+    fn a_synced_lockfile_lives_beside_the_web_crate() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, web) = (root.path().join("js"), root.path().join("web"));
+        std::fs::create_dir_all(&web).unwrap();
+        let source = Source::Synced {
+            dir: dir.clone(),
+            deps: BTreeMap::new(),
+            lock_dir: web.clone(),
+        };
+        let err = install(&source, true).unwrap_err().to_string();
+        assert!(err.contains("no npm lockfile"), "{err}");
+
+        std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+        std::fs::write(web.join("package-lock.json"), "{}").unwrap();
+        std::fs::write(dir.join("package.json"), package_json(&BTreeMap::new())).unwrap();
+        std::fs::write(dir.join("node_modules/.doxa-stamp"), "stale").unwrap();
+        assert!(copy_lockfiles(&web, &dir).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("package-lock.json")).unwrap(),
+            "{}"
+        );
+
+        std::fs::write(dir.join("package-lock.json"), "{\"v\":2}").unwrap();
+        copy_lockfiles(&dir, &web).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(web.join("package-lock.json")).unwrap(),
+            "{\"v\":2}",
+            "an install's lockfile goes back to be committed"
+        );
+    }
+
+    #[test]
     fn synced_package_json() {
         let deps = BTreeMap::from([
             ("react".to_owned(), "^19".to_owned()),
@@ -219,7 +293,7 @@ mod tests {
         web.config.npm.insert("react".into(), "^19".into());
         assert!(matches!(
             Source::for_app(&web, dir.path(), &layout),
-            Source::Synced(d, _) if d == layout.js()
+            Source::Synced { dir: d, lock_dir, .. } if d == layout.js() && lock_dir == web.dir
         ));
 
         std::fs::write(web.dir.join("package.json"), "{}").unwrap();
