@@ -9,9 +9,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 widgets-client = { path = "../client" }
-doxa = { workspace = true, features = ["ui"] }
+doxa = { workspace = true, features = ["ui", "react"] }
+
+[package.metadata.doxa]
+role = "client"
+server = "widgets-server"
+
+[package.metadata.doxa.npm]
+react = "^19"
+react-dom = "^19"
 
 [dev-dependencies]
 widgets-server = { path = "../server" }
-doxa = { workspace = true, features = ["ui", "client-router"] }
+doxa = { workspace = true, features = ["ui", "react", "client-router"] }
 tokio = { workspace = true }

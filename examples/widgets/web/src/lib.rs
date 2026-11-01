@@ -39,12 +39,23 @@ fn Shell() -> View {
 #[page("/", load = |p| list_widgets(Filter { contains: p.contains.clone() }))]
 async fn WidgetsPage(contains: Option<String>) -> Result<View> {
     let widgets = list_widgets(Filter { contains }).await?;
+    let picks = state(0u32);
     Ok(view! {
         <h1>"Widgets"</h1>
+        <Count total={widgets.len()} on_pick={move |_: bool| picks.update(|n| *n += 1)}/>
+        <p class="picks">{picks.get()}</p>
         <ul>
             {widgets.iter().map(|w| view! { <WidgetRow key={w.id} widget={w.clone()}/> }).collect::<View>()}
         </ul>
     })
+}
+
+/// A React component from `ts/count.tsx`; `doxa build` bundles it.
+#[react(module = "./ts/count.tsx", export = "Count")]
+pub struct Count {
+    pub total: usize,
+    #[react(event)]
+    pub on_pick: Callback<bool>,
 }
 
 #[component]

@@ -6,6 +6,7 @@ use doxa::client::transport::RouterTransport;
 use doxa::client::{Client, ClientConfig};
 use doxa::ui::dom::MemDom;
 use doxa::ui::navigate;
+use doxa::ui::react::{Bridge, EventFn, Mount};
 
 fn mount(role: &str) -> MemDom {
     let router = widgets_server::app(widgets_server::seeded());
@@ -50,6 +51,36 @@ async fn a_link_navigates_and_the_rename_button_follows_the_guard() {
     navigate("/widgets/gear");
     settle().await;
     assert!(dom.find("class", "edit").is_some(), "an editor can rename");
+}
+
+/// Stands in for React: records each island's props and keeps its event handlers.
+#[derive(Clone, Default)]
+struct FakeReact(Rc<std::cell::RefCell<Vec<(String, Vec<(&'static str, EventFn)>)>>>);
+
+impl Bridge for FakeReact {
+    fn mount(&self, m: Mount<'_>) {
+        self.0
+            .borrow_mut()
+            .push((format!("{} {}", m.island.name, m.props), m.events));
+    }
+    fn update(&self, _: u32, _: &str) {}
+    fn unmount(&self, _: u32) {}
+}
+
+#[tokio::test]
+async fn the_react_count_gets_the_total_and_calls_back_into_rust() {
+    let react = FakeReact::default();
+    doxa::ui::react::set_bridge(react.clone());
+    let dom = mount("viewer");
+    settle().await;
+    let (props, events) = react.0.borrow_mut().remove(0);
+    assert_eq!(props, r#"Count {"total":3}"#);
+    assert_eq!(dom.text(dom.find("class", "picks").unwrap()), "0");
+
+    let (_, on_pick) = events.iter().find(|(n, _)| *n == "onPick").unwrap();
+    on_pick("false");
+    settle().await;
+    assert_eq!(dom.text(dom.find("class", "picks").unwrap()), "1");
 }
 
 #[tokio::test]

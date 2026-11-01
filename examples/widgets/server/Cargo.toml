@@ -12,3 +12,6 @@ utoipa = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+embed = ["doxa/embed"]
