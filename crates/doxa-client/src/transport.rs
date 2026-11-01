@@ -320,21 +320,46 @@ mod browser {
         }
     }
 
+    /// A body reader that cancels the body, closing the connection, if dropped before the end.
+    struct Reader(Option<web_sys::ReadableStreamDefaultReader>);
+
+    impl Reader {
+        fn read(&self) -> Option<js_sys::Promise> {
+            self.0.as_ref().map(|r| r.read())
+        }
+
+        fn finish(mut self) {
+            self.0 = None;
+        }
+    }
+
+    impl Drop for Reader {
+        fn drop(&mut self) {
+            if let Some(reader) = self.0.take() {
+                let _ = reader.cancel();
+            }
+        }
+    }
+
     fn read_stream(
         stream: web_sys::ReadableStream,
     ) -> impl futures_core::Stream<Item = Result<Vec<u8>, String>> {
-        let reader: web_sys::ReadableStreamDefaultReader = stream.get_reader().unchecked_into();
+        let reader = Reader(Some(stream.get_reader().unchecked_into()));
         futures_util::stream::unfold(Some(reader), |reader| async move {
             let reader = reader?;
-            let chunk = match JsFuture::from(reader.read()).await {
+            let chunk = match JsFuture::from(reader.read()?).await {
                 Ok(chunk) => chunk,
-                Err(e) => return Some((Err(js_err(e)), None)),
+                Err(e) => {
+                    reader.finish();
+                    return Some((Err(js_err(e)), None));
+                }
             };
             let done = Reflect::get(&chunk, &"done".into())
                 .ok()
                 .and_then(|d| d.as_bool())
                 .unwrap_or(true);
             if done {
+                reader.finish();
                 return None;
             }
             let value = Reflect::get(&chunk, &"value".into()).ok()?;
