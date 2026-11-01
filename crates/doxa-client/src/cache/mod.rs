@@ -214,6 +214,8 @@ pub(crate) struct Revalidation {
 pub(crate) enum Revalidated {
     Value(Rc<dyn Any>, Meta),
     NotModified(f64),
+    /// `401`, `403` or `404`: readers should see the error, not the old value.
+    Gone,
     Failed,
 }
 
@@ -375,7 +377,13 @@ impl Cache {
                         e.at = now;
                         return;
                     }
-                    Revalidated::Failed => return,
+                    Revalidated::Gone => {
+                        entries.remove(key).map(|e| e.observers).unwrap_or_default()
+                    }
+                    Revalidated::Failed => {
+                        e.stale = true;
+                        return;
+                    }
                 }
             }
         };

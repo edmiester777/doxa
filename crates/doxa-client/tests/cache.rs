@@ -238,6 +238,43 @@ fn signing_in_and_out_clears_the_cache() {
     assert_eq!(client.requests_sent(), 5);
 }
 
+/// Read `cog`, let it go stale, and have its revalidation answer `status`.
+fn revalidate_with(status: u16) -> (MockTransport, Rc<Client>, Rc<Renders>) {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "cog")).json(status, &json!({}));
+    let client = install(&mock, Duration::from_millis(50));
+    let renders = Rc::new(Renders::default());
+    cache::set_observer(Some(renders.clone()));
+    wait(get("cog")).unwrap();
+    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(wait(get("cog")).unwrap().name, "cog");
+    cache::set_observer(None);
+    task::run_until_stalled();
+    (mock, client, renders)
+}
+
+#[test]
+fn a_revalidation_that_finds_nothing_or_is_refused_evicts_the_entry() {
+    for status in [404, 401, 403] {
+        let (mock, client, renders) = revalidate_with(status);
+        assert_eq!(renders.0.get(), 1, "{status}: readers were not told");
+        mock.json(status, &json!({}));
+        let err = wait(get("cog")).unwrap_err();
+        assert_eq!(err.status(), Some(status));
+        assert_eq!(client.requests_sent(), 3);
+    }
+}
+
+#[test]
+fn a_failed_revalidation_leaves_the_entry_stale() {
+    let (mock, client, renders) = revalidate_with(500);
+    assert_eq!(renders.0.get(), 0);
+    mock.json(200, &widget(1, "cog"));
+    assert_eq!(wait(get("cog")).unwrap().name, "cog");
+    task::run_until_stalled();
+    assert_eq!(client.requests_sent(), 3, "the next read did not try again");
+}
+
 #[derive(Default)]
 struct Renders(Cell<u32>);
 

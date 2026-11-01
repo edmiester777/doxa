@@ -424,6 +424,7 @@ fn revalidate<R: FromResponse>(
                 None => Revalidated::Failed,
             },
             Sent::NotModified(meta) => Revalidated::NotModified(meta.now),
+            Sent::Status(401 | 403 | 404, _) => Revalidated::Gone,
             Sent::Status(..) | Sent::Failed(_) => Revalidated::Failed,
         };
         client.cache.revalidated(&key, claim, result);
