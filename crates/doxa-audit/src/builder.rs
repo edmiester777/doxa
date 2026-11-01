@@ -91,6 +91,9 @@ struct BuilderInner {
     http_path: Option<String>,
     http_status: Option<u16>,
 
+    /// The request was a dry run, so it is recorded as [`Outcome::Probe`].
+    probe: bool,
+
     // Post-execution layer
     outcome: Option<Outcome>,
     response_summary: Option<serde_json::Value>,
@@ -162,6 +165,7 @@ impl AuditEventBuilder {
                 http_method: None,
                 http_path: None,
                 http_status: None,
+                probe: false,
                 outcome: None,
                 response_summary: None,
                 duration_ms: None,
@@ -233,6 +237,8 @@ impl AuditEventBuilder {
                 .get("x-request-id")
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
+
+            inner.probe = headers.contains_key(doxa_wire::DRY_RUN_HEADER);
         });
     }
 
@@ -575,10 +581,14 @@ impl AuditEventBuilder {
             inner.duration_ms = Some(inner.start.elapsed().as_millis() as i64);
         }
 
-        let outcome = inner
-            .outcome
-            .or(default_outcome)
-            .unwrap_or(Outcome::Allowed);
+        let outcome = if inner.probe {
+            Outcome::Probe
+        } else {
+            inner
+                .outcome
+                .or(default_outcome)
+                .unwrap_or(Outcome::Allowed)
+        };
 
         inner.logger.log(AuditEvent {
             event_type: inner.event_type.unwrap_or_default(),
@@ -666,6 +676,17 @@ mod tests {
     fn layered() -> (AuditEventBuilder, tokio::sync::mpsc::Receiver<AuditEvent>) {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         (AuditEventBuilder::layered(AuditLogger::from_sender(tx)), rx)
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_is_recorded_as_a_probe_even_when_denied() {
+        let (b, mut rx) = builder();
+        let mut headers = HeaderMap::new();
+        headers.insert(doxa_wire::DRY_RUN_HEADER, "1".parse().unwrap());
+        b.set_request_metadata(&headers);
+        b.record_decision(Decision::denied("update", "Widget", "7", "no grant"));
+        b.auto_emit();
+        assert_eq!(rx.recv().await.expect("emitted").outcome, Outcome::Probe);
     }
 
     // ── Folding a guard's decision ──────────────────────────

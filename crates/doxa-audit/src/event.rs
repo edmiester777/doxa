@@ -99,6 +99,8 @@ pub enum Outcome {
     Allowed,
     Denied,
     Error,
+    /// A dry run asking whether the caller could; nothing was done.
+    Probe,
 }
 
 impl fmt::Display for Outcome {
@@ -114,6 +116,7 @@ impl std::str::FromStr for Outcome {
             "allowed" => Ok(Self::Allowed),
             "denied" => Ok(Self::Denied),
             "error" => Ok(Self::Error),
+            "probe" => Ok(Self::Probe),
             other => Err(format!("unknown outcome: {other}")),
         }
     }
@@ -125,6 +128,7 @@ impl Outcome {
             Self::Allowed => "allowed",
             Self::Denied => "denied",
             Self::Error => "error",
+            Self::Probe => "probe",
         }
     }
 }
