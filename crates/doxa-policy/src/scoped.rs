@@ -119,7 +119,7 @@ pub trait ScopedTable: Sized + Send + FromQueryResult {
     /// four places — the key lookup, the id lookup, the listing, and the
     /// residual filter — and the failure mode is not a compile error but a
     /// deleted row that comes back on whichever of the four was missed.
-    /// Every one of those builds on [`scoped`](Self::scoped) or on
+    /// Every one of those builds on [`scoped`](ScopedTable::scoped) or on
     /// [`load_by_id`](Self::load_by_id), and both fold this in.
     ///
     /// `None` — the default — is no extra condition at all, rather than an
@@ -207,7 +207,7 @@ pub trait ScopedRow: ScopedTable {
 
     /// One row, or `None` if `scope` holds no such key.
     ///
-    /// Built on [`scoped`](Self::scoped) rather than filtering from
+    /// Built on [`scoped`](ScopedTable::scoped) rather than filtering from
     /// scratch, so the instance lookup cannot drift from the listing.
     ///
     /// Generic over the connection for the reason
@@ -232,7 +232,7 @@ pub trait ScopedRow: ScopedTable {
     ///
     /// Absent keys are simply absent from the result: this answers *which
     /// of these exist in scope*, and the caller compares what came back
-    /// against what it asked for. Confinement is [`scoped`](Self::scoped)'s,
+    /// against what it asked for. Confinement is [`scoped`](ScopedTable::scoped)'s,
     /// so a key belonging to another owner is missing for the same reason a
     /// key that does not exist is — the caller cannot tell which, and that
     /// is the property this trait exists to hold.

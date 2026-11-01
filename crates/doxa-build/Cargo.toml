@@ -1,0 +1,31 @@
+[package]
+name = "doxa-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "The asset pipeline behind `doxa build`: wasm, bindings, JS bundle, CSS, and a hashed dist."
+keywords = ["doxa", "wasm", "bundler", "build"]
+categories = ["development-tools::build-utils", "wasm"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+base64 = "0.22"
+toml = "0.9"
+tar = "0.4"
+flate2 = "1"
+brotli = "8"
+lightningcss = { version = "1.0.0-alpha.68", default-features = false, features = ["bundler"] }
+# Must equal the `wasm-bindgen` in the app's Cargo.lock; see `bindgen::WASM_BINDGEN_VERSION`.
+wasm-bindgen-cli-support = "=0.2.117"
+
+[dev-dependencies]
+tempfile = "3"

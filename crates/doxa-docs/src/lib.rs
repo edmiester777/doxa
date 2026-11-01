@@ -200,6 +200,7 @@ mod private_dispatch;
 mod problem;
 mod router_ext;
 mod routes_macro;
+mod spa;
 mod sse;
 mod ui;
 
@@ -222,6 +223,7 @@ pub use inner_schema::{ApidocHandlerSchemas, InnerToSchema};
 pub use mount::{mount_docs, MountDocsExt, MountOpts};
 pub use problem::{ApiErrorBody, ProblemDetails};
 pub use router_ext::OpenApiRouterExt;
+pub use spa::{Dist, EmbeddedFiles, MountSpaExt, Spa};
 pub use sse::{SseEventMeta, SseStream};
 
 #[cfg(feature = "docs-scalar")]

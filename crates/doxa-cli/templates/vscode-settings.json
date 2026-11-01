@@ -1,0 +1,3 @@
+{
+  "rust-analyzer.rustfmt.overrideCommand": ["doxa", "fmt", "--stdin"]
+}

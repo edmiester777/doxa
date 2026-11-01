@@ -1,0 +1,26 @@
+[package]
+name = "{{name}}-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.doxa]
+role = "client"
+server = "{{name}}-server"
+css = ["style/app.css"]
+css_sources = []
+public = "public"
+
+# npm packages the UI imports:
+# [package.metadata.doxa.npm]
+# "@monaco-editor/react" = "^4.7"
+# react = "^19"
+
+[dependencies]
+{{name}}-client = { path = "../client" }
+doxa = { version = "{{doxa_version}}", features = ["ui"] }
+# Pinned to the version `doxa build` generates bindings with.
+wasm-bindgen = "={{wasm_bindgen_version}}"

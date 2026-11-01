@@ -62,6 +62,10 @@ auth-catalog = ["doxa-auth?/catalog"]
 # into the policy layer, so it stays opt-in even under `full`'s siblings.
 policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-sea-orm"]
 
+# Compile the built SPA into the binary via `dist!()`; needs `DOXA_DIST`,
+# which `doxa build` sets. Not part of `full`.
+embed = ["docs", "doxa-docs/embed"]
+
 client = ["dep:doxa-client", "dep:doxa-macros"]
 # Drive client calls through an in-process axum `Router`, for native tests.
 client-router = ["client", "doxa-client/router"]

@@ -13,6 +13,7 @@
 //! | `policy` | `doxa-policy` | Cedar-based authorization policy engine |
 //! | `client` | `doxa-client` | Call routes from the browser as async functions |
 //! | `ui` | `doxa-ui` | Components, `view!`, hooks and a router, rendered in the browser |
+//! | `embed` | `doxa-docs` | `dist!()` compiles the built SPA into the binary |
 //! | `full` | all of the above | Everything |
 //!
 //! A crate whose `build.rs` calls `doxa_role::client()` sees every route as a
@@ -29,6 +30,9 @@
 
 #[cfg(all(feature = "docs", not(target_arch = "wasm32")))]
 pub use doxa_docs::*;
+
+#[cfg(all(feature = "docs", not(target_arch = "wasm32")))]
+pub use doxa_docs::dist;
 
 /// Types the server and its browser client agree on.
 pub use doxa_wire as wire;

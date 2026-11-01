@@ -39,6 +39,10 @@ macros = ["dep:doxa-macros"]
 # `doxa-macros` through the same path it reaches every other proc-macro.
 macros-sea-orm = ["macros", "doxa-macros/sea-orm"]
 
+# Compile the dist `doxa build` wrote into the binary through `dist!()`.
+# Needs `DOXA_DIST` at compile time, which `doxa build` sets.
+embed = []
+
 [dependencies]
 axum = { workspace = true }
 doxa-macros = { workspace = true, optional = true }
@@ -48,6 +52,7 @@ futures-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tower = { workspace = true }
+tokio = { version = "1", features = ["fs"] }
 paste = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
@@ -63,3 +68,4 @@ http-body-util = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+tempfile = "3"

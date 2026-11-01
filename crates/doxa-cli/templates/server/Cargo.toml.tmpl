@@ -1,0 +1,16 @@
+[package]
+name = "{{name}}-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# Set by `doxa build`, which compiles the built web app into the binary.
+embed = ["doxa/embed"]
+
+[dependencies]
+{{name}}-api = { path = "../api" }
+doxa = { version = "{{doxa_version}}", features = ["full"] }
+axum = "0.8"
+utoipa = "5"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,34 @@
+[package]
+name = "doxa-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "The `doxa` command: scaffold, build, and develop a doxa app."
+keywords = ["doxa", "cli", "wasm"]
+categories = ["development-tools", "command-line-utilities"]
+
+[[bin]]
+name = "doxa"
+path = "src/main.rs"
+# Shares the `doxa` lib's doc path.
+doc = false
+
+[dependencies]
+doxa-build = { workspace = true }
+doxa-fmt = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+tokio = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+futures = { workspace = true }
+bytes = { workspace = true }
+notify-debouncer-mini = "0.7"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

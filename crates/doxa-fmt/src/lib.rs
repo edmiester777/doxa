@@ -2,8 +2,11 @@
 //!
 //! Only `view!` bodies are rewritten; everything else is left byte-for-byte as rustfmt produced it.
 
+mod cli;
 mod lex;
 mod print;
+
+pub use cli::run;
 
 use std::path::Path;
 use std::str::FromStr;
