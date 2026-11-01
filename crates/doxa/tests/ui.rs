@@ -2,6 +2,7 @@
 
 use std::rc::Rc;
 
+use doxa::client::transport::MockTransport;
 use doxa::ui::dom::MemDom;
 use doxa::ui::prelude::*;
 
@@ -183,5 +184,196 @@ fn lifecycle_sees_the_node_attached_until_it_is_removed() {
     assert_eq!(
         LIFE.with(|l| l.take()),
         ["Mounted true", "Patched true", "Unmounting true"]
+    );
+}
+
+#[page("/gizmos/{name}")]
+fn Gizmo(name: String) -> View {
+    let editing = state(false);
+    let draft = state(name.clone());
+    view! {
+        <h1>{name}</h1>
+        <button on:click={move |_| editing.set(true)}>"rename"</button>
+        {editing.get().then(|| view! { <input bind:value={draft}/> })}
+    }
+}
+
+#[test]
+fn a_page_remounts_when_its_params_change() {
+    let dom = MemDom::new();
+    App::new(Router::new().page::<Gizmo>()).mount_on(Rc::new(dom.clone()), dom.body());
+    navigate("/gizmos/cog");
+    settle();
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert!(dom.find_tag("input").is_some());
+
+    navigate("/gizmos/gear");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("h1").unwrap()), "gear");
+    assert!(dom.find_tag("input").is_none(), "cog's open form is gone");
+}
+
+struct Sidebar;
+
+impl Plugin for Sidebar {
+    fn slots(&self, slots: &mut Slots) {
+        slots.fill("side", || view! { <i>"x"</i> });
+    }
+}
+
+#[test]
+fn a_slot_shows_each_fill_once_however_often_apps_mount() {
+    for _ in 0..2 {
+        let dom = MemDom::new();
+        App::new(|| view! {
+            <aside>
+                <Slot name="side"/>
+            </aside>
+        })
+            .plugin(Sidebar)
+            .mount_on(Rc::new(dom.clone()), dom.body());
+        assert_eq!(dom.text(dom.find_tag("aside").unwrap()), "x");
+    }
+}
+
+static VISITS: Singleton<u32> = Singleton::new(|| 0);
+
+mod probes {
+    use doxa::client::Probe;
+    use doxa::wire::{Method, RouteSpec};
+
+    pub static GUARDED: RouteSpec = RouteSpec {
+        method: Method::Get,
+        path: "/guarded",
+        operation_id: "guarded",
+        entities: &[],
+        dry_run: true,
+    };
+    pub static OTHER: RouteSpec = RouteSpec {
+        method: Method::Get,
+        path: "/other",
+        operation_id: "other",
+        entities: &[],
+        dry_run: true,
+    };
+    pub static OPAQUE: RouteSpec = RouteSpec {
+        method: Method::Get,
+        path: "/opaque",
+        operation_id: "opaque",
+        entities: &[],
+        dry_run: false,
+    };
+
+    pub mod guarded {
+        pub fn can() -> super::Probe {
+            super::Probe::new(&super::GUARDED)
+        }
+    }
+
+    pub mod other {
+        pub fn can() -> super::Probe {
+            super::Probe::new(&super::OTHER)
+        }
+    }
+
+    pub mod opaque {
+        pub fn can() -> super::Probe {
+            super::Probe::new(&super::OPAQUE)
+        }
+    }
+}
+
+fn answer(mock: &MockTransport, status: u16, session: &str) {
+    mock.respond(
+        status,
+        vec![
+            (doxa::wire::SESSION_HEADER.into(), session.into()),
+            (
+                doxa::wire::DRY_RUN_HEADER.into(),
+                doxa::wire::DRY_RUN_OK.into(),
+            ),
+        ],
+        Vec::new(),
+    );
+}
+
+fn mount_with(mock: &MockTransport, root: impl Fn() -> View + 'static) -> MemDom {
+    let dom = MemDom::new();
+    App::new(root)
+        .config(ClientConfig::default().transport(mock.clone()))
+        .mount_on(Rc::new(dom.clone()), dom.body());
+    dom
+}
+
+#[test]
+fn singletons_reset_with_the_session_of_the_client_mounted_last() {
+    let _ = mount_with(&MockTransport::new(), View::empty);
+    VISITS.set(1);
+
+    let mock = MockTransport::new();
+    let _ = mount_with(&mock, View::empty);
+    VISITS.set(2);
+    answer(&mock, 204, "a");
+    answer(&mock, 204, "b");
+    doxa::client::task::block_on(async {
+        let _ = probes::guarded::can().await;
+        let _ = probes::other::can().await;
+    });
+    assert_eq!(VISITS.get(), 0, "a new session starts the singleton over");
+}
+
+#[test]
+fn can_shows_children_fallback_or_unknown() {
+    let mock = MockTransport::new();
+    answer(&mock, 403, "s");
+    let dom = mount_with(&mock, || {
+        view! {
+            <p id="denied">
+                <Can route={probes::guarded} fallback={"no"} unknown={"?"}>"yes"</Can>
+            </p>
+            <p id="unknown">
+                <Can route={probes::opaque} fallback={"no"} unknown={"?"}>"yes"</Can>
+            </p>
+        }
+    });
+    settle();
+    assert_eq!(dom.text(dom.find("id", "denied").unwrap()), "no");
+    assert_eq!(dom.text(dom.find("id", "unknown").unwrap()), "?");
+}
+
+#[test]
+fn can_is_recognised_by_its_path() {
+    let mock = MockTransport::new();
+    answer(&mock, 204, "s");
+    let dom = mount_with(&mock, || {
+        view! {
+            <p>
+                <doxa::ui::Can route={probes::guarded}>"yes"</doxa::ui::Can>
+            </p>
+        }
+    });
+    settle();
+    assert_eq!(dom.text(dom.find_tag("p").unwrap()), "yes");
+}
+
+const LIGHT: Theme = Theme::new("light", &[("--bg", "white"), ("--fg", "black")]);
+const DIM: Theme = Theme::new("dim", &[("--bg", "grey")]);
+
+#[test]
+fn a_theme_sets_only_its_own_variables() {
+    let dom = MemDom::new();
+    doxa::ui::dom::Dom::set_attr(&dom, dom.body(), "style", "color: red;");
+    App::new(View::empty)
+        .theme(LIGHT)
+        .mount_on(Rc::new(dom.clone()), dom.body());
+    assert_eq!(
+        dom.attr(dom.body(), "style").as_deref(),
+        Some("color: red; --bg: white; --fg: black;")
+    );
+    set_theme(DIM);
+    assert_eq!(
+        dom.attr(dom.body(), "style").as_deref(),
+        Some("color: red; --bg: grey;")
     );
 }

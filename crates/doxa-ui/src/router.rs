@@ -8,7 +8,7 @@ use std::rc::Rc;
 use futures_util::future::LocalBoxFuture;
 use percent_encoding_lite::{decode, encode};
 
-use crate::component::{Component, PropSet, RenderFuture, Set};
+use crate::component::{required, Component, RenderFuture, Set, Unset};
 use crate::runtime::{self, Readers};
 use crate::view::{comp, el, SafeUrl};
 use crate::{IntoView, View};
@@ -171,7 +171,9 @@ impl Router {
         self.pages.push((P::PATH, |s| {
             let props = P::parse(s)?;
             let load = P::load(&props);
-            Some((comp::<P>(props).key(P::PATH).into_view(), load))
+            // Keyed by params too, so `/w/a` → `/w/b` remounts rather than keeping a's state.
+            let key = (P::PATH, &s.params);
+            Some((comp::<P>(props).key(key).into_view(), load))
         }));
         self
     }
@@ -302,9 +304,11 @@ pub struct LinkProps {
     children: View,
 }
 
-#[doc(hidden)]
-#[allow(non_camel_case_types)]
-pub struct Link_is_missing_the_to_prop;
+required!(
+    Link_needs_to,
+    "`<Link>` is missing the `to` prop",
+    "add `to={{SomePage::route(…)}}` to the tag"
+);
 
 /// Builds [`LinkProps`].
 pub struct LinkBuilder<T> {
@@ -316,7 +320,7 @@ pub struct LinkBuilder<T> {
 
 impl Link {
     /// Start building its props.
-    pub fn props() -> LinkBuilder<Link_is_missing_the_to_prop> {
+    pub fn props() -> LinkBuilder<Unset> {
         LinkBuilder {
             to: None,
             class: None,
@@ -354,7 +358,7 @@ impl<T> LinkBuilder<T> {
     /// Finish; every required prop must be given.
     pub fn build(self) -> LinkProps
     where
-        T: PropSet,
+        T: Link_needs_to,
     {
         LinkProps {
             to: self.to.expect("set"),

@@ -152,7 +152,7 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
     let NodeName::Path(path) = e.name() else {
         unreachable!()
     };
-    let is_can = path.path.is_ident("Can");
+    let is_can = path.path.segments.last().is_some_and(|s| s.ident == "Can");
     let mut out = quote_spanned! { path.span() => #path::props() };
     let (mut key, mut route, mut args) = (None, None, None);
     for attr in e.attributes() {

@@ -40,6 +40,8 @@ pub trait Dom {
     fn set_attr(&self, node: NodeId, name: &str, value: &str);
     /// Remove an attribute.
     fn remove_attr(&self, node: NodeId, name: &str);
+    /// Set one inline CSS property, or remove it with `None`.
+    fn set_style(&self, node: NodeId, name: &str, value: Option<&str>);
     /// Set a DOM property.
     fn set_prop(&self, node: NodeId, name: &str, value: &Prop);
     /// Replace an element's children with parsed HTML.

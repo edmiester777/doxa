@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::component::{Component, PropSet, RenderFuture, Set};
+use crate::component::{required, Component, RenderFuture, Set, Unset};
 use crate::hooks::{catch_boundary, suspense_boundary};
 use crate::view::el;
 use crate::{IntoView, Thrown, View};
@@ -28,9 +28,11 @@ pub struct CatchProps {
     children: View,
 }
 
-#[doc(hidden)]
-#[allow(non_camel_case_types)]
-pub struct Catch_is_missing_the_fallback_prop;
+required!(
+    Catch_needs_fallback,
+    "`<Catch>` is missing the `fallback` prop",
+    "add `fallback={{|e: &Thrown| …}}` to the tag"
+);
 
 /// Builds [`CatchProps`].
 pub struct CatchBuilder<F> {
@@ -41,7 +43,7 @@ pub struct CatchBuilder<F> {
 
 impl Catch {
     /// Start building its props.
-    pub fn props() -> CatchBuilder<Catch_is_missing_the_fallback_prop> {
+    pub fn props() -> CatchBuilder<Unset> {
         CatchBuilder {
             fallback: None,
             children: View::empty(),
@@ -71,7 +73,7 @@ impl<F> CatchBuilder<F> {
     /// Finish; every required prop must be given.
     pub fn build(self) -> CatchProps
     where
-        F: PropSet,
+        F: Catch_needs_fallback,
     {
         CatchProps {
             fallback: self.fallback.expect("set"),

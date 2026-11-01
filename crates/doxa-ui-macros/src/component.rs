@@ -107,7 +107,38 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
             optional,
         });
     }
+    no_spawn(&item.block)?;
     Ok(Parsed { item, props })
+}
+
+/// A render runs again on every change, so a task it spawns would be spawned again each time.
+/// Closures and nested items aren't the render, so they may spawn.
+fn no_spawn(body: &syn::Block) -> syn::Result<()> {
+    use syn::visit::Visit;
+
+    struct Find(Option<proc_macro2::Span>);
+    impl<'a> Visit<'a> for Find {
+        fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+            if let syn::Expr::Path(p) = &*call.func {
+                if p.path.segments.last().is_some_and(|s| s.ident == "spawn") {
+                    self.0.get_or_insert(call.func.span());
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_expr_closure(&mut self, _: &'a syn::ExprClosure) {}
+        fn visit_item(&mut self, _: &'a syn::Item) {}
+    }
+
+    let mut find = Find(None);
+    find.visit_block(body);
+    match find.0 {
+        Some(span) => Err(syn::Error::new(
+            span,
+            "use `effect` (or `action`) instead of spawning in a render",
+        )),
+        None => Ok(()),
+    }
 }
 
 fn is_option(ty: &Type) -> bool {
@@ -208,10 +239,17 @@ pub(crate) fn builder(
     let params: Vec<_> = (0..required.len())
         .map(|i| format_ident!("__P{}", i))
         .collect();
-    let markers: Vec<_> = required
+    let needs: Vec<_> = required
         .iter()
-        .map(|p| format_ident!("{}_is_missing_the_{}_prop", name, p.name))
+        .map(|p| format_ident!("{}_needs_{}", name, p.name))
         .collect();
+    let messages = required
+        .iter()
+        .map(|p| format!("`<{name}>` is missing the `{}` prop", p.name));
+    let labels = required
+        .iter()
+        .map(|p| format!("add `{}={{{{…}}}}` to the tag", p.name));
+    let unset = required.iter().map(|_| quote!(::doxa::ui::Unset));
 
     let setters = props.iter().map(|p| {
         let (n, t) = (&p.name, &p.ty);
@@ -265,7 +303,9 @@ pub(crate) fn builder(
         #(
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
-            #vis struct #markers;
+            #[diagnostic::on_unimplemented(message = #messages, label = #labels)]
+            #vis trait #needs {}
+            impl #needs for ::doxa::ui::Set {}
         )*
 
         #[doc = concat!("Builds [`", stringify!(#props_ty), "`].")]
@@ -276,7 +316,7 @@ pub(crate) fn builder(
 
         impl #name {
             /// Start building its props.
-            #vis fn props() -> #builder<#(#markers),*> {
+            #vis fn props() -> #builder<#(#unset),*> {
                 #builder { #(#names: ::core::option::Option::None,)* _set: ::core::marker::PhantomData }
             }
         }
@@ -288,7 +328,7 @@ pub(crate) fn builder(
 
         impl<#(#params),*> #builder<#(#params),*> {
             /// Finish; every required prop must be given.
-            #vis fn build(self) -> #props_ty where #(#params: ::doxa::ui::PropSet),* {
+            #vis fn build(self) -> #props_ty where #(#params: #needs),* {
                 #props_ty { #(#build_fields),* }
             }
         }

@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::panic::Location;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::runtime::{self, current_or_panic, Cancel, Hook, Instance, Readers};
 use crate::{Result, Thrown};
@@ -402,7 +402,18 @@ type Cells = HashMap<usize, Rc<RefCell<SingletonCell>>>;
 
 thread_local! {
     static SINGLETONS: RefCell<Cells> = RefCell::new(HashMap::new());
-    static WATCHING_SESSION: Cell<bool> = const { Cell::new(false) };
+    /// The client the cells belong to; a different current client starts them over.
+    static OWNER: RefCell<Weak<doxa_client::Client>> = const { RefCell::new(Weak::new()) };
+}
+
+fn follow_client() {
+    let client = doxa_client::Client::current();
+    let same = OWNER.with(|o| o.borrow().as_ptr() == Rc::as_ptr(&client));
+    if !same {
+        OWNER.with(|o| *o.borrow_mut() = Rc::downgrade(&client));
+        reset_singletons();
+        client.on_session_change(reset_singletons);
+    }
 }
 
 fn reset_singletons() {
@@ -421,9 +432,7 @@ impl<T: 'static> Singleton<T> {
 
     // Each cell is its own `RefCell`, so `init` and `f` may use other singletons.
     fn cell(&'static self) -> Rc<RefCell<SingletonCell>> {
-        if !WATCHING_SESSION.with(|w| w.replace(true)) {
-            doxa_client::Client::current().on_session_change(reset_singletons);
-        }
+        follow_client();
         let id = self as *const Self as usize;
         if let Some(c) = SINGLETONS.with(|s| s.borrow().get(&id).cloned()) {
             return c;

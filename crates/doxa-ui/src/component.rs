@@ -79,14 +79,21 @@ impl<V: IntoView, E: Into<Thrown>> IntoRender for std::result::Result<V, E> {
 }
 
 /// A required prop not yet given; `build()` is unavailable until every one is.
-#[diagnostic::on_unimplemented(
-    message = "a required prop is missing: {Self}",
-    label = "add the prop to the component's tag"
-)]
-pub trait PropSet {}
+#[doc(hidden)]
+pub struct Unset;
 
-/// Marker for a prop that has been given.
+/// A required prop that has been given.
 #[doc(hidden)]
 pub struct Set;
 
-impl PropSet for Set {}
+/// The bound `build()` puts on one required prop; `#[component]` generates the same.
+macro_rules! required {
+    ($trait:ident, $message:literal, $label:literal) => {
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        #[diagnostic::on_unimplemented(message = $message, label = $label)]
+        pub trait $trait {}
+        impl $trait for $crate::component::Set {}
+    };
+}
+pub(crate) use required;

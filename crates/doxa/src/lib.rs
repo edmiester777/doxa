@@ -93,7 +93,7 @@ pub use doxa_ui::start;
 /// let _ = view! { <Row name="a"/> };
 /// ```
 ///
-/// A required prop left out names it:
+/// A required prop left out is "`<Row>` is missing the `name` prop":
 ///
 /// ```compile_fail
 /// use doxa::ui::prelude::*;
@@ -116,6 +116,28 @@ pub use doxa_ui::start;
 /// use doxa::ui::prelude::*;
 /// #[component]
 /// fn Row(key: u32) -> View { view! { <li>{key}</li> } }
+/// ```
+///
+/// Spawning from an event handler compiles:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Ticker() -> View {
+///     let tick = move |_| doxa::client::task::spawn(async {});
+///     view! { <button on:click={tick}>"tick"</button> }
+/// }
+/// ```
+///
+/// Spawning in the render itself asks for `effect`:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Ticker() -> View {
+///     doxa::client::task::spawn(async {});
+///     view! { <button>"tick"</button> }
+/// }
 /// ```
 #[cfg(feature = "ui")]
 #[doc(hidden)]

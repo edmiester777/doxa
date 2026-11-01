@@ -132,6 +132,20 @@ impl Dom for WebDom {
         }
     }
 
+    fn set_style(&self, node: NodeId, name: &str, value: Option<&str>) {
+        let Some(el) = self
+            .node(node)
+            .and_then(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
+        else {
+            return;
+        };
+        let style = el.style();
+        let _ = match value {
+            Some(v) => style.set_property(name, v),
+            None => style.remove_property(name).map(drop),
+        };
+    }
+
     fn set_prop(&self, node: NodeId, name: &str, value: &Prop) {
         let Some(n) = self.node(node) else { return };
         let v = match value {

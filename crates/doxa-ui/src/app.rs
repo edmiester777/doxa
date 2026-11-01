@@ -7,7 +7,7 @@ use doxa_client::{CacheConfig, ClientConfig};
 
 use crate::component::{Component, RenderFuture};
 use crate::dom::{Dom, NodeId};
-use crate::plugin::{self, Plugin};
+use crate::plugin::{Fills, Plugin};
 use crate::router::{self, Router};
 use crate::runtime::{self, Instance};
 use crate::theme::{self, Theme};
@@ -130,7 +130,8 @@ impl App {
             router::install(r);
         }
         let plugins: Rc<[Box<dyn Plugin>]> = self.plugins.into();
-        plugin::install(|slots| plugins.iter().for_each(|p| p.slots(slots)));
+        let mut provided = self.provided;
+        provided.push((TypeId::of::<Fills>(), Rc::new(Fills::collect(&plugins))));
 
         let root = self.root;
         let props: Rc<dyn Any> = Rc::new(RootProps(Rc::new(move || {
@@ -144,7 +145,7 @@ impl App {
             props,
             at,
         );
-        *inst.contexts.borrow_mut() = self.provided;
+        *inst.contexts.borrow_mut() = provided;
         runtime::run(&inst);
         ROOT.with(|r| *r.borrow_mut() = Some(inst));
     }

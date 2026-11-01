@@ -1,11 +1,10 @@
 //! Plugins: views and providers added to an app from outside its own components.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::component::{Component, PropSet, RenderFuture, Set};
+use crate::component::{required, Component, RenderFuture, Set, Unset};
 use crate::{IntoView, View};
 
 /// Something an app installs with `App::plugin`.
@@ -46,12 +45,16 @@ impl Slots {
     }
 }
 
-thread_local! {
-    static SLOTS: RefCell<Slots> = RefCell::new(Slots::default());
-}
+/// One app's slot fills, provided at its root.
+#[derive(Clone)]
+pub(crate) struct Fills(Rc<Slots>);
 
-pub(crate) fn install(fill: impl FnOnce(&mut Slots)) {
-    SLOTS.with(|s| fill(&mut s.borrow_mut()));
+impl Fills {
+    pub fn collect(plugins: &[Box<dyn Plugin>]) -> Self {
+        let mut slots = Slots::default();
+        plugins.iter().for_each(|p| p.slots(&mut slots));
+        Fills(Rc::new(slots))
+    }
 }
 
 /// Where plugins' views go: `<Slot name="sidebar"/>`.
@@ -63,9 +66,11 @@ pub struct SlotProps {
     name: &'static str,
 }
 
-#[doc(hidden)]
-#[allow(non_camel_case_types)]
-pub struct Slot_is_missing_the_name_prop;
+required!(
+    Slot_needs_name,
+    "`<Slot>` is missing the `name` prop",
+    "add `name=\"…\"` to the tag"
+);
 
 /// Builds [`SlotProps`].
 pub struct SlotBuilder<N> {
@@ -75,7 +80,7 @@ pub struct SlotBuilder<N> {
 
 impl Slot {
     /// Start building its props.
-    pub fn props() -> SlotBuilder<Slot_is_missing_the_name_prop> {
+    pub fn props() -> SlotBuilder<Unset> {
         SlotBuilder {
             name: "",
             _set: PhantomData,
@@ -97,7 +102,7 @@ impl<N> SlotBuilder<N> {
     /// Finish; every required prop must be given.
     pub fn build(self) -> SlotProps
     where
-        N: PropSet,
+        N: Slot_needs_name,
     {
         SlotProps { name: self.name }
     }
@@ -108,8 +113,9 @@ impl Component for Slot {
     const NAME: &'static str = "Slot";
 
     fn render(props: SlotProps) -> RenderFuture {
-        let fills: Vec<Fill> =
-            SLOTS.with(|s| s.borrow().0.get(props.name).cloned().unwrap_or_default());
+        let fills: Vec<Fill> = crate::try_context::<Fills>()
+            .and_then(|f| f.0 .0.get(props.name).cloned())
+            .unwrap_or_default();
         RenderFuture::ready(Ok(fills.iter().map(|f| f()).collect()))
     }
 }

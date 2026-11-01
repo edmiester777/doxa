@@ -23,10 +23,6 @@ impl Theme {
     pub const fn new(name: &'static str, vars: &'static [(&'static str, &'static str)]) -> Self {
         Self { name, vars }
     }
-
-    fn style(&self) -> String {
-        self.vars.iter().map(|(k, v)| format!("{k}:{v};")).collect()
-    }
 }
 
 struct ThemeCell {
@@ -37,20 +33,33 @@ struct ThemeCell {
 thread_local! {
     static THEME: RefCell<ThemeCell> = const { RefCell::new(ThemeCell { current: None, readers: Readers::new() }) };
     static HOST: Cell<Option<NodeId>> = const { Cell::new(None) };
+    /// The theme whose variables are on the host now.
+    static APPLIED: Cell<Option<Theme>> = const { Cell::new(None) };
 }
 
 pub(crate) fn set_host(node: NodeId) {
     HOST.with(|h| h.set(Some(node)));
+    APPLIED.with(|a| a.set(None));
     if let Some(t) = THEME.with(|t| t.borrow().current) {
         apply(t);
     }
 }
 
 fn apply(theme: Theme) {
-    if let Some(host) = HOST.with(Cell::get) {
-        let dom = runtime::dom();
-        dom.set_attr(host, "data-theme", theme.name);
-        dom.set_attr(host, "style", &theme.style());
+    let Some(host) = HOST.with(Cell::get) else {
+        return;
+    };
+    let dom = runtime::dom();
+    dom.set_attr(host, "data-theme", theme.name);
+    if let Some(old) = APPLIED.with(|a| a.replace(Some(theme))) {
+        for (k, _) in old.vars {
+            if !theme.vars.iter().any(|(n, _)| n == k) {
+                dom.set_style(host, k, None);
+            }
+        }
+    }
+    for (k, v) in theme.vars {
+        dom.set_style(host, k, Some(v));
     }
 }
 

@@ -110,6 +110,18 @@ impl MemDom {
         )
     }
 
+    /// An element's attribute.
+    pub fn attr(&self, node: NodeId, name: &str) -> Option<String> {
+        let nodes = self.nodes.borrow();
+        match &nodes.get(&node)?.kind {
+            Kind::Element { attrs, .. } => attrs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone()),
+            _ => None,
+        }
+    }
+
     /// The value of a DOM property set with `prop:` or `bind:`.
     pub fn prop(&self, node: NodeId, name: &str) -> Option<Prop> {
         let nodes = self.nodes.borrow();
@@ -249,6 +261,29 @@ impl Dom for MemDom {
             self.nodes.borrow_mut().get_mut(&node).map(|n| &mut n.kind)
         {
             attrs.retain(|(k, _)| k != name);
+        }
+    }
+
+    fn set_style(&self, node: NodeId, name: &str, value: Option<&str>) {
+        let old = self.attr(node, "style").unwrap_or_default();
+        let mut decls: Vec<(String, String)> = old
+            .split(';')
+            .filter_map(|d| d.split_once(':'))
+            .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+            .filter(|(k, _)| k != name)
+            .collect();
+        if let Some(v) = value {
+            decls.push((name.to_owned(), v.to_owned()));
+        }
+        let style = decls
+            .iter()
+            .map(|(k, v)| format!("{k}: {v};"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if style.is_empty() {
+            self.remove_attr(node, "style");
+        } else {
+            self.set_attr(node, "style", &style);
         }
     }
 

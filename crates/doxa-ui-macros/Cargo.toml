@@ -17,5 +17,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
-syn = { workspace = true }
+syn = { workspace = true, features = ["visit"] }
 rstml = "0.12"
+serde_json = { workspace = true }
+toml = "0.9"

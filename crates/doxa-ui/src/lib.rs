@@ -22,7 +22,7 @@ mod view;
 pub use app::{App, IntoRoot};
 pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
 pub use can::{Can, CanBuilder, CanProps};
-pub use component::{Component, IntoRender, PropSet, RenderFuture, Set};
+pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
 pub use dom::{Event, NodeRef, Phase};
 pub use error::{Result, Thrown};
 pub use hooks::{
@@ -40,16 +40,14 @@ pub use view::{
 };
 
 /// A React component as a doxa one: `#[react(module = "…", export = "…")]` on its props struct.
+///
+/// A `children: View` field reaches React as an element wrapping doxa's DOM, so Radix `asChild` can't take it.
 #[cfg(feature = "react")]
 pub use doxa_ui_macros::react;
 pub use doxa_ui_macros::{component, page, start, view};
 
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::boundary::Catch_is_missing_the_fallback_prop;
-    pub use crate::can::Can_is_missing_the_route_prop;
-    pub use crate::plugin::Slot_is_missing_the_name_prop;
-    pub use crate::router::Link_is_missing_the_to_prop;
     pub use crate::view::FromChildren;
     #[cfg(target_arch = "wasm32")]
     pub use wasm_bindgen;
