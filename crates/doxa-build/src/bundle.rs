@@ -172,35 +172,111 @@ pub fn parse_metafile(json: &str) -> Result<BundleOutput, String> {
     })
 }
 
-/// Point every `doxa-island:<path>` specifier in the glue at the real file under
-/// `web_root`, returning the rewritten glue and the islands found.
-pub fn rewrite_islands(glue: &str, web_root: &Path) -> (String, Vec<PathBuf>) {
-    let mut out = String::with_capacity(glue.len());
-    let mut islands = Vec::new();
-    let mut rest = glue;
-    while let Some(at) = rest.find(ISLAND_SCHEME) {
+/// The prefix `#[react]` components and their runtime are imported under.
+pub const REACT_SCHEME: &str = "doxa-react:";
+
+/// Replace each import specifier in `js` that starts with `scheme` by `f(rest)`.
+/// Other strings, like the keys of wasm's imports object, keep the name the wasm asks for.
+fn rewrite_specifiers(js: &str, scheme: &str, mut f: impl FnMut(&str) -> String) -> String {
+    let mut out = String::with_capacity(js.len());
+    let mut rest = js;
+    while let Some(at) = rest.find(scheme) {
         let quote = rest[..at].chars().next_back();
+        let before = rest[..at.saturating_sub(1)].trim_end();
+        let imported = before.ends_with("from") || before.ends_with("import");
         let close = match quote {
-            Some(q @ ('"' | '\'')) => rest[at..].find(q).map(|end| (q, end)),
+            Some(q @ ('"' | '\'')) if imported => rest[at..].find(q).map(|end| (q, end)),
             _ => None,
         };
         let Some((q, end)) = close else {
-            out.push_str(&rest[..at + ISLAND_SCHEME.len()]);
-            rest = &rest[at + ISLAND_SCHEME.len()..];
+            out.push_str(&rest[..at + scheme.len()]);
+            rest = &rest[at + scheme.len()..];
             continue;
         };
-        let rel = &rest[at + ISLAND_SCHEME.len()..at + end];
-        let path = web_root.join(rel);
         out.push_str(&rest[..at]);
-        out.push_str(&js_path(&path));
+        out.push_str(&f(&rest[at + scheme.len()..at + end]));
         out.push(q);
-        if !islands.contains(&path) {
-            islands.push(path);
-        }
         rest = &rest[at + end + 1..];
     }
     out.push_str(rest);
+    out
+}
+
+/// Point every `doxa-island:<path>` specifier in the glue at the real file under
+/// `web_root`, returning the rewritten glue and the islands found.
+pub fn rewrite_islands(glue: &str, web_root: &Path) -> (String, Vec<PathBuf>) {
+    let mut islands = Vec::new();
+    let out = rewrite_specifiers(glue, ISLAND_SCHEME, |rel| {
+        let path = web_root.join(rel);
+        let js = js_path(&path);
+        if !islands.contains(&path) {
+            islands.push(path);
+        }
+        js
+    });
     (out, islands)
+}
+
+/// Generated modules the glue imports instead of `doxa-react:` specifiers, as paths
+/// relative to the glue, with their contents.
+pub type ReactModules = Vec<(String, String)>;
+
+/// Point every `doxa-react:` specifier in the glue at a generated module: the
+/// shipped runtime, or a loader per `#[react]` component.
+pub fn rewrite_react(glue: &str, web_root: &Path) -> (String, ReactModules) {
+    let mut modules: ReactModules = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut found = false;
+    let out = rewrite_specifiers(glue, REACT_SCHEME, |spec| {
+        found = true;
+        let file = if spec == "runtime" {
+            "react/runtime.js".to_owned()
+        } else {
+            match seen.iter().position(|s| s == spec) {
+                Some(i) => format!("react/island-{i}.js"),
+                None => {
+                    seen.push(spec.to_owned());
+                    let file = format!("react/island-{}.js", seen.len() - 1);
+                    modules.push((file.clone(), island_js(spec, web_root)));
+                    file
+                }
+            }
+        };
+        format!("./{file}")
+    });
+    if found {
+        modules.push((
+            "react/runtime.js".to_owned(),
+            include_str!("../js/react-runtime.js").to_owned(),
+        ));
+    }
+    (out, modules)
+}
+
+/// A loader for `<eager|lazy>:<export>:<module>`; `load()` returns the component.
+fn island_js(spec: &str, web_root: &Path) -> String {
+    let mut parts = spec.splitn(3, ':');
+    let (mode, export, module) = (
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+    );
+    let module = match module.strip_prefix(ISLAND_SCHEME) {
+        Some(rel) => js_path(&web_root.join(rel)),
+        None => module.to_owned(),
+    };
+    let lit = serde_json::to_string(&module).expect("json");
+    if mode == "lazy" {
+        format!(
+            "import {{ lazy }} from \"react\";\n\
+             const C = lazy(() => import({lit}).then((m) => ({{ default: m.{export} }})));\n\
+             export const load = () => C;\n"
+        )
+    } else if export == "default" {
+        format!("import C from {lit};\nexport const load = () => C;\n")
+    } else {
+        format!("import {{ {export} as C }} from {lit};\nexport const load = () => C;\n")
+    }
 }
 
 /// The generated entry: load the glue, start the wasm, and pull in islands.
@@ -243,6 +319,57 @@ mod tests {
         assert!(out.contains("from \"/app/web/ts/chart.tsx\";"), "{out}");
         assert!(out.contains("`doxa-island: in prose`"), "{out}");
         assert!(!out.contains("'doxa-island:"), "{out}");
+    }
+
+    #[test]
+    fn react_specifiers_become_generated_modules() {
+        let glue = "import { mount } from 'doxa-react:runtime';\n\
+                    import { load } from 'doxa-react:eager:Editor:doxa-island:ts/editor.tsx';\n\
+                    import { load as load2 } from 'doxa-react:lazy:default:@monaco-editor/react';\n\
+                    import { load as load3 } from 'doxa-react:eager:default:react-select';\n\
+                    import { load as load4 } from 'doxa-react:eager:Editor:doxa-island:ts/editor.tsx';\n\
+                    const imports = { \"doxa-react:eager:default:react-select\": import3 };\n";
+        let (out, modules) = rewrite_react(glue, Path::new("/app/web"));
+        assert!(
+            out.contains("{ \"doxa-react:eager:default:react-select\": import3 }"),
+            "the wasm still asks for its own module name: {out}"
+        );
+        assert_eq!(out.matches("doxa-react:").count(), 1, "{out}");
+        assert!(out.contains("from './react/runtime.js'"), "{out}");
+        assert_eq!(out.matches("'./react/island-0.js'").count(), 2, "{out}");
+        let files: BTreeMap<_, _> = modules.into_iter().collect();
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            [
+                "react/island-0.js",
+                "react/island-1.js",
+                "react/island-2.js",
+                "react/runtime.js"
+            ]
+        );
+        assert_eq!(
+            files["react/island-0.js"],
+            "import { Editor as C } from \"/app/web/ts/editor.tsx\";\nexport const load = () => C;\n"
+        );
+        assert!(
+            files["react/island-1.js"].contains(
+                "lazy(() => import(\"@monaco-editor/react\").then((m) => ({ default: m.default })))"
+            ),
+            "{}",
+            files["react/island-1.js"]
+        );
+        assert_eq!(
+            files["react/island-2.js"],
+            "import C from \"react-select\";\nexport const load = () => C;\n"
+        );
+        assert!(files["react/runtime.js"].contains("createPortal"));
+    }
+
+    #[test]
+    fn no_react_runtime_without_islands() {
+        let (out, modules) = rewrite_react("import x from 'y';\n", Path::new("/app/web"));
+        assert_eq!(out, "import x from 'y';\n");
+        assert!(modules.is_empty());
     }
 
     #[test]

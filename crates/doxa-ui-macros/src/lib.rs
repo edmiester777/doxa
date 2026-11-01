@@ -1,4 +1,4 @@
-//! `view!`, `#[component]`, `#[page]` and `#[start]` for doxa-ui. Use them through `doxa::ui`.
+//! `view!`, `#[component]`, `#[page]`, `#[react]` and `#[start]` for doxa-ui. Use them through `doxa::ui`.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -6,6 +6,7 @@ use syn::{parse_macro_input, ItemFn};
 
 mod component;
 mod page;
+mod react;
 mod view;
 
 /// Markup: `view! { <p class="x">{&name}</p> <Row widget={w}/> }`.
@@ -34,6 +35,16 @@ pub fn page(args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
     component::parse(item)
         .and_then(|parsed| page::expand(args, &parsed))
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A React component used as a doxa one: `#[react(module = "…", export = "…", lazy?)]` on its props.
+#[proc_macro_attribute]
+pub fn react(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args as react::Args);
+    let item = parse_macro_input!(item as syn::ItemStruct);
+    react::expand(args, item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

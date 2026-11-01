@@ -120,7 +120,6 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     let name = &item.sig.ident;
     let name_str = name.to_string();
     let props_ty = format_ident!("{}Props", name);
-    let builder = format_ident!("{}Builder", name);
     let docs: Vec<_> = item
         .attrs
         .iter()
@@ -137,56 +136,6 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
         quote! { pub #n: #t }
     });
     let names: Vec<_> = props.iter().map(|p| &p.name).collect();
-    let required: Vec<_> = props.iter().filter(|p| p.default.is_none()).collect();
-    let params: Vec<_> = (0..required.len())
-        .map(|i| format_ident!("__P{}", i))
-        .collect();
-    let markers: Vec<_> = required
-        .iter()
-        .map(|p| format_ident!("{}_is_missing_the_{}_prop", name, p.name))
-        .collect();
-
-    let setters = props.iter().map(|p| {
-        let (n, t) = (&p.name, &p.ty);
-        let pos = required.iter().position(|r| r.name == p.name);
-        let out_params = params.iter().enumerate().map(|(i, g)| {
-            if Some(i) == pos {
-                quote!(::doxa::ui::Set)
-            } else {
-                quote!(#g)
-            }
-        });
-        let moves = names.iter().map(|m| {
-            if *m == n {
-                quote!(#m: ::core::option::Option::Some(::core::convert::Into::into(value)))
-            } else {
-                quote!(#m: self.#m)
-            }
-        });
-        let arg = if n == "children" {
-            quote!(value: ::doxa::ui::View)
-        } else {
-            quote!(value: impl ::core::convert::Into<#t>)
-        };
-        quote_spanned! { n.span() =>
-            #[allow(missing_docs)]
-            pub fn #n(self, #arg) -> #builder<#(#out_params),*> {
-                #builder { #(#moves,)* _set: ::core::marker::PhantomData }
-            }
-        }
-    });
-
-    let build_fields = props.iter().map(|p| {
-        let n = &p.name;
-        match &p.default {
-            Some(d) => quote!(#n: self.#n.unwrap_or_else(|| #d)),
-            None => quote!(#n: self.#n.expect("checked by the builder's type")),
-        }
-    });
-    let builder_fields = props.iter().map(|p| {
-        let (n, t) = (&p.name, &p.ty);
-        quote!(#n: ::core::option::Option<#t>)
-    });
 
     let same_props = if opts.memo {
         quote! {
@@ -217,6 +166,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     } else {
         quote! { ::doxa::ui::RenderFuture::ready(::doxa::ui::IntoRender::into_render(__render(#(#names),*))) }
     };
+    let builder = builder(vis, name, &props_ty, props);
 
     quote! {
         #(#docs)*
@@ -227,6 +177,91 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
         #derive_eq
         #vis struct #props_ty { #(#fields),* }
 
+        #builder
+
+        impl ::doxa::ui::Component for #name {
+            type Props = #props_ty;
+            const NAME: &'static str = #name_str;
+            #same_props
+
+            fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
+                #(#others)*
+                #[allow(non_snake_case, clippy::too_many_arguments)]
+                #inner_sig #body
+                let #props_ty { #(#names),* } = props;
+                #call
+            }
+        }
+    }
+}
+
+/// The typestate builder for `props_ty`: `build()` needs every prop without a default.
+pub(crate) fn builder(
+    vis: &syn::Visibility,
+    name: &Ident,
+    props_ty: &Ident,
+    props: &[Prop],
+) -> TokenStream {
+    let builder = format_ident!("{}Builder", name);
+    let names: Vec<_> = props.iter().map(|p| &p.name).collect();
+    let required: Vec<_> = props.iter().filter(|p| p.default.is_none()).collect();
+    let params: Vec<_> = (0..required.len())
+        .map(|i| format_ident!("__P{}", i))
+        .collect();
+    let markers: Vec<_> = required
+        .iter()
+        .map(|p| format_ident!("{}_is_missing_the_{}_prop", name, p.name))
+        .collect();
+
+    let setters = props.iter().map(|p| {
+        let (n, t) = (&p.name, &p.ty);
+        let pos = required.iter().position(|r| r.name == p.name);
+        let out_params = params.iter().enumerate().map(|(i, g)| {
+            if Some(i) == pos {
+                quote!(::doxa::ui::Set)
+            } else {
+                quote!(#g)
+            }
+        });
+        let (arg, convert) = if n == "children" {
+            (
+                quote!(value: ::doxa::ui::View),
+                quote!(::doxa::ui::__private::FromChildren::from_children(value)),
+            )
+        } else {
+            (
+                quote!(value: impl ::core::convert::Into<#t>),
+                quote!(::core::convert::Into::into(value)),
+            )
+        };
+        let moves = names.iter().map(|m| {
+            if *m == n {
+                quote!(#m: ::core::option::Option::Some(#convert))
+            } else {
+                quote!(#m: self.#m)
+            }
+        });
+        quote_spanned! { n.span() =>
+            #[allow(missing_docs)]
+            pub fn #n(self, #arg) -> #builder<#(#out_params),*> {
+                #builder { #(#moves,)* _set: ::core::marker::PhantomData }
+            }
+        }
+    });
+
+    let build_fields = props.iter().map(|p| {
+        let n = &p.name;
+        match &p.default {
+            Some(d) => quote!(#n: self.#n.unwrap_or_else(|| #d)),
+            None => quote!(#n: self.#n.expect("checked by the builder's type")),
+        }
+    });
+    let builder_fields = props.iter().map(|p| {
+        let (n, t) = (&p.name, &p.ty);
+        quote!(#n: ::core::option::Option<#t>)
+    });
+
+    quote! {
         #(
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
@@ -255,20 +290,6 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
             /// Finish; every required prop must be given.
             #vis fn build(self) -> #props_ty where #(#params: ::doxa::ui::PropSet),* {
                 #props_ty { #(#build_fields),* }
-            }
-        }
-
-        impl ::doxa::ui::Component for #name {
-            type Props = #props_ty;
-            const NAME: &'static str = #name_str;
-            #same_props
-
-            fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
-                #(#others)*
-                #[allow(non_snake_case, clippy::too_many_arguments)]
-                #inner_sig #body
-                let #props_ty { #(#names),* } = props;
-                #call
             }
         }
     }

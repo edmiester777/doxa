@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::bundle::{entry_js, rewrite_islands, BundleOutput, BundleRequest, Bundler, Esbuild};
+use crate::bundle::{
+    entry_js, rewrite_islands, rewrite_react, BundleOutput, BundleRequest, Bundler, Esbuild,
+};
 use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
 use crate::error::{run, Error, IoContext, Result};
@@ -153,6 +155,14 @@ impl Pipeline {
         let dir = self.bindgen_dir();
         let glue_path = dir.join("app.js");
         let glue = std::fs::read_to_string(&glue_path).at(&glue_path)?;
+        let (glue, react) = rewrite_react(&glue, &self.web.dir);
+        for (file, js) in react {
+            let path = dir.join(file);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).at(parent)?;
+            }
+            std::fs::write(&path, js).at(&path)?;
+        }
         let (glue, islands) = rewrite_islands(&glue, &self.web.dir);
         let rewritten = dir.join("glue.js");
         std::fs::write(&rewritten, glue).at(&rewritten)?;

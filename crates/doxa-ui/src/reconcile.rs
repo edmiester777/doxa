@@ -1,12 +1,12 @@
 //! Turning a new view into the fewest DOM changes: same-kind nodes are patched,
 //! keyed children are matched by key and moved along a longest increasing subsequence.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::dom::{Dom, NodeId, Prop};
+use crate::dom::{Dom, NodeId, NodeRef, Phase, Prop};
 use crate::runtime::{self, Instance};
-use crate::view::{ComponentNode, Element, Handler, Key, Node};
+use crate::view::{ComponentNode, Element, Handler, Key, Life, Node};
 use crate::View;
 
 pub(crate) enum Mounted {
@@ -31,6 +31,7 @@ pub(crate) struct MountedElement {
     events: Vec<(&'static str, Rc<RefCell<Handler>>)>,
     inner_html: Option<String>,
     children: Vec<Mounted>,
+    life: Option<Life>,
 }
 
 impl Mounted {
@@ -103,6 +104,7 @@ pub(crate) fn update_region(inst: &Rc<Instance>, view: View) {
         .and_then(|n| dom.next_sibling(n));
     let mut new = Vec::new();
     flatten(view.0, &mut new);
+    DEPTH.with(|d| d.set(d.get() + 1));
     reconcile(&*dom, inst, parent, &mut region, new, end);
     if region.is_empty() {
         let anchor = dom.create_anchor();
@@ -110,6 +112,9 @@ pub(crate) fn update_region(inst: &Rc<Instance>, view: View) {
         region.push(Mounted::Anchor(anchor));
     }
     *inst.region.borrow_mut() = region;
+    if DEPTH.with(|d| d.replace(d.get() - 1)) == 1 {
+        run_deferred();
+    }
 }
 
 fn reconcile(
@@ -287,6 +292,9 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
             }
         }
     }
+    if let Some(life) = &e.life {
+        defer(life.clone(), Phase::Mounted, node);
+    }
     MountedElement {
         node,
         tag: e.tag,
@@ -296,6 +304,7 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
         events,
         inner_html: e.inner_html.clone(),
         children,
+        life: e.life.clone(),
     }
 }
 
@@ -396,6 +405,11 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
         }
     }
 
+    m.life = e.life.clone();
+    if let Some(life) = &m.life {
+        defer(life.clone(), Phase::Patched, node);
+    }
+
     if e.inner_html.is_some() {
         if m.inner_html != e.inner_html {
             for c in std::mem::take(&mut m.children) {
@@ -414,10 +428,30 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
     reconcile(dom, owner, node, &mut m.children, flat, None);
 }
 
+thread_local! {
+    static DEPTH: Cell<usize> = const { Cell::new(0) };
+    static DEFERRED: RefCell<Vec<(Life, Phase, NodeId)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Queue a lifecycle call for when the outermost region update finishes.
+fn defer(life: Life, phase: Phase, node: NodeId) {
+    DEFERRED.with(|d| d.borrow_mut().push((life, phase, node)));
+}
+
+fn run_deferred() {
+    let calls = DEFERRED.with(|d| std::mem::take(&mut *d.borrow_mut()));
+    for (life, phase, node) in calls {
+        life(phase, NodeRef(node));
+    }
+}
+
 fn unmount(dom: &dyn Dom, m: Mounted) {
     match m {
         Mounted::Anchor(n) | Mounted::Text { node: n, .. } => dom.remove(n),
         Mounted::Element(e) => {
+            if let Some(life) = &e.life {
+                life(Phase::Unmounting, NodeRef(e.node));
+            }
             kill_children(&e.children);
             dom.remove(e.node);
         }
@@ -434,7 +468,12 @@ fn unmount(dom: &dyn Dom, m: Mounted) {
 fn kill_children(children: &[Mounted]) {
     for c in children {
         match c {
-            Mounted::Element(e) => kill_children(&e.children),
+            Mounted::Element(e) => {
+                if let Some(life) = &e.life {
+                    life(Phase::Unmounting, NodeRef(e.node));
+                }
+                kill_children(&e.children)
+            }
             Mounted::Component { inst, .. } => {
                 inst.kill();
                 kill_children(&inst.region.borrow());

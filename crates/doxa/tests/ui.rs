@@ -150,3 +150,38 @@ fn a_page_parses_its_path_and_query() {
     let bad = doxa::ui::match_path(Thing::PATH, "/things/seven").unwrap();
     assert!(<Thing as Page>::parse(&bad).is_none());
 }
+
+thread_local! {
+    static LIFE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static DOC: std::cell::RefCell<Option<MemDom>> = const { std::cell::RefCell::new(None) };
+}
+
+#[component]
+fn Tracked() -> View {
+    let on = state(true);
+    let n = state(0);
+    let probe = doxa::ui::el("p").lifecycle(|phase, node| {
+        let attached = DOC.with(|d| d.borrow().as_ref().unwrap().find_tag("p")) == Some(node.id());
+        LIFE.with(|l| l.borrow_mut().push(format!("{phase:?} {attached}")));
+    });
+    view! {
+        <button id="n" on:click={move |_| n.update(|n| *n += 1)}>{n.get()}</button>
+        <button id="off" on:click={move |_| on.set(false)}>"off"</button>
+        <div>{on.get().then_some(probe)}</div>
+    }
+}
+
+#[test]
+fn lifecycle_sees_the_node_attached_until_it_is_removed() {
+    let dom = MemDom::new();
+    DOC.with(|d| *d.borrow_mut() = Some(dom.clone()));
+    App::new(|| view! { <Tracked/> }).mount_on(Rc::new(dom.clone()), dom.body());
+    dom.click(dom.find("id", "n").unwrap());
+    settle();
+    dom.click(dom.find("id", "off").unwrap());
+    settle();
+    assert_eq!(
+        LIFE.with(|l| l.take()),
+        ["Mounted true", "Patched true", "Unmounting true"]
+    );
+}

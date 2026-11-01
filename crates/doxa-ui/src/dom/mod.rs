@@ -54,6 +54,39 @@ pub trait Dom {
     fn listen(&self, node: NodeId, event: &str, handler: Rc<dyn Fn(Event)>);
     /// The element matching a CSS selector, for mounting.
     fn query(&self, selector: &str) -> Option<NodeId>;
+    /// The browser node behind `node`.
+    #[cfg(target_arch = "wasm32")]
+    fn raw(&self, _node: NodeId) -> Option<web_sys::Node> {
+        None
+    }
+}
+
+/// An element the renderer placed, as [`Element::lifecycle`](crate::Element::lifecycle) sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeRef(pub(crate) NodeId);
+
+impl NodeRef {
+    /// Its id in the current [`Dom`].
+    pub fn id(self) -> NodeId {
+        self.0
+    }
+
+    /// The browser node.
+    #[cfg(target_arch = "wasm32")]
+    pub fn raw(self) -> Option<web_sys::Node> {
+        crate::runtime::dom().raw(self.0)
+    }
+}
+
+/// Where an element is in its life, for [`Element::lifecycle`](crate::Element::lifecycle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Inserted, once the render that created it has committed.
+    Mounted,
+    /// Re-rendered in place, once that render has committed.
+    Patched,
+    /// About to be removed.
+    Unmounting,
 }
 
 /// A DOM event, as a handler sees it.

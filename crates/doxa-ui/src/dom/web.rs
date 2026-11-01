@@ -187,6 +187,10 @@ impl Dom for WebDom {
         let el = self.doc.query_selector(selector).ok()??;
         Some(self.add(el.into()))
     }
+
+    fn raw(&self, node: NodeId) -> Option<web_sys::Node> {
+        self.node(node)
+    }
 }
 
 pub(crate) fn target_value(e: &web_sys::Event) -> String {

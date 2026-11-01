@@ -15,7 +15,10 @@ use crate::runtime::{self, current_or_panic, Cancel, Hook, Instance, Readers};
 use crate::{Result, Thrown};
 
 #[track_caller]
-fn slot<T: 'static>(hook: &str, init: impl FnOnce() -> T) -> (Rc<Instance>, usize, Rc<T>) {
+pub(crate) fn slot<T: 'static>(
+    hook: &str,
+    init: impl FnOnce() -> T,
+) -> (Rc<Instance>, usize, Rc<T>) {
     let inst = current_or_panic(hook);
     let at = Location::caller();
     let i = inst.cursor.get();

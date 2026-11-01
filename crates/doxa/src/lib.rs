@@ -13,6 +13,7 @@
 //! | `policy` | `doxa-policy` | Cedar-based authorization policy engine |
 //! | `client` | `doxa-client` | Call routes from the browser as async functions |
 //! | `ui` | `doxa-ui` | Components, `view!`, hooks and a router, rendered in the browser |
+//! | `react` | `doxa-ui` | `#[react]`: React components used inside `view!` |
 //! | `embed` | `doxa-docs` | `dist!()` compiles the built SPA into the binary |
 //! | `full` | all of the above | Everything |
 //!
@@ -119,6 +120,33 @@ pub use doxa_ui::start;
 #[cfg(feature = "ui")]
 #[doc(hidden)]
 pub mod ui_diagnostics {}
+
+/// An event prop that is a `Callback` compiles:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/editor.tsx", export = "Editor")]
+/// pub struct Editor {
+///     pub value: String,
+///     #[react(event)]
+///     pub on_change: Callback<String>,
+/// }
+/// ```
+///
+/// One that isn't names the field:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/editor.tsx", export = "Editor")]
+/// pub struct Editor {
+///     pub value: String,
+///     #[react(event)]
+///     pub on_change: fn(String),
+/// }
+/// ```
+#[cfg(feature = "react")]
+#[doc(hidden)]
+pub mod react_diagnostics {}
 
 /// The client half: typed calls to the server's routes.
 #[cfg(feature = "client")]

@@ -17,6 +17,11 @@ doxa-wire = { workspace = true }
 doxa-ui-macros = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# `#[react]`: React components rendered as portals of one shared root.
+react = ["dep:serde_json"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

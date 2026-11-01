@@ -70,6 +70,8 @@ client = ["dep:doxa-client", "dep:doxa-macros"]
 # Drive client calls through an in-process axum `Router`, for native tests.
 client-router = ["client", "doxa-client/router"]
 ui = ["client", "dep:doxa-ui"]
+# `#[react]`: React components inside `view!`.
+react = ["ui", "doxa-ui/react"]
 
 # Everything.
 full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
@@ -124,6 +126,10 @@ required-features = ["full"]
 [[test]]
 name = "ui"
 required-features = ["ui"]
+
+[[test]]
+name = "react"
+required-features = ["react"]
 
 [[test]]
 name = "granted"

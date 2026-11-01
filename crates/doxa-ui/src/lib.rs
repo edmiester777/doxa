@@ -11,6 +11,8 @@ pub mod dom;
 mod error;
 mod hooks;
 mod plugin;
+#[cfg(feature = "react")]
+pub mod react;
 mod reconcile;
 mod router;
 mod runtime;
@@ -21,7 +23,7 @@ pub use app::{App, IntoRoot};
 pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
 pub use can::{Can, CanBuilder, CanProps};
 pub use component::{Component, IntoRender, PropSet, RenderFuture, Set};
-pub use dom::Event;
+pub use dom::{Event, NodeRef, Phase};
 pub use error::{Result, Thrown};
 pub use hooks::{
     action, context, effect, memo, provide, state, try_context, Action, Deps, Singleton, State,
@@ -37,6 +39,9 @@ pub use view::{
     SafeUrl, View,
 };
 
+/// A React component as a doxa one: `#[react(module = "…", export = "…")]` on its props struct.
+#[cfg(feature = "react")]
+pub use doxa_ui_macros::react;
 pub use doxa_ui_macros::{component, page, start, view};
 
 #[doc(hidden)]
@@ -45,12 +50,15 @@ pub mod __private {
     pub use crate::can::Can_is_missing_the_route_prop;
     pub use crate::plugin::Slot_is_missing_the_name_prop;
     pub use crate::router::Link_is_missing_the_to_prop;
+    pub use crate::view::FromChildren;
     #[cfg(target_arch = "wasm32")]
     pub use wasm_bindgen;
 }
 
 /// Everything a component file uses.
 pub mod prelude {
+    #[cfg(feature = "react")]
+    pub use crate::react;
     pub use crate::{
         action, component, context, effect, memo, navigate, page, provide, set_theme, state, theme,
         try_context, view, Action, App, Callback, Can, Catch, DangerousHtml, Event, IntoView, Link,
