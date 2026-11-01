@@ -84,20 +84,8 @@ mod audit_support {
             }))
         }
 
-        /// Record a terminal auth-failure event if the session is active.
-        ///
-        /// Takes the builder out of the session so a pipeline that fails
-        /// twice records once, and so
-        /// [`take_with_actor`](Self::take_with_actor) cannot then hand a
-        /// spent builder downstream.
-        ///
-        /// The event is *settled*, not emitted: under an
-        /// [`AuditLayer`](doxa_audit::AuditLayer) the outcome is recorded
-        /// and the layer sends it after the response, with the real status
-        /// and a duration measured through it. Only when this session
-        /// built its own builder — an [`AuthState`] logger with no
-        /// `AuditLayer` above it — is there nobody else to send it, and
-        /// then `status` is what the rejection is about to return.
+        /// Settle a terminal auth failure once; an [`AuditLayer`](doxa_audit::AuditLayer)
+        /// sends it after the response, otherwise it is sent now with `status`.
         pub fn emit_failure(&mut self, action: &str, error: &str, status: u16) {
             if let Some(builder) = self.0.take() {
                 builder.set_event(EventType::AuthFailure, action);
@@ -478,13 +466,7 @@ where
     //    `Require<M>` extractor can read tenant + roles without being
     //    generic over the consumer's `S` / `C`. The typed
     //    `AuthContext<S, C>` stays available for handlers that want
-    //    claim-level access.
-    //
-    //    Behind an `Arc` because every extractor that reaches it takes it
-    //    by value: `Auth<S, C>` and each `Granted<T>` on the handler. The
-    //    session is whatever the consumer's policy extension assembled —
-    //    a per-resource grant map, typically — so deep-copying it once
-    //    per guard is the one avoidable cost on the request path.
+    //    claim-level access. Behind an `Arc`: every guard takes it by value.
     let cap_ctx = CapabilityContext {
         tenant_id: claims.scope().map(str::to_owned),
         roles: claims.roles().to_vec(),
@@ -680,9 +662,6 @@ mod tests {
     async fn auth_layer_injects_auth_context_on_success() {
         let state = make_state("good");
         let svc = build_service(state, |req| {
-            // Assert AuthContext is in extensions and carries the
-            // expected claims. Shared, so every reader after this one
-            // pays a refcount bump rather than a copy of the session.
             let ctx = req
                 .extensions()
                 .get::<Arc<AuthContext<(), OidcClaims>>>()
