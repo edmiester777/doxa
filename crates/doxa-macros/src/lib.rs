@@ -814,6 +814,25 @@ pub fn __as_client(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// The files of the dist in `DOXA_DIST` at compile time, or none when it is unset, so an
+/// `embed` build without `doxa build` still compiles. `option_env!` makes cargo track it.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __embedded_dist(_: TokenStream) -> TokenStream {
+    let files = match std::env::var("DOXA_DIST") {
+        Ok(dir) => {
+            let file = format!("{}/embed.rs", dir.trim_end_matches('/'));
+            quote::quote! { ::core::include!(#file) }
+        }
+        Err(_) => quote::quote! { &[] },
+    };
+    quote::quote! {{
+        const _: ::core::option::Option<&str> = ::core::option_env!("DOXA_DIST");
+        #files
+    }}
+    .into()
+}
+
 /// Keep these items only in the server half; unlike `#[server]`, works on `mod x;`.
 ///
 /// ```ignore

@@ -39,9 +39,9 @@ macros = ["dep:doxa-macros"]
 # `doxa-macros` through the same path it reaches every other proc-macro.
 macros-sea-orm = ["macros", "doxa-macros/sea-orm"]
 
-# Compile the dist `doxa build` wrote into the binary through `dist!()`.
-# Needs `DOXA_DIST` at compile time, which `doxa build` sets.
-embed = []
+# Compile the dist `doxa build` wrote into the binary through `dist!()`, when
+# `doxa build` set `DOXA_DIST`; otherwise `dist!()` serves it from disk.
+embed = ["macros"]
 
 [dependencies]
 axum = { workspace = true }

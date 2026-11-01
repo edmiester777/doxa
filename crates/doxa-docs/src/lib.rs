@@ -267,6 +267,9 @@ pub type ApiResult<T, E> = Result<T, E>;
 pub mod __private {
     pub use tracing;
 
+    #[cfg(feature = "embed")]
+    pub use doxa_macros::__embedded_dist as embedded_dist;
+
     /// Referenced by `#[derive(PolicyResource)]` when building the
     /// attribute map, so consumers need not depend on `serde_json`.
     pub use serde_json;

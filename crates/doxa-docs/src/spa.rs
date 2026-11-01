@@ -25,18 +25,15 @@ pub struct Dist {
     pub embedded: EmbeddedFiles,
 }
 
-/// The dist `doxa build` wrote. With `embed`, every file is compiled in; this
-/// requires `DOXA_DIST`, which `doxa build` sets.
+/// The dist `doxa build` wrote. With `embed`, every file is compiled in when `doxa build`
+/// set `DOXA_DIST`; without it, the dist is served from disk.
 #[cfg(feature = "embed")]
 #[macro_export]
 macro_rules! dist {
     () => {
         $crate::Dist {
-            dir: ::core::option::Option::Some(::core::env!(
-                "DOXA_DIST",
-                "the `embed` feature needs DOXA_DIST; build the server with `doxa build`"
-            )),
-            embedded: ::core::include!(::core::concat!(::core::env!("DOXA_DIST"), "/embed.rs")),
+            dir: ::core::option_env!("DOXA_DIST"),
+            embedded: $crate::__private::embedded_dist!(),
         }
     };
 }
