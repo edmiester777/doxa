@@ -170,6 +170,7 @@ pub struct AuthLayer<S: Clone + Send + Sync + 'static, C: Claims> {
     /// per-route capabilities without being generic over the consumer's
     /// [`PolicyExtension`](doxa_policy::PolicyExtension) type.
     checker: Option<Arc<dyn CapabilityChecker>>,
+    cookie: Option<Arc<str>>,
 }
 
 impl<S: Clone + Send + Sync + 'static, C: Claims> Clone for AuthLayer<S, C> {
@@ -178,6 +179,7 @@ impl<S: Clone + Send + Sync + 'static, C: Claims> Clone for AuthLayer<S, C> {
             state: Arc::clone(&self.state),
             scheme_name: self.scheme_name.clone(),
             checker: self.checker.clone(),
+            cookie: self.cookie.clone(),
         }
     }
 }
@@ -192,7 +194,16 @@ impl<S: Clone + Send + Sync + 'static, C: Claims> AuthLayer<S, C> {
             state,
             scheme_name: Cow::Borrowed("bearer"),
             checker: None,
+            cookie: None,
         }
+    }
+
+    /// Also accept the token from cookie `name` when there is no `Authorization`
+    /// header. Cookie-authenticated mutations and dry runs must carry
+    /// `x-doxa-csrf`, which a cross-site form can't set.
+    pub fn with_cookie(mut self, name: impl Into<Arc<str>>) -> Self {
+        self.cookie = Some(name.into());
+        self
     }
 
     /// Override the OpenAPI security scheme name this layer contributes.
@@ -233,6 +244,7 @@ where
         AuthService {
             state: Arc::clone(&self.state),
             checker: self.checker.clone(),
+            cookie: self.cookie.clone(),
             inner,
             _claims: PhantomData,
         }
@@ -251,6 +263,7 @@ impl<S: Clone + Send + Sync + 'static, C: Claims> doxa::DocumentedLayer for Auth
 pub struct AuthService<S: Clone + Send + Sync + 'static, C: Claims, Inner> {
     state: Arc<AuthState<S, C>>,
     checker: Option<Arc<dyn CapabilityChecker>>,
+    cookie: Option<Arc<str>>,
     inner: Inner,
     _claims: PhantomData<fn() -> C>,
 }
@@ -265,6 +278,7 @@ where
         Self {
             state: Arc::clone(&self.state),
             checker: self.checker.clone(),
+            cookie: self.cookie.clone(),
             inner: self.inner.clone(),
             _claims: PhantomData,
         }
@@ -289,6 +303,7 @@ where
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let state = Arc::clone(&self.state);
         let checker = self.checker.clone();
+        let cookie = self.cookie.clone();
         // Canonical clone-and-swap pattern from the tower::Service
         // docs: poll_ready was called on `self.inner`, so we must
         // call `inner` (the readied one) inside the future and leave
@@ -296,8 +311,14 @@ where
         let inner_clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, inner_clone);
         Box::pin(async move {
-            match run_auth_pipeline::<S, C>(&state, checker, req).await {
-                Ok(req) => inner.call(req).await,
+            match run_auth_pipeline::<S, C>(&state, checker, cookie.as_deref(), req).await {
+                Ok((req, epoch)) => {
+                    let mut response = inner.call(req).await?;
+                    if let Ok(v) = axum::http::HeaderValue::from_str(&epoch) {
+                        response.headers_mut().insert(doxa_wire::SESSION_HEADER, v);
+                    }
+                    Ok(response)
+                }
                 Err(err) => Ok(err.into_response()),
             }
         })
@@ -314,15 +335,52 @@ fn rejection_status(error: &AuthError) -> u16 {
     doxa::__private::HasApiMetadata::api_status(error)
 }
 
+/// The request's token: the bearer header, else the configured cookie. A
+/// cookie only authenticates a mutation or dry run that also sends `x-doxa-csrf`.
+fn credential<'r>(request: &'r Request<Body>, cookie: Option<&str>) -> Result<&'r str, AuthError> {
+    let headers = request.headers();
+    if let Some(bearer) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return Ok(bearer);
+    }
+    let name = cookie.ok_or(AuthError::MissingCredentials)?;
+    let token = headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find_map(|(k, v)| (k == name).then_some(v))
+        .ok_or(AuthError::MissingCredentials)?;
+    let safe = request.method().is_safe() && !headers.contains_key(doxa_wire::DRY_RUN_HEADER);
+    if !safe && !headers.contains_key(doxa_wire::CSRF_HEADER) {
+        return Err(AuthError::Forbidden);
+    }
+    Ok(token)
+}
+
+/// Who the caller is, as an opaque id that changes on sign-in, sign-out or a
+/// tenant switch; the browser client drops its cache when it changes.
+fn epoch<C: Claims>(claims: &C) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (claims.sub(), claims.scope()).hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 /// Body of the auth pipeline. Returns the modified [`Request<Body>`] (with
-/// [`AuthContext`] injected into extensions) on success; the caller is
-/// responsible for invoking the inner service.
+/// [`AuthContext`] injected into extensions) and the session epoch on
+/// success; the caller is responsible for invoking the inner service.
 #[tracing::instrument(skip_all, name = "auth")]
 async fn run_auth_pipeline<S, C>(
     auth: &AuthState<S, C>,
     checker: Option<Arc<dyn CapabilityChecker>>,
+    cookie: Option<&str>,
     mut request: Request<Body>,
-) -> Result<Request<Body>, AuthError>
+) -> Result<(Request<Body>, String), AuthError>
 where
     S: Clone + Send + Sync + 'static,
     C: Claims,
@@ -332,22 +390,23 @@ where
     // feature flag.
     let mut audit = AuditSession::start(auth, &request);
 
-    // 1. Extract Bearer token from Authorization header
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            let error = AuthError::MissingCredentials;
-            tracing::warn!("missing or malformed Authorization header");
-            audit.emit_failure(
+    // 1. The bearer token, or the session cookie with its CSRF header.
+    let token = credential(&request, cookie).inspect_err(|error| {
+        let (action, message) = match error {
+            AuthError::Forbidden => (
+                "csrf_missing",
+                "Cookie credential without the x-doxa-csrf header",
+            ),
+            _ => (
                 "missing_credentials",
                 "Missing or malformed Authorization header",
-                rejection_status(&error),
-            );
-            error
-        })?;
+            ),
+        };
+        tracing::warn!("{message}");
+        audit.emit_failure(action, message, rejection_status(error));
+    })?;
+    let token = token.to_owned();
+    let token = token.as_str();
 
     // 2. Stage 1 — cryptographic credential validation.
     let minimal = auth.validator.validate(token).await.inspect_err(|e| {
@@ -422,13 +481,14 @@ where
     if let Some(checker) = checker {
         request.extensions_mut().insert(checker);
     }
+    let epoch = epoch(&claims);
     request.extensions_mut().insert(Arc::new(AuthContext {
         claims,
         session,
         is_admin: false,
     }));
 
-    Ok(request)
+    Ok((request, epoch))
 }
 
 #[cfg(test)]
@@ -517,6 +577,39 @@ mod tests {
             async move { Ok::<_, Infallible>(resp) }
         });
         AuthLayer::new(state).layer(inner)
+    }
+
+    async fn with_cookie(method: &str, csrf: bool) -> Response {
+        let inner = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, Infallible>(Response::builder().body(Body::empty()).unwrap())
+        });
+        let svc = AuthLayer::new(make_state("good"))
+            .with_cookie("sid")
+            .layer(inner);
+        let mut req = Request::builder()
+            .method(method)
+            .uri("/x")
+            .header("cookie", "theme=dark; sid=good");
+        if csrf {
+            req = req.header(doxa_wire::CSRF_HEADER, "1");
+        }
+        svc.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_cookie_authenticates_a_read() {
+        let resp = with_cookie("GET", false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().contains_key(doxa_wire::SESSION_HEADER));
+    }
+
+    #[tokio::test]
+    async fn a_cookie_mutation_needs_the_csrf_header() {
+        assert_eq!(
+            with_cookie("POST", false).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(with_cookie("POST", true).await.status(), StatusCode::OK);
     }
 
     #[tokio::test]

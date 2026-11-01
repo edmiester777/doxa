@@ -191,6 +191,7 @@ mod doc_params;
 mod doc_responses;
 mod doc_traits;
 mod error_responses;
+mod etag;
 mod extractor;
 mod handler_ops;
 mod headers;
@@ -216,6 +217,7 @@ pub use doc_traits::{
     DocHeaderParams, DocOperationContribution, DocOperationSecurity, DocPathParams, DocPathScalar,
     DocQueryParams, DocRequestBody, PathScalar,
 };
+pub use etag::{ETagLayer, ETagService};
 pub use extractor::Header;
 pub use handler_ops::{operation_for_method_mut, ApidocHandlerOps};
 pub use headers::{DocumentedHeader, HeaderParam};

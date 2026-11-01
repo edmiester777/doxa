@@ -77,6 +77,7 @@ pub fn app(catalog: Catalog) -> Router {
                 next.run(req).await
             },
         ))
+        .layer(doxa::ETagLayer)
         .with_state(AppState { catalog })
 }
 
