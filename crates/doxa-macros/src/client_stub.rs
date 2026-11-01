@@ -67,9 +67,20 @@ pub struct Route<'a> {
     pub operation_id: Option<&'a LitStr>,
 }
 
+/// Server-only extractors a handler body could authorize with, where no guard sees it.
+const MAY_AUTHORIZE: &[&str] = &["Extension", "HeaderMap", "Request", "Parts", "ConnectInfo"];
+
+fn may_authorize(item_fn: &ItemFn) -> bool {
+    item_fn.sig.inputs.iter().any(|arg| match arg {
+        FnArg::Typed(pt) => last_ident(&pt.ty).is_some_and(|n| MAY_AUTHORIZE.contains(&n.as_str())),
+        FnArg::Receiver(_) => false,
+    })
+}
+
 /// Whether the route has no guard at all, so the router's dry-run gate answers for it.
 pub fn unguarded(item_fn: &ItemFn) -> bool {
     !grant::has_guard(item_fn)
+        && !may_authorize(item_fn)
         && item_fn
             .sig
             .inputs
@@ -106,12 +117,14 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
         .filter(|(_, a)| matches!(a, FnArg::Typed(_)))
         .map(|(i, _)| i)
         .collect();
+    // Only a `Granted` guard answers a dry run wherever the route is mounted; an
+    // unguarded route is answered only by `routes!`, so a probe of it stays Unknown.
     let dry_run = match grant::dry_run_gate(item_fn) {
-        Some(gate) => {
+        Some(gate) if !may_authorize(item_fn) => {
             let after = typed.iter().position(|i| *i == gate).map_or(0, |p| p + 1);
             !args[after..].iter().any(Arg::is_foreign)
         }
-        None => unguarded(item_fn),
+        _ => false,
     };
 
     let entities: Vec<TokenStream> = item_fn
@@ -488,13 +501,19 @@ mod tests {
     }
 
     #[test]
-    fn an_unguarded_route_answers_a_dry_run_but_a_require_route_does_not() {
+    fn only_a_granted_guard_answers_a_dry_run() {
         let open = stub(
             "post",
             "/notes",
             quote! { async fn f(State(s): State<S>, Json(n): Json<Note>) {} },
         );
-        assert!(open.contains("dry_run : true"), "{open}");
+        assert!(open.contains("dry_run : false"), "{open}");
+        let granted = stub(
+            "post",
+            "/w/{name}",
+            quote! { async fn f(State(s): State<S>, w: Granted<W>) {} },
+        );
+        assert!(granted.contains("dry_run : true"), "{granted}");
         let required = stub(
             "post",
             "/notes",
@@ -503,6 +522,32 @@ mod tests {
         assert!(required.contains("dry_run : false"), "{required}");
         let custom = stub("post", "/notes", quote! { async fn f(g: MyGuard) {} });
         assert!(custom.contains("dry_run : false"), "{custom}");
+    }
+
+    #[test]
+    fn an_extractor_a_body_could_authorize_with_disables_the_dry_run() {
+        for arg in [
+            quote!(h: HeaderMap),
+            quote!(Extension(u): Extension<User>),
+            quote!(r: Request),
+            quote!(p: Parts),
+            quote!(ConnectInfo(a): ConnectInfo<SocketAddr>),
+        ] {
+            let after = stub(
+                "post",
+                "/w/{name}",
+                quote! { async fn f(w: Granted<W>, #arg) {} },
+            );
+            assert!(after.contains("dry_run : false"), "{after}");
+            let before = stub(
+                "post",
+                "/w/{name}",
+                quote! { async fn f(#arg, w: Granted<W>) {} },
+            );
+            assert!(before.contains("dry_run : false"), "{before}");
+            let item: ItemFn = syn::parse2(quote! { async fn f(#arg) {} }).unwrap();
+            assert!(!unguarded(&item), "{arg}");
+        }
     }
 
     #[test]

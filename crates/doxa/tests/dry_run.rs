@@ -69,6 +69,37 @@ async fn an_unguarded_route_answers_without_running() {
     assert_eq!(send("POST", false).await.status(), StatusCode::CREATED);
 }
 
+static PINGED: AtomicUsize = AtomicUsize::new(0);
+
+#[post("/ping")]
+async fn ping() -> StatusCode {
+    PINGED.fetch_add(1, Ordering::SeqCst);
+    StatusCode::ACCEPTED
+}
+
+#[cfg(feature = "client-router")]
+mod client {
+    doxa::client::__as_client! {
+        #[post("/ping")]
+        pub async fn ping() -> StatusCode { unreachable!() }
+    }
+}
+
+/// Mounted without `routes!`, nothing gates the route: the probe must not reach it.
+#[cfg(feature = "client-router")]
+#[tokio::test]
+async fn a_probe_never_runs_an_unguarded_route_mounted_by_hand() {
+    use doxa::client::transport::RouterTransport;
+    use doxa::client::{ClientConfig, Permission};
+
+    let router = axum::Router::new().route("/ping", axum::routing::post(ping));
+    ClientConfig::default()
+        .transport(RouterTransport::new(router))
+        .install();
+    assert_eq!(client::ping::can().await, Permission::Unknown);
+    assert_eq!(PINGED.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn a_guarded_route_is_left_to_its_guard() {
     let resp = send("GET", true).await;

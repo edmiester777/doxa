@@ -29,7 +29,7 @@ use utoipa::openapi::path::{HttpMethod, Operation, PathItem, Paths};
 /// the same paths leaves the operation unchanged.
 pub trait ApidocHandlerOps {
     /// The handler takes no doxa guard, so [`routes!`](crate::routes) answers
-    /// a `<Can>` dry run for it without running it.
+    /// a dry run for it without running it.
     const UNGUARDED: bool = false;
 
     /// Apply per-operation augmentations to the operation(s) this

@@ -1,4 +1,4 @@
-//! The router's answer to a `<Can>` dry run of a route with no doxa guard:
+//! The router's answer to a dry run of a route with no doxa guard:
 //! `204` before any extractor or the handler runs. A guarded route is left
 //! alone, so its last guard answers once it has passed.
 

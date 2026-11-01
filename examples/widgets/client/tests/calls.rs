@@ -166,7 +166,7 @@ async fn identical_streams_share_one_connection() {
 }
 
 #[tokio::test]
-async fn an_unguarded_route_answers_a_dry_run_without_running() {
+async fn a_probe_of_an_unguarded_route_is_unknown_and_never_runs_it() {
     let catalog = widgets_server::seeded();
     ClientConfig::default()
         .transport(
@@ -174,7 +174,7 @@ async fn an_unguarded_route_answers_a_dry_run_without_running() {
                 .with_header("x-role", "viewer"),
         )
         .install();
-    assert_eq!(suggest_name::can().await, Permission::Allowed);
+    assert_eq!(suggest_name::can().await, Permission::Unknown);
     assert!(catalog.suggestions().is_empty());
     let status = suggest_name(Rename {
         name: "bolt".into(),
