@@ -524,7 +524,90 @@ fn strip_hop_by_hop(h: &mut HeaderMap) {
     }
 }
 
+fn is_upgrade(req: &Request) -> bool {
+    let has = |name, token: &str| {
+        req.headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
+    };
+    has(header::CONNECTION, "upgrade") && req.headers().contains_key(header::UPGRADE)
+}
+
+/// Replay an upgrade handshake (a WebSocket, say) to the server, then pipe bytes both ways.
+async fn tunnel(p: &Proxy, mut req: Request) -> Result<Response, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = p.upstream.trim_start_matches("http://");
+    let mut upstream = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| e.to_string())?;
+    let target = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    let mut head = format!("{} {target} HTTP/1.1\r\nhost: {addr}\r\n", req.method());
+    for (name, value) in req.headers() {
+        if name != header::HOST {
+            let value = value.to_str().map_err(|e| e.to_string())?;
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+    }
+    head.push_str("\r\n");
+    upstream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // The response head, plus any bytes the server sent after it.
+    let mut buf = Vec::new();
+    let end = loop {
+        let mut chunk = [0u8; 4096];
+        let n = upstream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("the server closed the connection during the handshake".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let text = String::from_utf8_lossy(&buf[..end]).into_owned();
+    let mut lines = text.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .and_then(|s| StatusCode::from_u16(s).ok())
+        .ok_or("the server's handshake response has no status")?;
+    let mut res = Response::new(Body::empty());
+    *res.status_mut() = status;
+    for line in lines.filter(|l| !l.is_empty()) {
+        if let Some((name, value)) = line.split_once(':') {
+            if let (Ok(n), Ok(v)) = (
+                header::HeaderName::from_bytes(name.trim().as_bytes()),
+                HeaderValue::from_str(value.trim()),
+            ) {
+                res.headers_mut().append(n, v);
+            }
+        }
+    }
+    if status == StatusCode::SWITCHING_PROTOCOLS {
+        let early = buf.split_off(end);
+        let upgrade = hyper::upgrade::on(&mut req);
+        tokio::spawn(async move {
+            let Ok(client) = upgrade.await else { return };
+            let mut client = hyper_util::rt::TokioIo::new(client);
+            if client.write_all(&early).await.is_ok() {
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            }
+        });
+    }
+    Ok(res)
+}
+
 async fn forward(State(p): State<Arc<Proxy>>, req: Request) -> Response {
+    if is_upgrade(&req) {
+        return tunnel(&p, req).await.unwrap_or_else(|e| bad_gateway(&e));
+    }
     let readable = matches!(*req.method(), Method::GET | Method::HEAD);
     let path = req.uri().path().to_owned();
     let navigation = readable
@@ -586,6 +669,67 @@ mod tests {
 
     fn plan(paths: &[&str]) -> Plan {
         classify(paths.iter().map(Path::new), &watch())
+    }
+
+    /// Accepts any upgrade, then echoes what it receives.
+    async fn echo_server() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut b = [0u8; 1];
+                s.read_exact(&mut b).await.unwrap();
+                head.push(b[0]);
+            }
+            assert!(String::from_utf8_lossy(&head).contains("upgrade: echo"));
+            s.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let (mut r, mut w) = s.split();
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_is_tunnelled_to_the_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let upstream = echo_server().await;
+        let proxy = Arc::new(Proxy {
+            dist: PathBuf::from("/nonexistent"),
+            upstream: format!("http://127.0.0.1:{upstream}"),
+            client: reqwest::Client::new(),
+            reload: broadcast::channel(1).0,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().fallback(forward).with_state(proxy);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        c.write_all(
+            b"GET /live HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut b = [0u8; 1];
+            c.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"));
+        c.write_all(b"ping").await.unwrap();
+        let mut back = [0u8; 4];
+        c.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"ping");
     }
 
     #[test]

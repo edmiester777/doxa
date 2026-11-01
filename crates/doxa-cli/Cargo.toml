@@ -23,6 +23,8 @@ doxa-fmt = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { workspace = true }
 axum = { workspace = true }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 reqwest = { workspace = true, features = ["stream"] }
 futures = { workspace = true }
 bytes = { workspace = true }
