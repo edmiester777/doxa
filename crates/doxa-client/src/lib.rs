@@ -31,6 +31,11 @@ pub use sse::{Backoff, EventStream};
 #[doc(hidden)]
 pub use doxa_wire as __wire;
 
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::cache::entity::{CachedEntity, Entity, EntityOf, IsEntity, NotEntity};
+}
+
 /// Declare a route key shared by server and client.
 ///
 /// ```

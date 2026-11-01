@@ -156,6 +156,18 @@ impl Outgoing {
         self.keys.first()
     }
 
+    /// The key, when it is the call's only argument.
+    pub(crate) fn only_key(&self) -> Option<&Value> {
+        let [Value::Object(key)] = self.keys.as_slice() else {
+            return None;
+        };
+        let fields = key.values().filter(|v| !v.is_null()).count();
+        let only = self.positional.is_empty()
+            && self.body.is_none()
+            && self.named.len() + self.query.len() == fields;
+        only.then(|| &self.keys[0])
+    }
+
     pub(crate) fn headers(&self) -> &[(String, String)] {
         &self.headers
     }

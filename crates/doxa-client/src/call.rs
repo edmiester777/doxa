@@ -6,11 +6,12 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::task::Poll;
 
-use doxa_wire::{Identity, RouteSpec};
+use doxa_wire::{Identity, Method, RouteSpec};
 use futures_util::future::LocalBoxFuture;
 use serde_json::Value;
 
 use crate::arg::{ArgFor, Outgoing};
+use crate::cache::entity::Entity;
 use crate::cache::{map_items, max_age, Lookup, Meta, Outcome, Revalidated, Revalidation, Slot};
 use crate::client::{now, Client};
 use crate::fetch::Fetch;
@@ -35,6 +36,7 @@ pub struct Call<R> {
     fresh: bool,
     patch: Option<Patch>,
     settle: Option<Settle>,
+    entity: Option<Entity>,
     _response: PhantomData<fn() -> R>,
 }
 
@@ -49,8 +51,16 @@ impl<R> Call<R> {
             fresh: false,
             patch: None,
             settle: None,
+            entity: None,
             _response: PhantomData,
         }
+    }
+
+    /// How the cache files this route's response by identity; set by the stub.
+    #[doc(hidden)]
+    pub fn entity(mut self, entity: Option<Entity>) -> Self {
+        self.entity = entity;
+        self
     }
 
     /// Add the argument for a parameter the route reads with extractor `X`.
@@ -347,7 +357,11 @@ async fn query_once<R: FromResponse>(
                 }
                 return None;
             }
-            Lookup::Miss => {}
+            Lookup::Miss => {
+                if let Some(found) = from_store(call, client, key) {
+                    return Some(out_of::<R>(&found));
+                }
+            }
         }
     }
 
@@ -391,6 +405,28 @@ async fn query_once<R: FromResponse>(
     };
     drop(guard);
     Some(result)
+}
+
+/// An instance route answered from a fresh list or response holding that instance,
+/// filed under `key` with the age of what it came from.
+fn from_store<R>(call: &Call<R>, client: &Client, key: &str) -> Option<Rc<dyn Any>> {
+    let entity = call.entity?;
+    let route_key = call.out.only_key()?;
+    let (value, at) = client.cache.find(now(), |v| (entity.find)(v, route_key))?;
+    let meta = Meta {
+        now: at,
+        max_age: None,
+        etag: None,
+        digest: None,
+    };
+    client.cache.store(
+        key.to_owned(),
+        call.route,
+        Some(route_key.clone()),
+        value.clone(),
+        meta,
+    );
+    Some(value)
 }
 
 /// Ends an in-flight entry even if the caller drops the call, so waiters retry
@@ -439,7 +475,7 @@ fn revalidate<R: FromResponse>(
 async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
-    let request = call.request(&client, url, "application/json");
+    let request = call.request(&client, url.clone(), "application/json");
     let key = call.out.first_key().cloned();
     let previous = call.patch.map(|p| p(&client, key.as_ref()));
     client.cache.count_request();
@@ -450,12 +486,27 @@ async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Er
             if !current {
                 return Ok(v);
             }
-            if let (Some(settle), Some(stored)) = (call.settle, R::store(&v)) {
-                settle(&client, &*stored, key.as_ref());
+            let stored = R::store(&v);
+            if let (Some(settle), Some(stored)) = (call.settle, &stored) {
+                settle(&client, &**stored, key.as_ref());
             }
             let mut entities: Vec<&str> = call.route.entities.to_vec();
             entities.extend(extra.iter().map(String::as_str));
             client.cache.invalidate(&entities);
+            // Filed after the invalidation, so the next read of this instance needs no request.
+            if let (Some(entity), Some(stored)) = (call.entity, stored) {
+                if call.route.method != Method::Delete {
+                    let meta = Meta {
+                        now: now(),
+                        max_age: None,
+                        etag: None,
+                        digest: None,
+                    };
+                    let route_key = (entity.key)(&stored);
+                    let at = format!("{} {url}", call.route.method.as_str());
+                    client.cache.store(at, call.route, route_key, stored, meta);
+                }
+            }
             Ok(v)
         }
         other => {

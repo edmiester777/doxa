@@ -252,7 +252,11 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
         #(#docs)*
         #[allow(clippy::too_many_arguments)]
         #vis fn #name #lifetime (#(#params),*) -> ::doxa::client::Call<#ret> #refused {
-            ::doxa::client::Call::new(&#name::ROUTE) #(#pushes)*
+            #[allow(unused_imports)]
+            use ::doxa::client::__private::{IsEntity as _, NotEntity as _};
+            ::doxa::client::Call::new(&#name::ROUTE)
+                .entity((&::doxa::client::__private::EntityOf::<#ret>::new()).entity())
+                #(#pushes)*
         }
     })
 }

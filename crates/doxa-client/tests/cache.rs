@@ -435,6 +435,98 @@ fn apply_patches_instances_and_lists_and_tells_readers() {
     assert_eq!(client.requests_sent(), 2);
 }
 
+/// What a route's stub does: look the response type's identity up by autoref.
+fn by_identity<R: 'static>(call: Call<R>) -> Call<R>
+where
+    for<'a> &'a doxa_client::__private::EntityOf<R>: doxa_client::__private::IsEntity,
+{
+    use doxa_client::__private::{EntityOf, IsEntity as _};
+    call.entity((&EntityOf::<R>::new()).entity())
+}
+
+#[test]
+fn only_a_response_with_an_identity_is_filed_by_it() {
+    use doxa_client::__private::{EntityOf, IsEntity as _, NotEntity as _};
+    assert!((&EntityOf::<Json<Widget>>::new()).entity().is_some());
+    assert!(EntityOf::<Json<String>>::new().entity().is_none());
+}
+
+#[test]
+fn an_instance_in_a_fresh_list_is_read_without_a_request() {
+    let mock = MockTransport::new();
+    mock.json(200, &json!([widget(1, "cog"), widget(2, "gear")]))
+        .json(200, &widget(3, "flange"));
+    let client = install(&mock, Duration::from_secs(60));
+    task::block_on(async {
+        list().await.unwrap();
+        assert_eq!(by_identity(get("gear")).await.unwrap().id, 2);
+        assert_eq!(by_identity(get("flange")).await.unwrap().id, 3);
+    });
+    let urls: Vec<String> = mock.requests().into_iter().map(|r| r.url).collect();
+    assert_eq!(urls, ["/w", "/w/flange"]);
+    assert_eq!(client.requests_sent(), 2);
+}
+
+#[test]
+fn a_stale_list_does_not_answer_an_instance() {
+    let mock = MockTransport::new();
+    mock.json(200, &json!([widget(2, "gear")]))
+        .json(200, &widget(2, "gear"));
+    let client = install(&mock, Duration::from_secs(60));
+    wait(list()).unwrap();
+    cache::invalidate_all::<WidgetByName>();
+    wait(by_identity(get("gear"))).unwrap();
+    assert_eq!(client.requests_sent(), 2);
+}
+
+#[test]
+fn a_mutation_response_answers_the_renamed_instance() {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "sprocket"));
+    let client = install(&mock, Duration::from_secs(60));
+    task::block_on(async {
+        by_identity(rename("cog", "sprocket")).await.unwrap();
+        assert_eq!(by_identity(get("sprocket")).await.unwrap().id, 1);
+    });
+    assert_eq!(client.requests_sent(), 1);
+}
+
+#[test]
+fn a_failed_optimistic_update_rolls_back() {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "cog"))
+        .json(409, &json!({ "error": "taken" }));
+    install(&mock, Duration::from_secs(60));
+    wait(get("cog")).unwrap();
+    let renamed = rename("cog", "gear").optimistic(|w: &mut Widget| w.name = "gear".into());
+    let pending = Rc::new(RefCell::new(None));
+    let out = pending.clone();
+    task::spawn(async move {
+        *out.borrow_mut() = Some(renamed.await.is_err());
+    });
+    task::run_until_stalled();
+    assert_eq!(*pending.borrow(), Some(true));
+    assert_eq!(wait(get("cog")).unwrap().name, "cog");
+}
+
+#[test]
+fn a_stale_query_sends_its_etag_and_keeps_its_value_on_304() {
+    let mock = MockTransport::new();
+    let tagged = vec![("etag".to_owned(), "\"v1\"".to_owned())];
+    mock.respond(200, tagged, serde_json::to_vec(&widget(1, "cog")).unwrap())
+        .respond(304, Vec::new(), Vec::new());
+    let client = install(&mock, Duration::from_millis(20));
+    let first = wait(get("cog")).unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    wait(get("cog")).unwrap();
+    task::run_until_stalled();
+    let again = wait(get("cog")).unwrap();
+    let sent = mock.requests();
+    assert_eq!(sent[1].header("if-none-match"), Some("\"v1\""));
+    assert!(Cached::ptr_eq(&first, &again));
+    assert_eq!(client.requests_sent(), 2);
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 enum Event {

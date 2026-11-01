@@ -90,6 +90,25 @@ async fn repeated_reads_are_served_from_the_cache() {
 }
 
 #[tokio::test]
+async fn a_listed_or_renamed_widget_is_read_without_a_request() {
+    let client = install("editor");
+    list_widgets(Filter::default()).await.unwrap();
+    assert_eq!(get_widget("gear").await.unwrap().id, 2);
+    assert_eq!(client.requests_sent(), 1);
+
+    rename_widget(
+        "gear",
+        Rename {
+            name: "flange".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_widget("flange").await.unwrap().id, 2);
+    assert_eq!(client.requests_sent(), 2);
+}
+
+#[tokio::test]
 async fn a_mutation_marks_its_entity_stale() {
     let client = install("editor");
     get_widget("cog").await.unwrap();

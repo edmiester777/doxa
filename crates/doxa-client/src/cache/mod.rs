@@ -16,6 +16,8 @@ use serde_json::Value;
 use crate::arg::Arg;
 use crate::client::Client;
 
+pub(crate) mod entity;
+
 /// Something that re-renders when a query it read changes.
 pub trait Observer {
     /// A query this observer read has a new value, or went stale.
@@ -275,6 +277,19 @@ impl Cache {
             .max_age
             .unwrap_or_else(|| self.config.borrow().stale_time_for(entry.route));
         entry.stale || now - entry.at >= fresh_for.as_secs_f64() * 1000.0
+    }
+
+    /// What `pick` finds in the first fresh entry it matches, and when that entry was fetched.
+    pub fn find(
+        &self,
+        now: f64,
+        pick: impl Fn(&Rc<dyn Any>) -> Option<Rc<dyn Any>>,
+    ) -> Option<(Rc<dyn Any>, f64)> {
+        let entries = self.entries.borrow();
+        entries
+            .values()
+            .filter(|e| !self.is_stale(e, now))
+            .find_map(|e| Some((pick(&e.value)?, e.at)))
     }
 
     /// Record the current observer as a reader of `key` without reading it.
