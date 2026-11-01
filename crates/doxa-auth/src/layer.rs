@@ -319,7 +319,16 @@ where
                     }
                     Ok(response)
                 }
-                Err(err) => Ok(err.into_response()),
+                Err(err) => {
+                    let mut response = err.into_response();
+                    if response.status() == axum::http::StatusCode::UNAUTHORIZED {
+                        response.headers_mut().insert(
+                            doxa_wire::SESSION_HEADER,
+                            axum::http::HeaderValue::from_static(ANONYMOUS_EPOCH),
+                        );
+                    }
+                    Ok(response)
+                }
             }
         })
     }
@@ -361,6 +370,9 @@ fn credential<'r>(request: &'r Request<Body>, cookie: Option<&str>) -> Result<&'
     }
     Ok(token)
 }
+
+/// The epoch a `401` carries, so signing in or out changes what the client sees.
+const ANONYMOUS_EPOCH: &str = "anonymous";
 
 /// Who the caller is, as an opaque id that changes on sign-in, sign-out or a
 /// tenant switch; the browser client drops its cache when it changes.
@@ -621,6 +633,32 @@ mod tests {
         let req = Request::builder().uri("/x").body(Body::empty()).unwrap();
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_401_names_the_anonymous_session() {
+        let svc = build_service(make_state("good"), |_req| {
+            Response::builder().body(Body::empty()).unwrap()
+        });
+        let send = |auth: Option<&str>| {
+            let mut req = Request::builder().uri("/x");
+            if let Some(auth) = auth {
+                req = req.header("authorization", auth);
+            }
+            svc.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        let session = |resp: &Response| {
+            resp.headers()
+                .get(doxa_wire::SESSION_HEADER)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+        let missing = send(None).await.unwrap();
+        let bad = send(Some("Bearer wrong")).await.unwrap();
+        let good = send(Some("Bearer good")).await.unwrap();
+        assert_eq!(session(&missing).as_deref(), Some(ANONYMOUS_EPOCH));
+        assert_eq!(session(&bad).as_deref(), Some(ANONYMOUS_EPOCH));
+        assert_ne!(session(&good), session(&missing));
+        assert!(session(&good).is_some());
     }
 
     #[tokio::test]

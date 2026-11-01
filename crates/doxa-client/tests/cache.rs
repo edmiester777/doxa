@@ -9,7 +9,8 @@ use std::time::Duration;
 use doxa_client::cache::{self, Observer};
 use doxa_client::transport::{Body, MockTransport, Request, Response, Transport};
 use doxa_client::{
-    task, CacheConfig, Cached, Call, Client, ClientConfig, Granted, Json, Query, SseStream,
+    task, CacheConfig, Cached, Call, Client, ClientConfig, Granted, Json, Permission, Probe, Query,
+    SseStream,
 };
 use doxa_wire::{Identity, Keyed, Method, RouteSpec};
 use futures_util::future::LocalBoxFuture;
@@ -197,6 +198,44 @@ fn a_revalidation_from_before_a_clear_does_not_overwrite_the_new_entry() {
     manual.answer(2, 200, None, widget(1, "v2"));
     manual.answer(1, 200, None, widget(1, "old"));
     assert_eq!(wait(get("cog")).unwrap().name, "v2");
+}
+
+fn session(name: &str) -> Vec<(String, String)> {
+    vec![(doxa_wire::SESSION_HEADER.into(), name.into())]
+}
+
+#[test]
+fn signing_in_and_out_clears_the_cache() {
+    let mock = MockTransport::new();
+    let allowed = vec![
+        (doxa_wire::SESSION_HEADER.into(), "u1".into()),
+        (
+            doxa_wire::DRY_RUN_HEADER.into(),
+            doxa_wire::DRY_RUN_OK.into(),
+        ),
+    ];
+    let body = |w| serde_json::to_vec(&w).unwrap();
+    mock.respond(401, session("anonymous"), vec![])
+        .respond(200, session("u1"), body(widget(1, "cog")))
+        .respond(204, allowed, vec![])
+        .respond(401, session("anonymous"), vec![])
+        .respond(401, session("anonymous"), vec![]);
+    let client = install(&mock, Duration::from_secs(60));
+    let can = || Probe::new(&GET).arg::<Granted<WidgetByName>, _>("cog");
+
+    assert_eq!(wait(can()), Permission::Denied);
+    wait(get("cog")).unwrap();
+    assert_eq!(
+        wait(can()),
+        Permission::Allowed,
+        "signing in kept the anonymous answer"
+    );
+    assert!(wait(list()).is_err());
+    assert!(
+        wait(get("cog")).is_err(),
+        "signing out kept the user's data"
+    );
+    assert_eq!(client.requests_sent(), 5);
 }
 
 #[derive(Default)]
