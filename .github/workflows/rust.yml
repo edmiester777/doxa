@@ -32,7 +32,9 @@ jobs:
     - name: Add the wasm target
       run: rustup target add wasm32-unknown-unknown
     - name: Check the client half for the browser
-      run: cargo check -p doxa-client -p doxa-ui -p widgets-client -p widgets-web --target wasm32-unknown-unknown
+      run: |
+        cargo check -p doxa-client -p doxa-ui -p widgets-client -p widgets-web --target wasm32-unknown-unknown
+        cargo check -p doxa --features react --target wasm32-unknown-unknown
 
   msrv:
 
