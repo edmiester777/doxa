@@ -178,17 +178,28 @@ impl Client {
             changed
         };
         if changed {
-            self.session.set(sent + 1);
-            self.cache.clear();
-            let hubs: Vec<_> = self.streams.borrow_mut().drain().collect();
-            for hub in hubs.iter().filter_map(|(_, h)| h.upgrade()) {
-                hub.close();
-            }
-            for f in self.on_session.borrow().iter() {
-                f();
-            }
+            self.reset();
         }
         true
+    }
+
+    /// Drop everything tied to the session now (cache, streams, singletons) rather than on
+    /// the next response; call it when signing out.
+    pub fn end_session(&self) {
+        *self.epoch.borrow_mut() = None;
+        self.reset();
+    }
+
+    fn reset(&self) {
+        self.session.set(self.session.get() + 1);
+        self.cache.clear();
+        let hubs: Vec<_> = self.streams.borrow_mut().drain().collect();
+        for hub in hubs.iter().filter_map(|(_, h)| h.upgrade()) {
+            hub.close();
+        }
+        for f in self.on_session.borrow().iter() {
+            f();
+        }
     }
 }
 

@@ -238,6 +238,24 @@ fn signing_in_and_out_clears_the_cache() {
     assert_eq!(client.requests_sent(), 5);
 }
 
+#[test]
+fn ending_the_session_clears_without_a_request() {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "cog"))
+        .json(200, &widget(1, "cog"));
+    let client = install(&mock, Duration::from_secs(60));
+    let reset = Rc::new(Cell::new(0));
+    let r = reset.clone();
+    client.on_session_change(move || r.set(r.get() + 1));
+
+    wait(get("cog")).unwrap();
+    client.end_session();
+    assert_eq!(reset.get(), 1, "singletons hear of it");
+    assert_eq!(client.requests_sent(), 1, "nothing was sent to end it");
+    wait(get("cog")).unwrap();
+    assert_eq!(client.requests_sent(), 2, "the cached widget is gone");
+}
+
 /// Read `cog`, let it go stale, and have its revalidation answer `status`.
 fn revalidate_with(status: u16) -> (MockTransport, Rc<Client>, Rc<Renders>) {
     let mock = MockTransport::new();
