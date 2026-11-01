@@ -226,13 +226,15 @@ impl Plugin for Sidebar {
 fn a_slot_shows_each_fill_once_however_often_apps_mount() {
     for _ in 0..2 {
         let dom = MemDom::new();
-        App::new(|| view! {
-            <aside>
-                <Slot name="side"/>
-            </aside>
+        App::new(|| {
+            view! {
+                <aside>
+                    <Slot name="side"/>
+                </aside>
+            }
         })
-            .plugin(Sidebar)
-            .mount_on(Rc::new(dom.clone()), dom.body());
+        .plugin(Sidebar)
+        .mount_on(Rc::new(dom.clone()), dom.body());
         assert_eq!(dom.text(dom.find_tag("aside").unwrap()), "x");
     }
 }
