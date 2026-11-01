@@ -36,6 +36,7 @@ catalog = ["dep:inventory"]
 doxa-policy = { workspace = true }
 doxa-audit = { workspace = true, optional = true, default-features = false }
 doxa-protected = { workspace = true }
+doxa-wire = { workspace = true }
 doxa = { package = "doxa-docs", path = "../doxa-docs", version = "0.1.6", optional = true }
 cedar-policy = { workspace = true }
 axum = { workspace = true, optional = true }

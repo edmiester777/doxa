@@ -274,7 +274,8 @@ fn complete_subject(ty: &mut Type, appended: &[TokenStream], wrap: bool) {
 /// `Granted<Widget>` and `Granted<One<Widget>>` are the same subject
 /// written two ways, so both answer `Widget`. A subject that already names
 /// its site never reaches here, and `Many` / `Cap` have no key to check.
-fn instance_asset(ty: &Type) -> Option<Type> {
+pub(crate) fn instance_asset(ty: &Type) -> Option<Type> {
+    granted_arity(ty)?;
     let subject = subject_arg(ty)?;
     match subject_mode(subject) {
         Some((name, _)) if name == "One" => subject_arg(subject).cloned(),
@@ -297,6 +298,39 @@ fn subject_asset(ty: &Type) -> Option<Type> {
     }
 }
 
+/// The asset a `Granted<…>` argument is about, for any form but `Cap`.
+pub(crate) fn guarded_asset(ty: &Type) -> Option<Type> {
+    granted_arity(ty)?;
+    subject_asset(ty)
+}
+
+/// Extractors that authorize, in any form.
+const GUARDS: &[&str] = &[
+    "Granted",
+    "Require",
+    "Auth",
+    "AuthContext",
+    "CapabilityContext",
+    "Scoped",
+];
+
+/// The argument whose guard answers a `<Can>` dry run: the last guard, if it is a `Granted`.
+pub(crate) fn dry_run_gate(item_fn: &ItemFn) -> Option<usize> {
+    let last = item_fn
+        .sig
+        .inputs
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, arg)| {
+            let FnArg::Typed(pt) = arg else { return None };
+            let Type::Path(tp) = &*pt.ty else { return None };
+            let name = tp.path.segments.last()?.ident.to_string();
+            GUARDS.contains(&name.as_str()).then_some((i, pt))
+        })?;
+    (granted_arity(&last.1.ty) == Some(1)).then_some(last.0)
+}
+
 /// Binding name for marker naming; falls back to the position for
 /// wildcard or destructuring patterns.
 fn binding_name(pat: &Pat, index: usize) -> String {
@@ -312,6 +346,7 @@ fn binding_name(pat: &Pat, index: usize) -> String {
 pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Result<TokenStream> {
     let fn_ident = item_fn.sig.ident.clone();
     let verb = verb_trait(method);
+    let gate = dry_run_gate(item_fn);
     let mut items = TokenStream::new();
 
     for (index, arg) in item_fn.sig.inputs.iter_mut().enumerate() {
@@ -493,6 +528,12 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             _ => None,
         };
 
+        let gate_const = if gate == Some(index) {
+            quote! { const LAST_GUARD: bool = true; }
+        } else {
+            quote! {}
+        };
+
         items.extend(quote! {
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
@@ -501,6 +542,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             impl ::doxa::auth::GrantSite for #marker {
                 #scheme_const
                 #in_const
+                #gate_const
             }
 
             #route_check

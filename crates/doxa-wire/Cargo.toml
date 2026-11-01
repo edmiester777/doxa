@@ -1,0 +1,21 @@
+[package]
+name = "doxa-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Types a doxa server and its browser client agree on: routes, error bodies, keys, and headers."
+keywords = ["doxa", "http", "client"]
+categories = ["web-programming"]
+
+[features]
+default = []
+utoipa = ["dep:utoipa"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true, optional = true }

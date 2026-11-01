@@ -78,6 +78,9 @@ macro_rules! __doxa_action_submit {
     ($($tt:tt)*) => {};
 }
 
+#[doc(hidden)]
+pub use doxa_wire as __wire;
+
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};
 pub use context::{AuthContext, CapabilityContext};

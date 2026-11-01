@@ -178,6 +178,35 @@ impl Parse for Args {
     }
 }
 
+/// The client half: the descriptor and the key that names one.
+pub fn expand_client(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
+    let args: Args = syn::parse2(args)?;
+    let item: Item = syn::parse2(item)?;
+    let name = match &item {
+        Item::Struct(item) => &item.ident,
+        Item::Enum(item) => &item.ident,
+        other => return Err(syn::Error::new(other.span(), "`asset` goes on a struct")),
+    };
+    let Some(key) = &args.key else {
+        return Err(syn::Error::new(
+            name.span(),
+            "the browser names this asset by its key, so a client-visible asset needs \
+             `key = …`: a `route_key!` struct shared with the client",
+        ));
+    };
+    let Some(actions) = &args.actions else {
+        return Err(syn::Error::new(name.span(), "`asset` needs `actions = …`"));
+    };
+    Ok(quote! {
+        #item
+
+        impl ::doxa::wire::Keyed for #name {
+            type Key = #key;
+            const ENTITY_TYPE: &'static str = <#actions as ::doxa::wire::Vocabulary>::ENTITY_TYPE;
+        }
+    })
+}
+
 pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let args: Args = syn::parse2(args)?;
     let item: Item = syn::parse2(item)?;

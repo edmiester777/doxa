@@ -329,12 +329,19 @@ pub struct KeyError {
 
 impl IntoResponse for KeyError {
     fn into_response(self) -> Response {
-        (
+        error_body(
             axum::http::StatusCode::BAD_REQUEST,
+            "invalid_key",
             format!("invalid identifier: {}", self.detail),
         )
-            .into_response()
     }
+}
+
+/// A guard's own refusal, in the envelope `#[derive(ApiError)]` uses, so a
+/// client decodes every error the same way.
+fn error_body(status: axum::http::StatusCode, code: &str, message: String) -> Response {
+    let body = doxa::ApiErrorBody::new(status.as_u16(), code, message, serde_json::Value::Null);
+    (status, axum::Json(body)).into_response()
 }
 
 /// Nothing to identify — collection and capability routes.
@@ -410,7 +417,7 @@ macro_rules! route_key {
         $vis:vis $name:ident { $($field:ident : $ty:ty),+ $(,)? }
     ) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]
         $vis struct $name {
             $(
                 #[allow(missing_docs)]
@@ -422,6 +429,10 @@ macro_rules! route_key {
             const SEGMENTS: &'static [$crate::granted::ResourceIdType] =
                 &[$(<$ty as $crate::granted::KeySegment>::KIND),+];
 
+            const NAMES: &'static [&'static str] = &[$(::core::stringify!($field)),+];
+        }
+
+        impl $crate::__wire::KeyNames for $name {
             const NAMES: &'static [&'static str] = &[$(::core::stringify!($field)),+];
         }
     };
@@ -476,6 +487,8 @@ pub enum Refusal<E> {
     Source(Box<Response>),
     /// The loader failed with the consumer's own error type.
     Load(E),
+    /// A `<Can>` dry run that passed every guard; the handler does not run.
+    DryRun,
 }
 
 impl<E> From<AuthError> for Refusal<E> {
@@ -496,15 +509,24 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
             // The denial was recorded on the way out; the caller is told
             // only that it was refused.
             Refusal::Denied { .. } => AuthError::Forbidden.into_response(),
-            Refusal::NotFound { entity_type } => (
+            Refusal::NotFound { entity_type } => error_body(
                 axum::http::StatusCode::NOT_FOUND,
+                "not_found",
                 format!("{entity_type} not found"),
-            )
-                .into_response(),
+            ),
             Refusal::Key(error) => error.into_response(),
             Refusal::Auth(error) => error.into_response(),
             Refusal::Source(response) => *response,
             Refusal::Load(error) => error.into_response(),
+            Refusal::DryRun => (
+                axum::http::StatusCode::NO_CONTENT,
+                [
+                    (doxa_wire::DRY_RUN_HEADER, doxa_wire::DRY_RUN_OK),
+                    ("cache-control", "no-store"),
+                    ("vary", doxa_wire::DRY_RUN_HEADER),
+                ],
+            )
+                .into_response(),
         }
     }
 }
@@ -643,6 +665,9 @@ pub trait GrantSite: Send + Sync + 'static {
     ///
     /// [`ApiDocBuilder`]: https://docs.rs/doxa-docs
     const SCHEME: &'static str = "bearer";
+    /// Whether this is the route's last guard, which answers a `<Can>` dry run
+    /// with `204` instead of letting the handler run. Set by the route macro.
+    const LAST_GUARD: bool = false;
 }
 
 /// Site used by hand-written routes: the key out of the path, bearer. The
@@ -1913,6 +1938,11 @@ where
         // Same entry point a handler uses, so the refusal is recorded by
         // the same code either way.
         let loaded = authorize::<T>(key, source.state(), &parts.extensions).await?;
+        if <T::Site as GrantSite>::LAST_GUARD
+            && parts.headers.contains_key(doxa_wire::DRY_RUN_HEADER)
+        {
+            return Err(Refusal::DryRun);
+        }
         Ok(Granted(ctx, loaded))
     }
 }

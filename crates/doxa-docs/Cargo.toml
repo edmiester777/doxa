@@ -42,6 +42,7 @@ macros-sea-orm = ["macros", "doxa-macros/sea-orm"]
 [dependencies]
 axum = { workspace = true }
 doxa-macros = { workspace = true, optional = true }
+doxa-wire = { workspace = true, features = ["utoipa"] }
 bytes = { workspace = true }
 futures-core = { workspace = true }
 serde = { workspace = true }

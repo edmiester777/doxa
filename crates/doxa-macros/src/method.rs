@@ -20,7 +20,7 @@ use syn::{
     parse::Parser, parse2, punctuated::Punctuated, ItemFn, LitStr, Meta, Result, Token, Type,
 };
 
-use crate::{grant, sig};
+use crate::{client_stub, grant, sig};
 
 /// Expand `#[get("/path", ...)]` and friends.
 pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<TokenStream> {
@@ -28,7 +28,11 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
     let mut item_fn: ItemFn = parse2(item)?;
     let method_ident = syn::Ident::new(method, proc_macro2::Span::call_site());
     let path_lit = parsed_args.path;
-    let extra = parsed_args.extra;
+    let (client, extra) = take_client_arg(parsed_args.extra)?;
+
+    if doxa_macro_support::is_client() {
+        return client_half(method, &path_lit, &extra, client, &item_fn);
+    }
 
     // Rewrite `Granted<T>` arguments before inference runs, so the
     // signature the doc probes see is the one that actually compiles.
@@ -49,6 +53,13 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
 pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed = parse_operation_args(args)?;
     let mut item_fn: ItemFn = parse2(item)?;
+    let (client, extra) = take_client_arg(parsed.extra)?;
+    let parsed = OperationArgs { extra, ..parsed };
+
+    if doxa_macro_support::is_client() {
+        let method = parsed.method.to_string();
+        return client_half(&method, &parsed.path, &parsed.extra, client, &item_fn);
+    }
 
     let path_names = sig::parse_path_names(&parsed.path.value());
     let sites = grant::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
@@ -60,6 +71,61 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
         #utoipa_attr
         #item_fn
     })
+}
+
+/// The client half: a typed call to this route, unless `client = false`.
+fn client_half(
+    method: &str,
+    path: &LitStr,
+    extra: &[Meta],
+    client: bool,
+    item_fn: &ItemFn,
+) -> Result<TokenStream> {
+    if !client {
+        return Ok(TokenStream::new());
+    }
+    let operation_id = extra.iter().find_map(|m| match m {
+        Meta::NameValue(nv) if nv.path.is_ident("operation_id") => match &nv.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit),
+                ..
+            }) => Some(lit),
+            _ => None,
+        },
+        _ => None,
+    });
+    client_stub::expand(
+        &client_stub::Route {
+            method,
+            path,
+            operation_id,
+        },
+        item_fn,
+    )
+}
+
+/// Pull `client = false` out of the arguments; it is doxa's, not utoipa's.
+fn take_client_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
+    let mut client = true;
+    let mut rest = Vec::with_capacity(extra.len());
+    for meta in extra {
+        match &meta {
+            Meta::NameValue(nv) if nv.path.is_ident("client") => match &nv.value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Bool(b),
+                    ..
+                }) => client = b.value,
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "expected `client = false` or `client = true`",
+                    ))
+                }
+            },
+            _ => rest.push(meta),
+        }
+    }
+    Ok((client, rest))
 }
 
 struct MethodArgs {

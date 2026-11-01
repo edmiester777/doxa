@@ -392,7 +392,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         }
     };
 
-    Ok(quote! {
+    let server = quote! {
         #markers
 
         #(#consts)*
@@ -404,15 +404,21 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         #(#verb_impls)*
 
         impl #enum_name {
-            /// Every action this asset permits, as `ActionTable`
-            /// holds them.
-            ///
-            /// The same table as `ActionTable::ACTIONS` and not a copy of
-            /// it, spelled without the trait so the common wiring needs no
-            /// import.
+            /// Every action this asset permits, as `ActionTable` holds them.
             pub const ACTIONS: &'static [::doxa::auth::Action] =
                 <Self as ::doxa::auth::ActionTable>::ACTIONS;
+        }
+    };
 
+    let server = doxa_macro_support::tag(doxa_macro_support::Side::Server, server);
+    Ok(quote! {
+        #server
+
+        impl ::doxa::wire::Vocabulary for #enum_name {
+            const ENTITY_TYPE: &'static str = #resource;
+        }
+
+        impl #enum_name {
             /// Every variant, in declaration order.
             pub const ALL: &'static [Self] = &[#(#all),*];
 

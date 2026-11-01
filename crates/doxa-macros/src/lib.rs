@@ -190,9 +190,11 @@ mod actions;
 mod api_error;
 mod asset;
 mod capability;
+mod client_stub;
 mod grant;
 mod method;
 mod policy_resource;
+mod role;
 mod sig;
 mod sse_event;
 
@@ -286,6 +288,9 @@ mod sse_event;
 /// an SDK-visible one.
 #[proc_macro_derive(ApiError, attributes(api, api_error, api_default))]
 pub fn derive_api_error(input: TokenStream) -> TokenStream {
+    if doxa_macro_support::is_client() {
+        return TokenStream::new();
+    }
     api_error::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
@@ -324,6 +329,9 @@ pub fn derive_api_error(input: TokenStream) -> TokenStream {
 /// `utoipa::PartialSchema`; wrap `chrono`/`uuid` fields in a payload type).
 #[proc_macro_derive(SseEvent, attributes(sse))]
 pub fn derive_sse_event(input: TokenStream) -> TokenStream {
+    if doxa_macro_support::is_client() {
+        return TokenStream::new();
+    }
     sse_event::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
@@ -520,6 +528,9 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// used it.
 #[proc_macro_derive(PolicyResource, attributes(resource))]
 pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
+    if doxa_macro_support::is_client() {
+        return TokenStream::new();
+    }
     policy_resource::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
@@ -630,6 +641,9 @@ pub fn derive_actions(input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
+    if doxa_macro_support::is_client() {
+        return item;
+    }
     capability::expand(args.into(), item.into()).into()
 }
 
@@ -740,7 +754,12 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// compile.
 #[proc_macro_attribute]
 pub fn asset(args: TokenStream, item: TokenStream) -> TokenStream {
-    asset::expand(args.into(), item.into())
+    let expand = if doxa_macro_support::is_client() {
+        asset::expand_client
+    } else {
+        asset::expand
+    };
+    expand(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -756,4 +775,75 @@ pub fn operation(args: TokenStream, item: TokenStream) -> TokenStream {
     method::expand_operation(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+/// Bring in the prelude for this crate's role: server or client.
+///
+/// ```ignore
+/// doxa::prelude!();
+/// ```
+#[proc_macro]
+pub fn prelude(input: TokenStream) -> TokenStream {
+    role::prelude(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Keep this item only in the server half, e.g. `#[server] use sea_orm::DatabaseConnection;`.
+#[proc_macro_attribute]
+pub fn server(args: TokenStream, item: TokenStream) -> TokenStream {
+    role::only(doxa_macro_support::Side::Server, args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Keep this item only in the client half.
+#[proc_macro_attribute]
+pub fn client(args: TokenStream, item: TokenStream) -> TokenStream {
+    role::only(doxa_macro_support::Side::Client, args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Keep these items only in the server half; unlike `#[server]`, works on `mod x;`.
+///
+/// ```ignore
+/// doxa::server_only! {
+///     mod store;
+/// }
+/// ```
+#[proc_macro]
+pub fn server_only(input: TokenStream) -> TokenStream {
+    doxa_macro_support::tag(doxa_macro_support::Side::Server, input.into()).into()
+}
+
+/// Keep these items only in the client half.
+#[proc_macro]
+pub fn client_only(input: TokenStream) -> TokenStream {
+    doxa_macro_support::tag(doxa_macro_support::Side::Client, input.into()).into()
+}
+
+/// The id the client cache stores a value under.
+///
+/// `#[identity(entity = "Widget", id = id, key = WidgetKey { name })]`. `id` must
+/// never change; `key` also writes `From<&Widget> for WidgetKey`.
+#[proc_macro_derive(Identity, attributes(identity))]
+pub fn derive_identity(input: TokenStream) -> TokenStream {
+    role::derive_identity(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `ToSchema` in the client half, where there is no OpenAPI document to describe.
+#[doc(hidden)]
+#[proc_macro_derive(ClientToSchema, attributes(schema))]
+pub fn derive_client_to_schema(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
+}
+
+/// `IntoParams` in the client half.
+#[doc(hidden)]
+#[proc_macro_derive(ClientIntoParams, attributes(param, into_params))]
+pub fn derive_client_into_params(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
 }

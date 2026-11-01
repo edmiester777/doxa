@@ -11,41 +11,80 @@
 //! | `audit` | `doxa-audit` | Append-only audit logging primitives |
 //! | `auth` | `doxa-auth` | OIDC / JWT auth middleware with Cedar policy integration |
 //! | `policy` | `doxa-policy` | Cedar-based authorization policy engine |
+//! | `client` | `doxa-client` | Call routes from the browser as async functions |
 //! | `full` | all of the above | Everything |
 //!
-//! With default features, `doxa` is a drop-in replacement for the
-//! previous standalone `doxa-docs` crate — all public types, macros,
-//! and re-exports are available at the same paths.
+//! A crate whose `build.rs` calls `doxa_role::client()` sees every route as a
+//! typed call; `doxa::prelude!()` brings in the names for whichever half it is.
 //!
 //! ```toml
-//! # Just OpenAPI docs (same as before):
 //! doxa = "0.1"
-//!
-//! # Docs + auth + policy:
 //! doxa = { version = "0.1", features = ["auth", "policy"] }
-//!
-//! # Everything:
 //! doxa = { version = "0.1", features = ["full"] }
 //! ```
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
-#[cfg(feature = "docs")]
+#[cfg(all(feature = "docs", not(target_arch = "wasm32")))]
 pub use doxa_docs::*;
+
+/// Types the server and its browser client agree on.
+pub use doxa_wire as wire;
 
 /// Zeroize-on-drop secret string type with `[REDACTED]` Debug/Display.
 #[cfg(feature = "protected")]
 pub use doxa_protected as protected;
 
 /// SOC 2-flavored append-only audit logging primitives.
-#[cfg(feature = "audit")]
+#[cfg(all(feature = "audit", not(target_arch = "wasm32")))]
 pub use doxa_audit as audit;
 
 /// Provider-agnostic OIDC / JWT auth middleware with Cedar policy integration.
-#[cfg(feature = "auth")]
+#[cfg(all(feature = "auth", not(target_arch = "wasm32")))]
 pub use doxa_auth as auth;
 
 /// Cedar-based authorization policy engine.
-#[cfg(feature = "policy")]
+#[cfg(all(feature = "policy", not(target_arch = "wasm32")))]
 pub use doxa_policy as policy;
+
+#[cfg(any(feature = "macros", feature = "client"))]
+pub use doxa_macros::{client, client_only, prelude, server, server_only, Identity};
+
+/// The server half: what `doxa::prelude!()` brings in where the crate is the server.
+#[cfg(all(feature = "docs", feature = "macros", not(target_arch = "wasm32")))]
+pub mod server {
+    /// Names a shared route file needs when compiled as the server.
+    pub mod prelude {
+        pub use crate::{
+            asset, capability, client, client_only, delete, get, operation, patch, post, put,
+            server, server_only, Actions, ApiError, Identity, IntoParams, PolicyResource, SseEvent,
+            SseStream, ToSchema,
+        };
+        pub use axum::extract::{Extension, Form, Path, Query, State};
+        pub use axum::http::StatusCode;
+        pub use axum::Json;
+        pub use serde::{Deserialize, Serialize};
+
+        #[cfg(feature = "auth")]
+        pub use doxa_auth::{route_key, Cap, Granted, Many, One, Require};
+    }
+}
+
+/// The client half: typed calls to the server's routes.
+#[cfg(feature = "client")]
+pub mod client {
+    pub use doxa_client::*;
+
+    /// Names a shared route file needs when compiled as the client.
+    pub mod prelude {
+        pub use doxa_client::route_key;
+        pub use doxa_client::{Form, Granted, Json, Path, Query, SseStream, StatusCode};
+        pub use doxa_macros::{
+            asset, capability, client, client_only, delete, get, operation, patch, post, put,
+            server, server_only, Actions, ApiError, ClientIntoParams as IntoParams,
+            ClientToSchema as ToSchema, Identity, PolicyResource, SseEvent,
+        };
+        pub use serde::{Deserialize, Serialize};
+    }
+}

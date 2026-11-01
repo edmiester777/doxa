@@ -15,14 +15,14 @@ default = ["docs", "macros", "docs-scalar", "policy-catalog", "auth-catalog"]
 
 # OpenAPI documentation, Scalar UI hosting, and the core doxa-docs
 # surface (ApiDocBuilder, MountDocsExt, ProblemDetails, etc.).
-docs = ["dep:doxa-docs"]
+docs = ["dep:doxa-docs", "dep:axum"]
 
 # Forward Scalar UI feature to doxa-docs.
 docs-scalar = ["docs", "doxa-docs/docs-scalar"]
 
 # Re-export doxa-macros proc-macros (#[derive(ApiError)],
 # #[derive(SseEvent)], #[get]/#[post]/…) through doxa-docs.
-macros = ["docs", "doxa-docs/macros"]
+macros = ["docs", "dep:doxa-macros", "doxa-docs/macros"]
 
 # Zeroize-on-drop secret string type with [REDACTED] display.
 protected = ["dep:doxa-protected"]
@@ -63,14 +63,25 @@ auth-catalog = ["doxa-auth?/catalog"]
 policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-sea-orm"]
 
 # Everything.
+client = ["dep:doxa-client", "dep:doxa-macros"]
+
+client-router = ["client", "doxa-client/router"]
+
 full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
 
 [dependencies]
-doxa-docs = { workspace = true, optional = true }
+doxa-wire = { workspace = true }
+doxa-macros = { workspace = true, optional = true }
+doxa-client = { workspace = true, optional = true }
 doxa-protected = { workspace = true, optional = true }
+serde = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+doxa-docs = { workspace = true, optional = true }
 doxa-audit = { workspace = true, optional = true }
 doxa-auth = { workspace = true, optional = true, default-features = false }
 doxa-policy = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }
