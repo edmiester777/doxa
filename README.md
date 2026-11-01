@@ -116,6 +116,11 @@ utoipa = "5"             # required — see note below
 | `policy` | [`doxa-policy`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-policy) | Cedar authorization with pluggable storage |
 | `audit` | [`doxa-audit`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-audit) | Non-blocking audit log with auto-capture and trait-based outcomes, optional SeaORM sink |
 | `protected` | [`doxa-protected`](https://github.com/edmiester777/doxa/tree/main/crates/doxa-protected) | `ProtectedString` — zeroize-on-drop, redacted everywhere |
+| `client` | `doxa-client` | Call your routes from the browser as the functions they are, with a cache |
+| `ui` | `doxa-ui` | Client-rendered components, `view!`, hooks and a router |
+| `embed` | `doxa-docs` | Compile the built web app into the server binary |
+
+The `doxa` binary (`cargo install doxa-cli`) scaffolds an app (`doxa new`), builds the browser half (`doxa build`), serves it with reload (`doxa dev`), and formats `view!` markup (`doxa fmt`).
 
 Each crate also works standalone if you prefer fine-grained control over your dependency graph.
 
@@ -138,6 +143,8 @@ Each crate also works standalone if you prefer fine-grained control over your de
 | Handler-level audit enrichment | [13](#13-audit-enrichment-in-handlers) |
 | Custom audit middleware | [14](#14-custom-middleware-that-emits-audit-events) |
 | Custom audit event types | [15](#15-custom-audit-event-types) |
+| Call a route from the browser | [16](#16-call-a-route-from-the-browser) |
+| Pages that call routes | [17](#17-pages-that-call-routes) |
 
 ---
 
@@ -829,6 +836,62 @@ audit.set_resource("invoice", &invoice_id);
 The `event_type` column stores whatever `as_str()` returns (up to 50 bytes). This means you can query the audit log by domain — `WHERE event_type LIKE 'billing.%'` — without schema changes.
 
 ---
+
+### 16. Call a route from the browser
+
+Routes live in a crate both halves share. The client crate is the same source with a one-line `build.rs`, and in it every route is a function that sends the request the route expects:
+
+```toml
+# client/Cargo.toml
+[lib]
+path = "../api/src/lib.rs"
+```
+
+```rust
+// client/build.rs
+fn main() { doxa_role::client() }
+```
+
+```rust
+// api/src/widgets.rs — compiled by both
+doxa::prelude!();
+
+#[get("/api/widgets/{name}")]
+pub async fn get_widget(widget: Granted<WidgetByName>) -> Json<Widget> {
+    Json(widget.into_inner())
+}
+
+// anywhere in the client: the same name, minus server-only arguments
+let w: Widget = get_widget("sprocket").await?;
+```
+
+Server-only items in a shared file take `#[server]`, or `doxa::server_only! { mod store; }` for a module. GETs are cached and deduplicated, mutations invalidate what they touch, and `rename_widget::can(&key)` dry-runs the route's own guard.
+
+### 17. Pages that call routes
+
+```rust
+use doxa::ui::prelude::*;
+
+#[page("/widgets/{name}", load = |p| get_widget(&p.name))]
+async fn WidgetPage(name: String) -> Result<View> {
+    let key = WidgetKey { name };
+    let widget = get_widget(&key).await?;
+    let editing = state(false);
+    Ok(view! {
+        <h1>{&widget.name}</h1>
+        <Can route={rename_widget} args={&key}>
+            <button on:click={move |_| editing.toggle()}>"Rename"</button>
+        </Can>
+    })
+}
+
+#[doxa::start]
+fn start() {
+    App::new(Router::new().page::<WidgetPage>()).mount("#app");
+}
+```
+
+The same pages render natively into an in-memory document for tests. [`examples/widgets`](examples/widgets) has the whole app: `api` (shared routes), `client` (their client half), `server`, and `web` (the pages, tested against the real router).
 
 ## Design
 
