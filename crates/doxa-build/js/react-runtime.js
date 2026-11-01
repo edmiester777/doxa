@@ -1,17 +1,16 @@
-// The React side of doxa islands: one root, created on first mount, renders
-// every island as a portal into the host element doxa gave it.
-import { createElement, Suspense, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+// The React side of doxa islands: one root, created on first mount. A nested island is a
+// portal inside the island around it, so it gets that island's React context.
+import { createElement, Fragment, memo, Suspense, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 const islands = new Map();
 const listeners = new Set();
-let snapshot = [];
+let version = 0;
 let root = null;
-let next = 0;
 
 function publish() {
-  snapshot = [...islands.values()];
+  version++;
   for (const l of listeners) l();
 }
 
@@ -33,13 +32,19 @@ function Adopt({ node }) {
   return createElement("div", { ref, style: { display: "contents" } });
 }
 
-function Islands() {
-  const list = useSyncExternalStore(subscribe, () => snapshot);
-  return list.map((i) =>
+const IslandView = memo(({ component, props }) => createElement(component, props));
+
+// The islands whose nearest island is `parent`; `null` for the root, which also takes orphans.
+function Portals({ parent }) {
+  useSyncExternalStore(subscribe, () => version);
+  const mine = [...islands.values()].filter((i) =>
+    parent === null ? !islands.has(i.parent) : i.parent === parent,
+  );
+  return mine.map((i) =>
     createPortal(
-      createElement(Suspense, { fallback: null }, createElement(i.component, i.props)),
+      createElement(Suspense, { fallback: null }, createElement(IslandView, { component: i.component, props: i.props })),
       i.host,
-      i.key,
+      String(i.id),
     ),
   );
 }
@@ -54,20 +59,26 @@ function toJson(value) {
 
 function propsOf(island, json) {
   const props = { ...JSON.parse(json), ...island.events };
-  if (island.children) props.children = createElement(Adopt, { node: island.children });
+  if (island.children) {
+    props.children = createElement(
+      Fragment,
+      null,
+      createElement(Adopt, { node: island.children }),
+      createElement(Portals, { parent: island.id }),
+    );
+  }
   return props;
 }
 
-export function mount(host, component, json, handlers, children) {
+export function mount(id, parent, host, component, json, handlers, children) {
   if (root === null) {
     const el = document.createElement("div");
     el.hidden = true;
     document.body.appendChild(el);
     root = createRoot(el);
-    root.render(createElement(Islands));
+    root.render(createElement(Portals, { parent: null }));
   }
-  const id = ++next;
-  const island = { key: String(id), host, component, children, live: true, events: {}, props: null };
+  const island = { id, parent: parent ?? null, host, component, children, live: true, events: {}, props: null };
   for (const [name, f] of Object.entries(handlers)) {
     // Created once per island, so React sees the same function on every update.
     island.events[name] = (arg) => {
@@ -77,7 +88,6 @@ export function mount(host, component, json, handlers, children) {
   island.props = propsOf(island, json);
   islands.set(id, island);
   publish();
-  return id;
 }
 
 export function update(id, json) {

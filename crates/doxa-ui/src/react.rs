@@ -1,5 +1,6 @@
-//! React components in doxa views, declared with `#[react]`. Each island is a
-//! portal of one React root that a small JS runtime owns; `doxa build` ships it.
+//! React components in doxa views, declared with `#[react]`. Each island is a portal
+//! inside the nearest island around it, or of one shared root, so React context flows
+//! through doxa components; a small JS runtime that `doxa build` ships owns the root.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -94,22 +95,44 @@ fn parse<T: DeserializeOwned>(json: &str) -> serde_json::Result<T> {
     serde_json::from_str(json).or_else(|e| serde_json::from_str("null").map_err(|_| e))
 }
 
+/// An island for the bridge to render.
+pub struct Mount<'a> {
+    /// Names it in `update` and `unmount`.
+    pub id: u32,
+    /// The nearest island around it in the doxa tree, whose React context it gets.
+    pub parent: Option<u32>,
+    /// The element to render into.
+    pub host: NodeRef,
+    /// Its module and export.
+    pub island: &'a Island,
+    /// Its non-event props, as a JSON object.
+    pub props: &'a str,
+    /// Its event props.
+    pub events: Vec<(&'static str, EventFn)>,
+    /// doxa's render of its `View` children, for React to place as `children`.
+    pub children: Option<NodeRef>,
+}
+
 /// The JS side of islands. [`set_bridge`] swaps it, e.g. for a fake in native tests.
 pub trait Bridge {
-    /// Render `island` into `host` with `props`, a JSON object, and `events`; returns its id.
-    /// `children` holds doxa's `View` children, for React to place as its `children`.
-    fn mount(
-        &self,
-        host: NodeRef,
-        island: &Island,
-        props: &str,
-        events: Vec<(&'static str, EventFn)>,
-        children: Option<NodeRef>,
-    ) -> u32;
+    /// Render an island; a child may mount before its parent.
+    fn mount(&self, island: Mount<'_>);
     /// Give a mounted island new non-event props.
     fn update(&self, id: u32, props: &str);
     /// Remove an island's portal.
     fn unmount(&self, id: u32);
+}
+
+/// Passed down the doxa tree so a nested island knows the island around it.
+#[derive(Clone)]
+struct Parent(u32);
+
+fn next_id() -> u32 {
+    thread_local!(static NEXT: Cell<u32> = const { Cell::new(0) });
+    NEXT.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
+    })
 }
 
 thread_local! {
@@ -135,16 +158,7 @@ fn default_bridge() -> Rc<dyn Bridge> {
 fn default_bridge() -> Rc<dyn Bridge> {
     struct Inert;
     impl Bridge for Inert {
-        fn mount(
-            &self,
-            _: NodeRef,
-            _: &Island,
-            _: &str,
-            _: Vec<(&'static str, EventFn)>,
-            _: Option<NodeRef>,
-        ) -> u32 {
-            0
-        }
+        fn mount(&self, _: Mount<'_>) {}
         fn update(&self, _: u32, _: &str) {}
         fn unmount(&self, _: u32) {}
     }
@@ -154,7 +168,9 @@ fn default_bridge() -> Rc<dyn Bridge> {
 type Slot = Rc<RefCell<EventFn>>;
 
 struct Live<P> {
-    id: Cell<Option<u32>>,
+    id: u32,
+    parent: Option<u32>,
+    mounted: Cell<bool>,
     children: Cell<Option<NodeRef>>,
     shown: RefCell<Option<P>>,
     events: RefCell<Vec<(&'static str, Slot)>>,
@@ -188,31 +204,35 @@ impl<P: IslandProps> Live<P> {
                         (*name, f)
                     })
                     .collect();
-                let id = bridge().mount(
+                bridge().mount(Mount {
+                    id: self.id,
+                    parent: self.parent,
                     host,
-                    &P::ISLAND,
-                    &json(props),
-                    forwarders,
-                    self.children.get(),
-                );
-                self.id.set(Some(id));
+                    island: &P::ISLAND,
+                    props: &json(props),
+                    events: forwarders,
+                    children: self.children.get(),
+                });
+                self.mounted.set(true);
                 *self.shown.borrow_mut() = Some(props.clone());
             }
             Phase::Patched => {
-                let Some(id) = self.id.get() else { return };
+                if !self.mounted.get() {
+                    return;
+                }
                 let same = self
                     .shown
                     .borrow()
                     .as_ref()
                     .is_some_and(|s| s.same_data(props));
                 if !same {
-                    bridge().update(id, &json(props));
+                    bridge().update(self.id, &json(props));
                     *self.shown.borrow_mut() = Some(props.clone());
                 }
             }
             Phase::Unmounting => {
-                if let Some(id) = self.id.take() {
-                    bridge().unmount(id);
+                if self.mounted.replace(false) {
+                    bridge().unmount(self.id);
                     self.shown.borrow_mut().take();
                 }
             }
@@ -230,11 +250,14 @@ fn json<P: IslandProps>(props: &P) -> String {
 #[doc(hidden)]
 pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     let (inst, _, live) = crate::hooks::slot("island", || Live::<P> {
-        id: Cell::new(None),
+        id: next_id(),
+        parent: crate::hooks::try_context::<Parent>().map(|p| p.0),
+        mounted: Cell::new(false),
         children: Cell::new(None),
         shown: RefCell::new(None),
         events: RefCell::new(Vec::new()),
     });
+    crate::hooks::provide(Parent(live.id));
     let mut events = Events {
         list: Vec::new(),
         owner: Rc::downgrade(&inst),
@@ -268,19 +291,21 @@ mod web {
 
     use wasm_bindgen::prelude::*;
 
-    use super::{Bridge, EventFn, Island};
+    use super::{Bridge, Mount};
     use crate::dom::NodeRef;
 
     #[wasm_bindgen(module = "doxa-react:runtime")]
     extern "C" {
         #[wasm_bindgen(js_name = mount)]
         fn js_mount(
+            id: u32,
+            parent: Option<u32>,
             host: &web_sys::Node,
             component: &JsValue,
             props: &str,
             events: &js_sys::Object,
             children: Option<web_sys::Node>,
-        ) -> u32;
+        );
         #[wasm_bindgen(js_name = update)]
         fn js_update(id: u32, props: &str);
         #[wasm_bindgen(js_name = unmount)]
@@ -294,18 +319,12 @@ mod web {
     pub(super) struct WebBridge(RefCell<HashMap<u32, Handlers>>);
 
     impl Bridge for WebBridge {
-        fn mount(
-            &self,
-            host: NodeRef,
-            island: &Island,
-            props: &str,
-            events: Vec<(&'static str, EventFn)>,
-            children: Option<NodeRef>,
-        ) -> u32 {
-            let host = host.raw().expect("an island's host is in the document");
-            let children = children.and_then(NodeRef::raw);
+        fn mount(&self, m: Mount<'_>) {
+            let host = m.host.raw().expect("an island's host is in the document");
+            let children = m.children.and_then(NodeRef::raw);
             let obj = js_sys::Object::new();
-            let handlers: Handlers = events
+            let handlers: Handlers = m
+                .events
                 .into_iter()
                 .map(|(name, f)| {
                     let c = Closure::<dyn Fn(String)>::new(move |json: String| f(&json));
@@ -313,9 +332,9 @@ mod web {
                     c
                 })
                 .collect();
-            let id = js_mount(&host, &(island.load)(), props, &obj, children);
-            self.0.borrow_mut().insert(id, handlers);
-            id
+            let component = (m.island.load)();
+            js_mount(m.id, m.parent, &host, &component, m.props, &obj, children);
+            self.0.borrow_mut().insert(m.id, handlers);
         }
 
         fn update(&self, id: u32, props: &str) {

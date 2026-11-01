@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use doxa::ui::dom::MemDom;
 use doxa::ui::prelude::*;
-use doxa::ui::react::{Bridge, EventFn, Island, IslandProps};
+use doxa::ui::react::{Bridge, EventFn, IslandProps, Mount};
 use doxa::ui::NodeRef;
 
 #[react(module = "./ts/editor.tsx", export = "Editor")]
@@ -39,8 +39,8 @@ struct Calls {
     log: Vec<String>,
     hosts: Vec<u32>,
     children: Vec<Option<u32>>,
+    parents: Vec<(&'static str, Option<u32>)>,
     events: HashMap<u32, Vec<(&'static str, EventFn)>>,
-    next: u32,
 }
 
 #[derive(Clone, Default)]
@@ -53,23 +53,18 @@ fn sorted(json: &str) -> String {
 }
 
 impl Bridge for Fake {
-    fn mount(
-        &self,
-        host: NodeRef,
-        island: &Island,
-        props: &str,
-        events: Vec<(&'static str, EventFn)>,
-        children: Option<NodeRef>,
-    ) -> u32 {
+    fn mount(&self, m: Mount<'_>) {
         let mut c = self.0.borrow_mut();
-        c.next += 1;
-        let id = c.next;
-        c.log
-            .push(format!("mount {} {id} {}", island.name, sorted(props)));
-        c.hosts.push(host.id());
-        c.children.push(children.map(NodeRef::id));
-        c.events.insert(id, events);
-        id
+        c.log.push(format!(
+            "mount {} {} {}",
+            m.island.name,
+            m.id,
+            sorted(m.props)
+        ));
+        c.hosts.push(m.host.id());
+        c.children.push(m.children.map(NodeRef::id));
+        c.parents.push((m.island.name, m.parent));
+        c.events.insert(m.id, m.events);
     }
 
     fn update(&self, id: u32, props: &str) {
@@ -247,4 +242,47 @@ fn view_children_render_into_a_host_the_island_is_given() {
     doxa::client::task::run_until_stalled();
     assert_eq!(dom.text(host), "1", "doxa keeps rendering the children");
     assert_eq!(fake.log(), Vec::<String>::new(), "React sees no new props");
+}
+
+#[react(module = "./ts/theme.tsx", export = "ThemeProvider")]
+pub struct ThemeProvider {
+    pub theme: String,
+    pub children: View,
+}
+
+#[react(module = "./ts/badge.tsx", export = "Badge")]
+pub struct Badge {
+    pub label: String,
+}
+
+#[component]
+fn Toolbar() -> View {
+    view! {
+        <nav>
+            <Badge label="inner"/>
+        </nav>
+    }
+}
+
+#[test]
+fn a_nested_island_mounts_inside_the_island_around_it() {
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    App::new(|| {
+        view! {
+            <ThemeProvider theme="dark">
+                <Toolbar/>
+            </ThemeProvider>
+            <Badge label="outer"/>
+        }
+    })
+    .mount_on(Rc::new(dom.clone()), dom.body());
+    let mut parents = fake.0.borrow().parents.clone();
+    parents.sort();
+    assert_eq!(
+        parents,
+        [("Badge", None), ("Badge", Some(1)), ("ThemeProvider", None)],
+        "the badge under the provider, through a doxa component, is its child"
+    );
 }
