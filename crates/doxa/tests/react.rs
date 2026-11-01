@@ -23,7 +23,7 @@ pub struct Editor {
     pub on_blur: Callback<()>,
 }
 
-#[react(module = "@monaco-editor/react", export = "default", lazy)]
+#[react(module = "./ts/monaco.tsx", export = "default", lazy)]
 pub struct Monaco {
     pub value: String,
 }
@@ -193,7 +193,7 @@ fn the_island_names_its_module() {
     let m = <MonacoProps as IslandProps>::ISLAND;
     assert_eq!(
         (m.module, m.export, m.lazy),
-        ("@monaco-editor/react", "default", true)
+        ("doxa-island:ts/monaco.tsx", "default", true)
     );
 }
 

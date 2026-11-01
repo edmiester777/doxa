@@ -12,8 +12,7 @@ pub(crate) struct Declared {
     pub package_json: Vec<PathBuf>,
 }
 
-/// What the crate at `dir` declares, or `None` when it isn't a doxa app crate:
-/// no `[package.metadata.doxa]` and no `package.json`.
+/// What the crate at `dir` declares, or `None` when its `Cargo.toml` can't be read.
 pub(crate) fn declared(dir: &Path) -> Option<Declared> {
     let mut out = Declared::default();
     let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
@@ -35,7 +34,7 @@ pub(crate) fn declared(dir: &Path) -> Option<Declared> {
             break;
         }
     }
-    (doxa.is_some() || !out.package_json.is_empty()).then_some(out)
+    Some(out)
 }
 
 fn is_workspace_root(manifest: &Path) -> bool {
@@ -140,13 +139,13 @@ mod tests {
     }
 
     #[test]
-    fn a_crate_that_is_not_an_app_is_not_checked() {
+    fn a_crate_declaring_nothing_rejects_every_package() {
         let dir = temp("plain");
         std::fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"lib\"\n[workspace]\n",
         )
         .unwrap();
-        assert!(declared(&dir).is_none());
+        assert!(check("react", &declared(&dir).unwrap()).is_err());
     }
 }

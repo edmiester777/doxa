@@ -166,6 +166,16 @@ pub mod ui_diagnostics {}
 ///     pub on_change: fn(String),
 /// }
 /// ```
+///
+/// An npm module this crate doesn't declare is rejected; the local module above compiles:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "@monaco-editor/react", export = "default")]
+/// pub struct Monaco {
+///     pub value: String,
+/// }
+/// ```
 #[cfg(feature = "react")]
 #[doc(hidden)]
 pub mod react_diagnostics {}
