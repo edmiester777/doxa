@@ -89,6 +89,43 @@ fn catch_shows_its_fallback_for_a_child_error() {
     assert_eq!(dom.text(dom.find("class", "err").unwrap()), "boom");
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("refused")]
+struct Refused;
+
+async fn refuse() -> std::result::Result<(), Refused> {
+    Err(Refused)
+}
+
+#[component]
+fn AsyncButton() -> View {
+    view! {
+        <button
+            on:click={async move |_| {
+                refuse().await?;
+                Ok(())
+            }}
+        >
+            "go"
+        </button>
+    }
+}
+
+#[test]
+fn question_mark_in_an_async_handler_reaches_catch() {
+    let dom = mount(|| {
+        view! {
+            <Catch fallback={|e: &Thrown| view! { <p class="err">{e.to_string()}</p> }}>
+                <AsyncButton/>
+            </Catch>
+        }
+    });
+    settle();
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert_eq!(dom.text(dom.find("class", "err").unwrap()), "refused");
+}
+
 #[component]
 fn Saver() -> View {
     let save = action(async |n: u32| {
