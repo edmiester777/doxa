@@ -90,12 +90,12 @@ pub fn inject(html: &str, tags: &str) -> String {
     format!("{}{}{}", &html[..at], tags, &html[at..])
 }
 
-/// The `index.html` used when the web crate has none.
+/// The `index.html` used when the web crate has none, with the `#app` that `doxa new` mounts on.
 pub fn generated_html(title: &str, tags: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>\n{tags}</head>\n<body>\n</body>\n</html>\n",
+         <title>{}</title>\n{tags}</head>\n<body>\n<div id=\"app\"></div>\n</body>\n</html>\n",
         text(title)
     )
 }
@@ -252,6 +252,7 @@ mod tests {
             html.contains("<title>a&lt;b</title>\n<T>\n</head>"),
             "{html}"
         );
+        assert!(html.contains("<div id=\"app\"></div>"), "{html}");
     }
 
     #[test]
