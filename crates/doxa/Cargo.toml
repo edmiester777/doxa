@@ -162,3 +162,7 @@ required-features = ["full"]
 [[test]]
 name = "authorize_loaded"
 required-features = ["full"]
+
+[[test]]
+name = "dry_run"
+required-features = ["full"]

@@ -805,6 +805,15 @@ pub fn client(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Expand the routes inside as the client half whatever this crate's role, for doctests.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __as_client(input: TokenStream) -> TokenStream {
+    method::expand_as_client(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Keep these items only in the server half; unlike `#[server]`, works on `mod x;`.
 ///
 /// ```ignore
@@ -826,7 +835,8 @@ pub fn client_only(input: TokenStream) -> TokenStream {
 /// The id the client cache stores a value under.
 ///
 /// `#[identity(entity = "Widget", id = id, key = WidgetKey { name })]`. `id` must
-/// never change; `key` also writes `From<&Widget> for WidgetKey`.
+/// never change; `key` also writes `From<&Widget> for WidgetKey`. In the client half
+/// it writes `From<Cached<Widget>> for Widget`, so the type must be `Clone`.
 #[proc_macro_derive(Identity, attributes(identity))]
 pub fn derive_identity(input: TokenStream) -> TokenStream {
     role::derive_identity(input.into())

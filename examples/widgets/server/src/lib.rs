@@ -51,12 +51,16 @@ impl CapabilityChecker for RoleChecker {
 }
 
 /// The app, with the caller's role read from `x-role` in place of a real token.
+///
+/// `routes!` answers a `<Can>` dry run of an unguarded route like `suggest_name`
+/// itself; a guarded route answers from its last guard.
 pub fn app(catalog: Catalog) -> Router {
     let (router, _api) = OpenApiRouter::<AppState>::new()
         .routes(routes!(get_widget))
         .routes(routes!(list_widgets))
         .routes(routes!(rename_widget))
         .routes(routes!(widget_events))
+        .routes(routes!(suggest_name))
         .split_for_parts();
     router
         .layer(axum::middleware::from_fn(

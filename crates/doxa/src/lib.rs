@@ -170,10 +170,52 @@ pub mod ui_diagnostics {}
 #[doc(hidden)]
 pub mod react_diagnostics {}
 
+/// A route that returns JSON is called from the browser:
+///
+/// ```
+/// doxa::client::__as_client! {
+///     #[get("/count")]
+///     pub async fn count() -> Json<u32> { unreachable!() }
+/// }
+/// async fn page() -> Result<(), doxa::client::Fetch> {
+///     let n = count().await?;
+///     assert_eq!(*n, 3);
+///     Ok(())
+/// }
+/// ```
+///
+/// One that returns HTML is not, and the error says so at the call:
+///
+/// ```compile_fail
+/// doxa::client::__as_client! {
+///     #[get("/")]
+///     pub async fn home() -> Html<String> { unreachable!() }
+/// }
+/// async fn page() -> Result<(), doxa::client::Fetch> {
+///     home().await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// With `client = false` it has no client half to call:
+///
+/// ```
+/// doxa::client::__as_client! {
+///     #[get("/", client = false)]
+///     pub async fn home() -> Html<String> { unreachable!() }
+/// }
+/// ```
+#[cfg(feature = "client")]
+#[doc(hidden)]
+pub mod client_diagnostics {}
+
 /// The client half: typed calls to the server's routes.
 #[cfg(feature = "client")]
 pub mod client {
     pub use doxa_client::*;
+
+    #[doc(hidden)]
+    pub use doxa_macros::__as_client;
 
     /// Names a shared route file needs when compiled as the client.
     pub mod prelude {

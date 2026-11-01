@@ -90,6 +90,16 @@ pub async fn rename_widget(
     catalog.rename(widget.id, &rename.name).map(Json)
 }
 
+/// Suggest a name for a new widget. Anyone may, so nothing guards it.
+#[post("/api/suggestions")]
+pub async fn suggest_name(
+    State(catalog): State<Catalog>,
+    Json(suggestion): Json<Rename>,
+) -> StatusCode {
+    catalog.suggest(suggestion.name);
+    StatusCode::ACCEPTED
+}
+
 /// What happens to a widget, as it happens.
 #[get("/api/widgets/{name}/events")]
 pub async fn widget_events(

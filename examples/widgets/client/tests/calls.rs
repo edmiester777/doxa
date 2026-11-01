@@ -1,7 +1,7 @@
 //! The client stubs, sent through the real server router in-process.
 
 use doxa::client::transport::RouterTransport;
-use doxa::client::{CacheConfig, Client, ClientConfig, Fetch, Permission};
+use doxa::client::{CacheConfig, Cached, Client, ClientConfig, Fetch, Permission};
 use std::rc::Rc;
 use std::time::Duration;
 use widgets_client::widgets::*;
@@ -107,6 +107,82 @@ async fn a_mutation_marks_its_entity_stale() {
     get_widget("cog").await.ok();
     doxa::client::task::run_until_stalled();
     assert!(client.requests_sent() > before);
+}
+
+#[tokio::test]
+async fn a_mutation_refetches_each_query_once_however_often_it_is_read() {
+    let client = ClientConfig::default()
+        .transport(
+            RouterTransport::new(widgets_server::app(widgets_server::seeded()))
+                .with_header("x-role", "editor"),
+        )
+        .install();
+    // The default stale time, and the server's `Cache-Control: private, no-cache`.
+    get_widget("cog").await.unwrap();
+    list_widgets(Filter::default()).await.unwrap();
+    rename_widget(
+        "gear",
+        Rename {
+            name: "gear2".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let before = client.requests_sent();
+    for _ in 0..3 {
+        get_widget("cog").await.unwrap();
+        list_widgets(Filter::default()).await.unwrap();
+        doxa::client::task::run_until_stalled();
+    }
+    assert_eq!(client.requests_sent(), before + 2);
+    let names: Vec<String> = list_widgets(Filter::default())
+        .await
+        .unwrap()
+        .iter()
+        .map(|w| w.name.clone())
+        .collect();
+    assert_eq!(names, ["sprocket", "gear2", "cog"]);
+}
+
+#[tokio::test]
+async fn a_read_returns_the_cached_value_itself() {
+    install("viewer");
+    let a = get_widget("cog").await.unwrap();
+    let b = get_widget("cog").await.unwrap();
+    assert!(Cached::ptr_eq(&a, &b));
+}
+
+#[tokio::test]
+async fn identical_streams_share_one_connection() {
+    let client = install("viewer");
+    let mut a = widget_events("gear").await.unwrap();
+    let mut b = widget_events("gear").await.unwrap();
+    assert_eq!(client.requests_sent(), 1);
+    let renamed = Some(WidgetEvent::Renamed {
+        name: "gear".into(),
+    });
+    assert_eq!(a.next().await.unwrap(), renamed);
+    assert_eq!(b.next().await.unwrap(), renamed);
+}
+
+#[tokio::test]
+async fn an_unguarded_route_answers_a_dry_run_without_running() {
+    let catalog = widgets_server::seeded();
+    ClientConfig::default()
+        .transport(
+            RouterTransport::new(widgets_server::app(catalog.clone()))
+                .with_header("x-role", "viewer"),
+        )
+        .install();
+    assert_eq!(suggest_name::can().await, Permission::Allowed);
+    assert!(catalog.suggestions().is_empty());
+    let status = suggest_name(Rename {
+        name: "bolt".into(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, 202);
+    assert_eq!(catalog.suggestions(), ["bolt"]);
 }
 
 #[tokio::test]

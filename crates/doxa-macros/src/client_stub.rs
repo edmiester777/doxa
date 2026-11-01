@@ -39,6 +39,18 @@ enum Arg {
     },
 }
 
+impl Arg {
+    fn is_foreign(&self) -> bool {
+        matches!(
+            self,
+            Arg::Sent {
+                kind: Kind::Foreign,
+                ..
+            }
+        )
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Guard,
@@ -53,6 +65,20 @@ pub struct Route<'a> {
     pub method: &'a str,
     pub path: &'a LitStr,
     pub operation_id: Option<&'a LitStr>,
+}
+
+/// Whether the route has no guard at all, so the router's dry-run gate answers for it.
+pub fn unguarded(item_fn: &ItemFn) -> bool {
+    !grant::has_guard(item_fn)
+        && item_fn
+            .sig
+            .inputs
+            .iter()
+            .enumerate()
+            .all(|(i, arg)| match arg {
+                FnArg::Typed(pt) => !classify(&pt.pat, &pt.ty, i).is_foreign(),
+                FnArg::Receiver(_) => true,
+            })
 }
 
 /// Emit the stub and its `ROUTE` module.
@@ -80,18 +106,13 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
         .filter(|(_, a)| matches!(a, FnArg::Typed(_)))
         .map(|(i, _)| i)
         .collect();
-    let dry_run = grant::dry_run_gate(item_fn).is_some_and(|gate| {
-        let after = typed.iter().position(|i| *i == gate).map_or(0, |p| p + 1);
-        !args[after..].iter().any(|a| {
-            matches!(
-                a,
-                Arg::Sent {
-                    kind: Kind::Foreign,
-                    ..
-                }
-            )
-        })
-    });
+    let dry_run = match grant::dry_run_gate(item_fn) {
+        Some(gate) => {
+            let after = typed.iter().position(|i| *i == gate).map_or(0, |p| p + 1);
+            !args[after..].iter().any(Arg::is_foreign)
+        }
+        None => unguarded(item_fn),
+    };
 
     let entities: Vec<TokenStream> = item_fn
         .sig
@@ -177,10 +198,36 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
         })
         .unzip();
 
+    let mut bad = None;
     let ret = match &item_fn.sig.output {
         ReturnType::Default => quote!(()),
-        ReturnType::Type(_, ty) => response_type(ty),
+        ReturnType::Type(_, ty) => response_type(ty, &mut bad),
     };
+    // The bound names a lifetime so it is checked where the stub is called, not here.
+    let (refusal, refused) = match bad {
+        None => (quote!(), quote!()),
+        Some(ty) => {
+            let message = format!(
+                "`{name}` returns `{}`, which the browser can't decode",
+                type_text(ty)
+            )
+            .replace('{', "{{")
+            .replace('}', "}}");
+            (
+                quote! {
+                    #[doc(hidden)]
+                    #[diagnostic::on_unimplemented(
+                        message = #message,
+                        label = "not callable from the browser",
+                        note = "set `client = false` on the route to keep it server-only, or return `Json<T>`"
+                    )]
+                    pub trait ClientCallable {}
+                },
+                quote!(where &'__doxa (): #name::ClientCallable),
+            )
+        }
+    };
+    let lifetime = (!refused.is_empty()).then(|| quote!(<'__doxa>));
 
     Ok(quote! {
         #[allow(non_snake_case, missing_docs)]
@@ -196,6 +243,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
                 dry_run: #dry_run,
             };
             #coverage
+            #refusal
 
             /// Whether this caller may call the route with these arguments, from a dry run.
             pub fn can(#(#probe_params),*) -> ::doxa::client::Probe {
@@ -205,7 +253,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
 
         #(#docs)*
         #[allow(clippy::too_many_arguments)]
-        #vis fn #name(#(#params),*) -> ::doxa::client::Call<#ret> {
+        #vis fn #name #lifetime (#(#params),*) -> ::doxa::client::Call<#ret> #refused {
             ::doxa::client::Call::new(&#name::ROUTE) #(#pushes)*
         }
     })
@@ -293,26 +341,30 @@ fn classify(pat: &Pat, ty: &Type, index: usize) -> Arg {
     }
 }
 
-/// The handler's return type, with every wrapper named under `::doxa::client`.
-fn response_type(ty: &Type) -> TokenStream {
+/// The handler's return type, with every wrapper named under `::doxa::client`;
+/// `bad` gets the first part the browser can't decode.
+fn response_type<'a>(ty: &'a Type, bad: &mut Option<&'a Type>) -> TokenStream {
+    let unsupported = |ty: &'a Type, bad: &mut Option<&'a Type>| {
+        bad.get_or_insert(ty);
+        quote!(::doxa::client::Unsupported)
+    };
     match ty {
         Type::Tuple(t) if t.elems.is_empty() => quote!(()),
         Type::Tuple(t) => {
-            let elems = t.elems.iter().map(response_type);
+            let elems: Vec<_> = t.elems.iter().map(|e| response_type(e, bad)).collect();
             quote!((#(#elems),*))
         }
-        Type::ImplTrait(_) => quote!(::doxa::client::Unsupported),
         Type::Path(_) => {
             let last = last_ident(ty).unwrap_or_default();
             let args = type_args(ty);
             match (last.as_str(), args.as_slice()) {
                 ("Result", [ok, err]) => {
-                    let ok = response_type(ok);
+                    let ok = response_type(ok, bad);
                     quote!(::core::result::Result<#ok, #err>)
                 }
                 ("Result", [ok]) => {
-                    let ok = response_type(ok);
-                    quote!(::doxa::client::Result1<#ok>)
+                    let ok = response_type(ok, bad);
+                    quote!(::doxa::client::AliasedResult<#ok>)
                 }
                 ("Json", [t]) => quote!(::doxa::client::Json<#t>),
                 ("SseStream", [e, ..]) => quote!(::doxa::client::SseStream<#e>),
@@ -320,13 +372,30 @@ fn response_type(ty: &Type) -> TokenStream {
                 ("NoContent", []) => quote!(::doxa::client::StatusCode),
                 ("String", []) => quote!(::std::string::String),
                 ("Cached", [t]) => quote!(::doxa::client::Json<#t>),
-                _ => quote!(::doxa::client::Unsupported),
+                _ => unsupported(ty, bad),
             }
         }
-        Type::Paren(p) => response_type(&p.elem),
-        Type::Group(g) => response_type(&g.elem),
-        _ => quote!(::doxa::client::Unsupported),
+        Type::Paren(p) => response_type(&p.elem, bad),
+        Type::Group(g) => response_type(&g.elem, bad),
+        _ => unsupported(ty, bad),
     }
+}
+
+/// `Html < String >` as `Html<String>`, for a message.
+fn type_text(ty: &Type) -> String {
+    let mut s = quote!(#ty).to_string();
+    for (from, to) in [
+        (" <", "<"),
+        ("< ", "<"),
+        (" >", ">"),
+        (" ::", "::"),
+        (":: ", "::"),
+        (" ,", ","),
+        ("& ", "&"),
+    ] {
+        s = s.replace(from, to);
+    }
+    s
 }
 
 #[cfg(test)]
@@ -416,6 +485,47 @@ mod tests {
             out.contains(":: doxa :: client :: Foreign < MyGuard >"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn an_unguarded_route_answers_a_dry_run_but_a_require_route_does_not() {
+        let open = stub(
+            "post",
+            "/notes",
+            quote! { async fn f(State(s): State<S>, Json(n): Json<Note>) {} },
+        );
+        assert!(open.contains("dry_run : true"), "{open}");
+        let required = stub(
+            "post",
+            "/notes",
+            quote! { async fn f(_: Require<NotesWrite>, Json(n): Json<Note>) {} },
+        );
+        assert!(required.contains("dry_run : false"), "{required}");
+        let custom = stub("post", "/notes", quote! { async fn f(g: MyGuard) {} });
+        assert!(custom.contains("dry_run : false"), "{custom}");
+    }
+
+    #[test]
+    fn an_undecodable_return_type_refuses_the_call_by_name() {
+        let out = stub(
+            "get",
+            "/",
+            quote! { async fn home() -> Result<Html<String>, E> { todo!() } },
+        );
+        assert!(
+            out.contains("`home` returns `Html<String>`, which the browser can't decode"),
+            "{out}"
+        );
+        assert!(
+            out.contains("where & '__doxa () : home :: ClientCallable"),
+            "{out}"
+        );
+        let json = stub(
+            "get",
+            "/n",
+            quote! { async fn n() -> Json<u32> { todo!() } },
+        );
+        assert!(!json.contains("ClientCallable"), "{json}");
     }
 
     #[test]

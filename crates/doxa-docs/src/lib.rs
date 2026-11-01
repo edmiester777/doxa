@@ -190,6 +190,7 @@ mod contribution;
 mod doc_params;
 mod doc_responses;
 mod doc_traits;
+mod dry_run;
 mod error_responses;
 mod etag;
 mod extractor;
@@ -267,6 +268,8 @@ pub type ApiResult<T, E> = Result<T, E>;
 pub mod __private {
     pub use tracing;
 
+    pub use crate::dry_run::gate_dry_runs;
+
     /// Referenced by `#[derive(PolicyResource)]` when building the
     /// attribute map, so consumers need not depend on `serde_json`.
     pub use serde_json;
@@ -334,6 +337,7 @@ pub mod __private {
     // Re-export the upstream macro under a shadowed name so
     // `doxa::routes!` can call into it without requiring the
     // caller crate to declare `utoipa-axum` as a direct dependency.
+    pub use utoipa::Path as UtoipaPath;
     pub use utoipa_axum::routes as utoipa_axum_routes;
 
     /// Rewrites every `#/components/schemas/{from}` reference to

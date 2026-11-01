@@ -73,6 +73,33 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     })
 }
 
+/// Expand every `#[get]` / `#[post]` / … in `input` as the client half, whatever the role.
+pub fn expand_as_client(input: TokenStream) -> Result<TokenStream> {
+    let file: syn::File = parse2(input)?;
+    let mut out = TokenStream::new();
+    for item in file.items {
+        let syn::Item::Fn(mut item_fn) = item else {
+            out.extend(item.into_token_stream());
+            continue;
+        };
+        let position = item_fn.attrs.iter().position(|a| {
+            a.path().segments.last().is_some_and(|s| {
+                ["get", "post", "put", "patch", "delete"].contains(&s.ident.to_string().as_str())
+            })
+        });
+        let Some(position) = position else {
+            out.extend(item_fn.into_token_stream());
+            continue;
+        };
+        let attr = item_fn.attrs.remove(position);
+        let method = attr.path().segments.last().unwrap().ident.to_string();
+        let args = parse_method_args(attr.meta.require_list()?.tokens.clone())?;
+        let (client, extra) = take_client_arg(args.extra)?;
+        out.extend(client_half(&method, &args.path, &extra, client, &item_fn)?);
+    }
+    Ok(out)
+}
+
 /// The client half: a typed call to this route, unless `client = false`.
 fn client_half(
     method: &str,
@@ -330,6 +357,7 @@ fn build_utoipa_attr(
     // Infer from the signature, then merge in the explicit headers.
     let user_keys = sig::collect_user_keys(&forwarded_extra);
     let mut inferred = sig::infer(item_fn);
+    inferred.unguarded = client_stub::unguarded(item_fn);
     merge_explicit_headers(&mut inferred.header_marker_types, explicit_headers);
     let path_param_names = sig::parse_path_names(&path.value());
     let sig::InferredTokens {

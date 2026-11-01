@@ -8,14 +8,23 @@ use doxa::policy::{Fetch, FetchByKey, FetchSubset};
 
 use crate::widgets::{Widget, WidgetError, WidgetKey};
 
-/// Widgets in memory.
+/// Widgets in memory, and the names people have suggested.
 #[derive(Clone)]
-pub struct Catalog(Arc<RwLock<Vec<Widget>>>);
+pub struct Catalog(Arc<RwLock<Vec<Widget>>>, Arc<RwLock<Vec<String>>>);
 
 impl Catalog {
     /// A catalog holding `widgets`.
     pub fn new(widgets: Vec<Widget>) -> Self {
-        Self(Arc::new(RwLock::new(widgets)))
+        Self(Arc::new(RwLock::new(widgets)), Arc::default())
+    }
+
+    /// Every suggested name, oldest first.
+    pub fn suggestions(&self) -> Vec<String> {
+        self.1.read().unwrap().clone()
+    }
+
+    pub(crate) fn suggest(&self, name: String) {
+        self.1.write().unwrap().push(name);
     }
 
     pub(crate) fn list(&self, contains: Option<&str>) -> Vec<Widget> {
