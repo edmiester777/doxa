@@ -53,6 +53,35 @@ async fn a_link_navigates_and_the_rename_button_follows_the_guard() {
     assert!(dom.find("class", "edit").is_some(), "an editor can rename");
 }
 
+#[tokio::test]
+async fn a_renamed_can_takes_its_probe_directly() {
+    use doxa::ui::prelude::{view, App};
+    use doxa::ui::Can as Allowed;
+    use widgets_client::widgets::{rename_widget, WidgetKey};
+
+    for (role, shown) in [("editor", true), ("viewer", false)] {
+        let router = widgets_server::app(widgets_server::seeded());
+        let dom = MemDom::new();
+        App::new(|| {
+            let key = WidgetKey {
+                name: "gear".into(),
+            };
+            view! {
+                <Allowed probe={rename_widget::can(&key)}>
+                    <button class="edit">"Rename"</button>
+                </Allowed>
+            }
+        })
+        .config(
+            ClientConfig::default()
+                .transport(RouterTransport::new(router).with_header("x-role", role)),
+        )
+        .mount_on(Rc::new(dom.clone()), dom.body());
+        settle().await;
+        assert_eq!(dom.find("class", "edit").is_some(), shown, "{role}");
+    }
+}
+
 /// Stands in for React: records each island's props and keeps its event handlers.
 #[derive(Clone, Default)]
 struct FakeReact(Rc<std::cell::RefCell<Vec<(String, Vec<(&'static str, EventFn)>)>>>);

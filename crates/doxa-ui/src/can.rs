@@ -34,7 +34,8 @@ required!(
     "add `route={{the_route_fn}}` to the tag"
 );
 
-/// Builds [`CanProps`]; `view!` sets `probe` from `route` and `args`.
+/// Builds [`CanProps`]; `view!` sets `probe` from `route` and `args`. Imported under
+/// another name, write `probe={route::can(args)}` instead.
 pub struct CanBuilder<P> {
     probe: Option<Probe>,
     fallback: View,
