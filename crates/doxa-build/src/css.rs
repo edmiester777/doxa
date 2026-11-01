@@ -4,9 +4,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lightningcss::bundler::{Bundler, FileProvider};
+use lightningcss::dependencies::{Dependency, DependencyOptions};
 use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
 
 use crate::error::{run, Error, IoContext, Result};
+
+/// A built stylesheet and the local files its `url()`s point at, under hashed names.
+#[derive(Debug, Default)]
+pub struct Built {
+    /// The CSS text, with each local `url()` pointing at its hashed file.
+    pub css: String,
+    /// `(original file name, hashed name, bytes)` for each referenced file.
+    pub assets: Vec<(String, String, Vec<u8>)>,
+}
 
 /// Whether a stylesheet asks for Tailwind.
 pub fn uses_tailwind(css: &str) -> bool {
@@ -31,7 +41,7 @@ pub fn build(
     sources: &[String],
     stage: &Path,
     release: bool,
-) -> Result<String> {
+) -> Result<Built> {
     let input = web_dir.join(entry);
     let text = std::fs::read_to_string(&input).at(&input)?;
     let to_bundle = if uses_tailwind(&text) {
@@ -57,13 +67,16 @@ pub fn build(
         )?;
         output
     } else {
-        input
+        input.clone()
     };
-    bundle(&to_bundle, release)
+    let entry_dir = input.parent().unwrap_or(web_dir);
+    bundle(&to_bundle, entry_dir, release)
 }
 
-/// Inline `@import`s with lightningcss, minifying on release.
-pub fn bundle(path: &Path, release: bool) -> Result<String> {
+/// Inline `@import`s with lightningcss, minifying on release, and hash each local `url()`.
+/// A url resolves against the file that wrote it, then against `fallback` (Tailwind's output
+/// lives elsewhere).
+pub fn bundle(path: &Path, fallback: &Path, release: bool) -> Result<Built> {
     let fs = FileProvider::new();
     let mut bundler = Bundler::new(&fs, None, ParserOptions::default());
     let fail = |detail: String| Error::Tool {
@@ -81,10 +94,52 @@ pub fn bundle(path: &Path, release: bool) -> Result<String> {
     let out = sheet
         .to_css(PrinterOptions {
             minify: release,
+            analyze_dependencies: Some(DependencyOptions {
+                remove_imports: false,
+            }),
             ..PrinterOptions::default()
         })
         .map_err(|e| fail(e.to_string()))?;
-    Ok(out.code)
+    let mut built = Built {
+        css: out.code,
+        assets: Vec::new(),
+    };
+    for dep in out.dependencies.unwrap_or_default() {
+        let Dependency::Url(dep) = dep else { continue };
+        let target = match local(&dep.url) {
+            Some((file, suffix)) => {
+                let from = Path::new(&dep.loc.file_path).parent().unwrap_or(fallback);
+                let found = [from.join(file), fallback.join(file)]
+                    .into_iter()
+                    .find(|p| p.is_file())
+                    .ok_or_else(|| {
+                        fail(format!(
+                            "`url({})` in {}: no such file",
+                            dep.url, dep.loc.file_path
+                        ))
+                    })?;
+                let bytes = std::fs::read(&found).at(&found)?;
+                let name = found.file_name().unwrap_or_default().to_string_lossy();
+                let hashed = crate::dist::hashed_name(&name, &bytes);
+                let url = format!("/{hashed}{suffix}");
+                built.assets.push((name.into_owned(), hashed, bytes));
+                url
+            }
+            None => dep.url.clone(),
+        };
+        built.css = built.css.replace(&dep.placeholder, &target);
+    }
+    Ok(built)
+}
+
+/// A url naming a file beside the stylesheet: its path and any `?query` / `#fragment`.
+fn local(url: &str) -> Option<(&str, &str)> {
+    let external = url.contains(':') || url.starts_with('/') || url.starts_with('#');
+    if external || url.is_empty() {
+        return None;
+    }
+    let at = url.find(['?', '#']).unwrap_or(url.len());
+    Some(url.split_at(at))
 }
 
 #[cfg(test)]
@@ -117,6 +172,58 @@ mod tests {
         )
         .unwrap();
         let out = build(dir.path(), "app.css", &[], &dir.path().join("stage"), true).unwrap();
-        assert_eq!(out, "body{color:red}.a{margin:0}");
+        assert_eq!(out.css, "body{color:red}.a{margin:0}");
+    }
+
+    #[test]
+    fn a_local_url_points_at_a_hashed_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("style/fonts")).unwrap();
+        std::fs::write(dir.path().join("style/fonts/inter.woff2"), b"font").unwrap();
+        std::fs::write(
+            dir.path().join("style/fonts.css"),
+            "@font-face { src: url(fonts/inter.woff2?v=2); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("style/app.css"),
+            "@import \"fonts.css\";\n.a { background: url(\"https://x.test/a.png\"), url(#g), url(/logo.svg); }\n",
+        )
+        .unwrap();
+        let out = build(
+            dir.path(),
+            "style/app.css",
+            &[],
+            &dir.path().join("stage"),
+            true,
+        )
+        .unwrap();
+        let hashed = crate::dist::hashed_name("inter.woff2", b"font");
+        assert_eq!(
+            out.assets,
+            [("inter.woff2".to_owned(), hashed.clone(), b"font".to_vec())]
+        );
+        assert!(
+            out.css.contains(&format!("url(\"/{hashed}?v=2\")")),
+            "{}",
+            out.css
+        );
+        for kept in ["https://x.test/a.png", "#g", "/logo.svg"] {
+            assert!(out.css.contains(kept), "{kept} in {}", out.css);
+        }
+    }
+
+    #[test]
+    fn a_missing_url_target_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("app.css"),
+            ".a { background: url(gone.png); }\n",
+        )
+        .unwrap();
+        let err = build(dir.path(), "app.css", &[], &dir.path().join("stage"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("url(gone.png)"), "{err}");
     }
 }

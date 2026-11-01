@@ -37,7 +37,7 @@ pub struct Pipeline {
     bundler: Box<dyn Bundler + Send>,
     wasm_file: Option<String>,
     bundle: Option<BundleOutput>,
-    stylesheets: Vec<(String, String)>,
+    stylesheets: Vec<(String, css::Built)>,
 }
 
 /// Print a progress line.
@@ -187,7 +187,7 @@ impl Pipeline {
         let mut out = Vec::new();
         for entry in &cfg.css {
             note(format!("building {entry}"));
-            let text = css::build(
+            let built = css::build(
                 &self.web.dir,
                 entry,
                 &cfg.css_sources,
@@ -198,7 +198,7 @@ impl Pipeline {
                 .file_stem()
                 .unwrap_or_default()
                 .to_string_lossy();
-            out.push((format!("{stem}.css"), text));
+            out.push((format!("{stem}.css"), built));
         }
         self.stylesheets = out;
         Ok(())
@@ -217,8 +217,11 @@ impl Pipeline {
             std::fs::read(&app_wasm).at(&app_wasm)?,
         );
 
-        for (logical, text) in &self.stylesheets {
-            let name = d.add_hashed(logical, text.clone().into_bytes());
+        for (logical, built) in &self.stylesheets {
+            for (original, hashed, bytes) in &built.assets {
+                d.add(original, hashed, bytes.clone());
+            }
+            let name = d.add_hashed(logical, built.css.clone().into_bytes());
             d.stylesheets.push(name);
         }
         let out = self.esbuild_dir();
