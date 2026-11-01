@@ -54,6 +54,20 @@ jobs:
         CHROMEDRIVER: ${{ env.CHROMEWEBDRIVER }}/chromedriver
       run: cargo test -p doxa-ui --target wasm32-unknown-unknown --test browser
 
+  release:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Add the wasm target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Install wasm-opt
+      run: sudo apt-get install -y binaryen
+    - name: Build the example optimized, inside its wasm budget
+      working-directory: examples/widgets
+      run: cargo run -q -p doxa-cli -- build --release
+
   msrv:
 
     runs-on: ubuntu-latest

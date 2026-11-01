@@ -27,6 +27,8 @@ pub struct DoxaConfig {
     /// npm dependencies, name to version range.
     #[serde(default)]
     pub npm: BTreeMap<String, String>,
+    /// A release build fails when the optimized app wasm is larger, in KiB.
+    pub wasm_budget_kb: Option<u64>,
 }
 
 /// The workspace as `cargo metadata --no-deps` describes it.

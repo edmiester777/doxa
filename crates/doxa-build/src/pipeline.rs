@@ -132,6 +132,9 @@ impl Pipeline {
             note("wasm-opt not on PATH; skipping it");
         }
         let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
+        if self.opts.release {
+            check_budget(bytes.len(), self.web.config.wasm_budget_kb)?;
+        }
         self.wasm_file = Some(dist::hashed_name("app.wasm", &bytes));
         Ok(())
     }
@@ -285,6 +288,20 @@ impl Pipeline {
     }
 }
 
+fn check_budget(bytes: usize, budget_kb: Option<u64>) -> Result<()> {
+    let Some(budget) = budget_kb else {
+        return Ok(());
+    };
+    let kb = (bytes as u64).div_ceil(1024);
+    if kb <= budget {
+        return Ok(());
+    }
+    Err(Error::config(
+        format!("the app wasm is {kb} KiB, over its {budget} KiB budget"),
+        "shrink it (put wasm-opt on PATH if it was skipped), or raise `wasm_budget_kb` in [package.metadata.doxa]",
+    ))
+}
+
 fn copy_public(root: &Path, d: &mut Dist) -> Result<()> {
     if !root.is_dir() {
         return Ok(());
@@ -307,4 +324,20 @@ fn copy_public(root: &Path, d: &mut Dist) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_budget;
+
+    #[test]
+    fn a_wasm_over_its_budget_fails_with_its_size() {
+        assert!(check_budget(400 * 1024, None).is_ok());
+        assert!(check_budget(400 * 1024, Some(400)).is_ok());
+        let err = check_budget(400 * 1024 + 1, Some(400)).unwrap_err();
+        assert!(
+            err.to_string().contains("401 KiB, over its 400 KiB budget"),
+            "{err}"
+        );
+    }
 }
