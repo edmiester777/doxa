@@ -36,6 +36,24 @@ jobs:
         cargo check -p doxa-client -p doxa-ui -p widgets-client -p widgets-web --target wasm32-unknown-unknown
         cargo check -p doxa --features react --target wasm32-unknown-unknown
 
+  browser:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Add the wasm target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Install the test runner the resolved wasm-bindgen needs
+      run: |
+        version=$(cargo metadata --format-version 1 | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')
+        cargo install wasm-bindgen-cli --version "$version" --locked
+    - name: Run the renderer in headless Chrome
+      env:
+        CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        CHROMEDRIVER: ${{ env.CHROMEWEBDRIVER }}/chromedriver
+      run: cargo test -p doxa-ui --target wasm32-unknown-unknown --test browser
+
   msrv:
 
     runs-on: ubuntu-latest
