@@ -357,7 +357,6 @@ fn build_utoipa_attr(
     // Infer from the signature, then merge in the explicit headers.
     let user_keys = sig::collect_user_keys(&forwarded_extra);
     let mut inferred = sig::infer(item_fn);
-    inferred.unguarded = client_stub::unguarded(item_fn);
     merge_explicit_headers(&mut inferred.header_marker_types, explicit_headers);
     let path_param_names = sig::parse_path_names(&path.value());
     let sig::InferredTokens {

@@ -28,37 +28,32 @@ macro_rules! routes {
         let mut __routes_result = $crate::__private::utoipa_axum_routes!(
             $($handler_seg $(:: $handler_rest)*),+
         );
-        let mut __unguarded = ::std::vec::Vec::new();
         $(
             $crate::routes!(
-                @collect __routes_result, __unguarded,
+                @collect __routes_result,
                 prefix: [],
                 rest: $handler_seg $(:: $handler_rest)*
             );
         )+
-        let (__schemas, __paths, __router) = __routes_result;
-        (__schemas, __paths, $crate::__private::gate_dry_runs(__router, __unguarded))
+        __routes_result
     }};
 
     // Muncher: accumulate prefix tokens while more `::` segments
     // follow, then paste the final `__path_<last>` into the
     // prefix-qualified path.
-    (@collect $r:ident, $u:ident, prefix: [$($prefix:tt)*], rest: $head:ident :: $($tail:tt)+) => {
+    (@collect $r:ident, prefix: [$($prefix:tt)*], rest: $head:ident :: $($tail:tt)+) => {
         $crate::routes!(
-            @collect $r, $u,
+            @collect $r,
             prefix: [$($prefix)* $head ::],
             rest: $($tail)+
         )
     };
-    (@collect $r:ident, $u:ident, prefix: [$($prefix:tt)*], rest: $last:ident) => {
+    (@collect $r:ident, prefix: [$($prefix:tt)*], rest: $last:ident) => {
         $crate::__private::paste::paste! {
             <$($prefix)* [<__path_ $last>]
                 as $crate::ApidocHandlerSchemas>::collect(&mut $r.0);
             <$($prefix)* [<__path_ $last>]
                 as $crate::ApidocHandlerOps>::augment(&mut $r.1);
-            if <$($prefix)* [<__path_ $last>] as $crate::ApidocHandlerOps>::UNGUARDED {
-                $u.extend(<$($prefix)* [<__path_ $last>] as $crate::__private::UtoipaPath>::methods());
-            }
         }
     };
 }

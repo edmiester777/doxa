@@ -80,8 +80,6 @@ pub struct InferredAttrs {
     /// also flow through the trait-based dispatch, with dedupe
     /// handled at emit time.
     pub header_marker_types: Vec<Type>,
-    /// No argument is a guard, so the router answers a `<Can>` dry run itself.
-    pub unguarded: bool,
 }
 
 /// Walk a function and infer everything we can from its signature.
@@ -528,11 +526,8 @@ impl InferredAttrs {
         // resolves to the autoref-fallback no-op and the operation
         // is left unchanged.
         let arg_types_for_ops = self.arg_types.clone();
-        let unguarded = self.unguarded;
         pre_items.extend(quote! {
             impl ::doxa::ApidocHandlerOps for #path_struct_ident {
-                const UNGUARDED: bool = #unguarded;
-
                 fn augment(
                     __paths: &mut ::utoipa::openapi::path::Paths,
                 ) {

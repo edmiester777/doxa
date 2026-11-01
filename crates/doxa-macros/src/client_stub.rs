@@ -77,21 +77,6 @@ fn may_authorize(item_fn: &ItemFn) -> bool {
     })
 }
 
-/// Whether the route has no guard at all, so the router's dry-run gate answers for it.
-pub fn unguarded(item_fn: &ItemFn) -> bool {
-    !grant::has_guard(item_fn)
-        && !may_authorize(item_fn)
-        && item_fn
-            .sig
-            .inputs
-            .iter()
-            .enumerate()
-            .all(|(i, arg)| match arg {
-                FnArg::Typed(pt) => !classify(&pt.pat, &pt.ty, i).is_foreign(),
-                FnArg::Receiver(_) => true,
-            })
-}
-
 /// Emit the stub and its `ROUTE` module.
 pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
     let vis = &item_fn.vis;
@@ -545,8 +530,6 @@ mod tests {
                 quote! { async fn f(#arg, w: Granted<W>) {} },
             );
             assert!(before.contains("dry_run : false"), "{before}");
-            let item: ItemFn = syn::parse2(quote! { async fn f(#arg) {} }).unwrap();
-            assert!(!unguarded(&item), "{arg}");
         }
     }
 

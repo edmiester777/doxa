@@ -314,20 +314,6 @@ const GUARDS: &[&str] = &[
     "Scoped",
 ];
 
-/// Whether any argument is one of doxa's guards.
-pub(crate) fn has_guard(item_fn: &ItemFn) -> bool {
-    item_fn.sig.inputs.iter().any(|arg| {
-        let FnArg::Typed(pt) = arg else { return false };
-        let Type::Path(tp) = &*pt.ty else {
-            return false;
-        };
-        tp.path
-            .segments
-            .last()
-            .is_some_and(|s| GUARDS.contains(&s.ident.to_string().as_str()))
-    })
-}
-
 /// The argument whose guard answers a `<Can>` dry run: the last guard, if it is a `Granted`.
 pub(crate) fn dry_run_gate(item_fn: &ItemFn) -> Option<usize> {
     let last = item_fn
