@@ -225,6 +225,19 @@ pub(crate) fn target_checked(e: &web_sys::Event) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn button(e: &web_sys::Event) -> i16 {
+    e.dyn_ref::<web_sys::MouseEvent>()
+        .map_or(0, web_sys::MouseEvent::button)
+}
+
+/// A boolean event field such as `ctrlKey`, false where the event has none.
+pub(crate) fn flag(e: &web_sys::Event, name: &str) -> bool {
+    js_sys::Reflect::get(e, &JsValue::from_str(name))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 pub(crate) fn key(e: &web_sys::Event) -> String {
     e.dyn_ref::<web_sys::KeyboardEvent>()
         .map(|k| k.key())

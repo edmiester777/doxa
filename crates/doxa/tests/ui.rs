@@ -501,6 +501,56 @@ fn unkeyed_siblings_of_a_keyed_list_are_kept() {
     assert_eq!(dom.text(dom.find_tag("div").unwrap()), "2131x");
 }
 
+#[page("/plain")]
+fn Plain() -> View {
+    view! { <Link to={Target::route()}>"go"</Link> }
+}
+
+#[page("/target")]
+fn Target() -> View {
+    view! { <p>"target"</p> }
+}
+
+#[test]
+fn a_modified_link_click_is_left_to_the_browser() {
+    use doxa::ui::dom::MemEvent;
+    let dom = MemDom::new();
+    App::new(Router::new().page::<Plain>().page::<Target>())
+        .mount_on(Rc::new(dom.clone()), dom.body());
+    navigate("/plain");
+    settle();
+    let a = dom.find_tag("a").unwrap();
+    let modified = [
+        MemEvent {
+            ctrl_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            meta_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            shift_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            alt_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            button: 1,
+            ..MemEvent::default()
+        },
+    ];
+    for ev in modified {
+        assert!(dom.dispatch(a, "click", ev), "default not prevented");
+        settle();
+        assert!(dom.find_tag("p").is_none(), "did not navigate");
+    }
+    assert!(!dom.click(a), "a plain click is handled");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("p").unwrap()), "target");
+}
 
 const LIGHT: Theme = Theme::new("light", &[("--bg", "white"), ("--fg", "black")]);
 const DIM: Theme = Theme::new("dim", &[("--bg", "grey")]);

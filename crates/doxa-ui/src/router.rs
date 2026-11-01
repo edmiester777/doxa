@@ -379,6 +379,10 @@ impl Component for Link {
             .url("href", props.to.clone())
             .attr("class", props.class.clone())
             .on("click", move |e| {
+                // Modified and non-primary clicks open a new tab or window.
+                if e.button() != 0 || e.ctrl_key() || e.meta_key() || e.shift_key() || e.alt_key() {
+                    return;
+                }
                 e.prevent_default();
                 navigate(to.clone());
             })

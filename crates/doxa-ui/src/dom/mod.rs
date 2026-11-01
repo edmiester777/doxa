@@ -4,6 +4,7 @@ mod mem;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 pub use mem::MemDom;
@@ -99,7 +100,7 @@ pub struct Event {
 pub(crate) enum EventInner {
     #[cfg(target_arch = "wasm32")]
     Web(web_sys::Event),
-    Mem(MemEvent),
+    Mem(MemEvent, Rc<Cell<bool>>),
 }
 
 /// An event dispatched into a [`MemDom`] by a test.
@@ -111,6 +112,16 @@ pub struct MemEvent {
     pub checked: bool,
     /// For keyboard events, the key.
     pub key: String,
+    /// For mouse events, the button: 0 is the primary one.
+    pub button: i16,
+    /// Whether Ctrl was held.
+    pub ctrl_key: bool,
+    /// Whether Meta (Cmd) was held.
+    pub meta_key: bool,
+    /// Whether Shift was held.
+    pub shift_key: bool,
+    /// Whether Alt was held.
+    pub alt_key: bool,
 }
 
 impl Event {
@@ -119,7 +130,7 @@ impl Event {
         match &self.inner {
             #[cfg(target_arch = "wasm32")]
             EventInner::Web(e) => web::target_value(e),
-            EventInner::Mem(e) => e.value.clone(),
+            EventInner::Mem(e, _) => e.value.clone(),
         }
     }
 
@@ -128,7 +139,7 @@ impl Event {
         match &self.inner {
             #[cfg(target_arch = "wasm32")]
             EventInner::Web(e) => web::target_checked(e),
-            EventInner::Mem(e) => e.checked,
+            EventInner::Mem(e, _) => e.checked,
         }
     }
 
@@ -137,15 +148,54 @@ impl Event {
         match &self.inner {
             #[cfg(target_arch = "wasm32")]
             EventInner::Web(e) => web::key(e),
-            EventInner::Mem(e) => e.key.clone(),
+            EventInner::Mem(e, _) => e.key.clone(),
+        }
+    }
+
+    /// For mouse events, which button: 0 is the primary one.
+    pub fn button(&self) -> i16 {
+        match &self.inner {
+            #[cfg(target_arch = "wasm32")]
+            EventInner::Web(e) => web::button(e),
+            EventInner::Mem(e, _) => e.button,
+        }
+    }
+
+    /// Whether Ctrl was held.
+    pub fn ctrl_key(&self) -> bool {
+        self.modifier("ctrlKey", |e| e.ctrl_key)
+    }
+
+    /// Whether Meta (Cmd on macOS) was held.
+    pub fn meta_key(&self) -> bool {
+        self.modifier("metaKey", |e| e.meta_key)
+    }
+
+    /// Whether Shift was held.
+    pub fn shift_key(&self) -> bool {
+        self.modifier("shiftKey", |e| e.shift_key)
+    }
+
+    /// Whether Alt was held.
+    pub fn alt_key(&self) -> bool {
+        self.modifier("altKey", |e| e.alt_key)
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+    fn modifier(&self, name: &str, mem: fn(&MemEvent) -> bool) -> bool {
+        match &self.inner {
+            #[cfg(target_arch = "wasm32")]
+            EventInner::Web(e) => web::flag(e, name),
+            EventInner::Mem(e, _) => mem(e),
         }
     }
 
     /// Stop the browser's default action, e.g. a form submission.
     pub fn prevent_default(&self) {
-        #[cfg(target_arch = "wasm32")]
-        if let EventInner::Web(e) = &self.inner {
-            e.prevent_default();
+        match &self.inner {
+            #[cfg(target_arch = "wasm32")]
+            EventInner::Web(e) => e.prevent_default(),
+            EventInner::Mem(_, prevented) => prevented.set(true),
         }
     }
 
@@ -162,7 +212,7 @@ impl Event {
     pub fn raw(&self) -> Option<&web_sys::Event> {
         match &self.inner {
             EventInner::Web(e) => Some(e),
-            EventInner::Mem(_) => None,
+            EventInner::Mem(..) => None,
         }
     }
 }

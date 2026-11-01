@@ -1,6 +1,6 @@
 //! A document in memory, for rendering and driving components in native tests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -134,8 +134,9 @@ impl MemDom {
         }
     }
 
-    /// Fire `event` at `node`, as a user would.
-    pub fn dispatch(&self, node: NodeId, event: &str, detail: MemEvent) {
+    /// Fire `event` at `node`, as a user would. Like the browser's
+    /// `dispatchEvent`, false if a handler called `prevent_default`.
+    pub fn dispatch(&self, node: NodeId, event: &str, detail: MemEvent) -> bool {
         let handlers: Vec<_> = self
             .nodes
             .borrow()
@@ -148,20 +149,22 @@ impl MemDom {
                     .collect()
             })
             .unwrap_or_default();
+        let prevented = Rc::new(Cell::new(false));
         for h in handlers {
             h(Event {
-                inner: EventInner::Mem(detail.clone()),
+                inner: EventInner::Mem(detail.clone(), prevented.clone()),
             });
         }
+        !prevented.get()
     }
 
-    /// Click `node`.
-    pub fn click(&self, node: NodeId) {
-        self.dispatch(node, "click", MemEvent::default());
+    /// Click `node` with the primary button; false if the default was prevented.
+    pub fn click(&self, node: NodeId) -> bool {
+        self.dispatch(node, "click", MemEvent::default())
     }
 
     /// Type `value` into `node`, firing `input`.
-    pub fn input(&self, node: NodeId, value: &str) {
+    pub fn input(&self, node: NodeId, value: &str) -> bool {
         self.dispatch(
             node,
             "input",
@@ -169,7 +172,7 @@ impl MemDom {
                 value: value.to_owned(),
                 ..MemEvent::default()
             },
-        );
+        )
     }
 
     fn detach(&self, node: NodeId) {
