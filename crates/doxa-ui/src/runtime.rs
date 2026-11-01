@@ -36,6 +36,8 @@ pub(crate) struct Instance {
     pub hooks: RefCell<Vec<Hook>>,
     pub cursor: Cell<usize>,
     pub contexts: RefCell<Vec<(TypeId, Rc<dyn Any>)>>,
+    /// What this render `provide`d; replaces `contexts` when it commits.
+    pub provided: RefCell<Vec<(TypeId, Rc<dyn Any>)>>,
     pub keeps_contexts: bool,
     pub region: RefCell<Vec<Mounted>>,
     pub parent_node: Cell<NodeId>,
@@ -84,6 +86,7 @@ impl Instance {
             hooks: RefCell::new(Vec::new()),
             cursor: Cell::new(0),
             contexts: RefCell::new(Vec::new()),
+            provided: RefCell::new(Vec::new()),
             keeps_contexts: parent.is_none(),
             region: RefCell::new(Vec::new()),
             parent_node: Cell::new(parent_node),
@@ -290,9 +293,7 @@ pub(crate) fn run(inst: &Rc<Instance>) {
     let generation = inst.generation.get() + 1;
     inst.generation.set(generation);
     inst.cursor.set(0);
-    if !inst.keeps_contexts {
-        inst.contexts.borrow_mut().clear();
-    }
+    inst.provided.borrow_mut().clear();
     inst.effects.borrow_mut().clear();
 
     let props = inst.props.borrow().clone();
@@ -340,6 +341,7 @@ fn count_waiting(inst: &Rc<Instance>) {
 fn commit(inst: &Rc<Instance>, out: Result<View>) {
     match out {
         Ok(view) => {
+            commit_contexts(inst);
             reconcile::update_region(inst, view);
             inst.committed.set(true);
             inst.settle_waiting();
@@ -349,6 +351,18 @@ fn commit(inst: &Rc<Instance>, out: Result<View>) {
             }
         }
         Err(e) => throw(Some(inst), e),
+    }
+}
+
+fn commit_contexts(inst: &Instance) {
+    let provided = std::mem::take(&mut *inst.provided.borrow_mut());
+    let mut contexts = inst.contexts.borrow_mut();
+    if !inst.keeps_contexts {
+        contexts.clear();
+    }
+    for (t, v) in provided {
+        contexts.retain(|(c, _)| *c != t);
+        contexts.push((t, v));
     }
 }
 

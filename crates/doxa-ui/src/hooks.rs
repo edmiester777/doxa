@@ -226,9 +226,10 @@ where
     if same {
         return;
     }
-    *cell.deps.borrow_mut() = Some(Box::new(now.clone()));
     let owner = Rc::downgrade(&inst);
+    // Deps are stored on commit, so a cancelled or failed render leaves them stale.
     inst.effects.borrow_mut().push(Box::new(move || {
+        *cell.deps.borrow_mut() = Some(Box::new(now.clone()));
         cell.stop();
         let task = runtime::spawn_cancellable(async move {
             if let Err(e) = f(&now).await {
@@ -352,9 +353,9 @@ impl<A: 'static, T: Clone + 'static> Action<A, T> {
 /// Make `value` available to every component below this one, like a React context provider.
 pub fn provide<T: Clone + 'static>(value: T) {
     let inst = current_or_panic("provide");
-    let mut contexts = inst.contexts.borrow_mut();
-    contexts.retain(|(t, _)| *t != TypeId::of::<T>());
-    contexts.push((TypeId::of::<T>(), Rc::new(value)));
+    let mut provided = inst.provided.borrow_mut();
+    provided.retain(|(t, _)| *t != TypeId::of::<T>());
+    provided.push((TypeId::of::<T>(), Rc::new(value)));
 }
 
 /// The nearest `T` an ancestor provided.
@@ -371,12 +372,14 @@ pub fn context<T: Clone + 'static>() -> T {
 /// The nearest `T` an ancestor provided, if any.
 pub fn try_context<T: Clone + 'static>() -> Option<T> {
     let inst = current_or_panic("context");
-    std::iter::successors(Some(inst), |i| i.parent()).find_map(|i| {
-        i.contexts
-            .borrow()
-            .iter()
+    let find = |list: &[(TypeId, Rc<dyn Any>)]| {
+        list.iter()
             .find(|(t, _)| *t == TypeId::of::<T>())
             .and_then(|(_, v)| v.downcast_ref::<T>().cloned())
+    };
+    let own = find(&inst.provided.borrow());
+    own.or_else(|| {
+        std::iter::successors(Some(inst), |i| i.parent()).find_map(|i| find(&i.contexts.borrow()))
     })
 }
 

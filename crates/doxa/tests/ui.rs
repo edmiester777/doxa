@@ -359,6 +359,109 @@ fn can_is_recognised_by_its_path() {
     assert_eq!(dom.text(dom.find_tag("p").unwrap()), "yes");
 }
 
+thread_local! {
+    /// 0 renders normally, 1 waits forever, 2 fails.
+    static MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static RAN: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[component]
+async fn Effected() -> Result<View> {
+    let n = state(0u32);
+    let tick = state(0u32);
+    let _ = tick.get();
+    effect(n, async |n: &u32| {
+        RAN.with(|r| r.borrow_mut().push(*n));
+        Ok(())
+    });
+    match MODE.with(|m| m.get()) {
+        1 => std::future::pending::<()>().await,
+        2 => return Err(Thrown::msg("render failed")),
+        _ => {}
+    }
+    Ok(view! {
+        <button id="n" on:click={move |_| n.set(1)}>"n"</button>
+        <button id="tick" on:click={move |_| tick.update(|t| *t += 1)}>"tick"</button>
+    })
+}
+
+fn effect_survives_an_uncommitted_render(mode: u8) {
+    MODE.with(|m| m.set(0));
+    RAN.with(|r| r.take());
+    let dom = mount(|| view! { <Effected/> });
+    settle();
+    MODE.with(|m| m.set(mode));
+    dom.click(dom.find("id", "n").unwrap());
+    settle();
+    MODE.with(|m| m.set(0));
+    dom.click(dom.find("id", "tick").unwrap());
+    settle();
+    assert_eq!(RAN.with(|r| r.take()), [0, 1]);
+}
+
+#[test]
+fn an_effect_runs_after_a_cancelled_render() {
+    effect_survives_an_uncommitted_render(1);
+}
+
+#[test]
+fn an_effect_runs_after_a_failed_render() {
+    effect_survives_an_uncommitted_render(2);
+}
+
+#[derive(Clone)]
+struct Label(&'static str);
+
+#[component]
+async fn Provider() -> Result<View> {
+    let tick = state(0u32);
+    let _ = tick.get();
+    match MODE.with(|m| m.get()) {
+        1 => std::future::pending::<()>().await,
+        2 => return Err(Thrown::msg("render failed")),
+        _ => {}
+    }
+    provide(Label("ctx"));
+    Ok(view! {
+        <button id="tick" on:click={move |_| tick.update(|t| *t += 1)}>"tick"</button>
+        <Reader/>
+    })
+}
+
+#[component]
+fn Reader() -> View {
+    let n = state(0u32);
+    let label = context::<Label>().0;
+    view! {
+        <b on:click={move |_| n.update(|n| *n += 1)}>
+            {label}
+            {n.get()}
+        </b>
+    }
+}
+
+fn context_survives_an_uncommitted_render(mode: u8) {
+    MODE.with(|m| m.set(0));
+    let dom = mount(|| view! { <Provider/> });
+    MODE.with(|m| m.set(mode));
+    dom.click(dom.find("id", "tick").unwrap());
+    settle();
+    dom.click(dom.find_tag("b").unwrap());
+    settle();
+    assert_eq!(dom.text(dom.find_tag("b").unwrap()), "ctx1");
+}
+
+#[test]
+fn context_survives_a_cancelled_render() {
+    context_survives_an_uncommitted_render(1);
+}
+
+#[test]
+fn context_survives_a_failed_render() {
+    context_survives_an_uncommitted_render(2);
+}
+
+
 const LIGHT: Theme = Theme::new("light", &[("--bg", "white"), ("--fg", "black")]);
 const DIM: Theme = Theme::new("dim", &[("--bg", "grey")]);
 
