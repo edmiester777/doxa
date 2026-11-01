@@ -7,7 +7,7 @@ use doxa_wire::RouteSpec;
 use futures_util::future::LocalBoxFuture;
 
 use crate::arg::{ArgFor, Outgoing};
-use crate::cache::{Lookup, Meta};
+use crate::cache::Meta;
 use crate::client::{now, Client};
 use crate::transport::Request;
 
@@ -69,7 +69,7 @@ impl IntoFuture for Probe {
             };
             let client = Client::current();
             let key = format!("CAN {} {url}", self.route.method.as_str());
-            if let Lookup::Fresh(v) = client.cache.lookup(&key, now()) {
+            if let Some(v) = client.cache.fresh(&key, now()) {
                 if let Some(p) = v.downcast_ref::<Permission>() {
                     return *p;
                 }
@@ -99,6 +99,7 @@ impl IntoFuture for Probe {
             client.cache.store(
                 key,
                 self.route,
+                self.out.first_key().cloned(),
                 Rc::new(permission),
                 Meta {
                     now: now(),

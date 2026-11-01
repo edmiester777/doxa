@@ -1,22 +1,21 @@
-//! Server-sent events, decoded into the route's event enum.
+//! Server-sent events, decoded into the route's event enum. Identical streams
+//! share one connection: a [`Hub`] reads it, driven by whichever subscriber is
+//! waiting, and copies each event to every subscriber.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
+use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 
 use crate::fetch::Fetch;
-use crate::transport::{Body, Request, Transport};
-
-/// Where a stream came from, so it can be reopened.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct Source {
-    pub(crate) request: Request,
-    pub(crate) transport: Rc<dyn Transport>,
-}
+use crate::transport::{Body, Request, Response, Transport};
 
 /// How long to wait between reconnect attempts.
 #[derive(Debug, Clone, Copy)]
@@ -43,92 +42,238 @@ impl Default for Backoff {
 /// while let Some(event) = events.next().await? { /* … */ }
 /// ```
 pub struct EventStream<E> {
-    body: Option<Body>,
-    buffer: Vec<u8>,
-    last_id: Option<String>,
-    source: Source,
-    backoff: Option<(Backoff, Duration)>,
+    hub: Rc<Hub>,
+    inbox: Rc<Inbox>,
     _event: PhantomData<fn() -> E>,
 }
 
 impl<E: DeserializeOwned> EventStream<E> {
-    pub(crate) fn new(body: Body, source: Source) -> Self {
+    pub(crate) fn subscribe(hub: Rc<Hub>) -> Self {
+        let inbox = Rc::new(Inbox::default());
+        hub.state
+            .borrow_mut()
+            .subscribers
+            .push(Rc::downgrade(&inbox));
         Self {
-            body: Some(body),
-            buffer: Vec::new(),
-            last_id: None,
-            source,
-            backoff: None,
+            hub,
+            inbox,
             _event: PhantomData,
         }
     }
 
     /// Reopen the stream when it drops, resuming from the last event id.
-    pub fn reconnect(mut self, backoff: Backoff) -> Self {
-        self.backoff = Some((backoff, backoff.initial));
+    pub fn reconnect(self, backoff: Backoff) -> Self {
+        self.hub
+            .state
+            .borrow_mut()
+            .backoff
+            .get_or_insert((backoff, backoff.initial));
         self
     }
 
     /// The next event; `Ok(None)` once the server closes the stream.
     pub async fn next(&mut self) -> Result<Option<E>, Fetch> {
         loop {
-            if let Some(frame) = self.take_frame() {
-                if let Some(id) = frame.id {
-                    self.last_id = Some(id);
-                }
-                match frame.event.as_deref() {
-                    Some("error") => return Err(Fetch::Stream(frame.data)),
+            let item = std::future::poll_fn(|cx| self.poll_item(cx)).await;
+            match item {
+                None => return Ok(None),
+                Some(Item::Failed(e)) => return Err(e),
+                Some(Item::Frame(frame)) => match frame.event.as_deref() {
+                    Some("error") => return Err(Fetch::Stream(frame.data.clone())),
                     _ if frame.data.is_empty() => continue,
                     _ => {
                         return serde_json::from_str(&frame.data)
                             .map(Some)
                             .map_err(|e| Fetch::Decode(e.to_string()))
                     }
+                },
+            }
+        }
+    }
+
+    fn poll_item(&self, cx: &mut Context<'_>) -> Poll<Option<Item>> {
+        loop {
+            if let Some(item) = self.inbox.items.borrow_mut().pop_front() {
+                return Poll::Ready(Some(item));
+            }
+            self.hub.waiting.register(cx.waker());
+            match self.hub.pump() {
+                Poll::Ready(true) => continue,
+                Poll::Ready(false) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Inbox {
+    items: RefCell<VecDeque<Item>>,
+}
+
+#[derive(Clone)]
+enum Item {
+    Frame(Rc<Frame>),
+    Failed(Fetch),
+}
+
+/// Wakes every subscriber waiting on the connection, whichever one polled it last.
+#[derive(Default)]
+struct Waiting(Mutex<Vec<Waker>>);
+
+impl Waiting {
+    fn register(&self, waker: &Waker) {
+        let mut wakers = self.0.lock().unwrap();
+        if !wakers.iter().any(|w| w.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
+    }
+}
+
+impl Wake for Waiting {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref()
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        let wakers = std::mem::take(&mut *self.0.lock().unwrap());
+        wakers.into_iter().for_each(Waker::wake);
+    }
+}
+
+/// One open event stream, shared by every subscriber to the same route and arguments.
+#[doc(hidden)]
+pub struct Hub {
+    request: Request,
+    transport: Rc<dyn Transport>,
+    waiting: Arc<Waiting>,
+    state: RefCell<HubState>,
+}
+
+struct HubState {
+    body: Option<Body>,
+    reopening: Option<LocalBoxFuture<'static, Result<Response, String>>>,
+    buffer: Vec<u8>,
+    last_id: Option<String>,
+    backoff: Option<(Backoff, Duration)>,
+    done: bool,
+    subscribers: Vec<Weak<Inbox>>,
+}
+
+impl Hub {
+    pub(crate) fn new(request: Request, transport: Rc<dyn Transport>, body: Body) -> Self {
+        Self {
+            request,
+            transport,
+            waiting: Arc::default(),
+            state: RefCell::new(HubState {
+                body: Some(body),
+                reopening: None,
+                buffer: Vec::new(),
+                last_id: None,
+                backoff: None,
+                done: false,
+                subscribers: Vec::new(),
+            }),
+        }
+    }
+
+    /// Whether a new subscriber would still get events.
+    pub(crate) fn is_open(&self) -> bool {
+        !self.state.borrow().done
+    }
+
+    /// Read what the connection has. `Ready(true)`: progress, look again;
+    /// `Ready(false)`: the stream is over.
+    fn pump(&self) -> Poll<bool> {
+        let waker = Waker::from(self.waiting.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut s = self.state.borrow_mut();
+        if s.done {
+            return Poll::Ready(false);
+        }
+        if let Some(reopening) = s.reopening.as_mut() {
+            let Poll::Ready(result) = reopening.as_mut().poll(&mut cx) else {
+                return Poll::Pending;
+            };
+            s.reopening = None;
+            match result {
+                Ok(resp) if resp.status < 400 => {
+                    s.body = Some(resp.body);
+                    s.buffer.clear();
+                    if let Some((policy, delay)) = s.backoff.as_mut() {
+                        *delay = policy.initial;
+                    }
+                }
+                _ => {}
+            }
+            return Poll::Ready(true);
+        }
+        let chunk = match s.body.as_mut() {
+            Some(Body::Stream(stream)) => match stream.poll_next_unpin(&mut cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(chunk) => chunk,
+            },
+            Some(Body::Full(_)) => match s.body.take() {
+                Some(Body::Full(bytes)) => Some(Ok(bytes)),
+                _ => None,
+            },
+            None => None,
+        };
+        match chunk {
+            Some(Ok(bytes)) => {
+                s.buffer.extend_from_slice(&bytes);
+                while let Some(frame) = take_frame(&mut s.buffer) {
+                    if let Some(id) = &frame.id {
+                        s.last_id = Some(id.clone());
+                    }
+                    broadcast(&mut s, Item::Frame(Rc::new(frame)));
                 }
             }
-            let chunk = match self.body.as_mut() {
-                Some(Body::Stream(s)) => s.next().await,
-                Some(Body::Full(_)) => match self.body.take() {
-                    Some(Body::Full(b)) => Some(Ok(b)),
-                    _ => None,
-                },
-                None => None,
-            };
-            match chunk {
-                Some(Ok(bytes)) => self.buffer.extend_from_slice(&bytes),
-                Some(Err(e)) if self.backoff.is_none() => return Err(Fetch::Network(e)),
-                None if self.backoff.is_none() => return Ok(None),
-                _ => self.reopen().await?,
+            Some(Err(e)) if s.backoff.is_none() => {
+                broadcast(&mut s, Item::Failed(Fetch::Network(e)));
+                s.done = true;
+            }
+            None if s.backoff.is_none() => s.done = true,
+            _ => {
+                s.body = None;
+                let reopen = self.reopen(&mut s);
+                s.reopening = Some(reopen);
             }
         }
+        drop(s);
+        self.waiting.wake_by_ref();
+        Poll::Ready(true)
     }
 
-    async fn reopen(&mut self) -> Result<(), Fetch> {
-        let Some((policy, delay)) = self.backoff else {
-            return Ok(());
-        };
-        futures_timer::Delay::new(delay).await;
-        self.backoff = Some((policy, (delay * 2).min(policy.max)));
-        let mut request = self.source.request.clone();
-        if let Some(id) = &self.last_id {
+    fn reopen(&self, s: &mut HubState) -> LocalBoxFuture<'static, Result<Response, String>> {
+        let (policy, delay) = s.backoff.expect("reopened only with a backoff");
+        s.backoff = Some((policy, (delay * 2).min(policy.max)));
+        let mut request = self.request.clone();
+        if let Some(id) = &s.last_id {
             request.headers.push(("last-event-id".into(), id.clone()));
         }
-        match self.source.transport.send(request).await {
-            Ok(resp) if resp.status < 400 => {
-                self.body = Some(resp.body);
-                self.buffer.clear();
-                self.backoff = Some((policy, policy.initial));
-            }
-            _ => self.body = None,
-        }
-        Ok(())
+        let transport = self.transport.clone();
+        Box::pin(async move {
+            futures_timer::Delay::new(delay).await;
+            transport.send(request).await
+        })
     }
+}
 
-    fn take_frame(&mut self) -> Option<Frame> {
-        let (end, skip) = find_boundary(&self.buffer)?;
-        let raw: Vec<u8> = self.buffer.drain(..end + skip).take(end).collect();
-        Some(Frame::parse(&String::from_utf8_lossy(&raw)))
-    }
+fn broadcast(s: &mut HubState, item: Item) {
+    s.subscribers.retain(|w| match w.upgrade() {
+        Some(inbox) => {
+            inbox.items.borrow_mut().push_back(item.clone());
+            true
+        }
+        None => false,
+    });
+}
+
+fn take_frame(buffer: &mut Vec<u8>) -> Option<Frame> {
+    let (end, skip) = find_boundary(buffer)?;
+    let raw: Vec<u8> = buffer.drain(..end + skip).take(end).collect();
+    Some(Frame::parse(&String::from_utf8_lossy(&raw)))
 }
 
 fn find_boundary(buf: &[u8]) -> Option<(usize, usize)> {
@@ -183,18 +328,26 @@ mod tests {
         Deleted,
     }
 
+    fn request() -> Request {
+        Request {
+            method: doxa_wire::Method::Get,
+            url: "/e".into(),
+            headers: vec![],
+            body: None,
+            credentials: false,
+        }
+    }
+
+    fn hub(raw: &str, transport: MockTransport) -> Rc<Hub> {
+        Rc::new(Hub::new(
+            request(),
+            Rc::new(transport),
+            Body::Full(raw.as_bytes().to_vec()),
+        ))
+    }
+
     fn stream(raw: &str) -> EventStream<Ev> {
-        let source = Source {
-            request: Request {
-                method: doxa_wire::Method::Get,
-                url: "/e".into(),
-                headers: vec![],
-                body: None,
-                credentials: false,
-            },
-            transport: Rc::new(MockTransport::new()),
-        };
-        EventStream::new(Body::Full(raw.as_bytes().to_vec()), source)
+        EventStream::subscribe(hub(raw, MockTransport::new()))
     }
 
     #[test]
@@ -216,5 +369,36 @@ mod tests {
         let mut s = stream("event: error\ndata: upstream gone\n\n");
         let err = crate::task::block_on(s.next()).unwrap_err();
         assert!(matches!(err, Fetch::Stream(m) if m == "upstream gone"));
+    }
+
+    #[test]
+    fn every_subscriber_gets_every_event() {
+        let h = hub("data: {\"event\":\"deleted\"}\n\n", MockTransport::new());
+        let mut a = EventStream::<Ev>::subscribe(h.clone());
+        let mut b = EventStream::<Ev>::subscribe(h);
+        crate::task::block_on(async {
+            assert_eq!(a.next().await.unwrap(), Some(Ev::Deleted));
+            assert_eq!(b.next().await.unwrap(), Some(Ev::Deleted));
+            assert_eq!(a.next().await.unwrap(), None);
+            assert_eq!(b.next().await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn a_dropped_stream_reconnects_from_the_last_event_id() {
+        let mock = MockTransport::new();
+        mock.respond(200, vec![], b"data: {\"event\":\"deleted\"}\n\n".to_vec());
+        let h = hub("id: 7\ndata: {\"event\":\"deleted\"}\n\n", mock.clone());
+        let mut s = EventStream::<Ev>::subscribe(h).reconnect(Backoff {
+            initial: Duration::from_millis(1),
+            max: Duration::from_millis(1),
+        });
+        crate::task::block_on(async {
+            assert_eq!(s.next().await.unwrap(), Some(Ev::Deleted));
+            assert_eq!(s.next().await.unwrap(), Some(Ev::Deleted));
+        });
+        let sent = mock.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].header("last-event-id"), Some("7"));
     }
 }

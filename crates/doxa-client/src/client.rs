@@ -4,6 +4,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::cache::{Cache, CacheConfig};
+use std::collections::HashMap;
+use std::rc::Weak;
+
+use crate::sse::Hub;
 use crate::transport::{Request, Response, Transport};
 
 /// How a call proves who is making it.
@@ -72,6 +76,7 @@ pub struct Client {
     pub(crate) cache: Cache,
     epoch: RefCell<Option<String>>,
     on_session: RefCell<Vec<Box<dyn Fn()>>>,
+    streams: RefCell<HashMap<String, Weak<Hub>>>,
 }
 
 thread_local! {
@@ -88,6 +93,7 @@ impl Client {
             cache,
             epoch: RefCell::new(None),
             on_session: RefCell::new(Vec::new()),
+            streams: RefCell::default(),
         }
     }
 
@@ -113,6 +119,17 @@ impl Client {
     /// Forget every cached response.
     pub fn clear_cache(&self) {
         self.cache.clear();
+    }
+
+    /// The open stream for `key`, if another caller already opened it.
+    pub(crate) fn open_stream(&self, key: &str) -> Option<Rc<Hub>> {
+        let mut streams = self.streams.borrow_mut();
+        streams.retain(|_, hub| hub.upgrade().is_some_and(|h| h.is_open()));
+        streams.get(key).and_then(Weak::upgrade)
+    }
+
+    pub(crate) fn share_stream(&self, key: String, hub: &Rc<Hub>) {
+        self.streams.borrow_mut().insert(key, Rc::downgrade(hub));
     }
 
     pub(crate) fn authorize(&self, request: &mut Request) {
@@ -150,6 +167,7 @@ impl Client {
         };
         if changed {
             self.cache.clear();
+            self.streams.borrow_mut().clear();
             for f in self.on_session.borrow().iter() {
                 f();
             }

@@ -130,6 +130,18 @@ pub fn derive_identity(input: TokenStream) -> syn::Result<TokenStream> {
         }
     });
 
+    // A cached entity passes where an owned one is taken, e.g. a prop.
+    let owned = tag(
+        Side::Client,
+        quote! {
+            impl ::core::convert::From<::doxa::client::Cached<#name>> for #name {
+                fn from(value: ::doxa::client::Cached<#name>) -> Self {
+                    ::doxa::client::Cached::into_inner(value)
+                }
+            }
+        },
+    );
+
     Ok(quote! {
         impl ::doxa::wire::Identity for #name {
             type Id = #id_ty;
@@ -141,5 +153,6 @@ pub fn derive_identity(input: TokenStream) -> syn::Result<TokenStream> {
         }
 
         #key
+        #owned
     })
 }

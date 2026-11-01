@@ -11,11 +11,11 @@ use futures_util::future::LocalBoxFuture;
 use serde_json::Value;
 
 use crate::arg::{ArgFor, Outgoing};
-use crate::cache::{max_age, Lookup, Meta, Outcome, Slot};
+use crate::cache::{map_items, max_age, Lookup, Meta, Outcome, Revalidated, Revalidation, Slot};
 use crate::client::{now, Client};
 use crate::fetch::Fetch;
 use crate::response::{widen, FromResponse};
-use crate::sse::Source;
+use crate::sse::Hub;
 use crate::transport::Request;
 
 type Patch = Box<dyn FnOnce(&Client, Option<&Value>) -> Vec<(String, Rc<dyn Any>)>>;
@@ -24,7 +24,7 @@ type Settle = Box<dyn FnOnce(&Client, &dyn Any, Option<&Value>)>;
 /// A call to a route, built by the route's client stub. Await it.
 ///
 /// ```ignore
-/// let widget = get_widget(&key).await?;
+/// let widget = get_widget(&key).await?; // a `Cached<Widget>`
 /// ```
 #[must_use = "a call does nothing until it is awaited"]
 pub struct Call<R> {
@@ -141,43 +141,14 @@ impl<R> Call<R> {
     }
 }
 
-/// Apply `f` to every `T` in a cached `T`, `Vec<T>` or `Option<T>` that `hit` matches.
-fn map_items<T: Clone + 'static>(
-    value: &Rc<dyn Any>,
-    hit: impl Fn(&T) -> bool,
-    f: &dyn Fn(&mut T),
-) -> Option<Rc<dyn Any>> {
-    if let Some(t) = value.downcast_ref::<T>() {
-        return hit(t).then(|| {
-            let mut t = t.clone();
-            f(&mut t);
-            Rc::new(t) as Rc<dyn Any>
-        });
-    }
-    if let Some(items) = value.downcast_ref::<Vec<T>>() {
-        if !items.iter().any(&hit) {
-            return None;
-        }
-        let mut items = items.clone();
-        items.iter_mut().filter(|t| hit(t)).for_each(f);
-        return Some(Rc::new(items));
-    }
-    if let Some(Some(t)) = value.downcast_ref::<Option<T>>() {
-        return hit(t).then(|| {
-            let mut t = t.clone();
-            f(&mut t);
-            Rc::new(Some(t)) as Rc<dyn Any>
-        });
-    }
-    None
-}
-
 impl<R: FromResponse> IntoFuture for Call<R> {
     type Output = Result<R::Output, Fetch<R::Error>>;
     type IntoFuture = LocalBoxFuture<'static, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
-        if self.route.method.is_safe() {
+        if R::STREAMS {
+            Box::pin(subscribe(self))
+        } else if self.route.method.is_safe() {
             Box::pin(query(self))
         } else {
             Box::pin(owned(mutate(self)))
@@ -237,10 +208,6 @@ async fn send<R: FromResponse>(
     if let Some(etag) = etag {
         request.headers.push(("if-none-match".into(), etag.into()));
     }
-    let source = Source {
-        request: request.clone(),
-        transport: client.transport.clone(),
-    };
     let response = match client.transport.send(request).await {
         Ok(r) => r,
         Err(e) => return Sent::Failed(Fetch::Network(e)),
@@ -260,16 +227,8 @@ async fn send<R: FromResponse>(
     if status == 304 {
         return Sent::NotModified(meta);
     }
-    if status >= 400 {
-        return match response.body.bytes().await {
-            Ok(bytes) => Sent::Status(status, bytes),
-            Err(e) => Sent::Failed(Fetch::Network(e)),
-        };
-    }
-    if R::STREAMS {
-        return Sent::Value(R::stream(response.body, source), meta, invalidates);
-    }
     match response.body.bytes().await {
+        Ok(bytes) if status >= 400 => Sent::Status(status, bytes),
         Ok(bytes) => {
             meta.digest = Some(digest(&bytes));
             match R::decode(status, bytes) {
@@ -288,19 +247,15 @@ fn digest(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-fn accept<R: FromResponse>() -> &'static str {
-    if R::STREAMS {
-        "text/event-stream"
-    } else {
-        "application/json"
+fn not_modified<E>() -> Fetch<E> {
+    Fetch::Status {
+        code: 304,
+        body: None,
     }
 }
 
 fn out_of<R: FromResponse>(value: &Rc<dyn Any>) -> Result<R::Output, Fetch<R::Error>> {
-    value
-        .downcast_ref::<R::Output>()
-        .and_then(R::share)
-        .ok_or_else(|| Fetch::Decode("cached value has another type".to_owned()))
+    R::load(value.clone()).ok_or_else(|| Fetch::Decode("cached value has another type".to_owned()))
 }
 
 fn from_outcome<R: FromResponse>(outcome: &Outcome) -> Result<R::Output, Fetch<R::Error>> {
@@ -311,28 +266,45 @@ fn from_outcome<R: FromResponse>(outcome: &Outcome) -> Result<R::Output, Fetch<R
     }
 }
 
+/// Join the open stream with the same route and arguments, or open it.
+async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
+    let client = call.client.clone().unwrap_or_else(Client::current);
+    let url = call.url().map_err(widen)?;
+    let key = format!("{} {url}", call.route.method.as_str());
+    if let Some(hub) = client.open_stream(&key) {
+        return Ok(R::stream(hub));
+    }
+    let request = call.request(&client, url, "text/event-stream");
+    client.cache.count_request();
+    let response = client
+        .transport
+        .send(request.clone())
+        .await
+        .map_err(Fetch::Network)?;
+    client.observe_session(&response);
+    if response.status >= 400 {
+        let body = response.body.bytes().await.map_err(Fetch::Network)?;
+        return Err(Fetch::from_status(response.status, &body));
+    }
+    if let Some(hub) = client.open_stream(&key) {
+        return Ok(R::stream(hub));
+    }
+    let hub = Rc::new(Hub::new(request, client.transport.clone(), response.body));
+    client.share_stream(key, &hub);
+    Ok(R::stream(hub))
+}
+
 async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
-    let request = call.request(&client, url.clone(), accept::<R>());
-    if R::STREAMS {
-        return match send::<R>(&client, request, None).await {
-            Sent::Value(v, ..) => Ok(v),
-            Sent::NotModified(_) => Err(Fetch::Status {
-                code: 304,
-                body: None,
-            }),
-            Sent::Status(code, body) => Err(Fetch::from_status(code, &body)),
-            Sent::Failed(f) => Err(widen(f)),
-        };
-    }
+    let request = call.request(&client, url.clone(), "application/json");
 
     let key = format!("GET {url}");
     if !call.fresh {
         match client.cache.lookup(&key, now()) {
             Lookup::Fresh(v) => return out_of::<R>(&v),
-            Lookup::Stale(v, etag) => {
-                revalidate::<R>(&client, key, request, etag);
+            Lookup::Revalidate(v, claim) => {
+                revalidate::<R>(&client, key, request, claim);
                 return out_of::<R>(&v);
             }
             Lookup::Pending(slot) => {
@@ -354,12 +326,12 @@ async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Err
     };
     let result = match send::<R>(&client, request, None).await {
         Sent::Value(v, meta, _) => {
-            match R::share(&v) {
-                Some(copy) => {
-                    let stored: Rc<dyn Any> = Rc::new(copy);
+            match R::store(&v) {
+                Some(stored) => {
+                    let route_key = call.out.first_key().cloned();
                     client
                         .cache
-                        .store(key.clone(), call.route, stored.clone(), meta);
+                        .store(key.clone(), call.route, route_key, stored.clone(), meta);
                     slot.finish(Outcome::Value(stored));
                 }
                 None => slot.finish(Outcome::Failed(Fetch::Decode("not cacheable".into()))),
@@ -367,14 +339,8 @@ async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Err
             Ok(v)
         }
         Sent::NotModified(_) => {
-            slot.finish(Outcome::Failed(Fetch::Status {
-                code: 304,
-                body: None,
-            }));
-            Err(Fetch::Status {
-                code: 304,
-                body: None,
-            })
+            slot.finish(Outcome::Failed(not_modified()));
+            Err(not_modified())
         }
         Sent::Status(code, body) => {
             let err = Fetch::from_status(code, &body);
@@ -411,38 +377,34 @@ fn revalidate<R: FromResponse>(
     client: &Rc<Client>,
     key: String,
     request: Request,
-    etag: Option<String>,
+    claim: Revalidation,
 ) {
-    if !client.cache.claim_revalidation(&key) {
-        return;
-    }
     let client = client.clone();
     crate::task::spawn(async move {
         client.cache.count_request();
-        match send::<R>(&client, request, etag.as_deref()).await {
-            Sent::Value(v, meta, _) => {
-                if let Some(copy) = R::share(&v) {
-                    client.cache.replace(&key, Rc::new(copy), meta);
-                }
-            }
-            Sent::NotModified(meta) => client.cache.touch(&key, meta.now),
-            Sent::Status(..) | Sent::Failed(_) => {}
-        }
-        client.cache.release_revalidation(&key);
+        let result = match send::<R>(&client, request, claim.etag.as_deref()).await {
+            Sent::Value(v, meta, _) => match R::store(&v) {
+                Some(stored) => Revalidated::Value(stored, meta),
+                None => Revalidated::Failed,
+            },
+            Sent::NotModified(meta) => Revalidated::NotModified(meta.now),
+            Sent::Status(..) | Sent::Failed(_) => Revalidated::Failed,
+        };
+        client.cache.revalidated(&key, claim, result);
     });
 }
 
 async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
-    let request = call.request(&client, url, accept::<R>());
+    let request = call.request(&client, url, "application/json");
     let key = call.out.first_key().cloned();
     let previous = call.patch.map(|p| p(&client, key.as_ref()));
     client.cache.count_request();
     match send::<R>(&client, request, None).await {
         Sent::Value(v, _, extra) => {
-            if let Some(settle) = call.settle {
-                settle(&client, &v as &dyn Any, key.as_ref());
+            if let (Some(settle), Some(stored)) = (call.settle, R::store(&v)) {
+                settle(&client, &*stored, key.as_ref());
             }
             let mut entities: Vec<&str> = call.route.entities.to_vec();
             entities.extend(extra.iter().map(String::as_str));
@@ -456,10 +418,7 @@ async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Er
             Err(match other {
                 Sent::Status(code, body) => Fetch::from_status(code, &body),
                 Sent::Failed(f) => widen(f),
-                _ => Fetch::Status {
-                    code: 304,
-                    body: None,
-                },
+                _ => not_modified(),
             })
         }
     }

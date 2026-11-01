@@ -8,6 +8,7 @@
 
 mod arg;
 pub mod cache;
+mod cached;
 mod call;
 mod can;
 mod client;
@@ -18,7 +19,8 @@ pub mod task;
 pub mod transport;
 
 pub use arg::{Arg, ArgFor, ClientArg, Foreign, Form, Granted, Json, Outgoing, Path, Query};
-pub use cache::CacheConfig;
+pub use cache::{invalidate, invalidate_all, CacheConfig};
+pub use cached::Cached;
 pub use call::Call;
 pub use can::{Permission, Probe};
 pub use client::{Client, ClientConfig};
