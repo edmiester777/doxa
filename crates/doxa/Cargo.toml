@@ -62,17 +62,19 @@ auth-catalog = ["doxa-auth?/catalog"]
 # into the policy layer, so it stays opt-in even under `full`'s siblings.
 policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-sea-orm"]
 
-# Everything.
 client = ["dep:doxa-client", "dep:doxa-macros"]
-
+# Drive client calls through an in-process axum `Router`, for native tests.
 client-router = ["client", "doxa-client/router"]
+ui = ["client", "dep:doxa-ui"]
 
+# Everything.
 full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
 
 [dependencies]
 doxa-wire = { workspace = true }
 doxa-macros = { workspace = true, optional = true }
 doxa-client = { workspace = true, optional = true }
+doxa-ui = { workspace = true, optional = true }
 doxa-protected = { workspace = true, optional = true }
 serde = { workspace = true }
 
@@ -114,6 +116,10 @@ required-features = ["full"]
 [[test]]
 name = "grants"
 required-features = ["full"]
+
+[[test]]
+name = "ui"
+required-features = ["ui"]
 
 [[test]]
 name = "granted"

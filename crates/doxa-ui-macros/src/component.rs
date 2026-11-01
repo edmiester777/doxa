@@ -1,0 +1,275 @@
+//! `#[component]`: a function becomes a unit struct, a props struct and a typestate builder.
+
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
+use syn::{FnArg, Ident, ItemFn, Pat, Type};
+
+pub(crate) struct Prop {
+    pub name: Ident,
+    pub ty: Type,
+    pub default: Option<TokenStream>,
+    pub optional: bool,
+}
+
+pub(crate) struct Parsed {
+    pub item: ItemFn,
+    pub props: Vec<Prop>,
+}
+
+#[derive(Default)]
+pub(crate) struct Options {
+    pub memo: bool,
+}
+
+impl syn::parse::Parse for Options {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut o = Options::default();
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            match ident.to_string().as_str() {
+                "memo" => o.memo = true,
+                other => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("unknown option `{other}`; expected `memo`"),
+                    ))
+                }
+            }
+            if !input.is_empty() {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(o)
+    }
+}
+
+pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
+    if !item.sig.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            item.sig.generics.span(),
+            "components can't be generic",
+        ));
+    }
+    let mut props = Vec::new();
+    for arg in &mut item.sig.inputs {
+        let FnArg::Typed(pt) = arg else {
+            return Err(syn::Error::new(
+                arg.span(),
+                "a component is a free function, not a method",
+            ));
+        };
+        let Pat::Ident(pi) = &*pt.pat else {
+            return Err(syn::Error::new(
+                pt.pat.span(),
+                "name each prop: `name: Type`",
+            ));
+        };
+        let name = pi.ident.clone();
+        if name == "key" {
+            return Err(syn::Error::new(
+                name.span(),
+                "`key` is reserved for list identity; rename the prop",
+            ));
+        }
+        let mut default = None;
+        let mut kept = Vec::new();
+        for attr in pt.attrs.drain(..) {
+            if attr.path().is_ident("prop") {
+                attr.parse_nested_meta(|m| {
+                    if m.path.is_ident("default") {
+                        default = Some(match m.value() {
+                            Ok(v) => {
+                                let e: syn::Expr = v.parse()?;
+                                quote!(#e)
+                            }
+                            Err(_) => quote!(::core::default::Default::default()),
+                        });
+                        Ok(())
+                    } else {
+                        Err(m.error("expected `default` or `default = …`"))
+                    }
+                })?;
+            } else {
+                kept.push(attr);
+            }
+        }
+        pt.attrs = kept;
+        let ty = (*pt.ty).clone();
+        let optional = is_option(&ty);
+        if default.is_none() && (optional || name == "children") {
+            default = Some(quote!(::core::default::Default::default()));
+        }
+        props.push(Prop {
+            name,
+            ty,
+            default,
+            optional,
+        });
+    }
+    Ok(Parsed { item, props })
+}
+
+fn is_option(ty: &Type) -> bool {
+    matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.segments.last().is_some_and(|s| s.ident == "Option"))
+}
+
+pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
+    let Parsed { item, props } = parsed;
+    let vis = &item.vis;
+    let name = &item.sig.ident;
+    let name_str = name.to_string();
+    let props_ty = format_ident!("{}Props", name);
+    let builder = format_ident!("{}Builder", name);
+    let docs: Vec<_> = item
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .collect();
+    let others: Vec<_> = item
+        .attrs
+        .iter()
+        .filter(|a| !a.path().is_ident("doc"))
+        .collect();
+
+    let fields = props.iter().map(|p| {
+        let (n, t) = (&p.name, &p.ty);
+        quote! { pub #n: #t }
+    });
+    let names: Vec<_> = props.iter().map(|p| &p.name).collect();
+    let required: Vec<_> = props.iter().filter(|p| p.default.is_none()).collect();
+    let params: Vec<_> = (0..required.len())
+        .map(|i| format_ident!("__P{}", i))
+        .collect();
+    let markers: Vec<_> = required
+        .iter()
+        .map(|p| format_ident!("{}_is_missing_the_{}_prop", name, p.name))
+        .collect();
+
+    let setters = props.iter().map(|p| {
+        let (n, t) = (&p.name, &p.ty);
+        let pos = required.iter().position(|r| r.name == p.name);
+        let out_params = params.iter().enumerate().map(|(i, g)| {
+            if Some(i) == pos {
+                quote!(::doxa::ui::Set)
+            } else {
+                quote!(#g)
+            }
+        });
+        let moves = names.iter().map(|m| {
+            if *m == n {
+                quote!(#m: ::core::option::Option::Some(::core::convert::Into::into(value)))
+            } else {
+                quote!(#m: self.#m)
+            }
+        });
+        let arg = if n == "children" {
+            quote!(value: ::doxa::ui::View)
+        } else {
+            quote!(value: impl ::core::convert::Into<#t>)
+        };
+        quote_spanned! { n.span() =>
+            #[allow(missing_docs)]
+            pub fn #n(self, #arg) -> #builder<#(#out_params),*> {
+                #builder { #(#moves,)* _set: ::core::marker::PhantomData }
+            }
+        }
+    });
+
+    let build_fields = props.iter().map(|p| {
+        let n = &p.name;
+        match &p.default {
+            Some(d) => quote!(#n: self.#n.unwrap_or_else(|| #d)),
+            None => quote!(#n: self.#n.expect("checked by the builder's type")),
+        }
+    });
+    let builder_fields = props.iter().map(|p| {
+        let (n, t) = (&p.name, &p.ty);
+        quote!(#n: ::core::option::Option<#t>)
+    });
+
+    let same_props = if opts.memo {
+        quote! {
+            const SAME_PROPS: ::core::option::Option<fn(&::std::rc::Rc<dyn ::core::any::Any>, &::std::rc::Rc<dyn ::core::any::Any>) -> bool> =
+                ::core::option::Option::Some(|a, b| a.downcast_ref::<#props_ty>() == b.downcast_ref::<#props_ty>());
+        }
+    } else {
+        quote!()
+    };
+    let derive_eq = if opts.memo {
+        quote!(#[derive(PartialEq)])
+    } else {
+        quote!()
+    };
+
+    let inner_sig = {
+        let mut s = item.sig.clone();
+        s.ident = format_ident!("__render");
+        s
+    };
+    let body = &item.block;
+    let call = if item.sig.asyncness.is_some() {
+        quote! {
+            ::doxa::ui::RenderFuture::new(async move {
+                ::doxa::ui::IntoRender::into_render(__render(#(#names),*).await)
+            })
+        }
+    } else {
+        quote! { ::doxa::ui::RenderFuture::ready(::doxa::ui::IntoRender::into_render(__render(#(#names),*))) }
+    };
+
+    quote! {
+        #(#docs)*
+        #vis struct #name;
+
+        #[doc = concat!("Props of [`", #name_str, "`].")]
+        #[derive(Clone)]
+        #derive_eq
+        #vis struct #props_ty { #(#fields),* }
+
+        #(
+            #[doc(hidden)]
+            #[allow(non_camel_case_types)]
+            #vis struct #markers;
+        )*
+
+        #[doc = concat!("Builds [`", stringify!(#props_ty), "`].")]
+        #vis struct #builder<#(#params),*> {
+            #(#builder_fields,)*
+            _set: ::core::marker::PhantomData<(#(#params,)*)>,
+        }
+
+        impl #name {
+            /// Start building its props.
+            #vis fn props() -> #builder<#(#markers),*> {
+                #builder { #(#names: ::core::option::Option::None,)* _set: ::core::marker::PhantomData }
+            }
+        }
+
+        #[allow(dead_code)]
+        impl<#(#params),*> #builder<#(#params),*> {
+            #(#setters)*
+        }
+
+        impl<#(#params),*> #builder<#(#params),*> {
+            /// Finish; every required prop must be given.
+            #vis fn build(self) -> #props_ty where #(#params: ::doxa::ui::PropSet),* {
+                #props_ty { #(#build_fields),* }
+            }
+        }
+
+        impl ::doxa::ui::Component for #name {
+            type Props = #props_ty;
+            const NAME: &'static str = #name_str;
+            #same_props
+
+            fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
+                #(#others)*
+                #[allow(non_snake_case, clippy::too_many_arguments)]
+                #inner_sig #body
+                let #props_ty { #(#names),* } = props;
+                #call
+            }
+        }
+    }
+}

@@ -11,7 +11,7 @@ use futures_util::future::LocalBoxFuture;
 use serde_json::Value;
 
 use crate::arg::{ArgFor, Outgoing};
-use crate::cache::{max_age, Lookup, Meta, Outcome};
+use crate::cache::{max_age, Lookup, Meta, Outcome, Slot};
 use crate::client::{now, Client};
 use crate::fetch::Fetch;
 use crate::response::{widen, FromResponse};
@@ -246,10 +246,11 @@ async fn send<R: FromResponse>(
         Err(e) => return Sent::Failed(Fetch::Network(e)),
     };
     client.observe_session(&response);
-    let meta = Meta {
+    let mut meta = Meta {
         now: now(),
         max_age: max_age(response.header("cache-control")),
         etag: response.header("etag").map(str::to_owned),
+        digest: None,
     };
     let invalidates = response
         .header(doxa_wire::INVALIDATE_HEADER)
@@ -269,12 +270,22 @@ async fn send<R: FromResponse>(
         return Sent::Value(R::stream(response.body, source), meta, invalidates);
     }
     match response.body.bytes().await {
-        Ok(bytes) => match R::decode(status, bytes) {
-            Ok(v) => Sent::Value(v, meta, invalidates),
-            Err(e) => Sent::Failed(Fetch::Decode(e)),
-        },
+        Ok(bytes) => {
+            meta.digest = Some(digest(&bytes));
+            match R::decode(status, bytes) {
+                Ok(v) => Sent::Value(v, meta, invalidates),
+                Err(e) => Sent::Failed(Fetch::Decode(e)),
+            }
+        }
         Err(e) => Sent::Failed(Fetch::Network(e)),
     }
+}
+
+fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
 }
 
 fn accept<R: FromResponse>() -> &'static str {
@@ -326,14 +337,21 @@ async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Err
             }
             Lookup::Pending(slot) => {
                 let outcome = slot.wait().await;
-                client.cache.watch(&key);
-                return from_outcome::<R>(&outcome);
+                if !matches!(*outcome, Outcome::Failed(Fetch::Aborted)) {
+                    client.cache.watch(&key);
+                    return from_outcome::<R>(&outcome);
+                }
             }
             Lookup::Miss => {}
         }
     }
 
     let slot = client.cache.begin(&key);
+    let guard = Inflight {
+        client: &client,
+        key: &key,
+        slot: &slot,
+    };
     let result = match send::<R>(&client, request, None).await {
         Sent::Value(v, meta, _) => {
             match R::share(&v) {
@@ -368,8 +386,25 @@ async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Err
             Err(widen(f))
         }
     };
-    client.cache.end(&key);
+    drop(guard);
     result
+}
+
+/// Ends an in-flight entry even if the caller drops the call, so waiters retry
+/// rather than wait forever.
+struct Inflight<'a> {
+    client: &'a Client,
+    key: &'a str,
+    slot: &'a Slot,
+}
+
+impl Drop for Inflight<'_> {
+    fn drop(&mut self) {
+        if self.slot.outcome.borrow().is_none() {
+            self.slot.finish(Outcome::Failed(Fetch::Aborted));
+        }
+        self.client.cache.end(self.key);
+    }
 }
 
 fn revalidate<R: FromResponse>(

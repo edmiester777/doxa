@@ -1,0 +1,61 @@
+//! A client-rendered UI for doxa apps. Components are async functions that call
+//! routes directly; hooks follow React's rules, checked at runtime.
+//!
+//! Most apps only need `use doxa::ui::prelude::*;`.
+
+mod app;
+mod boundary;
+mod can;
+mod component;
+pub mod dom;
+mod error;
+mod hooks;
+mod plugin;
+mod reconcile;
+mod router;
+mod runtime;
+mod theme;
+mod view;
+
+pub use app::{App, IntoRoot};
+pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
+pub use can::{Can, CanBuilder, CanProps};
+pub use component::{Component, IntoRender, PropSet, RenderFuture, Set};
+pub use dom::Event;
+pub use error::{Result, Thrown};
+pub use hooks::{
+    action, context, effect, memo, provide, state, try_context, Action, Deps, Singleton, State,
+};
+pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
+pub use router::{
+    location, match_path, navigate, Link, LinkBuilder, LinkProps, Page, Prefetch, Route, Router,
+    Segments,
+};
+pub use theme::{set_theme, theme, Theme};
+pub use view::{
+    comp, el, Callback, ComponentView, DangerousHtml, Element, IntoAttr, IntoProp, IntoView, Key,
+    SafeUrl, View,
+};
+
+pub use doxa_ui_macros::{component, page, start, view};
+
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::boundary::Catch_is_missing_the_fallback_prop;
+    pub use crate::can::Can_is_missing_the_route_prop;
+    pub use crate::plugin::Slot_is_missing_the_name_prop;
+    pub use crate::router::Link_is_missing_the_to_prop;
+    #[cfg(target_arch = "wasm32")]
+    pub use wasm_bindgen;
+}
+
+/// Everything a component file uses.
+pub mod prelude {
+    pub use crate::{
+        action, component, context, effect, memo, navigate, page, provide, set_theme, state, theme,
+        try_context, view, Action, App, Callback, Can, Catch, DangerousHtml, Event, IntoView, Link,
+        Page, Plugin, Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State, Suspense,
+        Theme, Thrown, View,
+    };
+    pub use doxa_client::{CacheConfig, ClientConfig};
+}

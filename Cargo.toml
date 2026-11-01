@@ -12,9 +12,12 @@ members = [
     "crates/doxa-role",
     "crates/doxa-macro-support",
     "crates/doxa-client",
+    "crates/doxa-ui",
+    "crates/doxa-ui-macros",
     "examples/widgets/api",
     "examples/widgets/client",
     "examples/widgets/server",
+    "examples/widgets/web",
 ]
 
 [workspace.metadata.release]
@@ -50,6 +53,8 @@ doxa-wire = { path = "crates/doxa-wire", version = "0.1.6" }
 doxa-role = { path = "crates/doxa-role", version = "0.1.6" }
 doxa-macro-support = { path = "crates/doxa-macro-support", version = "0.1.6" }
 doxa-client = { path = "crates/doxa-client", version = "0.1.6" }
+doxa-ui = { path = "crates/doxa-ui", version = "0.1.6" }
+doxa-ui-macros = { path = "crates/doxa-ui-macros", version = "0.1.6" }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }

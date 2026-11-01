@@ -81,6 +81,7 @@ pub(crate) struct Entry {
     pub stale: bool,
     pub max_age: Option<Duration>,
     pub etag: Option<String>,
+    digest: Option<u64>,
     observers: Vec<Weak<dyn Observer>>,
 }
 
@@ -221,6 +222,7 @@ impl Cache {
                 stale: false,
                 max_age: meta.max_age,
                 etag: meta.etag,
+                digest: meta.digest,
                 observers,
             },
         );
@@ -236,18 +238,23 @@ impl Cache {
         }
     }
 
-    /// Replace a value after revalidation, telling everyone who read it.
+    /// Replace a value after revalidation, telling everyone who read it if it changed.
     pub fn replace(&self, key: &str, value: Rc<dyn Any>, meta: Meta) {
         let observers = {
             let mut entries = self.entries.borrow_mut();
             let Some(e) = entries.get_mut(key) else {
                 return;
             };
-            e.value = value;
+            let same = e.digest.is_some() && e.digest == meta.digest;
             e.at = meta.now;
             e.stale = false;
             e.max_age = meta.max_age;
             e.etag = meta.etag;
+            if same {
+                return;
+            }
+            e.value = value;
+            e.digest = meta.digest;
             e.observers.clone()
         };
         notify(&observers);
@@ -337,6 +344,8 @@ pub(crate) struct Meta {
     pub now: f64,
     pub max_age: Option<Duration>,
     pub etag: Option<String>,
+    /// A hash of the body, so an identical refetch doesn't re-render readers.
+    pub digest: Option<u64>,
 }
 
 fn ptr_eq(w: &Weak<dyn Observer>, o: &Rc<dyn Observer>) -> bool {

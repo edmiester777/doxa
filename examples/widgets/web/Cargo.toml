@@ -1,0 +1,17 @@
+[package]
+name = "widgets-web"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+widgets-client = { path = "../client" }
+doxa = { workspace = true, features = ["ui"] }
+
+[dev-dependencies]
+widgets-server = { path = "../server" }
+doxa = { workspace = true, features = ["ui", "client-router"] }
+tokio = { workspace = true }

@@ -1,0 +1,25 @@
+[package]
+name = "doxa-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "A client-rendered, async-native UI for doxa apps: components are async functions, hooks are React's."
+keywords = ["doxa", "wasm", "ui", "frontend", "react"]
+categories = ["web-programming", "wasm", "gui"]
+
+[dependencies]
+doxa-client = { workspace = true }
+doxa-wire = { workspace = true }
+doxa-ui-macros = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+serde = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Comment", "Event", "EventTarget", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "KeyboardEvent", "MouseEvent", "History", "Location", "PopStateEvent", "CssStyleDeclaration", "NodeList"] }

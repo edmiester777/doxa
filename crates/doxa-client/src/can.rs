@@ -31,6 +31,7 @@ impl Permission {
 
 /// A dry run of one route with one set of arguments. Await it for a [`Permission`].
 #[must_use = "a probe does nothing until it is awaited"]
+#[derive(Clone)]
 pub struct Probe {
     route: &'static RouteSpec,
     out: Outgoing,
@@ -103,6 +104,7 @@ impl IntoFuture for Probe {
                     now: now(),
                     max_age: Some(std::time::Duration::from_secs(60)),
                     etag: None,
+                    digest: None,
                 },
             );
             permission

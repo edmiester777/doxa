@@ -12,6 +12,7 @@
 //! | `auth` | `doxa-auth` | OIDC / JWT auth middleware with Cedar policy integration |
 //! | `policy` | `doxa-policy` | Cedar-based authorization policy engine |
 //! | `client` | `doxa-client` | Call routes from the browser as async functions |
+//! | `ui` | `doxa-ui` | Components, `view!`, hooks and a router, rendered in the browser |
 //! | `full` | all of the above | Everything |
 //!
 //! A crate whose `build.rs` calls `doxa_role::client()` sees every route as a
@@ -70,6 +71,50 @@ pub mod server {
         pub use doxa_auth::{route_key, Cap, Granted, Many, One, Require};
     }
 }
+
+/// Components, hooks and routing for the browser.
+#[cfg(feature = "ui")]
+pub use doxa_ui as ui;
+
+#[cfg(feature = "ui")]
+pub use doxa_ui::start;
+
+/// Every prop given compiles:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(name: String) -> View { view! { <li>{name}</li> } }
+/// let _ = view! { <Row name="a"/> };
+/// ```
+///
+/// A required prop left out names it:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(name: String) -> View { view! { <li>{name}</li> } }
+/// let _ = view! { <Row/> };
+/// ```
+///
+/// A prop named anything but `key` compiles:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(id: u32) -> View { view! { <li>{id}</li> } }
+/// ```
+///
+/// `key` is reserved for list identity:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(key: u32) -> View { view! { <li>{key}</li> } }
+/// ```
+#[cfg(feature = "ui")]
+#[doc(hidden)]
+pub mod ui_diagnostics {}
 
 /// The client half: typed calls to the server's routes.
 #[cfg(feature = "client")]
