@@ -136,7 +136,7 @@ function shellElement(shell, portals) {
 
 // Nested islands render inside `children`, or else the first slot or element, so they get this island's context.
 function propsOf(island, content) {
-  const props = { ...content.props, ...island.events };
+  const props = { ...content.props, ...content.raw, ...content.feeds, ...island.events };
   const slots = Object.keys(content.slots);
   const home = slots.includes("children") ? "children" : (slots[0] ?? content.shells[0]?.prop);
   const portals = (name) => (name === home ? createElement(Portals, { parent: island.id }) : null);

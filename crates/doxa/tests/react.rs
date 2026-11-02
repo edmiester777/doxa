@@ -50,6 +50,7 @@ struct Calls {
     async_funcs: HashMap<u32, Vec<(&'static str, AsyncFuncFn)>>,
     renders: HashMap<u32, Vec<(&'static str, RenderFns)>>,
     handles: HashMap<u32, doxa::ui::react::HandleSink>,
+    feeds: HashMap<u32, Vec<(&'static str, doxa::ui::react::FeedFns)>>,
 }
 
 #[derive(Clone, Default)]
@@ -62,6 +63,12 @@ fn describe(c: &Content) -> String {
     if !c.slots.is_empty() {
         let names: Vec<_> = c.slots.iter().map(|(n, _)| *n).collect();
         out.push_str(&format!(" slots:{}", names.join(",")));
+    }
+    for (name, _) in &c.raw {
+        out.push_str(&format!(" raw:{name}"));
+    }
+    for (name, _) in &c.feeds {
+        out.push_str(&format!(" feed:{name}"));
     }
     for s in &c.shells {
         let attrs: Vec<_> = s.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -94,6 +101,7 @@ impl Bridge for Fake {
         c.events.insert(m.id, m.events);
         c.errors.insert(m.id, m.on_error);
         c.shells.insert(m.id, m.content.shells.clone());
+        c.feeds.insert(m.id, m.content.feeds.clone());
         c.funcs.insert(m.id, m.funcs);
         c.async_funcs.insert(m.id, m.async_funcs);
         c.renders.insert(m.id, m.renders);
@@ -612,4 +620,67 @@ fn a_handle_is_ready_once_react_publishes_it() {
     publish(None);
     settle();
     assert_eq!(p(), "none");
+}
+
+#[react(module = "./ts/plot.tsx", export = "Plot")]
+pub struct Plot {
+    #[react(raw)]
+    pub ys: Rc<[f64]>,
+    #[react(feed)]
+    pub log: doxa::ui::react::Feed<String>,
+}
+
+#[component]
+fn Charted() -> View {
+    let ys = state::<Rc<[f64]>>(Rc::from(vec![1.0, 2.0]));
+    let tick = state(0u32);
+    let log = doxa::ui::react::feed::<String>(2);
+    let _ = tick.get();
+    view! {
+        <button id="tick" on:click={move |_| tick.update(|t| *t += 1)}>"tick"</button>
+        <button id="more" on:click={move |_| ys.set(Rc::from(vec![1.0, 2.0, 3.0]))}>"more"</button>
+        <button
+            id="say"
+            on:click={{ let log = log.clone(); move |_| log.push(format!("line {}", tick.get())) }}
+        >
+            "say"
+        </button>
+        <Plot ys={ys.get()} log={log.clone()}/>
+    }
+}
+
+#[test]
+fn a_raw_array_is_sent_once_per_allocation_and_a_feed_streams() {
+    let (fake, dom) = {
+        let fake = Fake::default();
+        doxa::ui::react::set_bridge(fake.clone());
+        let dom = MemDom::new();
+        App::new(|| view! { <Charted/> })
+            .mount_on(Rc::new(dom.clone()), dom.body())
+            .keep();
+        (fake, dom)
+    };
+    assert_eq!(fake.log(), ["mount Plot 1 {} raw:ys feed:log"]);
+    click(&dom, "tick");
+    assert!(fake.log().is_empty(), "the same Rc isn't sent again");
+    click(&dom, "more");
+    assert_eq!(fake.log(), ["update 1 {} raw:ys feed:log"]);
+
+    for _ in 0..3 {
+        click(&dom, "say");
+    }
+    let feed = fake.0.borrow().feeds[&1][0].1.clone();
+    let got = Rc::new(RefCell::new(Vec::new()));
+    let sink = got.clone();
+    let id = (feed.subscribe)(Rc::new(move |v| sink.borrow_mut().push(v)));
+    assert_eq!(
+        *got.borrow(),
+        [serde_json::json!("line 1"), serde_json::json!("line 1")],
+        "the last two, as backlog"
+    );
+    click(&dom, "say");
+    assert_eq!(got.borrow().len(), 3, "then live");
+    (feed.unsubscribe)(id);
+    click(&dom, "say");
+    assert_eq!(got.borrow().len(), 3);
 }

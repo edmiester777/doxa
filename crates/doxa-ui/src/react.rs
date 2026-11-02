@@ -50,16 +50,30 @@ pub trait IslandProps: Clone + 'static {
 /// An island's non-event props, by React prop name.
 pub type Props = serde_json::Map<String, serde_json::Value>;
 
-/// The non-event props, as a JSON object.
+/// The non-event props: JSON values, raw arrays and feeds.
 #[doc(hidden)]
 #[derive(Default)]
-pub struct Data(Props);
+pub struct Data {
+    props: Props,
+    raw: Vec<(&'static str, RawData)>,
+    feeds: Vec<(&'static str, FeedFns)>,
+}
 
 impl Data {
     pub fn set<T: Serialize + ?Sized>(&mut self, name: &'static str, value: &T) {
         let v = serde_json::to_value(value)
             .unwrap_or_else(|e| panic!("React prop `{name}` doesn't serialize: {e}"));
-        self.0.insert(name.to_owned(), v);
+        self.props.insert(name.to_owned(), v);
+    }
+
+    /// A `#[react(raw)]` array.
+    pub fn raw(&mut self, name: &'static str, value: &impl RawArray) {
+        self.raw.push((name, value.raw()));
+    }
+
+    /// A `#[react(feed)]` channel.
+    pub fn feed<T: Serialize + Clone + 'static>(&mut self, name: &'static str, feed: &Feed<T>) {
+        self.feeds.push((name, feed.fns()));
     }
 
     /// Leave the prop out when `None`.
@@ -146,6 +160,164 @@ impl<A, V: IntoView, F: Fn(A) -> V + 'static> From<F> for Render<A> {
     fn from(f: F) -> Self {
         Render(Rc::new(move |a| f(a).into_view()))
     }
+}
+
+/// A `#[react(raw)]` array, by element type. Copied once per `Rc` into a JS-owned typed array:
+/// a view into wasm memory would be detached the next time memory grows.
+#[derive(Clone, Debug)]
+pub enum RawData {
+    /// `Float64Array`.
+    F64(Rc<[f64]>),
+    /// `Float32Array`.
+    F32(Rc<[f32]>),
+    /// `Int32Array`.
+    I32(Rc<[i32]>),
+    /// `Uint32Array`.
+    U32(Rc<[u32]>),
+    /// `Uint8Array`.
+    U8(Rc<[u8]>),
+}
+
+impl RawData {
+    /// Which allocation it is; a new one is copied again.
+    pub fn id(&self) -> usize {
+        match self {
+            RawData::F64(r) => Rc::as_ptr(r).cast::<u8>() as usize,
+            RawData::F32(r) => Rc::as_ptr(r).cast::<u8>() as usize,
+            RawData::I32(r) => Rc::as_ptr(r).cast::<u8>() as usize,
+            RawData::U32(r) => Rc::as_ptr(r).cast::<u8>() as usize,
+            RawData::U8(r) => Rc::as_ptr(r).cast::<u8>() as usize,
+        }
+    }
+}
+
+/// What a `#[react(raw)]` field can be: an `Rc<[_]>` of numbers.
+pub trait RawArray {
+    #[doc(hidden)]
+    fn raw(&self) -> RawData;
+}
+
+macro_rules! raw_array {
+    ($($t:ty => $v:ident),*) => {$(
+        impl RawArray for Rc<[$t]> {
+            fn raw(&self) -> RawData {
+                RawData::$v(self.clone())
+            }
+        }
+    )*};
+}
+
+raw_array!(f64 => F64, f32 => F32, i32 => I32, u32 => U32, u8 => U8);
+
+type Subscriber<T> = (u64, Rc<dyn Fn(&T)>);
+
+struct FeedInner<T> {
+    backlog: RefCell<std::collections::VecDeque<T>>,
+    capacity: usize,
+    subscribers: RefCell<Vec<Subscriber<T>>>,
+    next: Cell<u64>,
+}
+
+/// An append-only stream into a React component, e.g. a terminal's output:
+/// `#[react(feed)] pub output: Feed<String>`, read in JS as `props.output.subscribe(cb)`.
+///
+/// It keeps the last `capacity` items, which a new subscriber is given first.
+pub struct Feed<T: 'static>(Rc<FeedInner<T>>);
+
+impl<T> Clone for Feed<T> {
+    fn clone(&self) -> Self {
+        Feed(self.0.clone())
+    }
+}
+
+impl<T> PartialEq for Feed<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T: Clone + 'static> Feed<T> {
+    /// A feed keeping the last `capacity` items.
+    pub fn new(capacity: usize) -> Feed<T> {
+        Feed(Rc::new(FeedInner {
+            backlog: RefCell::default(),
+            capacity,
+            subscribers: RefCell::default(),
+            next: Cell::new(0),
+        }))
+    }
+
+    /// Send `item` to every subscriber now, and keep it for later ones.
+    pub fn push(&self, item: T) {
+        {
+            let mut b = self.0.backlog.borrow_mut();
+            b.push_back(item.clone());
+            while b.len() > self.0.capacity {
+                b.pop_front();
+            }
+        }
+        let subs: Vec<_> = self
+            .0
+            .subscribers
+            .borrow()
+            .iter()
+            .map(|(_, f)| f.clone())
+            .collect();
+        subs.iter().for_each(|f| f(&item));
+    }
+
+    /// Call `f` with the backlog, then with each new item, until [`unsubscribe`](Self::unsubscribe).
+    pub fn subscribe(&self, f: impl Fn(&T) + 'static) -> u64 {
+        let backlog: Vec<T> = self.0.backlog.borrow().iter().cloned().collect();
+        backlog.iter().for_each(&f);
+        let id = self.0.next.get() + 1;
+        self.0.next.set(id);
+        self.0.subscribers.borrow_mut().push((id, Rc::new(f)));
+        id
+    }
+
+    /// Stop calling a subscriber.
+    pub fn unsubscribe(&self, id: u64) {
+        self.0.subscribers.borrow_mut().retain(|(i, _)| *i != id);
+    }
+}
+
+impl<T: Serialize + Clone + 'static> Feed<T> {
+    fn fns(&self) -> FeedFns {
+        let (a, b) = (self.clone(), self.clone());
+        FeedFns {
+            id: Rc::as_ptr(&self.0).cast::<u8>() as usize,
+            subscribe: Rc::new(move |f: FeedSink| {
+                a.subscribe(move |item| {
+                    if let Ok(v) = serde_json::to_value(item) {
+                        f(v)
+                    }
+                })
+            }),
+            unsubscribe: Rc::new(move |id| b.unsubscribe(id)),
+        }
+    }
+}
+
+/// A feed that keeps the last `capacity` items, stable across renders.
+#[track_caller]
+pub fn feed<T: Clone + 'static>(capacity: usize) -> Feed<T> {
+    let (_, _, f) = crate::hooks::slot("feed", || Feed::<T>::new(capacity));
+    (*f).clone()
+}
+
+/// Where a feed subscriber is sent each item, as JSON.
+pub type FeedSink = Rc<dyn Fn(serde_json::Value)>;
+
+/// A [`Feed`] as JS subscribes to it, with items as JSON.
+#[derive(Clone)]
+pub struct FeedFns {
+    /// Which feed it is; the same one keeps its JS subscriber object.
+    pub id: usize,
+    /// Start delivering items; returns the id to unsubscribe.
+    pub subscribe: Rc<dyn Fn(FeedSink) -> u64>,
+    /// Stop.
+    pub unsubscribe: Rc<dyn Fn(u64)>,
 }
 
 /// What a bridge publishes as an island's handle: React's `ref.current`, a `JsValue` in the browser.
@@ -409,6 +581,10 @@ pub struct Content {
     pub slots: Vec<(&'static str, NodeRef)>,
     /// Elements for React to render.
     pub shells: Vec<Shell>,
+    /// `#[react(raw)]` arrays, copied into JS typed arrays.
+    pub raw: Vec<(&'static str, RawData)>,
+    /// `#[react(feed)]` channels.
+    pub feeds: Vec<(&'static str, FeedFns)>,
 }
 
 /// An island for the bridge to render.
@@ -648,9 +824,11 @@ impl<P: IslandProps> Live<P> {
         let mut d = Data::default();
         props.data(&mut d);
         let content = Content {
-            props: d.0,
+            props: d.props,
             slots: self.slots.borrow().clone(),
             shells,
+            raw: d.raw,
+            feeds: d.feeds,
         };
         Some((props, content))
     }
@@ -930,7 +1108,37 @@ mod web {
     struct Functions {
         events: Vec<Closure<dyn Fn(String)>>,
         shells: HashMap<String, JsValue>,
+        /// Typed arrays and feed subscribers by prop, with the identity they were made from.
+        made: HashMap<&'static str, (usize, JsValue)>,
         keep: Vec<Box<dyn std::any::Any>>,
+    }
+
+    fn typed(raw: &super::RawData) -> JsValue {
+        use super::RawData;
+        // Each `from` copies into memory JS owns.
+        match raw {
+            RawData::F64(r) => js_sys::Float64Array::from(&r[..]).into(),
+            RawData::F32(r) => js_sys::Float32Array::from(&r[..]).into(),
+            RawData::I32(r) => js_sys::Int32Array::from(&r[..]).into(),
+            RawData::U32(r) => js_sys::Uint32Array::from(&r[..]).into(),
+            RawData::U8(r) => js_sys::Uint8Array::from(&r[..]).into(),
+        }
+    }
+
+    /// `{ subscribe(cb) }`, returning a function that unsubscribes.
+    fn subscriber(fns: &super::FeedFns, keep: &mut Vec<Box<dyn std::any::Any>>) -> JsValue {
+        let fns = fns.clone();
+        let c = Closure::<dyn Fn(js_sys::Function) -> JsValue>::new(move |cb: js_sys::Function| {
+            let id = (fns.subscribe)(Rc::new(move |v| {
+                let _ = cb.call1(&JsValue::NULL, &to_value(&v));
+            }));
+            let unsubscribe = fns.unsubscribe.clone();
+            Closure::once_into_js(move || unsubscribe(id))
+        });
+        let obj: JsValue = js_sys::Object::new().into();
+        set(&obj, "subscribe", c.as_ref());
+        keep.push(Box::new(c));
+        obj
     }
 
     /// Islands rendered by the shipped runtime, keeping each one's functions alive.
@@ -1002,6 +1210,33 @@ mod web {
                 shells.push(&shell);
             }
             set(&out, "shells", &shells);
+            let raw: JsValue = js_sys::Object::new().into();
+            for (name, data) in &c.raw {
+                let id = data.id();
+                let v = match f.made.get(name) {
+                    Some((made, v)) if *made == id => v.clone(),
+                    _ => {
+                        let v = typed(data);
+                        f.made.insert(name, (id, v.clone()));
+                        v
+                    }
+                };
+                set(&raw, name, &v);
+            }
+            set(&out, "raw", &raw);
+            let feeds: JsValue = js_sys::Object::new().into();
+            for (name, fns) in &c.feeds {
+                let v = match f.made.get(name) {
+                    Some((made, v)) if *made == fns.id => v.clone(),
+                    _ => {
+                        let v = subscriber(fns, &mut f.keep);
+                        f.made.insert(name, (fns.id, v.clone()));
+                        v
+                    }
+                };
+                set(&feeds, name, &v);
+            }
+            set(&out, "feeds", &feeds);
             out
         }
     }

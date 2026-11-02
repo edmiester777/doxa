@@ -36,12 +36,14 @@ impl syn::parse::Parse for Args {
                     input.parse::<syn::Token![=]>()?;
                     handle = Some(input.parse::<Type>()?);
                 }
-                other => return Err(syn::Error::new(
-                    ident.span(),
-                    format!(
+                other => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!(
                         "unknown option `{other}`; expected `module`, `export`, `lazy` or `handle`"
                     ),
-                )),
+                    ))
+                }
             }
             if !input.is_empty() {
                 input.parse::<syn::Token![,]>()?;
@@ -93,6 +95,10 @@ enum Role {
     },
     /// `#[react(render)]`: a `Render` React places as an element.
     Render,
+    /// `#[react(raw)]`: an `Rc<[number]>` copied into a JS typed array.
+    Raw,
+    /// `#[react(feed)]`: a `Feed<T>` JS subscribes to.
+    Feed,
 }
 
 struct Field {
@@ -175,7 +181,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             ));
         }
         let (mut optional, mut event, mut element, mut rename) = (false, false, false, None);
-        let (mut func, mut render) = (false, false);
+        let (mut func, mut render, mut raw, mut feed) = (false, false, false, false);
         let mut kept = Vec::new();
         for attr in f.attrs.drain(..) {
             if !attr.path().is_ident("react") {
@@ -193,18 +199,22 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                     func = true;
                 } else if m.path.is_ident("render") {
                     render = true;
+                } else if m.path.is_ident("raw") {
+                    raw = true;
+                } else if m.path.is_ident("feed") {
+                    feed = true;
                 } else if m.path.is_ident("rename") {
                     rename = Some(m.value()?.parse::<LitStr>()?.value());
                 } else {
                     return Err(m.error(
-                        "expected `optional`, `event`, `element`, `func`, `render` or `rename = \"…\"`",
+                        "expected `optional`, `event`, `element`, `func`, `render`, `raw`, `feed` or `rename = \"…\"`",
                     ));
                 }
                 Ok(())
             })?;
         }
         f.attrs = kept;
-        if [optional, event, element, func, render]
+        if [optional, event, element, func, render, raw, feed]
             .iter()
             .filter(|b| **b)
             .count()
@@ -212,7 +222,19 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         {
             return Err(syn::Error::new(
                 name.span(),
-                "a prop takes one of `optional`, `event`, `element`, `func` and `render`",
+                "a prop takes one of `optional`, `event`, `element`, `func`, `render`, `raw` and `feed`",
+            ));
+        }
+        if raw && !last_segment_is(&f.ty, "Rc") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(raw)]` field `{name}` must be an `Rc<[f64]>`, or of `f32`, `i32`, `u32` or `u8`"),
+            ));
+        }
+        if feed && !last_segment_is(&f.ty, "Feed") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(feed)]` field `{name}` must be a `Feed<T>`"),
             ));
         }
         if func && !last_segment_is(&f.ty, "Func") && !last_segment_is(&f.ty, "AsyncFunc") {
@@ -238,6 +260,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         let role = match (optional, event) {
             _ if element => Role::Element,
             _ if render => Role::Render,
+            _ if raw => Role::Raw,
+            _ if feed => Role::Feed,
             _ if func => Role::Func {
                 is_async: last_segment_is(&f.ty, "AsyncFunc"),
             },
@@ -346,16 +370,24 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
 
     let same = fields
         .iter()
-        .filter(|f| matches!(f.role, Role::Data | Role::Optional))
+        .filter(|f| matches!(f.role, Role::Data | Role::Optional | Role::Raw | Role::Feed))
         .map(|f| {
             let n = &f.name;
-            quote_spanned! { f.ty.span() => && self.#n == other.#n }
+            match f.role {
+                // The same allocation, not equal contents: comparing big arrays every render costs as much as copying.
+                Role::Raw => {
+                    quote_spanned! { f.ty.span() => && ::std::rc::Rc::ptr_eq(&self.#n, &other.#n) }
+                }
+                _ => quote_spanned! { f.ty.span() => && self.#n == other.#n },
+            }
         });
     let data = fields.iter().filter_map(|f| {
         let (n, js) = (&f.name, &f.js);
         match f.role {
             Role::Data => Some(quote_spanned! { f.ty.span() => out.set(#js, &self.#n); }),
             Role::Optional => Some(quote_spanned! { f.ty.span() => out.opt(#js, &self.#n); }),
+            Role::Raw => Some(quote_spanned! { f.ty.span() => out.raw(#js, &self.#n); }),
+            Role::Feed => Some(quote_spanned! { f.ty.span() => out.feed(#js, &self.#n); }),
             Role::Event | Role::Slot { .. } | Role::Element | Role::Func { .. } | Role::Render => {
                 None
             }

@@ -238,6 +238,29 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
+/// Bulk numbers go as `raw`, copied once into a typed array:
+///
+/// ```
+/// use std::rc::Rc;
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/plot.tsx", export = "Plot")]
+/// pub struct Plot {
+///     #[react(raw)]
+///     pub ys: Rc<[f64]>,
+/// }
+/// ```
+///
+/// A `Vec` is "`#[react(raw)]` field `ys` must be an `Rc<[f64]>`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/plot.tsx", export = "Plot")]
+/// pub struct Plot {
+///     #[react(raw)]
+///     pub ys: Vec<f64>,
+/// }
+/// ```
+///
 /// An npm module this crate doesn't declare is rejected; the local module above compiles:
 ///
 /// ```compile_fail
