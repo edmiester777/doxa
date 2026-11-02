@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::bundle::{
-    entry_js, rewrite_islands, rewrite_react, BundleOutput, BundleRequest, Bundler, Esbuild,
+    entry_js, gallery_js, rewrite_islands, rewrite_react, BundleOutput, BundleRequest, Bundler,
+    Esbuild,
 };
 use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
@@ -22,6 +23,8 @@ pub struct BuildOptions {
     pub locked: bool,
     /// Write `.br` and `.gz` siblings.
     pub compress: bool,
+    /// Build the `#[story]` gallery into `target/doxa/gallery` instead of the app.
+    pub gallery: bool,
 }
 
 /// One app's build, holding what earlier steps produced.
@@ -73,7 +76,11 @@ impl Pipeline {
 
     /// The served directory.
     pub fn dist_dir(&self) -> PathBuf {
-        self.layout.dist()
+        if self.opts.gallery {
+            self.layout.gallery()
+        } else {
+            self.layout.dist()
+        }
     }
 
     /// Every step, then the dist.
@@ -115,6 +122,9 @@ impl Pipeline {
         // wasm-split builds its call graph from the relocations and finds functions by name;
         // only this crate links. Both are stripped from what ships.
         cmd.args(["--", "-C", "link-arg=--emit-relocs", "-C", "strip=none"]);
+        if self.opts.gallery {
+            cmd.args(["--cfg", "doxa_gallery"]);
+        }
         run(
             "cargo",
             &mut cmd,
@@ -254,16 +264,15 @@ impl Pipeline {
         let entry_dir = self.layout.stage().join("entry");
         std::fs::create_dir_all(&entry_dir).at(&entry_dir)?;
         let entry = entry_dir.join("app.js");
-        std::fs::write(
-            &entry,
-            entry_js(
-                &rewritten,
-                &islands,
-                &wasm_file,
-                !self.split_files.is_empty(),
-            ),
-        )
-        .at(&entry)?;
+        let split = !self.split_files.is_empty();
+        let js = if self.opts.gallery {
+            let gallery = dir.join("gallery.js");
+            std::fs::write(&gallery, include_str!("../js/gallery.js")).at(&gallery)?;
+            gallery_js(&rewritten, &islands, &wasm_file, &gallery, split)
+        } else {
+            entry_js(&rewritten, &islands, &wasm_file, split)
+        };
+        std::fs::write(&entry, js).at(&entry)?;
         let out_dir = self.esbuild_dir();
         self.bundle = Some(self.bundler.bundle(&BundleRequest {
             entry: &entry,
@@ -347,13 +356,18 @@ impl Pipeline {
         }
 
         let custom = self.web.dir.join("index.html");
-        let html = if custom.is_file() {
+        let html = if custom.is_file() && !self.opts.gallery {
             dist::inject(
                 &std::fs::read_to_string(&custom).at(&custom)?,
                 &d.html_tags(),
             )
         } else {
-            dist::generated_html(&self.web.name, &d.html_tags())
+            let title = if self.opts.gallery {
+                "Stories"
+            } else {
+                &self.web.name
+            };
+            dist::generated_html(title, &d.html_tags())
         };
         dist::write(&self.dist_dir(), &d, &html, self.opts.compress)?;
         note(format!("wrote {}", self.dist_dir().display()));

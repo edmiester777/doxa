@@ -24,6 +24,7 @@ pub mod react;
 mod reconcile;
 mod router;
 mod runtime;
+mod story;
 mod theme;
 mod view;
 
@@ -58,6 +59,7 @@ pub use router::{
     set_query, Keep, Link, LinkBuilder, LinkProps, Nav, Navigation, Outlet, OutletBuilder,
     OutletProps, Page, Prefetch, Query, Route, Router, Segments,
 };
+pub use story::{IntoStory, StoryRoot};
 pub use theme::{set_theme, theme, Theme};
 pub use view::{
     comp, el, BindChecked, BindSelected, BindValue, Callback, ComponentView, DangerousHtml,
@@ -70,7 +72,7 @@ pub use view::{
 /// prop, `#[react(element)]` has React render the element and doxa only its children.
 #[cfg(feature = "react")]
 pub use doxa_ui_macros::react;
-pub use doxa_ui_macros::{component, page, start, view};
+pub use doxa_ui_macros::{component, page, start, story, view};
 
 /// A doxa component mounted by a foreign React host, as `#[component(export)]` wrappers do.
 #[cfg(feature = "export")]
@@ -84,10 +86,13 @@ pub mod __private {
     #[cfg(target_arch = "wasm32")]
     pub use web_sys;
 
-    /// Whether a `doxa build --lib` package loaded this wasm, so a host owns the page.
     #[cfg(target_arch = "wasm32")]
-    pub fn in_library() -> bool {
-        js_sys::Reflect::get(&js_sys::global(), &"__DOXA_LIBRARY__".into())
+    pub use crate::story::{mount_story, StoryHandle};
+
+    /// Whether a library package or the gallery loaded this wasm, so the app doesn't own the page.
+    #[cfg(target_arch = "wasm32")]
+    pub fn hosted() -> bool {
+        js_sys::Reflect::get(&js_sys::global(), &"__DOXA_HOSTED__".into())
             .is_ok_and(|v| v.is_truthy())
     }
     #[cfg(target_arch = "wasm32")]

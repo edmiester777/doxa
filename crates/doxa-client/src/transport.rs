@@ -189,6 +189,88 @@ impl Transport for MockTransport {
     }
 }
 
+/// Events, one JSON value per line, replayed as an SSE stream; see [`scripted`].
+#[derive(Clone)]
+pub struct Scripted {
+    frames: Rc<Vec<String>>,
+    every: std::time::Duration,
+}
+
+/// Replay `jsonl`, one `E` per line, as the answer to every request, on the doxa
+/// [clock](crate::clock): a manual clock in tests, real time in the browser. A line that
+/// isn't an `E` panics, naming the line.
+///
+/// ```
+/// # #[derive(serde::Deserialize)] struct Delta { text: String }
+/// use std::time::Duration;
+/// use doxa_client::transport::scripted;
+///
+/// let script = scripted::<Delta>("{\"text\":\"Hel\"}\n{\"text\":\"lo\"}\n").every(Duration::from_millis(40));
+/// let _transport = script.transport();
+/// ```
+#[track_caller]
+pub fn scripted<E: serde::de::DeserializeOwned>(jsonl: &str) -> Scripted {
+    let frames = jsonl
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            if let Err(e) = serde_json::from_str::<E>(l) {
+                panic!(
+                    "line {} of the script isn't a `{}`: {e}",
+                    i + 1,
+                    std::any::type_name::<E>()
+                );
+            }
+            l.trim().to_owned()
+        })
+        .collect();
+    Scripted {
+        frames: Rc::new(frames),
+        every: std::time::Duration::ZERO,
+    }
+}
+
+impl Scripted {
+    /// Wait `d` before each event.
+    pub fn every(mut self, d: std::time::Duration) -> Self {
+        self.every = d;
+        self
+    }
+
+    /// A transport answering each request with the whole script.
+    pub fn transport(&self) -> ScriptedTransport {
+        ScriptedTransport(self.clone())
+    }
+}
+
+/// The [`Transport`] of a [`Scripted`].
+#[derive(Clone)]
+pub struct ScriptedTransport(Scripted);
+
+impl Transport for ScriptedTransport {
+    fn send(&self, _: Request) -> LocalBoxFuture<'static, Result<Response, String>> {
+        let Scripted { frames, every } = self.0.clone();
+        let stream = futures_util::stream::unfold(0, move |i| {
+            let frames = frames.clone();
+            async move {
+                let line = frames.get(i)?;
+                if !every.is_zero() {
+                    crate::clock::sleep(every).await;
+                }
+                Some((Ok(format!("data: {line}\n\n").into_bytes()), i + 1))
+            }
+        });
+        Box::pin(async move {
+            Ok(Response {
+                status: 200,
+                headers: vec![("content-type".into(), "text/event-stream".into())],
+                body: Body::Stream(Box::pin(stream)),
+            })
+        })
+    }
+}
+
 #[cfg(all(feature = "router", not(target_arch = "wasm32")))]
 pub use router::RouterTransport;
 

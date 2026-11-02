@@ -6,6 +6,7 @@ use widgets_client::widgets::*;
 
 pub mod kit;
 pub mod motion;
+pub mod stories;
 use motion::{exit, flip};
 
 /// The default look.

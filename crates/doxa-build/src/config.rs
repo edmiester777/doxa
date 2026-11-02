@@ -304,6 +304,10 @@ impl Layout {
     pub fn dist(&self) -> PathBuf {
         self.root.join("dist")
     }
+    /// The `#[story]` gallery `doxa gallery` serves.
+    pub fn gallery(&self) -> PathBuf {
+        self.root.join("gallery")
+    }
     /// The npm package `doxa build --lib` writes.
     pub fn lib(&self) -> PathBuf {
         self.root.join("lib")

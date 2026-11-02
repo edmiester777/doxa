@@ -239,6 +239,7 @@ pub async fn run(package: Option<String>, port: u16, locked: bool) -> Result<(),
         package,
         locked,
         compress: false,
+        gallery: false,
     };
     let pipeline = tokio::task::spawn_blocking(move || -> doxa_build::Result<Pipeline> {
         let mut p = Pipeline::new(&cwd, opts)?;

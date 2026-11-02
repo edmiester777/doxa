@@ -1,6 +1,7 @@
 //! `doxa`: scaffold, build, and develop a doxa app.
 
 mod dev;
+mod gallery;
 mod new;
 
 use std::process::ExitCode;
@@ -53,6 +54,18 @@ enum Command {
         #[arg(long)]
         locked: bool,
     },
+    /// Build the `#[story]` functions into a gallery and serve it.
+    Gallery {
+        /// The web crate; defaults to the one with role = "client".
+        #[arg(short, long)]
+        package: Option<String>,
+        /// The port to serve on.
+        #[arg(long, default_value_t = 3100)]
+        port: u16,
+        /// Install npm dependencies from the lockfile only.
+        #[arg(long)]
+        locked: bool,
+    },
     /// Format Rust sources, including view markup.
     Fmt {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
@@ -77,6 +90,7 @@ fn main() -> ExitCode {
                 package,
                 locked,
                 compress: !lib,
+                gallery: false,
             },
             lib,
         ),
@@ -87,6 +101,13 @@ fn main() -> ExitCode {
         } => tokio::runtime::Runtime::new()
             .map_err(Into::into)
             .and_then(|rt| rt.block_on(dev::run(package, port, locked))),
+        Command::Gallery {
+            package,
+            port,
+            locked,
+        } => tokio::runtime::Runtime::new()
+            .map_err(Into::into)
+            .and_then(|rt| rt.block_on(gallery::run(package, port, locked))),
         Command::Fmt { args } => return doxa_fmt::run(args),
     };
     match result {
@@ -149,6 +170,10 @@ mod tests {
         assert!(matches!(
             parse(&["doxa", "dev", "--port", "8080", "--package", "w"]),
             Command::Dev { port: 8080, package: Some(p), .. } if p == "w"
+        ));
+        assert!(matches!(
+            parse(&["doxa", "gallery"]),
+            Command::Gallery { port: 3100, .. }
         ));
     }
 

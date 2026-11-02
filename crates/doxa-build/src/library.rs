@@ -109,7 +109,7 @@ pub fn index_js(
     js.push_str("\nlet started = null;\nlet options = {};\n\n");
     js.push_str("function start() {\n  started ??= import(");
     js.push_str(&path(glue));
-    js.push_str(").then(async (m) => {\n    globalThis.__DOXA_LIBRARY__ = true;\n");
+    js.push_str(").then(async (m) => {\n    globalThis.__DOXA_HOSTED__ = true;\n");
     if runtime.is_some() {
         js.push_str("    libraryMode();\n");
     }

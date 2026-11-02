@@ -62,7 +62,33 @@ pub fn derive_form(item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// The wasm entry point: runs once the module loads, except inside a `doxa build --lib` package.
+/// A view shown alone in `doxa gallery`: `#[story] fn empty_list() -> View { … }`. Return
+/// `(view, guard)` to keep a `push_scoped` layer for the story's life.
+#[proc_macro_attribute]
+pub fn story(_args: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as ItemFn);
+    let name = &item.sig.ident;
+    let export = format!("__doxa_story_{name}");
+    quote! {
+        #item
+
+        #[allow(unexpected_cfgs)]
+        const _: () = {
+            // Used, so a story isn't dead code outside the gallery.
+            let _ = #name;
+            #[cfg(all(doxa_gallery, target_arch = "wasm32"))]
+            #[::doxa::ui::__private::wasm_bindgen::prelude::wasm_bindgen(js_name = #export, wasm_bindgen = ::doxa::ui::__private::wasm_bindgen)]
+            pub fn __doxa_story(
+                host: ::doxa::ui::__private::web_sys::Element,
+            ) -> ::core::result::Result<::doxa::ui::__private::StoryHandle, ::doxa::ui::__private::wasm_bindgen::JsError> {
+                ::doxa::ui::__private::mount_story(host, #name)
+            }
+        };
+    }
+    .into()
+}
+
+/// The wasm entry point: runs once the module loads, except in a `doxa build --lib` package or `doxa gallery`.
 #[proc_macro_attribute]
 pub fn start(_args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
@@ -76,7 +102,7 @@ pub fn start(_args: TokenStream, item: TokenStream) -> TokenStream {
             use ::doxa::ui::__private::wasm_bindgen;
             #[wasm_bindgen::prelude::wasm_bindgen(start, wasm_bindgen = ::doxa::ui::__private::wasm_bindgen)]
             fn __doxa_start() {
-                if !::doxa::ui::__private::in_library() {
+                if !::doxa::ui::__private::hosted() {
                     #name()
                 }
             }
