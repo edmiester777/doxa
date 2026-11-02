@@ -1,6 +1,15 @@
 // The React side of doxa islands: one root, created on first mount. A nested island is a
 // portal inside the island around it, so it gets that island's React context.
-import { createElement, Fragment, memo, Suspense, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import {
+  Component,
+  createElement,
+  Fragment,
+  memo,
+  Suspense,
+  useLayoutEffect,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -34,6 +43,23 @@ function Adopt({ node }) {
 
 const IslandView = memo(({ component, props }) => createElement(component, props));
 
+// One per island, so a throwing island goes blank and tells Rust instead of unmounting the shared root.
+class Boundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error) {
+    this.props.onError(String(error?.message ?? error));
+  }
+  render() {
+    return this.state.failed ? null : this.props.children;
+  }
+}
+
 // The islands whose nearest island is `parent`; `null` for the root, which also takes orphans.
 function Portals({ parent }) {
   useSyncExternalStore(subscribe, () => version);
@@ -42,7 +68,11 @@ function Portals({ parent }) {
   );
   return mine.map((i) =>
     createPortal(
-      createElement(Suspense, { fallback: null }, createElement(IslandView, { component: i.component, props: i.props })),
+      createElement(
+        Boundary,
+        { onError: i.onError },
+        createElement(Suspense, { fallback: null }, createElement(IslandView, { component: i.component, props: i.props })),
+      ),
       i.host,
       String(i.id),
     ),
@@ -70,7 +100,7 @@ function propsOf(island, data) {
   return props;
 }
 
-export function mount(id, parent, host, component, data, handlers, children) {
+export function mount(id, parent, host, component, data, handlers, children, onError) {
   if (root === null) {
     const el = document.createElement("div");
     el.hidden = true;
@@ -79,6 +109,9 @@ export function mount(id, parent, host, component, data, handlers, children) {
     root.render(createElement(Portals, { parent: null }));
   }
   const island = { id, parent: parent ?? null, host, component, children, live: true, events: {}, props: null };
+  island.onError = (message) => {
+    if (island.live) onError(message);
+  };
   for (const [name, f] of Object.entries(handlers)) {
     // Created once per island, so React sees the same function on every update.
     island.events[name] = (arg) => {

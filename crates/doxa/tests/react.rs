@@ -42,6 +42,7 @@ struct Calls {
     parents: Vec<(&'static str, Option<u32>)>,
     roots: Vec<u64>,
     events: HashMap<u32, Vec<(&'static str, EventFn)>>,
+    errors: HashMap<u32, EventFn>,
 }
 
 #[derive(Clone, Default)]
@@ -66,6 +67,7 @@ impl Bridge for Fake {
         c.parents.push((m.island.name, m.parent));
         c.roots.push(m.root);
         c.events.insert(m.id, m.events);
+        c.errors.insert(m.id, m.on_error);
     }
 
     fn update(&self, id: u32, props: &Props) {
@@ -310,4 +312,40 @@ fn each_island_names_the_root_it_is_in() {
         "dropping a root unmounts its islands"
     );
     a.keep();
+}
+
+#[component]
+fn TwoEditors() -> View {
+    let caught = |e: &Thrown| view! { <p class="err">{e.to_string()}</p> };
+    view! {
+        <Catch fallback={caught}>
+            <Monaco value={"a".to_string()}/>
+        </Catch>
+        <Catch fallback={caught}>
+            <Monaco value={"b".to_string()}/>
+        </Catch>
+    }
+}
+
+#[test]
+fn an_island_that_throws_in_react_reaches_its_catch_and_spares_its_siblings() {
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    App::new(|| view! { <TwoEditors/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    let ids: Vec<u32> = fake.0.borrow().errors.keys().copied().collect();
+    let (first, second) = (*ids.iter().min().unwrap(), *ids.iter().max().unwrap());
+    fake.log();
+    let fail = fake.0.borrow().errors[&first].clone();
+    fail("editor exploded");
+    doxa::client::task::run_until_stalled();
+    let err = dom.find("class", "err").expect("the catch shows");
+    assert_eq!(dom.text(err), "<Monaco> threw in React: editor exploded");
+    assert_eq!(
+        fake.log(),
+        [format!("unmount {first}")],
+        "island {second} stays"
+    );
 }

@@ -116,6 +116,8 @@ pub struct Mount<'a> {
     pub events: Vec<(&'static str, EventFn)>,
     /// doxa's render of its `View` children, for React to place as `children`.
     pub children: Option<NodeRef>,
+    /// Call with a message when the island throws while React renders it.
+    pub on_error: EventFn,
 }
 
 /// The JS side of islands. [`set_bridge`] swaps it, e.g. for a fake in native tests.
@@ -176,6 +178,8 @@ struct Live<P> {
     id: u32,
     parent: Option<u32>,
     root: u64,
+    /// The island's instance, where a React error is thrown.
+    owner: Weak<Instance>,
     mounted: Cell<bool>,
     children: Cell<Option<NodeRef>>,
     shown: RefCell<Option<P>>,
@@ -218,6 +222,15 @@ impl<P: IslandProps> Live<P> {
                     island: &P::ISLAND,
                     props: &data(props),
                     events: forwarders,
+                    on_error: {
+                        let (owner, name) = (self.owner.clone(), P::ISLAND.name);
+                        Rc::new(move |message: &str| {
+                            runtime::throw(
+                                owner.upgrade().as_ref(),
+                                Thrown::msg(format!("<{name}> threw in React: {message}")),
+                            )
+                        })
+                    },
                     children: self.children.get(),
                 });
                 self.mounted.set(true);
@@ -256,11 +269,12 @@ fn data<P: IslandProps>(props: &P) -> Props {
 /// The render of a `#[react]` component: an empty host the bridge renders into.
 #[doc(hidden)]
 pub fn render<P: IslandProps>(props: P) -> RenderFuture {
-    let root = crate::runtime::current_or_panic("island").root_id();
+    let me = crate::runtime::current_or_panic("island");
     let (inst, _, live) = crate::hooks::slot("island", || Live::<P> {
         id: next_id(),
         parent: crate::hooks::try_context::<Parent>().map(|p| p.0),
-        root,
+        root: me.root_id(),
+        owner: Rc::downgrade(&me),
         mounted: Cell::new(false),
         children: Cell::new(None),
         shown: RefCell::new(None),
@@ -314,6 +328,7 @@ mod web {
             props: &JsValue,
             events: &js_sys::Object,
             children: Option<web_sys::Node>,
+            on_error: &JsValue,
         );
         #[wasm_bindgen(js_name = update)]
         fn js_update(id: u32, props: &JsValue);
@@ -340,7 +355,7 @@ mod web {
             let host = m.host.raw().expect("an island's host is in the document");
             let children = m.children.and_then(NodeRef::raw);
             let obj = js_sys::Object::new();
-            let handlers: Handlers = m
+            let mut handlers: Handlers = m
                 .events
                 .into_iter()
                 .map(|(name, f)| {
@@ -349,6 +364,8 @@ mod web {
                     c
                 })
                 .collect();
+            let on_error = m.on_error;
+            let on_error = Closure::<dyn Fn(String)>::new(move |msg: String| on_error(&msg));
             let component = (m.island.load)();
             js_mount(
                 m.id,
@@ -358,7 +375,9 @@ mod web {
                 &to_js(m.props),
                 &obj,
                 children,
+                on_error.as_ref(),
             );
+            handlers.push(on_error);
             self.0.borrow_mut().insert(m.id, handlers);
         }
 
