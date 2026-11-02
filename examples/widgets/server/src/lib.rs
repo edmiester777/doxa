@@ -58,6 +58,9 @@ pub fn app(catalog: Catalog) -> Router {
         .routes(routes!(rename_widget))
         .routes(routes!(widget_events))
         .routes(routes!(suggest_name))
+        .routes(routes!(widget_label))
+        .routes(routes!(upload_photo))
+        .routes(routes!(upload_files))
         .split_for_parts();
     router
         .layer(axum::middleware::from_fn(

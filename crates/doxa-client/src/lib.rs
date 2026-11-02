@@ -13,20 +13,24 @@ mod call;
 mod can;
 mod fetch;
 pub mod layer;
+mod multipart;
 mod response;
 mod service;
 mod sse;
 pub mod task;
 pub mod transport;
 
-pub use arg::{Arg, ArgFor, ClientArg, Foreign, Form, Granted, Json, Outgoing, Path, Query};
+pub use arg::{Arg, ArgFor, Bytes, ClientArg, Foreign, Form, Granted, Json, Outgoing, Path, Query};
 pub use cache::{invalidate, invalidate_all, CacheConfig};
 pub use cached::Cached;
 pub use call::Call;
 pub use can::{Permission, Probe};
 pub use fetch::{Fetch, NoError};
 pub use layer::{layer_fn, layers, Layer, Next};
-pub use response::{AliasedResult, FromResponse, SseOnce, SseStream, StatusCode, Unsupported};
+pub use multipart::Multipart;
+pub use response::{
+    AliasedResult, Attachment, Download, FromResponse, SseOnce, SseStream, StatusCode, Unsupported,
+};
 pub use service::{on_any_session_change, service, Service};
 pub use sse::{Backoff, EventStream, Once};
 

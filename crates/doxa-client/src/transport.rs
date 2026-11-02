@@ -20,9 +20,30 @@ pub struct Request {
     /// Header names and values.
     pub headers: Vec<(String, String)>,
     /// Request body, if any.
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Payload>,
     /// Send the browser's cookies with the request.
     pub credentials: bool,
+}
+
+/// A request body.
+#[derive(Debug, Clone)]
+pub enum Payload {
+    /// Bytes, with the content type in the headers.
+    Bytes(Vec<u8>),
+    /// A `Blob` or `FormData` the browser sends as it is, setting its own content type.
+    #[cfg(target_arch = "wasm32")]
+    Js(wasm_bindgen::JsValue),
+}
+
+impl Payload {
+    /// The bytes, unless the body lives in the browser.
+    pub fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Payload::Bytes(b) => Some(b),
+            #[cfg(target_arch = "wasm32")]
+            Payload::Js(_) => None,
+        }
+    }
 }
 
 impl Request {
@@ -177,7 +198,7 @@ mod router {
     use futures_util::StreamExt;
     use tower::ServiceExt;
 
-    use super::{Body, Request, Response, Transport};
+    use super::{Body, Payload, Request, Response, Transport};
 
     /// Sends every call through an axum router in-process: the real routes and layers.
     #[derive(Clone)]
@@ -213,8 +234,13 @@ mod router {
                 for (k, v) in request.headers.iter().chain(&extra) {
                     builder = builder.header(k, v);
                 }
+                let body = request
+                    .body
+                    .as_ref()
+                    .and_then(Payload::bytes)
+                    .unwrap_or_default();
                 let req = builder
-                    .body(axum::body::Body::from(request.body.unwrap_or_default()))
+                    .body(axum::body::Body::from(body.to_vec()))
                     .map_err(|e| e.to_string())?;
                 let Ok(resp) = router.oneshot(req).await;
                 let status = resp.status().as_u16();
@@ -248,7 +274,7 @@ mod browser {
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{RequestCache, RequestCredentials, RequestInit};
 
-    use super::{Body, Request, Response, Transport};
+    use super::{Body, Payload, Request, Response, Transport};
 
     /// `window.fetch`, with the browser's HTTP cache bypassed so only doxa's applies.
     #[derive(Clone, Default)]
@@ -286,8 +312,10 @@ mod browser {
                     headers.append(k, v).map_err(js_err)?;
                 }
                 init.set_headers(&headers);
-                if let Some(body) = &request.body {
-                    init.set_body(&Uint8Array::from(body.as_slice()));
+                match &request.body {
+                    Some(Payload::Bytes(body)) => init.set_body(&Uint8Array::from(body.as_slice())),
+                    Some(Payload::Js(body)) => init.set_body(body),
+                    None => {}
                 }
                 let req = web_sys::Request::new_with_str_and_init(&url, &init).map_err(js_err)?;
                 let window = web_sys::window().ok_or("no window")?;

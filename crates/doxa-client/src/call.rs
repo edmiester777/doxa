@@ -127,9 +127,11 @@ impl<R> Call<R> {
     pub(crate) fn request(&self, url: String, accept: &str) -> Request {
         let mut headers = self.out.headers().to_vec();
         headers.push(("accept".into(), accept.into()));
-        let body = self.out.body().map(|(content_type, bytes)| {
-            headers.push(("content-type".into(), (*content_type).into()));
-            bytes.clone()
+        let body = self.out.body().map(|(content_type, payload)| {
+            if let Some(t) = content_type {
+                headers.push(("content-type".into(), t.clone()));
+            }
+            payload.clone()
         });
         Request {
             method: self.route.method,
@@ -235,11 +237,12 @@ async fn decode<R: FromResponse>(response: crate::transport::Response) -> Sent<R
     if status == 304 {
         return Sent::NotModified(meta);
     }
+    let headers = response.headers;
     match response.body.bytes().await {
         Ok(bytes) if status >= 400 => Sent::Status(status, bytes),
         Ok(bytes) => {
             meta.digest = Some(digest(&bytes));
-            match R::decode(status, bytes) {
+            match R::decode(status, &headers, bytes) {
                 Ok(v) => Sent::Value(v, meta, invalidates),
                 Err(e) => Sent::Failed(Fetch::Decode(e)),
             }

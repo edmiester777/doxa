@@ -240,3 +240,26 @@ async fn a_dry_run_asks_the_real_guard() {
     // The dry run never ran the handler.
     assert_eq!(get_widget("sprocket").await.unwrap().name, "sprocket");
 }
+
+#[tokio::test]
+async fn an_attachment_arrives_with_its_type_and_name() {
+    install("viewer");
+    let file = widget_label("gear").await.unwrap();
+    assert_eq!(file.bytes, b"gear\n");
+    assert_eq!(file.content_type.as_deref(), Some("text/plain"));
+    assert_eq!(file.filename.as_deref(), Some("gear label.txt"));
+}
+
+#[tokio::test]
+async fn bytes_and_multipart_bodies_reach_the_route() {
+    install("editor");
+    assert_eq!(*upload_photo("gear", vec![0u8; 512]).await.unwrap(), 512);
+    let form = doxa::client::Multipart::new().text("title", "Q3").bytes(
+        "sheet",
+        "q3.csv",
+        "text/csv",
+        b"a,b\n1,2\n".to_vec(),
+    );
+    let fields = upload_files(form).await.unwrap();
+    assert_eq!(*fields, ["title=2", "sheet:q3.csv=8"]);
+}

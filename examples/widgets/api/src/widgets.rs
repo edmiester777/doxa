@@ -5,6 +5,8 @@ doxa::prelude!();
 #[server]
 use crate::store::{AppGrants, Caller, Catalog};
 #[server]
+use axum::{body::Bytes, extract::Multipart};
+#[server]
 use futures::stream::{self, Stream};
 #[server]
 use std::convert::Infallible;
@@ -99,6 +101,37 @@ pub async fn suggest_name(
 ) -> StatusCode {
     catalog.suggest(format!("{} from {who}", suggestion.name));
     StatusCode::ACCEPTED
+}
+
+/// A widget's label, as a file to save.
+#[get("/api/widgets/{name}/label")]
+pub async fn widget_label(widget: Granted<WidgetByName>) -> Attachment {
+    let name = widget.into_inner().name;
+    Attachment::new(format!("{name}\n"))
+        .content_type("text/plain")
+        .filename(format!("{name} label.txt"))
+}
+
+/// Upload a widget's photo; answers its size in bytes.
+#[put("/api/widgets/{name}/photo")]
+pub async fn upload_photo(_widget: Granted<WidgetByName>, photo: Bytes) -> Json<usize> {
+    Json(photo.len())
+}
+
+/// Upload files; answers each field as `name=size`.
+#[post("/api/uploads")]
+pub async fn upload_files(mut form: Multipart) -> Json<Vec<String>> {
+    let mut fields = Vec::new();
+    while let Ok(Some(field)) = form.next_field().await {
+        let name = field.name().unwrap_or_default().to_owned();
+        let file = field.file_name().map(str::to_owned);
+        let size = field.bytes().await.map_or(0, |b| b.len());
+        fields.push(match file {
+            Some(f) => format!("{name}:{f}={size}"),
+            None => format!("{name}={size}"),
+        });
+    }
+    Json(fields)
 }
 
 /// What happens to a widget, as it happens.

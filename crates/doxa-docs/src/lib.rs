@@ -185,6 +185,7 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod attachment;
 mod builder;
 mod contribution;
 #[cfg(feature = "cors")]
@@ -209,6 +210,7 @@ mod spa;
 mod sse;
 mod ui;
 
+pub use attachment::Attachment;
 pub use builder::{ApiDoc, ApiDocBuilder, BuildError, SseSpecVersion};
 pub use contribution::{
     apply_badge_to_operation, apply_contribution, record_required_permission, BadgeContribution,

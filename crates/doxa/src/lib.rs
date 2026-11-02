@@ -64,8 +64,8 @@ pub mod server {
     pub mod prelude {
         pub use crate::{
             asset, capability, client, client_only, delete, get, operation, patch, post, put,
-            server, server_only, Actions, ApiError, Identity, IntoParams, PolicyResource, SseEvent,
-            SseStream, ToSchema,
+            server, server_only, Actions, ApiError, Attachment, Identity, IntoParams,
+            PolicyResource, SseEvent, SseStream, ToSchema,
         };
         pub use axum::extract::{Extension, Form, Path, Query, State};
         pub use axum::http::StatusCode;

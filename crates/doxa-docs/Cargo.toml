@@ -57,6 +57,7 @@ bytes = { workspace = true }
 futures-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+percent-encoding = "2"
 tower = { workspace = true }
 tokio = { version = "1", features = ["fs"] }
 paste = { workspace = true }

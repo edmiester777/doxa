@@ -345,6 +345,8 @@ fn classify(pat: &Pat, ty: &Type, index: usize) -> Arg {
         ("Query", Some(t)) => sent(Kind::Plain, quote!(::doxa::client::Query<#t>)),
         ("Json", Some(t)) => sent(Kind::Body, quote!(::doxa::client::Json<#t>)),
         ("Form", Some(t)) => sent(Kind::Body, quote!(::doxa::client::Form<#t>)),
+        ("Bytes", None) => sent(Kind::Body, quote!(::doxa::client::Bytes)),
+        ("Multipart", None) => sent(Kind::Body, quote!(::doxa::client::Multipart)),
         ("Granted", Some(_)) => match grant::instance_asset(ty) {
             Some(asset) => sent(Kind::Guard, quote!(::doxa::client::Granted<#asset>)),
             None => Arg::Dropped,
@@ -389,6 +391,7 @@ fn response_type<'a>(ty: &'a Type, once: bool, bad: &mut Option<&'a Type>) -> To
                 ("StatusCode", []) => quote!(::doxa::client::StatusCode),
                 ("NoContent", []) => quote!(::doxa::client::StatusCode),
                 ("String", []) => quote!(::std::string::String),
+                ("Attachment", []) => quote!(::doxa::client::Attachment),
                 ("Cached", [t]) => quote!(::doxa::client::Json<#t>),
                 _ => unsupported(ty, bad),
             }

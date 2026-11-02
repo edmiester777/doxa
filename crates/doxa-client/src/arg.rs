@@ -7,6 +7,9 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::multipart::Multipart;
+use crate::transport::Payload;
+
 /// A value that can stand in for a `T` argument: `T`, `&T`, `&str` for `String`, `&[T]` for `Vec<T>`.
 pub trait Arg<T> {
     /// The owned value.
@@ -75,7 +78,7 @@ pub struct Outgoing {
     positional: Vec<String>,
     query: Vec<(String, String)>,
     keys: Vec<Value>,
-    body: Option<(&'static str, Vec<u8>)>,
+    body: Option<(Option<String>, Payload)>,
     headers: Vec<(String, String)>,
 }
 
@@ -138,14 +141,24 @@ impl Outgoing {
     /// Set a JSON body.
     pub fn json(&mut self, value: &impl Serialize) -> Result<(), String> {
         let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
-        self.body = Some(("application/json", bytes));
+        self.raw("application/json", bytes);
         Ok(())
+    }
+
+    /// Set the body to `bytes` of type `content_type`.
+    pub fn raw(&mut self, content_type: impl Into<String>, bytes: Vec<u8>) {
+        self.body = Some((Some(content_type.into()), Payload::Bytes(bytes)));
+    }
+
+    /// Set a body the browser sends as it is, e.g. `FormData`.
+    pub fn payload(&mut self, content_type: Option<String>, payload: Payload) {
+        self.body = Some((content_type, payload));
     }
 
     /// Set a form body.
     pub fn form(&mut self, value: &impl Serialize) -> Result<(), String> {
         let encoded = serde_urlencoded::to_string(value).map_err(|e| e.to_string())?;
-        self.body = Some(("application/x-www-form-urlencoded", encoded.into_bytes()));
+        self.raw("application/x-www-form-urlencoded", encoded.into_bytes());
         Ok(())
     }
 
@@ -174,7 +187,7 @@ impl Outgoing {
         &self.headers
     }
 
-    pub(crate) fn body(&self) -> Option<&(&'static str, Vec<u8>)> {
+    pub(crate) fn body(&self) -> Option<&(Option<String>, Payload)> {
         self.body.as_ref()
     }
 
@@ -249,6 +262,8 @@ pub struct Json<T>(PhantomData<fn() -> T>);
 pub struct Form<T>(PhantomData<fn() -> T>);
 /// `Granted<W>`: the caller passes the asset's key.
 pub struct Granted<W>(PhantomData<fn() -> W>);
+/// `axum::body::Bytes`: the caller passes the raw body.
+pub struct Bytes;
 /// An extractor doxa does not know; it needs its own [`ClientArg`] impl.
 pub struct Foreign<T>(PhantomData<fn() -> T>);
 
@@ -288,6 +303,23 @@ where
     type Value = W::Key;
     fn apply(value: W::Key, out: &mut Outgoing) -> Result<(), String> {
         out.key(&value)
+    }
+}
+
+impl ClientArg for Bytes {
+    type Value = Vec<u8>;
+    fn apply(value: Vec<u8>, out: &mut Outgoing) -> Result<(), String> {
+        out.raw("application/octet-stream", value);
+        Ok(())
+    }
+}
+
+impl ClientArg for Multipart {
+    type Value = Multipart;
+    fn apply(value: Multipart, out: &mut Outgoing) -> Result<(), String> {
+        let (content_type, payload) = value.encode()?;
+        out.payload(content_type, payload);
+        Ok(())
     }
 }
 

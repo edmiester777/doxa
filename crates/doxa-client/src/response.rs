@@ -13,7 +13,7 @@ use crate::sse::{EventStream, Hub, Once};
 /// A route's return type, as the browser decodes it.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` can't be decoded by the browser",
-    note = "a client-callable route returns `Json<T>`, `SseStream<E>`, `StatusCode`, `String` or `()`, \
+    note = "a client-callable route returns `Json<T>`, `SseStream<E>`, `Attachment`, `StatusCode`, `String` or `()`, \
             optionally in a `Result` whose error derives `Deserialize`; `T` must be `Deserialize + Clone`. \
             Otherwise set `client = false` on the route"
 )]
@@ -26,7 +26,11 @@ pub trait FromResponse: 'static {
     const STREAMS: bool = false;
     /// Decode a buffered success response.
     #[doc(hidden)]
-    fn decode(status: u16, body: Vec<u8>) -> Result<Self::Output, String>;
+    fn decode(
+        status: u16,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) -> Result<Self::Output, String>;
     /// Subscribe to a shared event stream; only called when `STREAMS`.
     #[doc(hidden)]
     fn stream(_hub: Rc<Hub>) -> Self::Output {
@@ -46,6 +50,8 @@ pub struct StatusCode;
 pub struct SseStream<E>(PhantomData<fn() -> E>);
 /// `SseStream<E, _>` from a route that isn't a GET: the call yields a [`Once`].
 pub struct SseOnce<E>(PhantomData<fn() -> E>);
+/// `doxa::Attachment`: the call yields a [`Download`].
+pub struct Attachment;
 /// A return type the browser can't decode. The route's stub refuses to be called.
 pub struct Unsupported;
 /// A one-argument `Result<T>` alias: the error type isn't visible, so it decodes as JSON.
@@ -85,7 +91,7 @@ fn load_copy<T: Clone + 'static>(value: Rc<dyn Any>) -> Option<T> {
 impl<T: DeserializeOwned + Clone + 'static> FromResponse for crate::arg::Json<T> {
     type Output = Cached<T>;
     type Error = NoError;
-    fn decode(_: u16, body: Vec<u8>) -> Result<Cached<T>, String> {
+    fn decode(_: u16, _: &[(String, String)], body: Vec<u8>) -> Result<Cached<T>, String> {
         serde_json::from_slice(&body)
             .map(Cached::new)
             .map_err(|e| e.to_string())
@@ -101,8 +107,12 @@ impl<T: DeserializeOwned + Clone + 'static> FromResponse for crate::arg::Json<T>
 macro_rules! forward {
     () => {
         const STREAMS: bool = R::STREAMS;
-        fn decode(status: u16, body: Vec<u8>) -> Result<Self::Output, String> {
-            R::decode(status, body)
+        fn decode(
+            status: u16,
+            headers: &[(String, String)],
+            body: Vec<u8>,
+        ) -> Result<Self::Output, String> {
+            R::decode(status, headers, body)
         }
         fn stream(hub: Rc<Hub>) -> Self::Output {
             R::stream(hub)
@@ -144,7 +154,7 @@ impl<R: FromResponse> FromResponse for (StatusCode, R) {
 impl FromResponse for StatusCode {
     type Output = u16;
     type Error = NoError;
-    fn decode(status: u16, _: Vec<u8>) -> Result<u16, String> {
+    fn decode(status: u16, _: &[(String, String)], _: Vec<u8>) -> Result<u16, String> {
         Ok(status)
     }
     fn store(value: &u16) -> Option<Rc<dyn Any>> {
@@ -158,7 +168,7 @@ impl FromResponse for StatusCode {
 impl FromResponse for () {
     type Output = ();
     type Error = NoError;
-    fn decode(_: u16, _: Vec<u8>) -> Result<(), String> {
+    fn decode(_: u16, _: &[(String, String)], _: Vec<u8>) -> Result<(), String> {
         Ok(())
     }
     fn store(value: &()) -> Option<Rc<dyn Any>> {
@@ -172,7 +182,7 @@ impl FromResponse for () {
 impl FromResponse for String {
     type Output = Cached<String>;
     type Error = NoError;
-    fn decode(_: u16, body: Vec<u8>) -> Result<Cached<String>, String> {
+    fn decode(_: u16, _: &[(String, String)], body: Vec<u8>) -> Result<Cached<String>, String> {
         String::from_utf8(body)
             .map(Cached::new)
             .map_err(|e| e.to_string())
@@ -189,7 +199,7 @@ impl<E: DeserializeOwned + 'static> FromResponse for SseStream<E> {
     type Output = EventStream<E>;
     type Error = NoError;
     const STREAMS: bool = true;
-    fn decode(_: u16, _: Vec<u8>) -> Result<EventStream<E>, String> {
+    fn decode(_: u16, _: &[(String, String)], _: Vec<u8>) -> Result<EventStream<E>, String> {
         Err("an event stream arrived buffered".to_owned())
     }
     fn stream(hub: Rc<Hub>) -> EventStream<E> {
@@ -207,7 +217,7 @@ impl<E: DeserializeOwned + 'static> FromResponse for SseOnce<E> {
     type Output = Once<E>;
     type Error = NoError;
     const STREAMS: bool = true;
-    fn decode(_: u16, _: Vec<u8>) -> Result<Once<E>, String> {
+    fn decode(_: u16, _: &[(String, String)], _: Vec<u8>) -> Result<Once<E>, String> {
         Err("an event stream arrived buffered".to_owned())
     }
     fn stream(hub: Rc<Hub>) -> Once<E> {
@@ -221,10 +231,62 @@ impl<E: DeserializeOwned + 'static> FromResponse for SseOnce<E> {
     }
 }
 
+/// A file a route sent: its bytes, type and suggested name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Download {
+    /// The file's contents.
+    pub bytes: Vec<u8>,
+    /// `content-type`, if sent.
+    pub content_type: Option<String>,
+    /// The name `content-disposition` suggests saving it under.
+    pub filename: Option<String>,
+}
+
+impl FromResponse for Attachment {
+    type Output = Download;
+    type Error = NoError;
+    fn decode(_: u16, headers: &[(String, String)], bytes: Vec<u8>) -> Result<Download, String> {
+        let header = |n: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(n))
+                .map(|(_, v)| v.as_str())
+        };
+        Ok(Download {
+            bytes,
+            content_type: header("content-type").map(str::to_owned),
+            filename: header("content-disposition").and_then(filename),
+        })
+    }
+    fn store(_: &Download) -> Option<Rc<dyn Any>> {
+        None
+    }
+    fn load(_: Rc<dyn Any>) -> Option<Download> {
+        None
+    }
+}
+
+/// The `filename*` (RFC 5987, UTF-8) or `filename` of a `content-disposition` value.
+fn filename(disposition: &str) -> Option<String> {
+    let params = || disposition.split(';').skip(1).map(str::trim);
+    let extended = params().find_map(|p| p.strip_prefix("filename*="));
+    if let Some(v) = extended.and_then(|v| v.split_once("''").map(|(_, v)| v)) {
+        let decoded = percent_encoding::percent_decode_str(v).decode_utf8().ok()?;
+        return Some(decoded.into_owned());
+    }
+    let v = params().find_map(|p| p.strip_prefix("filename="))?;
+    Some(
+        match v.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+            Some(q) => q.replace("\\\"", "\"").replace("\\\\", "\\"),
+            None => v.to_owned(),
+        },
+    )
+}
+
 impl FromResponse for Unsupported {
     type Output = Unsupported;
     type Error = NoError;
-    fn decode(_: u16, _: Vec<u8>) -> Result<Unsupported, String> {
+    fn decode(_: u16, _: &[(String, String)], _: Vec<u8>) -> Result<Unsupported, String> {
         Err("this route's response isn't client-callable".to_owned())
     }
     fn store(_: &Unsupported) -> Option<Rc<dyn Any>> {
