@@ -23,6 +23,8 @@ garde = { workspace = true, optional = true }
 [features]
 # `#[react]`: React components rendered as portals of one shared root.
 react = ["dep:serde-wasm-bindgen"]
+# `#[component(export)]`: components a foreign React host mounts, built by `doxa build --lib`.
+export = ["dep:serde-wasm-bindgen"]
 # `form()` and `#[derive(Form)]`, checked by garde.
 forms = ["dep:garde"]
 

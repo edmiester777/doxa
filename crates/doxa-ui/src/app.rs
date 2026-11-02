@@ -174,6 +174,13 @@ impl RootHandle {
         self.id
     }
 
+    /// Render the root again, as its own state changing would.
+    pub(crate) fn refresh(&self) {
+        if let Some(inst) = Instance::find(self.id) {
+            runtime::schedule(&inst);
+        }
+    }
+
     /// Keep the root mounted for the page's life.
     pub fn keep(self) {
         std::mem::forget(self);

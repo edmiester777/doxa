@@ -50,7 +50,7 @@ pub fn strip_link_sections(wasm: &[u8], names: bool) -> Vec<u8> {
 }
 
 /// An unsigned LEB128 and how many bytes it took.
-fn leb128(b: &[u8]) -> Option<(usize, usize)> {
+pub(crate) fn leb128(b: &[u8]) -> Option<(usize, usize)> {
     let mut value = 0usize;
     for (i, byte) in b.iter().enumerate().take(5) {
         value |= ((byte & 0x7f) as usize) << (7 * i);
@@ -59,6 +59,21 @@ fn leb128(b: &[u8]) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+/// The glue with one `"./__wasm_split.js"` key in its imports object; wasm-bindgen writes one
+/// per extern block that names the module, and they are the same module.
+pub fn dedupe_loader_imports(glue: &str) -> String {
+    let mut seen = false;
+    glue.lines()
+        .filter(|l| {
+            let dup = l.trim_start().starts_with("\"./__wasm_split.js\":");
+            let keep = !(dup && seen);
+            seen |= dup;
+            keep
+        })
+        .map(|l| format!("{l}\n"))
+        .collect()
 }
 
 /// A wasm module split off the main one.
@@ -163,6 +178,15 @@ mod tests {
             b"\0asm...__wasm_split_00___page___00_export_ab_render..."
         ));
         assert!(!has_split_points(b"\0asm...__wasm_bindgen_start..."));
+    }
+
+    #[test]
+    fn the_loader_is_one_key_of_the_imports() {
+        let glue = "imports = {\n  \"./__wasm_split.js\": import2,\n  \"./__wasm_split.js\": import3,\n};\n";
+        assert_eq!(
+            dedupe_loader_imports(glue),
+            "imports = {\n  \"./__wasm_split.js\": import2,\n};\n"
+        );
     }
 
     #[test]

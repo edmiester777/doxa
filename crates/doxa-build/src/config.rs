@@ -37,6 +37,20 @@ pub struct DoxaConfig {
     /// Stylesheet extension (`scss`) to the command that turns it into CSS.
     #[serde(default)]
     pub preprocess: BTreeMap<String, Preprocess>,
+    /// The npm package `doxa build --lib` writes from the `#[component(export)]` components.
+    pub library: Option<Library>,
+}
+
+/// `library = { name = "@acme/kit", scope = ".kit-root" }`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Library {
+    /// The npm package name.
+    pub name: String,
+    /// A selector every stylesheet rule is scoped under, so the host's page is untouched.
+    pub scope: Option<String>,
+    /// How React is had: `"peer"`, the host's own, is the only kind.
+    pub react: Option<String>,
 }
 
 /// A command run on each `css` entry with its extension, before Tailwind and bundling.
@@ -66,6 +80,9 @@ pub struct Workspace {
 pub struct Package {
     /// Package name.
     pub name: String,
+    /// Package version.
+    #[serde(default)]
+    pub version: String,
     /// Path to its `Cargo.toml`.
     pub manifest_path: PathBuf,
     /// Its build targets.
@@ -103,6 +120,8 @@ pub struct Dependency {
 pub struct WebCrate {
     /// Package name.
     pub name: String,
+    /// Package version.
+    pub version: String,
     /// Directory holding its `Cargo.toml`.
     pub dir: PathBuf,
     /// Its library name, as the `.wasm` file is named.
@@ -127,7 +146,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, wasm_budget_kb, chunk_budget_kb, and npm, services and preprocess tables",
+                    "keys are role, server, css, css_sources, public, wasm_budget_kb, chunk_budget_kb, library, and npm, services and preprocess tables",
                 )
             }),
         }
@@ -214,6 +233,7 @@ impl Workspace {
             })?;
         Ok(WebCrate {
             name: pkg.name.clone(),
+            version: pkg.version.clone(),
             dir: pkg.dir().to_owned(),
             lib_name: lib.name.replace('-', "_"),
             config: pkg.doxa()?.unwrap_or_default(),
@@ -283,6 +303,10 @@ impl Layout {
     /// The served output.
     pub fn dist(&self) -> PathBuf {
         self.root.join("dist")
+    }
+    /// The npm package `doxa build --lib` writes.
+    pub fn lib(&self) -> PathBuf {
+        self.root.join("lib")
     }
 }
 

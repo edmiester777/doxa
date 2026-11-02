@@ -283,6 +283,7 @@ mod tests {
         };
         let mut web = WebCrate {
             name: "web".into(),
+            version: "0.0.0".into(),
             dir: dir.path().join("web"),
             lib_name: "web".into(),
             config: DoxaConfig::default(),

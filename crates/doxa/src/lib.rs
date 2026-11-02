@@ -355,6 +355,29 @@ pub mod bind_diagnostics {}
 #[doc(hidden)]
 pub mod listener_diagnostics {}
 
+/// An exported component's props come from JS:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component(export)]
+/// fn Badge(label: String, on_close: Callback) -> View {
+///     view! { <span>{label}</span> }
+/// }
+/// ```
+///
+/// so a `View` prop is "an exported component's props come from JS, which can't pass a `View`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component(export)]
+/// fn Badge(children: View) -> View {
+///     children
+/// }
+/// ```
+#[cfg(feature = "export")]
+#[doc(hidden)]
+pub mod export_diagnostics {}
+
 /// A route that returns JSON is called from the browser:
 ///
 /// ```

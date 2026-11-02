@@ -32,14 +32,16 @@ pub struct Pipeline {
     pub web: WebCrate,
     /// Output directories.
     pub layout: Layout,
-    opts: BuildOptions,
-    npm: npm::Source,
-    bundler: Box<dyn Bundler + Send>,
-    wasm_file: Option<String>,
+    pub(crate) opts: BuildOptions,
+    pub(crate) npm: npm::Source,
+    pub(crate) bundler: Box<dyn Bundler + Send>,
+    /// Building an npm package: no Preflight, relative stylesheet urls.
+    pub(crate) library: bool,
+    pub(crate) wasm_file: Option<String>,
     /// Modules split off the app wasm, as (hashed name, bytes).
-    split_files: Vec<(String, Vec<u8>)>,
+    pub(crate) split_files: Vec<(String, Vec<u8>)>,
     bundle: Option<BundleOutput>,
-    stylesheets: Vec<(String, css::Built)>,
+    pub(crate) stylesheets: Vec<(String, css::Built)>,
 }
 
 /// Print a progress line.
@@ -61,6 +63,7 @@ impl Pipeline {
             opts,
             npm,
             bundler: Box::new(Esbuild::managed()?),
+            library: false,
             wasm_file: None,
             split_files: Vec::new(),
             bundle: None,
@@ -120,17 +123,7 @@ impl Pipeline {
         if !checked {
             self.check_lock(&lock)?;
         }
-        let profile = if self.opts.release {
-            "release"
-        } else {
-            "debug"
-        };
-        let wasm = self
-            .layout
-            .wasm_target()
-            .join("wasm32-unknown-unknown")
-            .join(profile)
-            .join(format!("{}.wasm", self.web.lib_name));
+        let wasm = self.linked_wasm();
         let out = self.bindgen_dir();
         let original = std::fs::read(&wasm).at(&wasm)?;
         let splits = split::has_split_points(&original);
@@ -213,6 +206,20 @@ impl Pipeline {
         Ok(())
     }
 
+    /// The wasm as the linker wrote it, before bindgen.
+    pub(crate) fn linked_wasm(&self) -> PathBuf {
+        let profile = if self.opts.release {
+            "release"
+        } else {
+            "debug"
+        };
+        self.layout
+            .wasm_target()
+            .join("wasm32-unknown-unknown")
+            .join(profile)
+            .join(format!("{}.wasm", self.web.lib_name))
+    }
+
     fn check_lock(&self, lock: &Path) -> Result<bool> {
         match std::fs::read_to_string(lock) {
             Ok(text) => bindgen::check_lock(&text, lock).map(|()| true),
@@ -232,6 +239,7 @@ impl Pipeline {
         let dir = self.bindgen_dir();
         let glue_path = dir.join("app.js");
         let glue = std::fs::read_to_string(&glue_path).at(&glue_path)?;
+        let glue = split::dedupe_loader_imports(&glue);
         let (glue, react) = rewrite_react(&glue, &self.web.dir);
         for (file, js) in react {
             let path = dir.join(file);
@@ -262,6 +270,7 @@ impl Pipeline {
             out_dir: &out_dir,
             node_modules: self.npm.dir(),
             release: self.opts.release,
+            library: false,
         })?);
         Ok(())
     }
@@ -278,6 +287,7 @@ impl Pipeline {
                 sources: &cfg.css_sources,
                 preprocess: &cfg.preprocess,
                 node_modules: self.npm.dir(),
+                library: self.library,
             };
             let built = css::build(&inputs, entry, &stage, self.opts.release)?;
             let stem = Path::new(entry)
@@ -368,7 +378,7 @@ impl Pipeline {
         )
     }
 
-    fn bindgen_dir(&self) -> PathBuf {
+    pub(crate) fn bindgen_dir(&self) -> PathBuf {
         self.layout.stage().join("bindgen")
     }
 

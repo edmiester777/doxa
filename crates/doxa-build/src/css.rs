@@ -48,6 +48,8 @@ pub struct Inputs<'a> {
     pub preprocess: &'a BTreeMap<String, Preprocess>,
     /// Where npm installed the tools a preprocessor runs.
     pub node_modules: Option<&'a Path>,
+    /// For a library: no Preflight, and `url()`s relative to the stylesheet.
+    pub library: bool,
 }
 
 /// Where a preprocessor writes `input`'s CSS: beside it, so relative paths still resolve.
@@ -101,11 +103,9 @@ fn preprocess(at: &Inputs<'_>, input: &Path) -> Result<Option<PathBuf>> {
 
 /// Build one stylesheet entry of the web crate, returning the CSS text.
 pub fn build(at: &Inputs<'_>, entry: &str, stage: &Path, release: bool) -> Result<Built> {
-    let web_dir = at.web_dir;
-    let sources = at.sources;
-    let source = web_dir.join(entry);
+    let source = at.web_dir.join(entry);
     let pre = preprocess(at, &source)?;
-    let built = build_css(web_dir, &source, pre.as_deref(), sources, stage, release);
+    let built = build_css(at, &source, pre.as_deref(), stage, release);
     if let Some(out) = pre {
         let _ = std::fs::remove_file(out);
     }
@@ -113,16 +113,67 @@ pub fn build(at: &Inputs<'_>, entry: &str, stage: &Path, release: bool) -> Resul
 }
 
 fn build_css(
-    web_dir: &Path,
+    at: &Inputs<'_>,
     source: &Path,
     pre: Option<&Path>,
-    sources: &[String],
     stage: &Path,
     release: bool,
 ) -> Result<Built> {
-    let input = pre.unwrap_or(source).to_owned();
+    let (web_dir, sources) = (at.web_dir, at.sources);
+    let mut input = pre.unwrap_or(source).to_owned();
     let text = std::fs::read_to_string(&input).at(&input)?;
-    let to_bundle = if uses_tailwind(&text) {
+    // Beside the entry, so its relative imports still resolve; removed once built.
+    let mut unstyled = None;
+    if at.library && uses_tailwind(&text) {
+        let path = input.with_extension("lib.css");
+        std::fs::write(&path, without_preflight(&text)).at(&path)?;
+        input = path.clone();
+        unstyled = Some(path);
+    }
+    let built = tailwind_and_bundle(web_dir, sources, &input, &text, stage, release, at.library);
+    if let Some(path) = unstyled {
+        let _ = std::fs::remove_file(path);
+    }
+    built
+}
+
+/// Tailwind's theme and utilities without Preflight, which would restyle the host's page.
+pub fn without_preflight(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(at) = ["@import \"tailwindcss\"", "@import 'tailwindcss'"]
+        .iter()
+        .filter_map(|p| rest.find(p).map(|i| (i, p.len())))
+        .min()
+    {
+        let (start, len) = at;
+        let end = rest[start..].find(';').map_or(rest.len(), |e| start + e);
+        let modifiers = rest[start + len..end].trim();
+        out.push_str(&rest[..start]);
+        out.push_str("@layer theme, base, components, utilities;\n");
+        out.push_str("@import \"tailwindcss/theme.css\" layer(theme);\n");
+        out.push_str("@import \"tailwindcss/utilities.css\" layer(utilities)");
+        if !modifiers.is_empty() {
+            out.push(' ');
+            out.push_str(modifiers);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn tailwind_and_bundle(
+    web_dir: &Path,
+    sources: &[String],
+    input: &Path,
+    text: &str,
+    stage: &Path,
+    release: bool,
+    library: bool,
+) -> Result<Built> {
+    let input = input.to_owned();
+    let to_bundle = if uses_tailwind(text) {
         std::fs::create_dir_all(stage).at(stage)?;
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();
         let wrapper = stage.join(format!("{stem}.tailwind-in.css"));
@@ -148,13 +199,18 @@ fn build_css(
         input.clone()
     };
     let entry_dir = input.parent().unwrap_or(web_dir);
-    bundle(&to_bundle, entry_dir, release)
+    bundle(
+        &to_bundle,
+        entry_dir,
+        release,
+        if library { "./" } else { "/" },
+    )
 }
 
-/// Inline `@import`s with lightningcss, minifying on release, and hash each local `url()`.
-/// A url resolves against the file that wrote it, then against `fallback` (Tailwind's output
-/// lives elsewhere).
-pub fn bundle(path: &Path, fallback: &Path, release: bool) -> Result<Built> {
+/// Inline `@import`s with lightningcss, minifying on release, and hash each local `url()`,
+/// pointing it at `prefix` and the hashed name. A url resolves against the file that wrote
+/// it, then against `fallback` (Tailwind's output lives elsewhere).
+pub fn bundle(path: &Path, fallback: &Path, release: bool, prefix: &str) -> Result<Built> {
     let fs = FileProvider::new();
     let mut bundler = Bundler::new(&fs, None, ParserOptions::default());
     let fail = |detail: String| Error::Tool {
@@ -199,7 +255,7 @@ pub fn bundle(path: &Path, fallback: &Path, release: bool) -> Result<Built> {
                 let bytes = std::fs::read(&found).at(&found)?;
                 let name = found.file_name().unwrap_or_default().to_string_lossy();
                 let hashed = crate::dist::hashed_name(&name, &bytes);
-                let url = format!("/{hashed}{suffix}");
+                let url = format!("{prefix}{hashed}{suffix}");
                 built.assets.push((name.into_owned(), hashed, bytes));
                 url
             }
@@ -208,6 +264,125 @@ pub fn bundle(path: &Path, fallback: &Path, release: bool) -> Result<Built> {
         built.css = built.css.replace(&dep.placeholder, &target);
     }
     Ok(built)
+}
+
+/// `css` with every style rule inside `@scope (scope)`, the page's root selectors meaning the
+/// scope's root; rules that can't be scoped (`@font-face`, `@property`, `@keyframes`, imports)
+/// stay global.
+pub fn scope(css: &str, scope: &str) -> String {
+    let mut global = String::new();
+    let mut out = String::new();
+    let mut rules = String::new();
+    let flush = |rules: &mut String, out: &mut String| {
+        if !rules.trim().is_empty() {
+            out.push_str(&format!("@scope ({scope}) {{{rules}}}"));
+        }
+        rules.clear();
+    };
+    for stmt in statements(css) {
+        let t = stmt.trim_start();
+        let name: String = t
+            .strip_prefix('@')
+            .map(|r| {
+                r.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '-')
+                    .collect()
+            })
+            .unwrap_or_default();
+        let open = t.find('{');
+        match (name.as_str(), open) {
+            ("", Some(open)) => {
+                rules.push_str(&root_selectors(&t[..open]));
+                rules.push_str(&t[open..]);
+            }
+            ("media" | "supports" | "container" | "layer" | "starting-style", Some(open))
+                if t.ends_with('}') =>
+            {
+                flush(&mut rules, &mut out);
+                let inner = &t[open + 1..t.len() - 1];
+                out.push_str(&t[..=open]);
+                out.push_str(&self::scope(inner, scope));
+                out.push('}');
+            }
+            ("import" | "charset" | "namespace", _) => global.push_str(t),
+            _ => {
+                flush(&mut rules, &mut out);
+                out.push_str(t);
+            }
+        }
+    }
+    flush(&mut rules, &mut out);
+    global + &out
+}
+
+/// `:root`, `:host`, `html` and `body` in a selector list, as `:scope`.
+fn root_selectors(prelude: &str) -> String {
+    let mut out = String::with_capacity(prelude.len());
+    let b = prelude.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let rest = &prelude[i..];
+        let boundary_before =
+            i == 0 || matches!(b[i - 1], b' ' | b',' | b'>' | b'+' | b'~' | b'\n' | b'(');
+        let hit = [":root", ":host", "html", "body"].into_iter().find(|w| {
+            rest.starts_with(w)
+                && (w.starts_with(':') || boundary_before)
+                && rest[w.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        });
+        match hit {
+            Some(w) => {
+                out.push_str(":scope");
+                i += w.len();
+            }
+            None => {
+                let c = rest.chars().next().expect("in bounds");
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// The top-level statements of `css`: rules with their blocks, and `;`-ended at-rules.
+fn statements(css: &str) -> Vec<&str> {
+    let b = css.as_bytes();
+    let (mut out, mut start, mut depth, mut i) = (Vec::new(), 0, 0usize, 0);
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = css[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 1);
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    out.push(&css[start..=i]);
+                    start = i + 1;
+                }
+            }
+            b';' if depth == 0 => {
+                out.push(&css[start..=i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if !css[start..].trim().is_empty() {
+        out.push(&css[start..]);
+    }
+    out
 }
 
 /// A url naming a file beside the stylesheet: its path and any `?query` / `#fragment`.
@@ -232,6 +407,7 @@ mod tests {
             sources: &[],
             preprocess: &NONE,
             node_modules: None,
+            library: false,
         }
     }
 
@@ -283,6 +459,30 @@ mod tests {
         );
         let css = with(dir.path(), &command(&["true"]));
         assert!(css.contains("wrote nothing"), "{css}");
+    }
+
+    #[test]
+    fn a_library_stylesheet_is_scoped_and_keeps_global_at_rules_global() {
+        let css =
+            "@import url(x.css);@font-face{font-family:A}:root,html{--c:red}.btn{color:var(--c)}\
+                   @media (width>1px){body .btn{margin:0}}@keyframes k{0%{opacity:0}}.htmlish{}";
+        assert_eq!(
+            scope(css, ".kit"),
+            "@import url(x.css);@font-face{font-family:A}\
+             @scope (.kit) {:scope,:scope{--c:red}.btn{color:var(--c)}}\
+             @media (width>1px){@scope (.kit) {:scope .btn{margin:0}}}\
+             @keyframes k{0%{opacity:0}}@scope (.kit) {.htmlish{}}"
+        );
+    }
+
+    #[test]
+    fn preflight_is_left_out_of_a_library() {
+        assert_eq!(
+            without_preflight("@import \"tailwindcss\" source(none);\n.a{}"),
+            "@layer theme, base, components, utilities;\n\
+             @import \"tailwindcss/theme.css\" layer(theme);\n\
+             @import \"tailwindcss/utilities.css\" layer(utilities) source(none);\n.a{}"
+        );
     }
 
     #[test]

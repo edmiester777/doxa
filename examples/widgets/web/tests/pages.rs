@@ -208,3 +208,32 @@ async fn an_unknown_path_shows_not_found() {
     settle().await;
     assert!(dom.find("class", "missing").is_some());
 }
+
+#[tokio::test]
+async fn an_exported_component_renders_again_with_the_hosts_new_props() {
+    use doxa::ui::Exported;
+    use widgets_web::kit::{WidgetTitle, WidgetTitleProps};
+
+    serve("viewer");
+    let dom = MemDom::new();
+    let at = dom.body();
+    let props = |name: &str| WidgetTitleProps {
+        name: name.into(),
+        level: 2,
+    };
+    let title = Exported::<WidgetTitle>::mount_on(Rc::new(dom.clone()), at, props("gear"));
+    settle().await;
+    assert_eq!(dom.text(dom.find("class", "title").unwrap()), "gear");
+    assert_eq!(dom.find("data-level", "2"), dom.find("class", "title"));
+
+    title.update(props("cog"));
+    settle().await;
+    assert_eq!(dom.text(dom.find("class", "title").unwrap()), "cog");
+
+    drop(title);
+    settle().await;
+    assert!(
+        dom.find("class", "title").is_none(),
+        "unmounted with its handle"
+    );
+}

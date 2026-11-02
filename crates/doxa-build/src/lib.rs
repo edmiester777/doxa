@@ -10,6 +10,7 @@ pub mod config;
 pub mod css;
 pub mod dist;
 mod error;
+pub mod library;
 pub mod npm;
 pub mod pipeline;
 pub mod split;

@@ -1,0 +1,17 @@
+{
+  "name": "widgets-host",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@widgets/kit": "file:../../../target/doxa/lib",
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "vite": "^7"
+  }
+}

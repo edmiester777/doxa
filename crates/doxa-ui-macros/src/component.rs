@@ -22,6 +22,8 @@ pub(crate) struct Options {
     pub memo: bool,
     /// Render from its own wasm module, split off by `doxa build`.
     pub lazy: bool,
+    /// Mountable by a foreign React host, through `doxa build --lib`.
+    pub export: bool,
 }
 
 impl syn::parse::Parse for Options {
@@ -31,10 +33,11 @@ impl syn::parse::Parse for Options {
             let ident: Ident = input.parse()?;
             match ident.to_string().as_str() {
                 "memo" => o.memo = true,
+                "export" => o.export = true,
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        format!("unknown option `{other}`; expected `memo`"),
+                        format!("unknown option `{other}`; expected `memo` or `export`"),
                     ))
                 }
             }
@@ -148,6 +151,14 @@ fn is_option(ty: &Type) -> bool {
 }
 
 pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
+    let exported = if opts.export {
+        match crate::export::expand(parsed) {
+            Ok(t) => t,
+            Err(e) => return e.into_compile_error(),
+        }
+    } else {
+        quote!()
+    };
     let Parsed { item, props } = parsed;
     let vis = &item.vis;
     let name = &item.sig.ident;
@@ -266,6 +277,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
         }
 
         #split
+        #exported
     }
 }
 

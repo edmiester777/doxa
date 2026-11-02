@@ -1,0 +1,7 @@
+:root {
+  --accent: #0a7;
+}
+
+.picker .open {
+  border: 1px solid var(--accent);
+}

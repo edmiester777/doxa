@@ -1096,6 +1096,7 @@ mod web {
             on_error: &JsValue,
             calls: &JsValue,
             on_handle: &JsValue,
+            root: f64,
         );
         #[wasm_bindgen(js_name = update)]
         fn js_update(id: u32, content: &JsValue);
@@ -1358,6 +1359,7 @@ mod web {
                 on_error.as_ref(),
                 &calls,
                 &on_handle,
+                m.root as f64,
             );
             events.push(on_error);
             self.0

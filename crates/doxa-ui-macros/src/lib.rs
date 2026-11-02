@@ -5,6 +5,7 @@ use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
 mod component;
+mod export;
 mod form;
 mod npm;
 mod page;
@@ -61,7 +62,7 @@ pub fn derive_form(item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// The wasm entry point: runs once the module loads.
+/// The wasm entry point: runs once the module loads, except inside a `doxa build --lib` package.
 #[proc_macro_attribute]
 pub fn start(_args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
@@ -75,7 +76,9 @@ pub fn start(_args: TokenStream, item: TokenStream) -> TokenStream {
             use ::doxa::ui::__private::wasm_bindgen;
             #[wasm_bindgen::prelude::wasm_bindgen(start, wasm_bindgen = ::doxa::ui::__private::wasm_bindgen)]
             fn __doxa_start() {
-                #name()
+                if !::doxa::ui::__private::in_library() {
+                    #name()
+                }
             }
 
             // wasm-split hangs what only the main module calls off a function named `main`.

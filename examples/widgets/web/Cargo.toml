@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 widgets-client = { path = "../client" }
-doxa = { workspace = true, features = ["ui", "react", "forms"] }
+doxa = { workspace = true, features = ["ui", "react", "forms", "export"] }
 futures = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -21,6 +21,8 @@ web-sys = { version = "0.3", features = ["AddEventListenerOptions", "CssStyleDec
 role = "client"
 server = "widgets-server"
 wasm_budget_kb = 450
+css = ["style/app.css"]
+library = { name = "@widgets/kit", scope = ".widgets-kit" }
 
 [package.metadata.doxa.npm]
 react = "^19"
@@ -28,6 +30,6 @@ react-dom = "^19"
 
 [dev-dependencies]
 widgets-server = { path = "../server" }
-doxa = { workspace = true, features = ["ui", "react", "forms", "client-router"] }
+doxa = { workspace = true, features = ["ui", "react", "forms", "export", "client-router"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }

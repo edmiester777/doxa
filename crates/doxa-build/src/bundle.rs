@@ -24,6 +24,8 @@ pub struct BundleRequest<'a> {
     pub node_modules: Option<&'a Path>,
     /// Minify.
     pub release: bool,
+    /// For an npm package: leave npm imports to the host's bundler, and keep chunks beside the entry.
+    pub library: bool,
 }
 
 /// What a bundler wrote, as paths relative to its `out_dir`.
@@ -82,6 +84,12 @@ impl Esbuild {
         args.push(meta);
         if req.release {
             args.push("--minify".into());
+        }
+        if req.library {
+            args.push("--packages=external".into());
+            args.push("--chunk-names=[name]-[hash]".into());
+            args.push("--banner:js=\"use client\";".into());
+            args.retain(|a| a != "--chunk-names=chunks/[name]-[hash]");
         }
         args
     }
@@ -465,6 +473,7 @@ mod tests {
             out_dir: Path::new("/s/out"),
             node_modules: None,
             release: true,
+            library: false,
         };
         let args: Vec<String> = Esbuild::args(&req, Path::new("/s/meta.json"))
             .into_iter()

@@ -4,6 +4,7 @@ use doxa::ui::prelude::*;
 use doxa::ui::{form, Field};
 use widgets_client::widgets::*;
 
+pub mod kit;
 pub mod motion;
 use motion::{exit, flip};
 

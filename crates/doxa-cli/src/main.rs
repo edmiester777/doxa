@@ -37,6 +37,9 @@ enum Command {
         /// Install npm dependencies from the lockfile only.
         #[arg(long)]
         locked: bool,
+        /// Write the `#[component(export)]` components as an npm package in target/doxa/lib.
+        #[arg(long)]
+        lib: bool,
     },
     /// Build, run the server, and rebuild and reload on change.
     Dev {
@@ -67,12 +70,16 @@ fn main() -> ExitCode {
             release,
             package,
             locked,
-        } => build(BuildOptions {
-            release,
-            package,
-            locked,
-            compress: true,
-        }),
+            lib,
+        } => build(
+            BuildOptions {
+                release,
+                package,
+                locked,
+                compress: !lib,
+            },
+            lib,
+        ),
         Command::Dev {
             package,
             port,
@@ -91,8 +98,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn build(opts: BuildOptions) -> Result<(), Box<dyn std::error::Error>> {
+fn build(opts: BuildOptions, lib: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut pipeline = Pipeline::new(&std::env::current_dir()?, opts)?;
+    if lib {
+        pipeline.build_library()?;
+        return Ok(());
+    }
     let _ = pipeline.build()?;
     if let Some(server) = pipeline.web.config.server.clone() {
         pipeline.build_server(&server)?;
@@ -112,14 +123,19 @@ mod tests {
     fn build_flags() {
         assert!(matches!(
             parse(&["doxa", "build", "--release", "-p", "web", "--locked"]),
-            Command::Build { release: true, package: Some(p), locked: true } if p == "web"
+            Command::Build { release: true, package: Some(p), locked: true, lib: false } if p == "web"
+        ));
+        assert!(matches!(
+            parse(&["doxa", "build", "--lib"]),
+            Command::Build { lib: true, .. }
         ));
         assert!(matches!(
             parse(&["doxa", "build"]),
             Command::Build {
                 release: false,
                 package: None,
-                locked: false
+                locked: false,
+                lib: false
             }
         ));
     }

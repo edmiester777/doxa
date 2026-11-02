@@ -1,5 +1,6 @@
 // The React side of doxa islands: one root, created on first mount. A nested island is a
-// portal inside the island around it, so it gets that island's React context.
+// portal inside the island around it, so it gets that island's React context. In a library,
+// each exported component's wrapper renders its root's islands instead, inside the host's tree.
 import {
   Component,
   createElement,
@@ -17,6 +18,12 @@ const islands = new Map();
 const listeners = new Set();
 let version = 0;
 let root = null;
+let library = false;
+
+// Called by a library's entry before anything mounts: no root of our own.
+export function libraryMode() {
+  library = true;
+}
 
 function publish() {
   version++;
@@ -62,11 +69,14 @@ class Boundary extends Component {
   }
 }
 
-// The islands whose nearest island is `parent`; `null` for the root, which also takes orphans.
-function Portals({ parent }) {
+// The islands whose nearest island is `parent`; `null` for the top ones, which also takes
+// orphans, of every doxa root or only `root`.
+export function Portals({ parent = null, root }) {
   useSyncExternalStore(subscribe, () => version);
   const mine = [...islands.values()].filter((i) =>
-    parent === null ? !islands.has(i.parent) : i.parent === parent,
+    parent === null
+      ? !islands.has(i.parent) && (root === undefined || i.root === root)
+      : i.parent === parent,
   );
   return mine.map((i) =>
     createPortal(
@@ -173,15 +183,15 @@ function DoxaRender({ fns, args }) {
   return createElement("div", { ref, style: { display: "contents" } });
 }
 
-export function mount(id, parent, host, component, content, handlers, onError, calls, onHandle) {
-  if (root === null) {
+export function mount(id, parent, host, component, content, handlers, onError, calls, onHandle, rootId) {
+  if (root === null && !library) {
     const el = document.createElement("div");
     el.hidden = true;
     document.body.appendChild(el);
     root = createRoot(el);
     root.render(createElement(Portals, { parent: null }));
   }
-  const island = { id, parent: parent ?? null, host, component, live: true, events: {}, props: null };
+  const island = { id, parent: parent ?? null, root: rootId, host, component, live: true, events: {}, props: null };
   island.onError = (message) => {
     if (island.live) onError(message);
   };

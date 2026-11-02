@@ -11,6 +11,8 @@ mod component;
 mod directive;
 pub mod dom;
 mod error;
+#[cfg(feature = "export")]
+mod export;
 #[cfg(feature = "forms")]
 mod form;
 mod head;
@@ -70,9 +72,24 @@ pub use view::{
 pub use doxa_ui_macros::react;
 pub use doxa_ui_macros::{component, page, start, view};
 
+/// A doxa component mounted by a foreign React host, as `#[component(export)]` wrappers do.
+#[cfg(feature = "export")]
+pub use export::Exported;
+
 #[doc(hidden)]
 pub mod __private {
+    #[cfg(all(feature = "export", target_arch = "wasm32"))]
+    pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
     pub use crate::view::FromChildren;
+    #[cfg(target_arch = "wasm32")]
+    pub use web_sys;
+
+    /// Whether a `doxa build --lib` package loaded this wasm, so a host owns the page.
+    #[cfg(target_arch = "wasm32")]
+    pub fn in_library() -> bool {
+        js_sys::Reflect::get(&js_sys::global(), &"__DOXA_LIBRARY__".into())
+            .is_ok_and(|v| v.is_truthy())
+    }
     #[cfg(target_arch = "wasm32")]
     pub use wasm_bindgen;
     #[cfg(target_arch = "wasm32")]

@@ -83,6 +83,8 @@ ui = ["client", "dep:doxa-ui"]
 react = ["ui", "doxa-ui/react"]
 # `form()` and `#[derive(Form)]`: garde-checked forms with field-level errors.
 forms = ["ui", "doxa-ui/forms"]
+# `#[component(export)]`: components a foreign React host mounts, from `doxa build --lib`.
+export = ["ui", "doxa-ui/export"]
 
 # Everything.
 full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
