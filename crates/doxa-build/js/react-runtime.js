@@ -147,7 +147,31 @@ function propsOf(island, content) {
   return props;
 }
 
-export function mount(id, parent, host, component, content, handlers, onError) {
+// One argument as itself, several as an array, which Rust reads as a tuple.
+function pack(args) {
+  return args.length === 1 ? args[0] : args;
+}
+
+let renders = 0;
+
+// A doxa view React places, mounted after React commits its element and never during a render.
+function DoxaRender({ fns, args }) {
+  const ref = useRef(null);
+  const key = useRef(0);
+  const first = useRef(true);
+  useLayoutEffect(() => {
+    key.current = ++renders;
+    fns.mount(key.current, ref.current, args);
+    return () => fns.unmount(key.current);
+  }, [fns]);
+  useLayoutEffect(() => {
+    if (first.current) first.current = false;
+    else fns.update(key.current, args);
+  }, [args]);
+  return createElement("div", { ref, style: { display: "contents" } });
+}
+
+export function mount(id, parent, host, component, content, handlers, onError, calls) {
   if (root === null) {
     const el = document.createElement("div");
     el.hidden = true;
@@ -164,6 +188,21 @@ export function mount(id, parent, host, component, content, handlers, onError) {
     island.events[name] = (arg) => {
       if (island.live) f(toJson(arg));
     };
+  }
+  for (const [name, f] of Object.entries(calls.funcs)) {
+    island.events[name] = (...args) => (island.live ? f(pack(args)) : undefined);
+  }
+  for (const [name, f] of Object.entries(calls.asyncFuncs)) {
+    island.events[name] = (...args) => (island.live ? f(pack(args)) : Promise.reject(new Error("unmounted")));
+  }
+  for (const [name, raw] of Object.entries(calls.renders)) {
+    // Rust drops these when the island unmounts, before React runs the cleanups that call them.
+    const fns = {
+      mount: (...a) => island.live && raw.mount(...a),
+      update: (...a) => island.live && raw.update(...a),
+      unmount: (...a) => island.live && raw.unmount(...a),
+    };
+    island.events[name] = (...args) => createElement(DoxaRender, { fns, args: pack(args) });
   }
   island.props = propsOf(island, content);
   islands.set(id, island);

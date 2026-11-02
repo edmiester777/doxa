@@ -80,6 +80,12 @@ enum Role {
     },
     /// `#[react(element)]`: a `View` of one element, which React renders itself.
     Element,
+    /// `#[react(func)]`: a `Func` or `AsyncFunc` React calls for a value.
+    Func {
+        is_async: bool,
+    },
+    /// `#[react(render)]`: a `Render` React places as an element.
+    Render,
 }
 
 struct Field {
@@ -162,6 +168,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             ));
         }
         let (mut optional, mut event, mut element, mut rename) = (false, false, false, None);
+        let (mut func, mut render) = (false, false);
         let mut kept = Vec::new();
         for attr in f.attrs.drain(..) {
             if !attr.path().is_ident("react") {
@@ -175,17 +182,46 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                     event = true;
                 } else if m.path.is_ident("element") {
                     element = true;
+                } else if m.path.is_ident("func") {
+                    func = true;
+                } else if m.path.is_ident("render") {
+                    render = true;
                 } else if m.path.is_ident("rename") {
                     rename = Some(m.value()?.parse::<LitStr>()?.value());
                 } else {
-                    return Err(
-                        m.error("expected `optional`, `event`, `element` or `rename = \"…\"`")
-                    );
+                    return Err(m.error(
+                        "expected `optional`, `event`, `element`, `func`, `render` or `rename = \"…\"`",
+                    ));
                 }
                 Ok(())
             })?;
         }
         f.attrs = kept;
+        if [optional, event, element, func, render]
+            .iter()
+            .filter(|b| **b)
+            .count()
+            > 1
+        {
+            return Err(syn::Error::new(
+                name.span(),
+                "a prop takes one of `optional`, `event`, `element`, `func` and `render`",
+            ));
+        }
+        if func && !last_segment_is(&f.ty, "Func") && !last_segment_is(&f.ty, "AsyncFunc") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!(
+                    "`#[react(func)]` field `{name}` must be a `Func<A, R>` or `AsyncFunc<A, R>`"
+                ),
+            ));
+        }
+        if render && !last_segment_is(&f.ty, "Render") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(render)]` field `{name}` must be a `Render<A>`"),
+            ));
+        }
         if element && !last_segment_is(&f.ty, "View") {
             return Err(syn::Error::new(
                 f.ty.span(),
@@ -193,19 +229,12 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             ));
         }
         let role = match (optional, event) {
-            _ if element && (optional || event) => {
-                return Err(syn::Error::new(
-                    name.span(),
-                    "an `element` prop is neither `optional` nor an `event`",
-                ))
-            }
             _ if element => Role::Element,
-            (true, true) => {
-                return Err(syn::Error::new(
-                    name.span(),
-                    "a prop is `optional` or an `event`, not both",
-                ))
-            }
+            _ if render => Role::Render,
+            _ if func => Role::Func {
+                is_async: last_segment_is(&f.ty, "AsyncFunc"),
+            },
+            (true, true) => unreachable!("two roles are refused above"),
             (true, false) if !last_segment_is(&f.ty, "Option") => {
                 return Err(syn::Error::new(
                     f.ty.span(),
@@ -285,7 +314,9 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         match f.role {
             Role::Data => Some(quote_spanned! { f.ty.span() => out.set(#js, &self.#n); }),
             Role::Optional => Some(quote_spanned! { f.ty.span() => out.opt(#js, &self.#n); }),
-            Role::Event | Role::Slot { .. } | Role::Element => None,
+            Role::Event | Role::Slot { .. } | Role::Element | Role::Func { .. } | Role::Render => {
+                None
+            }
         }
     });
     let views = fields.iter().filter_map(|f| {
@@ -299,8 +330,18 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
     });
     let events = fields.iter().filter_map(|f| {
         let (n, js) = (&f.name, &f.js);
-        matches!(f.role, Role::Event)
-            .then(|| quote_spanned! { f.ty.span() => out.event(#js, &self.#n); })
+        let span = f.ty.span();
+        match f.role {
+            Role::Event => Some(quote_spanned! { span => out.event(#js, &self.#n); }),
+            Role::Func { is_async: false } => {
+                Some(quote_spanned! { span => out.func(#js, &self.#n); })
+            }
+            Role::Func { is_async: true } => {
+                Some(quote_spanned! { span => out.async_func(#js, &self.#n); })
+            }
+            Role::Render => Some(quote_spanned! { span => out.render(#js, &self.#n); }),
+            _ => None,
+        }
     });
 
     Ok(quote! {

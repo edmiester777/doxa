@@ -69,14 +69,152 @@ impl Data {
 /// An event handler as JS calls it: with the JSON of its first argument.
 pub type EventFn = Rc<dyn Fn(&str)>;
 
-/// The event props.
+/// The event, function and render props.
 #[doc(hidden)]
 pub struct Events {
     list: Vec<(&'static str, EventFn)>,
+    funcs: Vec<(&'static str, FuncFn)>,
+    async_funcs: Vec<(&'static str, AsyncFuncFn)>,
+    renders: Vec<(&'static str, RenderView)>,
     owner: Weak<Instance>,
 }
 
+/// A function React calls for a value: `#[react(func)] pub row_id: Func<Row, String>`.
+///
+/// JS passes one argument as `A`, several as a tuple. A Rust panic in it traps the whole wasm
+/// instance, which no error boundary catches.
+pub struct Func<A, R>(Rc<dyn Fn(A) -> R>);
+
+impl<A, R> Clone for Func<A, R> {
+    fn clone(&self) -> Self {
+        Func(self.0.clone())
+    }
+}
+
+impl<A, R, F: Fn(A) -> R + 'static> From<F> for Func<A, R> {
+    fn from(f: F) -> Self {
+        Func(Rc::new(f))
+    }
+}
+
+impl<A, R> Func<A, R> {
+    /// Call it from Rust.
+    pub fn call(&self, a: A) -> R {
+        (self.0)(a)
+    }
+}
+
+type Pending<R> = futures_util::future::LocalBoxFuture<'static, crate::Result<R>>;
+
+/// A function React awaits: JS gets a `Promise` of `R`, rejected with the error's message.
+pub struct AsyncFunc<A, R>(Rc<dyn Fn(A) -> Pending<R>>);
+
+impl<A, R> Clone for AsyncFunc<A, R> {
+    fn clone(&self) -> Self {
+        AsyncFunc(self.0.clone())
+    }
+}
+
+impl<A: 'static, R: 'static, F: AsyncFn(A) -> crate::Result<R> + 'static> From<F>
+    for AsyncFunc<A, R>
+{
+    fn from(f: F) -> Self {
+        let f = Rc::new(f);
+        AsyncFunc(Rc::new(move |a| {
+            let f = f.clone();
+            Box::pin(async move { f(a).await })
+        }))
+    }
+}
+
+/// A doxa view React places as an element: `#[react(render)] pub cell: Render<(Row, Column)>`.
+///
+/// It is mounted after React commits, inside this island, so context and `<Catch>` reach it.
+pub struct Render<A>(Rc<dyn Fn(A) -> View>);
+
+impl<A> Clone for Render<A> {
+    fn clone(&self) -> Self {
+        Render(self.0.clone())
+    }
+}
+
+impl<A, V: IntoView, F: Fn(A) -> V + 'static> From<F> for Render<A> {
+    fn from(f: F) -> Self {
+        Render(Rc::new(move |a| f(a).into_view()))
+    }
+}
+
+/// A [`Func`] as JS calls it, with the arguments as JSON.
+pub type FuncFn = Rc<dyn Fn(serde_json::Value) -> Result<serde_json::Value, String>>;
+/// An [`AsyncFunc`] as JS calls it.
+pub type AsyncFuncFn = Rc<
+    dyn Fn(
+        serde_json::Value,
+    ) -> futures_util::future::LocalBoxFuture<'static, Result<serde_json::Value, String>>,
+>;
+type RenderView = Rc<dyn Fn(serde_json::Value) -> Result<View, String>>;
+
+/// A [`Render`] as JS drives it: a doxa view mounted into, updated in and removed from an element React owns.
+#[derive(Clone)]
+pub struct RenderFns {
+    /// Render into `node` with these arguments; `key` names it after.
+    pub mount: Rc<dyn Fn(u32, NodeRef, serde_json::Value)>,
+    /// New arguments.
+    pub update: Rc<dyn Fn(u32, serde_json::Value)>,
+    /// React removed it.
+    pub unmount: Rc<dyn Fn(u32)>,
+}
+
+fn args<A: DeserializeOwned>(name: &str, v: serde_json::Value) -> Result<A, String> {
+    serde_json::from_value(v)
+        .map_err(|e| format!("React called `{name}` with the wrong arguments: {e}"))
+}
+
 impl Events {
+    pub fn func<A: DeserializeOwned + 'static, R: Serialize + 'static>(
+        &mut self,
+        name: &'static str,
+        f: &Func<A, R>,
+    ) {
+        let f = f.clone();
+        self.funcs.push((
+            name,
+            Rc::new(move |v| {
+                if runtime::current_instance().is_some() {
+                    return Err(format!(
+                        "`{name}` was called while doxa was rendering; call it from React instead"
+                    ));
+                }
+                let out = f.call(args(name, v)?);
+                serde_json::to_value(out).map_err(|e| format!("`{name}` returned {e}"))
+            }),
+        ));
+    }
+
+    pub fn async_func<A: DeserializeOwned + 'static, R: Serialize + 'static>(
+        &mut self,
+        name: &'static str,
+        f: &AsyncFunc<A, R>,
+    ) {
+        let f = f.clone();
+        self.async_funcs.push((
+            name,
+            Rc::new(move |v| {
+                let call = args(name, v).map(|a| (f.0)(a));
+                Box::pin(async move {
+                    let out = call?.await.map_err(|e| e.to_string())?;
+                    serde_json::to_value(out).map_err(|e| format!("`{name}` returned {e}"))
+                })
+            }),
+        ));
+    }
+
+    pub fn render<A: DeserializeOwned + 'static>(&mut self, name: &'static str, r: &Render<A>) {
+        let r = r.clone();
+        self.renders
+            .push((name, Rc::new(move |v| Ok((r.0)(args(name, v)?)))));
+    }
+
     pub fn event<T: DeserializeOwned + 'static>(&mut self, name: &'static str, cb: &Callback<T>) {
         let (cb, owner) = (cb.clone(), self.owner.clone());
         self.list.push((
@@ -187,6 +325,12 @@ pub struct Mount<'a> {
     pub events: Vec<(&'static str, EventFn)>,
     /// Call with a message when the island throws while React renders it.
     pub on_error: EventFn,
+    /// Its [`Func`] props.
+    pub funcs: Vec<(&'static str, FuncFn)>,
+    /// Its [`AsyncFunc`] props.
+    pub async_funcs: Vec<(&'static str, AsyncFuncFn)>,
+    /// Its [`Render`] props.
+    pub renders: Vec<(&'static str, RenderFns)>,
 }
 
 /// The JS side of islands. [`set_bridge`] swaps it, e.g. for a fake in native tests.
@@ -259,7 +403,12 @@ struct Live<P> {
     /// The island's instance, where a React error is thrown.
     owner: Weak<Instance>,
     host: Cell<Option<NodeRef>>,
-    events: RefCell<Vec<(&'static str, Shared<EventFn>)>>,
+    events: Targets<EventFn>,
+    funcs: Targets<FuncFn>,
+    async_funcs: Targets<AsyncFuncFn>,
+    renders: Targets<RenderView>,
+    /// Each `Render` React has mounted: its key, prop, element and arguments.
+    rendered: crate::State<Vec<Rendered>>,
     shell_events: RefCell<Vec<ShellEvent>>,
     shell_nodes: RefCell<Vec<(&'static str, NodeFn)>>,
     slots: RefCell<Vec<(&'static str, NodeRef)>>,
@@ -268,15 +417,94 @@ struct Live<P> {
     sent: RefCell<Option<Sent<P>>>,
 }
 
+/// Stable cells, by prop, each pointed at this render's function.
+type Targets<T> = RefCell<Vec<(&'static str, Shared<T>)>>;
+
+type Rendered = (u32, &'static str, NodeRef, serde_json::Value);
+
+struct Forwarders {
+    funcs: Vec<(&'static str, FuncFn)>,
+    async_funcs: Vec<(&'static str, AsyncFuncFn)>,
+    renders: Vec<(&'static str, RenderFns)>,
+}
+
+fn retarget<T>(targets: &Targets<T>, list: Vec<(&'static str, T)>) {
+    let mut slots = targets.borrow_mut();
+    for (name, f) in list {
+        match slots.iter().find(|(n, _)| *n == name) {
+            Some((_, slot)) => *slot.borrow_mut() = f,
+            None => slots.push((name, Rc::new(RefCell::new(f)))),
+        }
+    }
+}
+
 impl<P: IslandProps> Live<P> {
-    /// Point each event's stable slot at this render's handler.
-    fn retarget(&self, events: Vec<(&'static str, EventFn)>) {
-        let mut slots = self.events.borrow_mut();
-        for (name, f) in events {
-            match slots.iter().find(|(n, _)| *n == name) {
-                Some((_, slot)) => *slot.borrow_mut() = f,
-                None => slots.push((name, Rc::new(RefCell::new(f)))),
-            }
+    fn retarget(&self, e: Events) {
+        retarget(&self.events, e.list);
+        retarget(&self.funcs, e.funcs);
+        retarget(&self.async_funcs, e.async_funcs);
+        retarget(&self.renders, e.renders);
+    }
+
+    /// The functions React gets: each calls whichever function the latest render passed.
+    fn forwarders(&self) -> Forwarders {
+        let funcs = self
+            .funcs
+            .borrow()
+            .iter()
+            .map(|(name, cell)| {
+                let cell = cell.clone();
+                let f: FuncFn = Rc::new(move |v| {
+                    let f = cell.borrow().clone();
+                    f(v)
+                });
+                (*name, f)
+            })
+            .collect();
+        let async_funcs = self
+            .async_funcs
+            .borrow()
+            .iter()
+            .map(|(name, cell)| {
+                let cell = cell.clone();
+                let f: AsyncFuncFn = Rc::new(move |v| {
+                    let f = cell.borrow().clone();
+                    f(v)
+                });
+                (*name, f)
+            })
+            .collect();
+        let rendered = self.rendered;
+        let renders = self
+            .renders
+            .borrow()
+            .iter()
+            .map(|(name, _)| {
+                let name = *name;
+                let fns = RenderFns {
+                    mount: Rc::new(move |key, node, args| {
+                        rendered.update(|r| r.push((key, name, node, args)))
+                    }),
+                    update: Rc::new(move |key, args| {
+                        let changed =
+                            rendered.with(|r| r.iter().any(|e| e.0 == key && e.3 != args));
+                        if changed {
+                            rendered.update(|r| {
+                                if let Some(e) = r.iter_mut().find(|e| e.0 == key) {
+                                    e.3 = args;
+                                }
+                            })
+                        }
+                    }),
+                    unmount: Rc::new(move |key| rendered.update(|r| r.retain(|e| e.0 != key))),
+                };
+                (name, fns)
+            })
+            .collect();
+        Forwarders {
+            funcs,
+            async_funcs,
+            renders,
         }
     }
 
@@ -337,6 +565,11 @@ impl<P: IslandProps> Live<P> {
             })
             .collect();
         let (owner, name) = (self.owner.clone(), P::ISLAND.name);
+        let Forwarders {
+            funcs,
+            async_funcs,
+            renders,
+        } = self.forwarders();
         bridge().mount(Mount {
             id: self.id,
             parent: self.parent,
@@ -345,6 +578,9 @@ impl<P: IslandProps> Live<P> {
             island: &P::ISLAND,
             content: &content,
             events: forwarders,
+            funcs,
+            async_funcs,
+            renders,
             on_error: Rc::new(move |message: &str| {
                 runtime::throw(
                     owner.upgrade().as_ref(),
@@ -421,6 +657,7 @@ fn single_element(node: &Node) -> Option<Rc<Element>> {
 pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     let me = crate::runtime::current_or_panic("island");
     let targets = crate::hooks::state(Vec::<(&'static str, NodeRef)>::new());
+    let rendered = crate::hooks::state(Vec::<Rendered>::new());
     let (inst, _, live) = crate::hooks::slot("island", || Live::<P> {
         id: next_id(),
         parent: crate::hooks::try_context::<Parent>().map(|p| p.0),
@@ -428,6 +665,10 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
         owner: Rc::downgrade(&me),
         host: Cell::new(None),
         events: RefCell::default(),
+        funcs: RefCell::default(),
+        async_funcs: RefCell::default(),
+        renders: RefCell::default(),
+        rendered,
         shell_events: RefCell::default(),
         shell_nodes: RefCell::default(),
         slots: RefCell::default(),
@@ -437,14 +678,33 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     crate::hooks::provide(Parent(live.id));
     let mut events = Events {
         list: Vec::new(),
+        funcs: Vec::new(),
+        async_funcs: Vec::new(),
+        renders: Vec::new(),
         owner: Rc::downgrade(&inst),
     };
     props.events(&mut events);
-    live.retarget(events.list);
+    live.retarget(events);
 
     let mut views = Views::default();
     props.views(&mut views);
     let mut children: Vec<View> = Vec::new();
+    // Each `Render` React mounted, as a portal into its element so it sits inside this island.
+    for (key, prop, node, args) in rendered.get() {
+        let f = live
+            .renders
+            .borrow()
+            .iter()
+            .find(|(n, _)| *n == prop)
+            .map(|(_, c)| c.borrow().clone());
+        let view = match f.map(|f| f(args)) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => return RenderFuture::ready(Err(Thrown::msg(e))),
+            None => continue,
+        };
+        let portal = Portal::props().to(node).children(view).build();
+        children.push(comp::<Portal>(portal).key(key).into_view());
+    }
     // Slot hosts mount before the island host, so their nodes are known by then.
     for (name, view) in views.slots {
         let live = live.clone();
@@ -534,6 +794,7 @@ mod web {
             content: &JsValue,
             events: &js_sys::Object,
             on_error: &JsValue,
+            calls: &JsValue,
         );
         #[wasm_bindgen(js_name = update)]
         fn js_update(id: u32, content: &JsValue);
@@ -622,6 +883,81 @@ mod web {
         }
     }
 
+    fn to_value(v: &serde_json::Value) -> JsValue {
+        use serde::Serialize;
+        v.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .unwrap_or(JsValue::UNDEFINED)
+    }
+
+    fn from_value(v: JsValue) -> serde_json::Value {
+        serde_wasm_bindgen::from_value(v).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// `{ funcs: { name: fn }, asyncFuncs: { name: fn }, renders: { name: { mount, update, unmount } } }`.
+    fn calls(
+        funcs: Vec<(&'static str, super::FuncFn)>,
+        async_funcs: Vec<(&'static str, super::AsyncFuncFn)>,
+        renders: Vec<(&'static str, super::RenderFns)>,
+        keep: &mut Vec<Box<dyn std::any::Any>>,
+    ) -> JsValue {
+        let out: JsValue = js_sys::Object::new().into();
+        let f: JsValue = js_sys::Object::new().into();
+        for (name, func) in funcs {
+            let c =
+                Closure::<dyn Fn(JsValue) -> Result<JsValue, JsValue>>::new(move |v: JsValue| {
+                    func(from_value(v))
+                        .map(|r| to_value(&r))
+                        .map_err(|e| js_sys::Error::new(&e).into())
+                });
+            set(&f, name, c.as_ref());
+            keep.push(Box::new(c));
+        }
+        set(&out, "funcs", &f);
+        let a: JsValue = js_sys::Object::new().into();
+        for (name, func) in async_funcs {
+            let c = Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |v: JsValue| {
+                let fut = func(from_value(v));
+                wasm_bindgen_futures::future_to_promise(async move {
+                    fut.await
+                        .map(|r| to_value(&r))
+                        .map_err(|e| js_sys::Error::new(&e).into())
+                })
+            });
+            set(&a, name, c.as_ref());
+            keep.push(Box::new(c));
+        }
+        set(&out, "asyncFuncs", &a);
+        let r: JsValue = js_sys::Object::new().into();
+        for (name, fns) in renders {
+            let o: JsValue = js_sys::Object::new().into();
+            let mount = fns.mount;
+            let c = Closure::<dyn Fn(u32, JsValue, JsValue)>::new(move |key, el: JsValue, args| {
+                let node = el
+                    .dyn_into::<web_sys::Node>()
+                    .ok()
+                    .and_then(|n| crate::runtime::try_dom()?.adopt(n));
+                if let Some(n) = node {
+                    mount(key, NodeRef::from_id(n), from_value(args));
+                }
+            });
+            set(&o, "mount", c.as_ref());
+            keep.push(Box::new(c));
+            let update = fns.update;
+            let c = Closure::<dyn Fn(u32, JsValue)>::new(move |key, args| {
+                update(key, from_value(args))
+            });
+            set(&o, "update", c.as_ref());
+            keep.push(Box::new(c));
+            let unmount = fns.unmount;
+            let c = Closure::<dyn Fn(u32)>::new(move |key| unmount(key));
+            set(&o, "unmount", c.as_ref());
+            keep.push(Box::new(c));
+            set(&r, name, &o);
+        }
+        set(&out, "renders", &r);
+        out
+    }
+
     impl Bridge for WebBridge {
         fn mount(&self, m: Mount<'_>) {
             let host = m.host.raw().expect("an island's host is in the document");
@@ -638,6 +974,8 @@ mod web {
                 .collect();
             let on_error = m.on_error;
             let on_error = Closure::<dyn Fn(String)>::new(move |msg: String| on_error(&msg));
+            let mut keep: Vec<Box<dyn std::any::Any>> = Vec::new();
+            let calls = calls(m.funcs, m.async_funcs, m.renders, &mut keep);
             let component = (m.island.load)();
             js_mount(
                 m.id,
@@ -647,8 +985,15 @@ mod web {
                 &content,
                 &obj,
                 on_error.as_ref(),
+                &calls,
             );
             events.push(on_error);
+            self.0
+                .borrow_mut()
+                .entry(m.id)
+                .or_default()
+                .keep
+                .extend(keep);
             self.0.borrow_mut().entry(m.id).or_default().events = events;
         }
 

@@ -6,7 +6,10 @@ use std::rc::Rc;
 
 use doxa::ui::dom::MemDom;
 use doxa::ui::prelude::*;
-use doxa::ui::react::{Bridge, Content, EventFn, IslandProps, Mount, Shell};
+use doxa::ui::react::{
+    AsyncFunc, AsyncFuncFn, Bridge, Content, EventFn, Func, FuncFn, IslandProps, Mount, Render,
+    RenderFns, Shell,
+};
 
 #[react(module = "./ts/editor.tsx", export = "Editor")]
 pub struct Editor {
@@ -43,6 +46,9 @@ struct Calls {
     events: HashMap<u32, Vec<(&'static str, EventFn)>>,
     errors: HashMap<u32, EventFn>,
     shells: HashMap<u32, Vec<Shell>>,
+    funcs: HashMap<u32, Vec<(&'static str, FuncFn)>>,
+    async_funcs: HashMap<u32, Vec<(&'static str, AsyncFuncFn)>>,
+    renders: HashMap<u32, Vec<(&'static str, RenderFns)>>,
 }
 
 #[derive(Clone, Default)]
@@ -87,6 +93,9 @@ impl Bridge for Fake {
         c.events.insert(m.id, m.events);
         c.errors.insert(m.id, m.on_error);
         c.shells.insert(m.id, m.content.shells.clone());
+        c.funcs.insert(m.id, m.funcs);
+        c.async_funcs.insert(m.id, m.async_funcs);
+        c.renders.insert(m.id, m.renders);
     }
 
     fn update(&self, id: u32, content: &Content) {
@@ -429,4 +438,116 @@ fn an_element_prop_is_rendered_by_react_with_doxa_children_inside() {
     (shell.node)(None);
     doxa::client::task::run_until_stalled();
     assert_eq!(dom.text(button), "");
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Row {
+    id: u32,
+    name: String,
+}
+
+#[react(module = "./ts/data-table.tsx", export = "DataTable")]
+pub struct DataTable {
+    pub rows: Vec<Row>,
+    #[react(func)]
+    pub row_id: Func<Row, String>,
+    #[react(func)]
+    pub load_more: AsyncFunc<u32, Vec<Row>>,
+    #[react(render)]
+    pub cell: Render<(Row, String)>,
+}
+
+#[derive(Clone)]
+struct Tone(&'static str);
+
+#[component]
+fn CellText(text: String) -> View {
+    let tone = context::<Tone>();
+    view! { <span>{format!("{} {text}", tone.0)}</span> }
+}
+
+#[component]
+fn Table() -> View {
+    provide(Tone("loud"));
+    view! {
+        <DataTable
+            rows={Vec::new()}
+            row_id={|r: Row| format!("row-{}", r.id)}
+            load_more={async |n: u32| Ok((0..n).map(|id| Row { id, name: "r".into() }).collect())}
+            cell={|(row, col): (Row, String)| view! {
+                <CellText text={format!("{}:{col}", row.name)}/>
+            }}
+        />
+    }
+}
+
+thread_local! {
+    static PROBE: RefCell<Option<FuncFn>> = const { RefCell::new(None) };
+    static PROBED: RefCell<Vec<Result<serde_json::Value, String>>> = const { RefCell::new(Vec::new()) };
+}
+
+#[component]
+fn Prober(n: u32) -> View {
+    if let Some(f) = PROBE.with(|p| p.borrow().clone()) {
+        PROBED.with(|p| {
+            p.borrow_mut()
+                .push(f(serde_json::json!({"id": n, "name": "x"})))
+        });
+    }
+    view! { <b>{n}</b> }
+}
+
+#[test]
+fn react_calls_funcs_awaits_async_funcs_and_places_renders() {
+    use doxa::ui::dom::Dom;
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    App::new(|| view! { <Table/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    let settle = doxa::client::task::run_until_stalled;
+    let row_id = fake.0.borrow().funcs[&1][0].1.clone();
+    assert_eq!(
+        row_id(serde_json::json!({"id": 3, "name": "x"})),
+        Ok(serde_json::json!("row-3"))
+    );
+    assert!(row_id(serde_json::json!("nope"))
+        .unwrap_err()
+        .contains("wrong arguments"));
+
+    let load_more = fake.0.borrow().async_funcs[&1][0].1.clone();
+    let page = doxa::client::task::block_on(load_more(serde_json::json!(2))).unwrap();
+    assert_eq!(page.as_array().map(Vec::len), Some(2));
+
+    // React mounts the render into an element it owns; doxa fills it with context from the island.
+    let cell = fake.0.borrow().renders[&1][0].1.clone();
+    let el = dom.create_element("td", None);
+    dom.insert(dom.body(), el, None);
+    (cell.mount)(
+        7,
+        doxa::ui::NodeRef::from_id(el),
+        serde_json::json!([{"id": 1, "name": "a"}, "name"]),
+    );
+    settle();
+    assert_eq!(dom.text(el), "loud a:name");
+    (cell.update)(7, serde_json::json!([{"id": 1, "name": "b"}, "name"]));
+    settle();
+    assert_eq!(dom.text(el), "loud b:name");
+    (cell.unmount)(7);
+    settle();
+    assert_eq!(dom.text(el), "");
+
+    // A Func called while doxa renders is refused rather than re-entering it.
+    PROBE.with(|p| *p.borrow_mut() = Some(row_id));
+    let _probe =
+        App::new(|| view! { <Prober n={1u32}/> }).mount_on(Rc::new(dom.clone()), dom.body());
+    settle();
+    let probed = PROBED.with(|p| p.take());
+    assert!(
+        probed.iter().all(|r| r
+            .as_ref()
+            .is_err_and(|e| e.contains("while doxa was rendering"))),
+        "{probed:?}"
+    );
 }

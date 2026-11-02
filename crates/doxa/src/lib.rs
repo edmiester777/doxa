@@ -189,6 +189,31 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
+/// React calls a `func` for a value, and places a `render`:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// use doxa::ui::react::{Func, Render};
+/// #[react(module = "./ts/table.tsx", export = "Table")]
+/// pub struct Table {
+///     #[react(func)]
+///     pub row_id: Func<u32, String>,
+///     #[react(render)]
+///     pub cell: Render<u32>,
+/// }
+/// ```
+///
+/// A `func` that isn't one is "`#[react(func)]` field `row_id` must be a `Func<A, R>` or `AsyncFunc<A, R>`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/table.tsx", export = "Table")]
+/// pub struct Table {
+///     #[react(func)]
+///     pub row_id: fn(u32) -> String,
+/// }
+/// ```
+///
 /// An npm module this crate doesn't declare is rejected; the local module above compiles:
 ///
 /// ```compile_fail
