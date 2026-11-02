@@ -7,10 +7,10 @@ use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use doxa_client::cache::{self, Observer};
-use doxa_client::layer::{bearer, layers};
+use doxa_client::layer::{bearer, layers, transport};
 use doxa_client::transport::{Body, MockTransport, Request, Response, Transport};
 use doxa_client::{
-    task, CacheConfig, Cached, Call, Client, ClientConfig, Granted, Json, Permission, Probe, Query,
+    service, task, CacheConfig, Cached, Call, Granted, Json, Permission, Probe, Query, Service,
     SseOnce, SseStream,
 };
 use doxa_wire::{Identity, Keyed, Method, RouteSpec};
@@ -53,6 +53,7 @@ const fn route(method: Method, path: &'static str) -> RouteSpec {
         operation_id: path,
         entities: &["Widget"],
         dry_run: true,
+        package: "",
     }
 }
 
@@ -82,11 +83,16 @@ fn widget(id: u32, name: &str) -> serde_json::Value {
     json!({ "id": id, "name": name })
 }
 
-fn install(mock: &MockTransport, stale: Duration) -> Rc<Client> {
-    ClientConfig::default()
-        .transport(mock.clone())
-        .cache(CacheConfig::default().stale_time(stale))
-        .install()
+fn serve(t: impl Transport) -> Rc<Service> {
+    let s = service("");
+    s.layers().push(transport(t));
+    s
+}
+
+fn install(mock: &MockTransport, stale: Duration) -> Rc<Service> {
+    let s = serve(mock.clone());
+    s.cache(CacheConfig::default().stale_time(stale));
+    s
 }
 
 fn wait<F: IntoFuture>(call: F) -> F::Output {
@@ -158,10 +164,8 @@ fn spawn<F: IntoFuture + 'static>(call: F) {
 #[test]
 fn a_late_response_from_the_old_session_is_dropped() {
     let manual = Manual::default();
-    let client = ClientConfig::default()
-        .transport(manual.clone())
-        .cache(CacheConfig::default().stale_time(Duration::from_secs(60)))
-        .install();
+    let client = serve(manual.clone());
+    client.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
     let changes = Rc::new(Cell::new(0));
     let c = changes.clone();
     client.on_session_change(move || c.set(c.get() + 1));
@@ -187,10 +191,8 @@ fn a_late_response_from_the_old_session_is_dropped() {
 #[test]
 fn a_revalidation_from_before_a_clear_does_not_overwrite_the_new_entry() {
     let manual = Manual::default();
-    let client = ClientConfig::default()
-        .transport(manual.clone())
-        .cache(CacheConfig::default().stale_time(Duration::ZERO))
-        .install();
+    let client = serve(manual.clone());
+    client.cache(CacheConfig::default().stale_time(Duration::ZERO));
     spawn(get("cog"));
     manual.answer(0, 200, None, widget(1, "v1"));
     assert_eq!(wait(get("cog")).unwrap().name, "v1");
@@ -258,7 +260,7 @@ fn ending_the_session_clears_without_a_request() {
 }
 
 /// Read `cog`, let it go stale, and have its revalidation answer `status`.
-fn revalidate_with(status: u16) -> (MockTransport, Rc<Client>, Rc<Renders>) {
+fn revalidate_with(status: u16) -> (MockTransport, Rc<Service>, Rc<Renders>) {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog")).json(status, &json!({}));
     let client = install(&mock, Duration::from_millis(50));
@@ -275,12 +277,17 @@ fn revalidate_with(status: u16) -> (MockTransport, Rc<Client>, Rc<Renders>) {
 #[test]
 fn a_revalidation_that_finds_nothing_or_is_refused_evicts_the_entry() {
     for status in [404, 401, 403] {
-        let (mock, client, renders) = revalidate_with(status);
-        assert_eq!(renders.0.get(), 1, "{status}: readers were not told");
-        mock.json(status, &json!({}));
-        let err = wait(get("cog")).unwrap_err();
-        assert_eq!(err.status(), Some(status));
-        assert_eq!(client.requests_sent(), 3);
+        // A thread of its own for a fresh service.
+        std::thread::spawn(move || {
+            let (mock, client, renders) = revalidate_with(status);
+            assert_eq!(renders.0.get(), 1, "{status}: readers were not told");
+            mock.json(status, &json!({}));
+            let err = wait(get("cog")).unwrap_err();
+            assert_eq!(err.status(), Some(status));
+            assert_eq!(client.requests_sent(), 3);
+        })
+        .join()
+        .unwrap();
     }
 }
 
@@ -307,7 +314,7 @@ impl Observer for Renders {
 fn re_reading_a_fresh_query_sends_nothing() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"));
-    let client = ClientConfig::default().transport(mock.clone()).install();
+    let client = serve(mock.clone());
     task::block_on(async {
         for _ in 0..5 {
             assert_eq!(get("cog").await.unwrap().name, "cog");
@@ -360,7 +367,7 @@ fn a_mutation_refetches_each_affected_query_once() {
         .json(200, &widget(1, "sprocket"))
         .json(200, &widget(1, "sprocket"))
         .json(200, &json!([widget(1, "sprocket"), widget(2, "gear")]));
-    let client = ClientConfig::default().transport(mock.clone()).install();
+    let client = serve(mock.clone());
     let renders = Rc::new(Renders::default());
     cache::set_observer(Some(renders.clone()));
     task::block_on(async {
@@ -625,7 +632,7 @@ fn a_reconnect_sends_the_current_credentials() {
     let token = Rc::new(RefCell::new("t1".to_owned()));
     let t = token.clone();
     let _auth = layers().push_scoped(bearer(move || Some(t.borrow().clone())));
-    ClientConfig::default().transport(script.clone()).install();
+    serve(script.clone());
     task::block_on(async {
         let mut s = events("cog").await.unwrap().reconnect(fast());
         s.next().await.unwrap();
@@ -648,7 +655,7 @@ fn a_refused_reconnect_ends_the_stream_with_the_error() {
         .text(200, vec![], RENAMED)
         .text(403, vec![], "{}")
         .text(200, vec![], RENAMED);
-    ClientConfig::default().transport(script.clone()).install();
+    serve(script.clone());
     task::block_on(async {
         let mut s = events("cog").await.unwrap().reconnect(fast());
         s.next().await.unwrap();
@@ -666,7 +673,7 @@ fn a_session_change_closes_open_streams() {
         .text(200, session("a"), &widget(2, "gear").to_string())
         .push(200, vec![], Body::Stream(Box::pin(Open(dropped.clone()))))
         .text(200, session("b"), &widget(1, "cog").to_string());
-    ClientConfig::default().transport(script.clone()).install();
+    serve(script.clone());
     wait(get("gear")).unwrap();
     let mut s = wait(events("cog")).unwrap();
     wait(get("cog")).unwrap();
@@ -682,7 +689,7 @@ fn a_reconnect_reports_its_session() {
         .text(200, vec![], RENAMED)
         .text(200, session("b"), RENAMED)
         .text(200, session("b"), &widget(2, "gear").to_string());
-    let client = ClientConfig::default().transport(script.clone()).install();
+    let client = serve(script.clone());
     let changes = Rc::new(Cell::new(0));
     let c = changes.clone();
     client.on_session_change(move || c.set(c.get() + 1));
@@ -703,7 +710,7 @@ struct SignsOut(Scripted);
 impl Transport for SignsOut {
     fn send(&self, request: Request) -> LocalBoxFuture<'static, Result<Response, String>> {
         if self.0.seen.borrow().len() == 1 {
-            Client::current().end_session();
+            service("").end_session();
         }
         self.0.send(request)
     }
@@ -713,9 +720,7 @@ impl Transport for SignsOut {
 fn ending_the_session_while_a_stream_reconnects_closes_it() {
     let script = Scripted::default();
     script.text(200, vec![], RENAMED).text(200, vec![], RENAMED);
-    ClientConfig::default()
-        .transport(SignsOut(script.clone()))
-        .install();
+    serve(SignsOut(script.clone()));
     task::block_on(async {
         let mut s = events("cog").await.unwrap().reconnect(fast());
         s.next().await.unwrap();
@@ -733,7 +738,7 @@ fn turn(name: &str) -> Call<SseOnce<Event>> {
 fn each_post_stream_is_its_own_request() {
     let script = Scripted::default();
     script.text(200, vec![], RENAMED).text(200, vec![], RENAMED);
-    ClientConfig::default().transport(script.clone()).install();
+    serve(script.clone());
     task::block_on(async {
         let mut a = turn("cog").await.unwrap();
         let mut b = turn("cog").await.unwrap();
@@ -761,7 +766,7 @@ fn dropping_a_post_stream_ends_its_request() {
     let script = Scripted::default();
     let dropped = Rc::new(Cell::new(false));
     script.push(200, vec![], Body::Stream(Box::pin(Open(dropped.clone()))));
-    ClientConfig::default().transport(script.clone()).install();
+    serve(script.clone());
     let s = wait(turn("cog")).unwrap();
     assert!(!dropped.get());
     drop(s);
@@ -771,7 +776,7 @@ fn dropping_a_post_stream_ends_its_request() {
 #[test]
 fn a_post_stream_from_an_old_session_fails_without_being_resent() {
     let manual = Manual::default();
-    ClientConfig::default().transport(manual.clone()).install();
+    serve(manual.clone());
     spawn(get("gear"));
     manual.answer(0, 200, Some("a"), widget(2, "gear"));
     let failed = Rc::new(Cell::new(false));

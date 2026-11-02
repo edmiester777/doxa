@@ -239,6 +239,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
                 operation_id: #op_id,
                 entities: &[#(#entities),*],
                 dry_run: #dry_run,
+                package: ::core::env!("CARGO_PKG_NAME"),
             };
             #coverage
             #refusal

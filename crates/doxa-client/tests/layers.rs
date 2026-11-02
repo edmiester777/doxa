@@ -9,7 +9,7 @@ use doxa_client::layer::{
     bearer, cookies, layer_fn, layers, on_error_code, on_status, transport, Next,
 };
 use doxa_client::transport::{MockTransport, Request};
-use doxa_client::{task, Call, Client, ClientConfig, Json, Permission, Probe, SseStream};
+use doxa_client::{service, task, Call, Json, Permission, Probe, SseStream};
 use doxa_wire::{Method, RouteSpec};
 use serde::Deserialize;
 use serde_json::json;
@@ -21,6 +21,7 @@ const fn route(method: Method, path: &'static str) -> RouteSpec {
         operation_id: path,
         entities: &[],
         dry_run: true,
+        package: "",
     }
 }
 
@@ -45,7 +46,7 @@ fn wait<F: IntoFuture>(f: F) -> F::Output {
 
 fn install() -> MockTransport {
     let mock = MockTransport::new();
-    ClientConfig::default().transport(mock.clone()).install();
+    service("").layers().push(transport(mock.clone()));
     mock
 }
 
@@ -131,7 +132,7 @@ fn signing_out_on_a_401_reconnect_ends_the_stream() {
     let mock = install();
     mock.respond(200, vec![], b"data: {}\n\n".to_vec())
         .json(401, &json!({}));
-    layers().push(on_status(401, |_| Client::current().end_session()));
+    layers().push(on_status(401, |_| service("").end_session()));
     let fails = wait(async {
         let mut s = Call::<SseStream<Ev>>::new(&EVENTS)
             .await

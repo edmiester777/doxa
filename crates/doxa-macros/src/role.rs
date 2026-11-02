@@ -27,6 +27,28 @@ pub fn prelude(input: TokenStream) -> syn::Result<TokenStream> {
     })
 }
 
+/// `service!()`: this client crate's `service()` and `PACKAGE`; nothing in the server half.
+pub fn service(input: TokenStream) -> syn::Result<TokenStream> {
+    if !input.is_empty() {
+        return Err(syn::Error::new_spanned(
+            input,
+            "`service!()` takes no arguments",
+        ));
+    }
+    if !doxa_macro_support::is_client() {
+        return Ok(TokenStream::new());
+    }
+    Ok(quote! {
+        /// The package name this crate's routes and entities carry, which names its service.
+        pub const PACKAGE: &str = ::core::env!("CARGO_PKG_NAME");
+
+        /// This crate's service: its server's base URL, layers, cache and session.
+        pub fn service() -> ::std::rc::Rc<::doxa::client::Service> {
+            ::doxa::client::service(PACKAGE)
+        }
+    })
+}
+
 /// `#[server]` / `#[client]` on any item: keep it only in that half.
 pub fn only(side: Side, args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     if !args.is_empty() {
@@ -146,6 +168,7 @@ pub fn derive_identity(input: TokenStream) -> syn::Result<TokenStream> {
         impl ::doxa::wire::Identity for #name {
             type Id = #id_ty;
             const ENTITY_TYPE: &'static str = #entity;
+            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
             fn identity(&self) -> #id_ty {
                 ::core::clone::Clone::clone(&self.#id)
             }

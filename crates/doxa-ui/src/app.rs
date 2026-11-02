@@ -1,9 +1,7 @@
-//! `App`: the client, global providers, theme and plugins, mounted at one element.
+//! `App`: global providers, theme and plugins, mounted at one element.
 
 use std::any::{Any, TypeId};
 use std::rc::Rc;
-
-use doxa_client::{CacheConfig, ClientConfig};
 
 use crate::component::{Component, RenderFuture};
 use crate::dom::{Dom, NodeId};
@@ -25,8 +23,6 @@ use crate::{IntoView, View};
 pub struct App {
     root: Rc<dyn Fn() -> View>,
     router: Option<Router>,
-    config: ClientConfig,
-    cache: Option<CacheConfig>,
     provided: Vec<(TypeId, Rc<dyn Any>)>,
     theme: Option<Theme>,
     plugins: Vec<Box<dyn Plugin>>,
@@ -58,24 +54,10 @@ impl App {
         Self {
             root,
             router,
-            config: ClientConfig::default(),
-            cache: None,
             provided: Vec::new(),
             theme: None,
             plugins: Vec::new(),
         }
-    }
-
-    /// How routes are called: credentials and transport.
-    pub fn config(mut self, config: ClientConfig) -> Self {
-        self.config = config;
-        self
-    }
-
-    /// How long responses stay fresh.
-    pub fn cache(mut self, cache: CacheConfig) -> Self {
-        self.cache = Some(cache);
-        self
     }
 
     /// A value every component can read with `context::<T>()`.
@@ -116,11 +98,6 @@ impl App {
 
     /// Mount at `at` in `dom`; tests pass a [`MemDom`](crate::dom::MemDom).
     pub fn mount_on(self, dom: Rc<dyn Dom>, at: NodeId) {
-        let mut config = self.config;
-        if let Some(cache) = self.cache {
-            config = config.cache(cache);
-        }
-        config.install();
         runtime::set_dom(dom.clone());
         theme::set_host(dom.query("html").unwrap_or(at));
         if let Some(t) = self.theme {

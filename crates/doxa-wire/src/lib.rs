@@ -110,6 +110,8 @@ pub struct RouteSpec {
     pub entities: &'static [&'static str],
     /// Whether the route answers a `<Can>` dry run.
     pub dry_run: bool,
+    /// The client crate the route was compiled into, which names its service.
+    pub package: &'static str,
 }
 
 impl RouteSpec {
@@ -149,6 +151,8 @@ pub trait Keyed {
     type Key;
     /// The entity type the asset is about.
     const ENTITY_TYPE: &'static str;
+    /// The client crate whose service caches it.
+    const PACKAGE: &'static str = "";
 }
 
 /// A value the client cache can store by identity, from `#[derive(Identity)]`.
@@ -157,6 +161,8 @@ pub trait Identity {
     type Id: Clone + Eq + std::hash::Hash + 'static;
     /// The entity type, shared with the asset that guards it.
     const ENTITY_TYPE: &'static str;
+    /// The client crate whose service caches it.
+    const PACKAGE: &'static str = "";
     /// This value's identity.
     fn identity(&self) -> Self::Id;
     /// The route key naming this value, as it serializes, if it declares one.

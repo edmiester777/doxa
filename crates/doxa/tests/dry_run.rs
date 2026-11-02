@@ -52,12 +52,12 @@ mod client {
 #[tokio::test]
 async fn a_probe_never_reaches_an_unguarded_route() {
     use doxa::client::transport::RouterTransport;
-    use doxa::client::{ClientConfig, Permission};
+    use doxa::client::{layer::transport, service, Permission};
 
     let router = axum::Router::new().route("/ping", axum::routing::post(ping));
-    ClientConfig::default()
-        .transport(RouterTransport::new(router))
-        .install();
+    service("doxa")
+        .layers()
+        .push(transport(RouterTransport::new(router)));
     assert_eq!(client::ping::can().await, Permission::Unknown);
     assert_eq!(PINGED.load(Ordering::SeqCst), 0);
 }

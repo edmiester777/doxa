@@ -36,6 +36,8 @@ pub struct Dist {
     pub preload: Vec<String>,
     /// Stylesheets to link.
     pub stylesheets: Vec<String>,
+    /// Client crate to base URL, the default `services.json`.
+    pub services: BTreeMap<String, String>,
 }
 
 impl Dist {
@@ -122,7 +124,7 @@ pub fn compressible(path: &str) -> bool {
         .any(|e| path.ends_with(e))
 }
 
-/// Replace `dir` with `dist`, `index.html`, `manifest.json`, and `embed.rs`.
+/// Replace `dir` with `dist`, `index.html`, `manifest.json`, `services.json` and `embed.rs`.
 /// `compress` adds the precompressed siblings.
 pub fn write(dir: &Path, dist: &Dist, index_html: &str, compress: bool) -> Result<()> {
     if dir.exists() {
@@ -131,6 +133,8 @@ pub fn write(dir: &Path, dist: &Dist, index_html: &str, compress: bool) -> Resul
     let mut files = dist.files.clone();
     files.insert("index.html".into(), index_html.as_bytes().to_vec());
     files.insert("manifest.json".into(), dist.manifest_json().into_bytes());
+    let services = serde_json::to_string_pretty(&dist.services).expect("json") + "\n";
+    files.insert("services.json".into(), services.into_bytes());
     let mut written = Vec::new();
     for (rel, bytes) in &files {
         put(dir, rel, bytes)?;
@@ -208,6 +212,8 @@ mod tests {
         d.entry = js.clone();
         d.preload = vec![js, "chunks/chunk-AB12CD34.js".into()];
         d.stylesheets = vec![css];
+        d.services
+            .insert("orders-client".into(), "https://orders.example.com".into());
         d
     }
 
@@ -273,6 +279,10 @@ mod tests {
             .unwrap();
         assert_eq!(html, "<html></html>");
         assert!(!out.join("manifest.json.br").exists());
+        assert_eq!(
+            std::fs::read_to_string(out.join("services.json")).unwrap(),
+            "{\n  \"orders-client\": \"https://orders.example.com\"\n}\n"
+        );
 
         let embed = std::fs::read_to_string(out.join("embed.rs")).unwrap();
         assert!(embed.starts_with("&["), "{embed}");

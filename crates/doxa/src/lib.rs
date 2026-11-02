@@ -55,7 +55,7 @@ pub use doxa_auth as auth;
 pub use doxa_policy as policy;
 
 #[cfg(any(feature = "macros", feature = "client"))]
-pub use doxa_macros::{client, client_only, prelude, server, server_only, Identity};
+pub use doxa_macros::{client, client_only, prelude, server, server_only, service, Identity};
 
 /// The server half: what `doxa::prelude!()` brings in where the crate is the server.
 #[cfg(all(feature = "docs", feature = "macros", not(target_arch = "wasm32")))]

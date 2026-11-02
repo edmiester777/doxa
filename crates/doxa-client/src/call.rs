@@ -13,14 +13,14 @@ use serde_json::Value;
 use crate::arg::{ArgFor, Outgoing};
 use crate::cache::entity::Entity;
 use crate::cache::{map_items, max_age, Lookup, Meta, Outcome, Revalidated, Revalidation, Slot};
-use crate::client::{now, Client};
 use crate::fetch::Fetch;
 use crate::response::{widen, FromResponse};
+use crate::service::{now, service, Service};
 use crate::sse::Hub;
 use crate::transport::Request;
 
-type Patch = Box<dyn FnOnce(&Client, Option<&Value>) -> Vec<(String, Rc<dyn Any>)>>;
-type Settle = Box<dyn FnOnce(&Client, &dyn Any, Option<&Value>)>;
+type Patch = Box<dyn FnOnce(&Service, Option<&Value>) -> Vec<(String, Rc<dyn Any>)>>;
+type Settle = Box<dyn FnOnce(&Service, &dyn Any, Option<&Value>)>;
 
 /// A call to a route, built by the route's client stub. Await it.
 ///
@@ -32,7 +32,6 @@ pub struct Call<R> {
     route: &'static RouteSpec,
     out: Outgoing,
     error: Option<String>,
-    client: Option<Rc<Client>>,
     fresh: bool,
     patch: Option<Patch>,
     settle: Option<Settle>,
@@ -47,7 +46,6 @@ impl<R> Call<R> {
             route,
             out: Outgoing::new(route.path),
             error: None,
-            client: None,
             fresh: false,
             patch: None,
             settle: None,
@@ -82,12 +80,6 @@ impl<R> Call<R> {
     /// Skip the cache and ask the server, storing what comes back.
     pub fn fresh(mut self) -> Self {
         self.fresh = true;
-        self
-    }
-
-    /// Use `client` rather than the current one.
-    pub fn via(mut self, client: &Rc<Client>) -> Self {
-        self.client = Some(client.clone());
         self
     }
 
@@ -212,7 +204,7 @@ enum Sent<R: FromResponse> {
 
 /// What came back, and whether it still belongs to the current session.
 async fn send<R: FromResponse>(
-    client: &Client,
+    client: &Service,
     mut request: Request,
     etag: Option<&str>,
 ) -> (Sent<R>, bool) {
@@ -292,7 +284,7 @@ fn from_outcome<R: FromResponse>(outcome: &Outcome) -> Result<R::Output, Fetch<R
 
 /// Join the open stream with the same route and arguments, or open it.
 async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
-    let client = call.client.clone().unwrap_or_else(Client::current);
+    let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
     let key = format!("{} {url}", call.route.method.as_str());
     let response = loop {
@@ -322,7 +314,7 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
 
 /// Send a mutating route's stream request exactly once: never shared, resent or reopened.
 async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
-    let client = call.client.clone().unwrap_or_else(Client::current);
+    let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
     let request = call.request(url.clone(), "text/event-stream");
     client.cache.count_request();
@@ -346,7 +338,7 @@ async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
 }
 
 async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
-    let client = call.client.clone().unwrap_or_else(Client::current);
+    let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
     let key = format!("GET {url}");
     loop {
@@ -359,7 +351,7 @@ async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Err
 /// One attempt; `None` when the session changed while it was in flight.
 async fn query_once<R: FromResponse>(
     call: &Call<R>,
-    client: &Rc<Client>,
+    client: &Rc<Service>,
     url: &str,
     key: &str,
 ) -> Option<Result<R::Output, Fetch<R::Error>>> {
@@ -431,7 +423,7 @@ async fn query_once<R: FromResponse>(
 
 /// An instance route answered from a fresh list or response holding that instance,
 /// filed under `key` with the age of what it came from.
-fn from_store<R>(call: &Call<R>, client: &Client, key: &str) -> Option<Rc<dyn Any>> {
+fn from_store<R>(call: &Call<R>, client: &Service, key: &str) -> Option<Rc<dyn Any>> {
     let entity = call.entity?;
     let route_key = call.out.only_key()?;
     let (value, at) = client.cache.find(now(), |v| (entity.find)(v, route_key))?;
@@ -454,7 +446,7 @@ fn from_store<R>(call: &Call<R>, client: &Client, key: &str) -> Option<Rc<dyn An
 /// Ends an in-flight entry even if the caller drops the call, so waiters retry
 /// rather than wait forever.
 struct Inflight<'a> {
-    client: &'a Client,
+    client: &'a Service,
     key: &'a str,
     slot: &'a Slot,
 }
@@ -469,7 +461,7 @@ impl Drop for Inflight<'_> {
 }
 
 fn revalidate<R: FromResponse>(
-    client: &Rc<Client>,
+    client: &Rc<Service>,
     key: String,
     request: Request,
     claim: Revalidation,
@@ -495,7 +487,7 @@ fn revalidate<R: FromResponse>(
 }
 
 async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
-    let client = call.client.clone().unwrap_or_else(Client::current);
+    let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
     let request = call.request(url.clone(), "application/json");
     let key = call.out.first_key().cloned();

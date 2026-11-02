@@ -29,6 +29,9 @@ pub struct DoxaConfig {
     pub npm: BTreeMap<String, String>,
     /// A release build fails when the optimized app wasm is larger, in KiB.
     pub wasm_budget_kb: Option<u64>,
+    /// Client crate to base URL, written to `services.json`; unlisted ones are same-origin.
+    #[serde(default)]
+    pub services: BTreeMap<String, String>,
 }
 
 /// The workspace as `cargo metadata --no-deps` describes it.
@@ -108,7 +111,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, and an npm table",
+                    "keys are role, server, css, css_sources, public, wasm_budget_kb, and npm and services tables",
                 )
             }),
         }

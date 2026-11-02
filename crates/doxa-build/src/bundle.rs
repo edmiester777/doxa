@@ -279,19 +279,23 @@ fn island_js(spec: &str, web_root: &Path) -> String {
     }
 }
 
-/// The generated entry: load the glue, start the wasm, and pull in islands.
+/// The generated entry: load the glue and islands, read `services.json`, start the wasm.
+/// A missing file, or a server answering it with `index.html`, means no overrides.
 pub fn entry_js(glue: &Path, islands: &[PathBuf], wasm_file: &str) -> String {
     let lit = |p: &Path| serde_json::to_string(&js_path(p)).expect("json");
     let mut js = format!("import init from {};\n", lit(glue));
     for island in islands {
         js.push_str(&format!("import {};\n", lit(island)));
     }
+    js.push_str(SERVICES_JS);
     js.push_str(&format!(
         "await init({{ module_or_path: new URL({}, import.meta.url) }});\n",
         serde_json::to_string(&format!("./{wasm_file}")).expect("json")
     ));
     js
 }
+
+const SERVICES_JS: &str = "globalThis.__DOXA_SERVICES__ = await fetch(new URL(\"./services.json\", import.meta.url), { cache: \"no-cache\" })\n  .then((r) => (r.ok && /json/.test(r.headers.get(\"content-type\") ?? \"\") ? r.json() : {}))\n  .catch(() => ({}));\n";
 
 fn js_path(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
@@ -383,6 +387,9 @@ mod tests {
             js,
             "import init from \"/s/bindgen/app.js\";\n\
              import \"/app/web/ts/editor.tsx\";\n\
+             globalThis.__DOXA_SERVICES__ = await fetch(new URL(\"./services.json\", import.meta.url), { cache: \"no-cache\" })\n  \
+             .then((r) => (r.ok && /json/.test(r.headers.get(\"content-type\") ?? \"\") ? r.json() : {}))\n  \
+             .catch(() => ({}));\n\
              await init({ module_or_path: new URL(\"./app-0123abcd.wasm\", import.meta.url) });\n"
         );
     }

@@ -1,75 +1,69 @@
-//! The installed client: transport, cache, and session.
+//! One service per client crate: its base URL, layers, cache, streams and session.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
-use crate::cache::{Cache, CacheConfig};
 use std::collections::HashMap;
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 
 use futures_util::future::LocalBoxFuture;
 
+use crate::cache::{Cache, CacheConfig};
 use crate::fetch::Fetch;
-use crate::layer::{layers, Next};
+use crate::layer::{layers, Layers, Next};
 use crate::sse::Hub;
 use crate::transport::{Request, Response, Transport};
 
-/// Everything a call needs that isn't one of its arguments or a [layer](crate::layer).
+/// Where one client crate's routes are served, and everything tied to that server's session.
 ///
 /// ```
-/// use doxa_client::{ClientConfig, transport::MockTransport};
+/// use doxa_client::{layer::transport, service, transport::MockTransport};
 ///
-/// ClientConfig::default().transport(MockTransport::new()).install();
+/// let orders = service("orders-client");
+/// orders.set_base("https://orders.example.com");
+/// orders.layers().push(transport(MockTransport::new()));
 /// ```
-#[derive(Clone, Default)]
-pub struct ClientConfig {
-    transport: Option<Rc<dyn Transport>>,
-    cache: CacheConfig,
-}
-
-impl ClientConfig {
-    /// Send calls through `transport` instead of `fetch`.
-    pub fn transport(mut self, transport: impl Transport) -> Self {
-        self.transport = Some(Rc::new(transport));
-        self
-    }
-
-    /// How long responses stay fresh.
-    pub fn cache(mut self, cache: CacheConfig) -> Self {
-        self.cache = cache;
-        self
-    }
-
-    /// Make this the client every call on this thread uses.
-    pub fn install(self) -> Rc<Client> {
-        let client = Rc::new(Client::new(self));
-        CURRENT.with(|c| *c.borrow_mut() = Some(client.clone()));
-        client
-    }
-}
-
-/// An installed client. Calls use the current one unless told otherwise.
-pub struct Client {
+pub struct Service {
+    package: &'static str,
+    base: RefCell<String>,
+    layers: Layers,
     transport: Rc<dyn Transport>,
     pub(crate) cache: Cache,
     epoch: RefCell<Option<String>>,
     /// Bumped on every session change; a response to an older one is dropped.
     session: Cell<u64>,
-    on_session: RefCell<Vec<Box<dyn Fn()>>>,
+    on_session: RefCell<Vec<Rc<dyn Fn()>>>,
     streams: RefCell<HashMap<String, Weak<Hub>>>,
 }
 
+type AnySession = Rc<dyn Fn(&'static str)>;
+
 thread_local! {
-    static CURRENT: RefCell<Option<Rc<Client>>> = const { RefCell::new(None) };
+    static SERVICES: RefCell<HashMap<&'static str, Rc<Service>>> = RefCell::default();
+    static ANY_SESSION: RefCell<Vec<AnySession>> = const { RefCell::new(Vec::new()) };
 }
 
-impl Client {
-    pub(crate) fn new(config: ClientConfig) -> Self {
-        let cache = Cache::default();
-        *cache.config.borrow_mut() = config.cache;
+/// The service of client crate `package`, created on first use.
+pub fn service(package: &'static str) -> Rc<Service> {
+    SERVICES.with(|s| {
+        s.borrow_mut()
+            .entry(package)
+            .or_insert_with(|| Rc::new(Service::new(package)))
+            .clone()
+    })
+}
+
+/// Run `f` with the package name whenever any service's session changes.
+pub fn on_any_session_change(f: impl Fn(&'static str) + 'static) {
+    ANY_SESSION.with(|a| a.borrow_mut().push(Rc::new(f)));
+}
+
+impl Service {
+    fn new(package: &'static str) -> Self {
         Self {
-            transport: config.transport.unwrap_or_else(default_transport),
-            cache,
+            package,
+            base: RefCell::new(configured_base(package)),
+            layers: Layers::default(),
+            transport: default_transport(),
+            cache: Cache::default(),
             epoch: RefCell::new(None),
             session: Cell::new(0),
             on_session: RefCell::new(Vec::new()),
@@ -77,18 +71,34 @@ impl Client {
         }
     }
 
-    /// The client calls on this thread use, installing a default one if needed.
-    pub fn current() -> Rc<Client> {
-        CURRENT.with(|c| {
-            c.borrow_mut()
-                .get_or_insert_with(|| Rc::new(Client::new(ClientConfig::default())))
-                .clone()
-        })
+    /// The client crate this service is for.
+    pub fn package(&self) -> &'static str {
+        self.package
+    }
+
+    /// The base URL requests go to; empty means the page's own origin.
+    pub fn base(&self) -> String {
+        self.base.borrow().clone()
+    }
+
+    /// Send requests to `base`, e.g. `https://orders.example.com`.
+    pub fn set_base(&self, base: impl Into<String>) {
+        *self.base.borrow_mut() = base.into();
+    }
+
+    /// This service's layers; they run after the [global ones](crate::layers).
+    pub fn layers(&self) -> Layers {
+        self.layers.clone()
+    }
+
+    /// How long this service's responses stay fresh.
+    pub fn cache(&self, config: CacheConfig) {
+        *self.cache.config.borrow_mut() = config;
     }
 
     /// Run `f` whenever the server reports a new session (sign-in, sign-out, tenant switch).
     pub fn on_session_change(&self, f: impl Fn() + 'static) {
-        self.on_session.borrow_mut().push(Box::new(f));
+        self.on_session.borrow_mut().push(Rc::new(f));
     }
 
     /// Requests that reached the network.
@@ -118,12 +128,18 @@ impl Client {
         self.streams.borrow_mut().insert(key, Rc::downgrade(hub));
     }
 
-    /// Send `request` through the layers, then the transport. Holds no borrow while it runs.
+    /// Send `request` under the base URL through the global layers, this service's, then
+    /// the transport. Holds no borrow while it runs.
     pub(crate) fn send(
         &self,
-        request: Request,
+        mut request: Request,
     ) -> LocalBoxFuture<'static, Result<Response, Fetch>> {
-        Next::new(layers().snapshot().into(), self.transport.clone()).run(request)
+        if !request.url.contains("://") {
+            request.url = format!("{}{}", self.base.borrow(), request.url);
+        }
+        let mut stack = layers().snapshot();
+        stack.extend(self.layers.snapshot());
+        Next::new(stack.into(), self.transport.clone()).run(request)
     }
 
     /// The session counter to tag a request with as it is sent.
@@ -166,9 +182,10 @@ impl Client {
         for hub in hubs.iter().filter_map(|(_, h)| h.upgrade()) {
             hub.close();
         }
-        for f in self.on_session.borrow().iter() {
-            f();
-        }
+        let own: Vec<_> = self.on_session.borrow().clone();
+        own.iter().for_each(|f| f());
+        let any: Vec<_> = ANY_SESSION.with(|a| a.borrow().clone());
+        any.iter().for_each(|f| f(self.package));
     }
 }
 
@@ -180,6 +197,23 @@ fn default_transport() -> Rc<dyn Transport> {
 #[cfg(not(target_arch = "wasm32"))]
 fn default_transport() -> Rc<dyn Transport> {
     Rc::new(crate::transport::Unconfigured)
+}
+
+/// The base URL `services.json` gives `package`, which the entry script loads before the wasm.
+#[cfg(target_arch = "wasm32")]
+fn configured_base(package: &str) -> String {
+    use js_sys::Reflect;
+    Reflect::get(&js_sys::global(), &"__DOXA_SERVICES__".into())
+        .ok()
+        .filter(|m| m.is_object())
+        .and_then(|m| Reflect::get(&m, &package.into()).ok())
+        .and_then(|v| v.as_string())
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn configured_base(_: &str) -> String {
+    String::new()
 }
 
 /// Milliseconds since an arbitrary epoch.

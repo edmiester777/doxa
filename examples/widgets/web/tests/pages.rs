@@ -2,21 +2,34 @@
 
 use std::rc::Rc;
 
+use std::cell::RefCell;
+
+use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
-use doxa::client::{Client, ClientConfig};
 use doxa::ui::dom::MemDom;
 use doxa::ui::navigate;
 use doxa::ui::react::{Bridge, EventFn, Mount};
 
-fn mount(role: &str) -> MemDom {
+thread_local! {
+    static SERVED: RefCell<Option<Scoped>> = const { RefCell::new(None) };
+}
+
+/// Answer this thread's calls with a fresh server, as `role`, from an empty cache.
+fn serve(role: &str) {
+    let s = widgets_client::service();
+    SERVED.with(|g| g.borrow_mut().take());
+    s.end_session();
     let router = widgets_server::app(widgets_server::seeded());
+    let guard = s.layers().push_scoped(transport(
+        RouterTransport::new(router).with_header("x-role", role),
+    ));
+    SERVED.with(|g| *g.borrow_mut() = Some(guard));
+}
+
+fn mount(role: &str) -> MemDom {
+    serve(role);
     let dom = MemDom::new();
-    widgets_web::app()
-        .config(
-            ClientConfig::default()
-                .transport(RouterTransport::new(router).with_header("x-role", role)),
-        )
-        .mount_on(Rc::new(dom.clone()), dom.body());
+    widgets_web::app().mount_on(Rc::new(dom.clone()), dom.body());
     dom
 }
 
@@ -33,7 +46,7 @@ async fn the_list_page_renders_every_widget_with_one_request() {
     let dom = mount("viewer");
     settle().await;
     assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "sprocketgearcog");
-    assert_eq!(Client::current().requests_sent(), 1);
+    assert_eq!(widgets_client::service().requests_sent(), 1);
 }
 
 #[tokio::test]
@@ -60,7 +73,7 @@ async fn a_renamed_can_takes_its_probe_directly() {
     use widgets_client::widgets::{rename_widget, WidgetKey};
 
     for (role, shown) in [("editor", true), ("viewer", false)] {
-        let router = widgets_server::app(widgets_server::seeded());
+        serve(role);
         let dom = MemDom::new();
         App::new(|| {
             let key = WidgetKey {
@@ -72,10 +85,6 @@ async fn a_renamed_can_takes_its_probe_directly() {
                 </Allowed>
             }
         })
-        .config(
-            ClientConfig::default()
-                .transport(RouterTransport::new(router).with_header("x-role", role)),
-        )
         .mount_on(Rc::new(dom.clone()), dom.body());
         settle().await;
         assert_eq!(dom.find("class", "edit").is_some(), shown, "{role}");

@@ -14,8 +14,8 @@ use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 
-use crate::client::Client;
 use crate::fetch::Fetch;
+use crate::service::Service;
 use crate::transport::{Body, Request, Response};
 
 /// How long to wait between reconnect attempts.
@@ -168,7 +168,7 @@ impl Wake for Waiting {
 pub struct Hub {
     /// The request as the call built it; each reconnect sends it through the layers afresh.
     request: Request,
-    client: Rc<Client>,
+    client: Rc<Service>,
     waiting: Arc<Waiting>,
     state: RefCell<HubState>,
 }
@@ -187,7 +187,7 @@ struct HubState {
 }
 
 impl Hub {
-    pub(crate) fn new(request: Request, client: Rc<Client>, body: Body) -> Self {
+    pub(crate) fn new(request: Request, client: Rc<Service>, body: Body) -> Self {
         Self {
             request,
             client,
@@ -415,11 +415,11 @@ mod tests {
     }
 
     fn hub(raw: &str, transport: MockTransport) -> Rc<Hub> {
+        let service = crate::service("");
+        service.layers().push(crate::layer::transport(transport));
         Rc::new(Hub::new(
             request(),
-            Rc::new(Client::new(
-                crate::ClientConfig::default().transport(transport),
-            )),
+            service,
             Body::Full(raw.as_bytes().to_vec()),
         ))
     }

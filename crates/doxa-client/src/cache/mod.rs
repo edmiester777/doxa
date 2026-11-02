@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::arg::Arg;
-use crate::client::Client;
+use crate::service::service;
 
 pub(crate) mod entity;
 
@@ -47,14 +47,14 @@ where
     W::Key: Serialize,
 {
     let key = doxa_wire::key_value(&key.into_arg());
-    Client::current().cache.invalidate_where(|e| {
+    service(W::PACKAGE).cache.invalidate_where(|e| {
         e.route.entities.contains(&W::ENTITY_TYPE) && (e.key.is_none() || e.key == key)
     });
 }
 
 /// Mark stale every cached query about the asset `W`.
 pub fn invalidate_all<W: Keyed>() {
-    Client::current().cache.invalidate(&[W::ENTITY_TYPE]);
+    service(W::PACKAGE).cache.invalidate(&[W::ENTITY_TYPE]);
 }
 
 /// Patch every cached `T` whose route key is `key`, in instances and lists, and
@@ -67,7 +67,7 @@ pub fn apply<T: Identity + Clone + 'static>(key: &impl Serialize, f: impl Fn(&mu
     let Some(key) = doxa_wire::key_value(key) else {
         return;
     };
-    Client::current()
+    service(T::PACKAGE)
         .cache
         .patch(|value| map_items::<T>(value, |t| t.route_key().as_ref() == Some(&key), &f));
 }

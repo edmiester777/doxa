@@ -8,7 +8,7 @@ use futures_util::future::LocalBoxFuture;
 
 use crate::arg::{ArgFor, Outgoing};
 use crate::cache::Meta;
-use crate::client::{now, Client};
+use crate::service::{now, service};
 use crate::transport::Request;
 
 /// What a dry run of a route said.
@@ -67,7 +67,7 @@ impl IntoFuture for Probe {
             let Ok(url) = self.out.url() else {
                 return Permission::Unknown;
             };
-            let client = Client::current();
+            let client = service(self.route.package);
             let key = format!("CAN {} {url}", self.route.method.as_str());
             let permission = loop {
                 if let Some(v) = client.cache.fresh(&key, now()) {

@@ -63,5 +63,5 @@ pub mod prelude {
         Outlet, Page, Plugin, Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State,
         Suspense, Theme, Thrown, View,
     };
-    pub use doxa_client::{CacheConfig, ClientConfig};
+    pub use doxa_client::{layers, service, CacheConfig};
 }

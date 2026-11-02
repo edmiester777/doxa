@@ -2,7 +2,7 @@
 //! precompressed siblings when the client takes them, and `index.html` for browser
 //! navigations outside the API prefix.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -61,6 +61,7 @@ enum Source {
 pub struct Spa {
     source: Source,
     api_prefix: String,
+    services: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl Spa {
@@ -69,6 +70,7 @@ impl Spa {
         Spa {
             source: Source::Dir(path.into()),
             api_prefix: "/api".into(),
+            services: None,
         }
     }
 
@@ -77,6 +79,7 @@ impl Spa {
         Spa {
             source: Source::Embedded(Arc::new(files.iter().copied().collect())),
             api_prefix: "/api".into(),
+            services: None,
         }
     }
 
@@ -102,6 +105,42 @@ impl Spa {
             format!("/{p}")
         };
         self
+    }
+
+    /// Answer `services.json` with the built defaults overlaid by these client crate base
+    /// URLs, so a deployment points its clients without a rebuild.
+    pub fn services<K: Into<String>, V: Into<String>>(
+        mut self,
+        services: impl IntoIterator<Item = (K, V)>,
+    ) -> Spa {
+        let map = services
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        self.services = Some(Arc::new(map));
+        self
+    }
+
+    async fn services_json(&self, overrides: &BTreeMap<String, String>, head: bool) -> Response {
+        let mut merged: BTreeMap<String, String> = match self.read("services.json").await {
+            Some(b) => serde_json::from_slice(&b).unwrap_or_default(),
+            None => BTreeMap::new(),
+        };
+        merged.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let body = serde_json::to_vec(&merged).expect("json");
+        let mut res = Response::new(if head {
+            Body::empty()
+        } else {
+            Body::from(body.clone())
+        });
+        let h = res.headers_mut();
+        h.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        h.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        res
     }
 
     fn is_api(&self, path: &str) -> bool {
@@ -197,6 +236,9 @@ async fn serve(State(spa): State<Arc<Spa>>, req: Request, next: Next) -> Respons
     let res = next.run(req).await;
     if res.status() != StatusCode::NOT_FOUND {
         return res;
+    }
+    if let (Some(overrides), "/services.json") = (&spa.services, path.as_str()) {
+        return spa.services_json(overrides, head).await;
     }
     if let Some(rel) = asset_path(&path) {
         if let Some(found) = spa.file(rel, accept, head).await {
@@ -322,6 +364,10 @@ mod tests {
         ("app-89abcdef.wasm", b"\0asm"),
         ("chunks/chunk-QWERTYUI.js", b"chunk"),
         ("robots.txt", b"User-agent: *"),
+        (
+            "services.json",
+            br#"{"chat-client":"/chat","orders-client":"/orders"}"#,
+        ),
     ];
 
     fn app(spa: Spa) -> Router {
@@ -474,6 +520,22 @@ mod tests {
         assert_eq!(body(res).await, b"ok");
         let res = send(&r, Method::GET, "/../etc/passwd", &[]).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn services_overlay_the_built_defaults() {
+        let r = app(Spa::embedded(FILES).services([("orders-client", "https://o.example.com")]));
+        let res = send(&r, Method::GET, "/services.json", &[]).await;
+        assert_eq!(hdr(&res, header::CACHE_CONTROL), Some("no-cache"));
+        assert_eq!(hdr(&res, header::CONTENT_TYPE), Some("application/json"));
+        assert_eq!(
+            body(res).await,
+            br#"{"chat-client":"/chat","orders-client":"https://o.example.com"}"#
+        );
+
+        let r = app(Spa::embedded(FILES));
+        let res = send(&r, Method::GET, "/services.json", &[]).await;
+        assert_eq!(body(res).await, FILES[8].1);
     }
 
     #[tokio::test]

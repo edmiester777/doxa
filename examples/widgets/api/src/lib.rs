@@ -2,6 +2,8 @@
 
 pub mod widgets;
 
+doxa::service!();
+
 doxa::server_only! {
     pub mod store;
 }

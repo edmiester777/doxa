@@ -11,10 +11,10 @@ pub mod cache;
 mod cached;
 mod call;
 mod can;
-mod client;
 mod fetch;
 pub mod layer;
 mod response;
+mod service;
 mod sse;
 pub mod task;
 pub mod transport;
@@ -24,10 +24,10 @@ pub use cache::{invalidate, invalidate_all, CacheConfig};
 pub use cached::Cached;
 pub use call::Call;
 pub use can::{Permission, Probe};
-pub use client::{Client, ClientConfig};
 pub use fetch::{Fetch, NoError};
 pub use layer::{layer_fn, layers, Layer, Next};
 pub use response::{AliasedResult, FromResponse, SseOnce, SseStream, StatusCode, Unsupported};
+pub use service::{on_any_session_change, service, Service};
 pub use sse::{Backoff, EventStream, Once};
 
 #[doc(hidden)]

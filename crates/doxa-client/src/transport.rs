@@ -95,7 +95,7 @@ pub(crate) struct Unconfigured;
 impl Transport for Unconfigured {
     fn send(&self, _: Request) -> LocalBoxFuture<'static, Result<Response, String>> {
         Box::pin(async {
-            Err("no transport: install a `ClientConfig` with `.transport(…)` first".to_owned())
+            Err("no transport: push a `layer::transport(…)` onto `layers()` first".to_owned())
         })
     }
 }

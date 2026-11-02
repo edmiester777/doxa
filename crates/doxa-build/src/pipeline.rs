@@ -212,7 +212,10 @@ impl Pipeline {
         let (Some(wasm_file), Some(bundle)) = (&self.wasm_file, &self.bundle) else {
             return Err(Error::config("nothing built yet", "run a full build"));
         };
-        let mut d = Dist::default();
+        let mut d = Dist {
+            services: self.web.config.services.clone(),
+            ..Dist::default()
+        };
         let app_wasm = self.bindgen_dir().join("app_bg.wasm");
         d.add(
             "app.wasm",

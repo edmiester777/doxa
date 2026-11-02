@@ -395,6 +395,7 @@ fn a_slot_shows_each_fill_once_however_often_apps_mount() {
 }
 
 static VISITS: Singleton<u32> = Singleton::new(|| 0);
+static OWNED: Singleton<u32> = Singleton::new(|| 0).resets_with("other-client");
 
 mod probes {
     use doxa::client::Probe;
@@ -406,6 +407,7 @@ mod probes {
         operation_id: "guarded",
         entities: &[],
         dry_run: true,
+        package: "",
     };
     pub static OTHER: RouteSpec = RouteSpec {
         method: Method::Get,
@@ -413,6 +415,7 @@ mod probes {
         operation_id: "other",
         entities: &[],
         dry_run: true,
+        package: "",
     };
     pub static OPAQUE: RouteSpec = RouteSpec {
         method: Method::Get,
@@ -420,6 +423,7 @@ mod probes {
         operation_id: "opaque",
         entities: &[],
         dry_run: false,
+        package: "",
     };
 
     pub mod guarded {
@@ -457,20 +461,19 @@ fn answer(mock: &MockTransport, status: u16, session: &str) {
 
 fn mount_with(mock: &MockTransport, root: impl Fn() -> View + 'static) -> MemDom {
     let dom = MemDom::new();
-    App::new(root)
-        .config(ClientConfig::default().transport(mock.clone()))
-        .mount_on(Rc::new(dom.clone()), dom.body());
+    service("")
+        .layers()
+        .push(doxa::client::layer::transport(mock.clone()));
+    App::new(root).mount_on(Rc::new(dom.clone()), dom.body());
     dom
 }
 
 #[test]
-fn singletons_reset_with_the_session_of_the_client_mounted_last() {
-    let _ = mount_with(&MockTransport::new(), View::empty);
-    VISITS.set(1);
-
+fn a_singleton_resets_with_any_session_or_only_its_owners() {
     let mock = MockTransport::new();
     let _ = mount_with(&mock, View::empty);
     VISITS.set(2);
+    OWNED.set(2);
     answer(&mock, 204, "a");
     answer(&mock, 204, "b");
     doxa::client::task::block_on(async {
@@ -478,6 +481,9 @@ fn singletons_reset_with_the_session_of_the_client_mounted_last() {
         let _ = probes::other::can().await;
     });
     assert_eq!(VISITS.get(), 0, "a new session starts the singleton over");
+    assert_eq!(OWNED.get(), 2, "another service's session reset it");
+    service("other-client").end_session();
+    assert_eq!(OWNED.get(), 0);
 }
 
 #[test]

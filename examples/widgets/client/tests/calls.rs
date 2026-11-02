@@ -1,17 +1,37 @@
 //! The client stubs, sent through the real server router in-process.
 
+use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
-use doxa::client::{CacheConfig, Cached, Client, ClientConfig, Fetch, Permission};
+use doxa::client::{CacheConfig, Cached, Fetch, Permission, Service};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 use widgets_client::widgets::*;
 
-fn install(role: &str) -> Rc<Client> {
-    let router = widgets_server::app(widgets_server::seeded());
-    ClientConfig::default()
-        .transport(RouterTransport::new(router).with_header("x-role", role))
-        .cache(CacheConfig::default().stale_time(Duration::from_secs(60)))
-        .install()
+thread_local! {
+    static SERVED: RefCell<Option<Scoped>> = const { RefCell::new(None) };
+}
+
+/// Answer this thread's calls with `router`, as `role`, from an empty cache.
+fn serve(router: RouterTransport, role: &str) -> Rc<Service> {
+    let s = widgets_client::service();
+    SERVED.with(|g| g.borrow_mut().take());
+    s.end_session();
+    let guard = s
+        .layers()
+        .push_scoped(transport(router.with_header("x-role", role)));
+    SERVED.with(|g| *g.borrow_mut() = Some(guard));
+    s
+}
+
+fn seeded() -> RouterTransport {
+    RouterTransport::new(widgets_server::app(widgets_server::seeded()))
+}
+
+fn install(role: &str) -> Rc<Service> {
+    let s = serve(seeded(), role);
+    s.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
+    s
 }
 
 #[tokio::test]
@@ -130,12 +150,7 @@ async fn a_mutation_marks_its_entity_stale() {
 
 #[tokio::test]
 async fn a_mutation_refetches_each_query_once_however_often_it_is_read() {
-    let client = ClientConfig::default()
-        .transport(
-            RouterTransport::new(widgets_server::app(widgets_server::seeded()))
-                .with_header("x-role", "editor"),
-        )
-        .install();
+    let client = serve(seeded(), "editor");
     // The default stale time, and the server's `Cache-Control: private, no-cache`.
     get_widget("cog").await.unwrap();
     list_widgets(Filter::default()).await.unwrap();
@@ -187,12 +202,10 @@ async fn identical_streams_share_one_connection() {
 #[tokio::test]
 async fn a_probe_of_an_unguarded_route_is_unknown_and_never_runs_it() {
     let catalog = widgets_server::seeded();
-    ClientConfig::default()
-        .transport(
-            RouterTransport::new(widgets_server::app(catalog.clone()))
-                .with_header("x-role", "viewer"),
-        )
-        .install();
+    serve(
+        RouterTransport::new(widgets_server::app(catalog.clone())),
+        "viewer",
+    );
     assert_eq!(suggest_name::can().await, Permission::Unknown);
     assert!(catalog.suggestions().is_empty());
     let status = suggest_name(Rename {

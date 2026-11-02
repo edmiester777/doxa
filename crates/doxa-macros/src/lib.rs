@@ -789,6 +789,18 @@ pub fn prelude(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// This client crate's `service()`, for its base URL, layers and cache.
+///
+/// ```ignore
+/// doxa::service!();
+/// ```
+#[proc_macro]
+pub fn service(input: TokenStream) -> TokenStream {
+    role::service(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Keep this item only in the server half, e.g. `#[server] use sea_orm::DatabaseConnection;`.
 #[proc_macro_attribute]
 pub fn server(args: TokenStream, item: TokenStream) -> TokenStream {

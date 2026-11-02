@@ -203,6 +203,7 @@ pub fn expand_client(args: TokenStream, item: TokenStream) -> syn::Result<TokenS
         impl ::doxa::wire::Keyed for #name {
             type Key = #key;
             const ENTITY_TYPE: &'static str = <#actions as ::doxa::wire::Vocabulary>::ENTITY_TYPE;
+            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
         }
     })
 }

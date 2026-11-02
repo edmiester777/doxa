@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::panic::Location;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 use crate::runtime::{self, current_or_panic, Cancel, Hook, Instance, Readers};
 use crate::{Result, Thrown};
@@ -391,36 +391,42 @@ pub fn try_context<T: Clone + 'static>() -> Option<T> {
 /// CART.update(|c| c.items.push(item));
 /// ```
 ///
-/// Readers re-render when it changes. It resets when the session changes.
+/// Readers re-render when it changes. It resets when any service's session changes, or
+/// only [one's](Singleton::resets_with).
 pub struct Singleton<T: 'static> {
     init: fn() -> T,
+    owner: Option<&'static str>,
 }
 
 struct SingletonCell {
     value: Box<dyn Any>,
     readers: Readers,
+    owner: Option<&'static str>,
 }
 
 type Cells = HashMap<usize, Rc<RefCell<SingletonCell>>>;
 
 thread_local! {
     static SINGLETONS: RefCell<Cells> = RefCell::new(HashMap::new());
-    /// The client the cells belong to; a different current client starts them over.
-    static OWNER: RefCell<Weak<doxa_client::Client>> = const { RefCell::new(Weak::new()) };
+    static HOOKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn follow_client() {
-    let client = doxa_client::Client::current();
-    let same = OWNER.with(|o| o.borrow().as_ptr() == Rc::as_ptr(&client));
-    if !same {
-        OWNER.with(|o| *o.borrow_mut() = Rc::downgrade(&client));
-        reset_singletons();
-        client.on_session_change(reset_singletons);
+fn hook_sessions() {
+    if !HOOKED.with(|h| h.replace(true)) {
+        doxa_client::on_any_session_change(reset_singletons);
     }
 }
 
-fn reset_singletons() {
-    let cells: Vec<_> = SINGLETONS.with(|s| s.borrow_mut().drain().map(|(_, c)| c).collect());
+fn reset_singletons(package: &'static str) {
+    let cells: Vec<_> = SINGLETONS.with(|s| {
+        let mut s = s.borrow_mut();
+        let ids: Vec<_> = s
+            .iter()
+            .filter(|(_, c)| c.borrow().owner.is_none_or(|o| o == package))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.iter().filter_map(|id| s.remove(id)).collect()
+    });
     for cell in cells {
         let readers = cell.borrow_mut().readers.live();
         runtime::schedule_all(readers);
@@ -430,12 +436,18 @@ fn reset_singletons() {
 impl<T: 'static> Singleton<T> {
     /// A singleton built by `init` on first use.
     pub const fn new(init: fn() -> T) -> Self {
-        Self { init }
+        Self { init, owner: None }
+    }
+
+    /// Reset only when the session of client crate `package`'s service changes.
+    pub const fn resets_with(mut self, package: &'static str) -> Self {
+        self.owner = Some(package);
+        self
     }
 
     // Each cell is its own `RefCell`, so `init` and `f` may use other singletons.
     fn cell(&'static self) -> Rc<RefCell<SingletonCell>> {
-        follow_client();
+        hook_sessions();
         let id = self as *const Self as usize;
         if let Some(c) = SINGLETONS.with(|s| s.borrow().get(&id).cloned()) {
             return c;
@@ -443,6 +455,7 @@ impl<T: 'static> Singleton<T> {
         let cell = Rc::new(RefCell::new(SingletonCell {
             value: Box::new((self.init)()),
             readers: Readers::default(),
+            owner: self.owner,
         }));
         SINGLETONS.with(|s| s.borrow_mut().entry(id).or_insert(cell).clone())
     }
