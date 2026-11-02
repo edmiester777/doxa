@@ -190,13 +190,13 @@ impl Pipeline {
         let mut out = Vec::new();
         for entry in &cfg.css {
             note(format!("building {entry}"));
-            let built = css::build(
-                &self.web.dir,
-                entry,
-                &cfg.css_sources,
-                &stage,
-                self.opts.release,
-            )?;
+            let inputs = css::Inputs {
+                web_dir: &self.web.dir,
+                sources: &cfg.css_sources,
+                preprocess: &cfg.preprocess,
+                node_modules: self.npm.dir(),
+            };
+            let built = css::build(&inputs, entry, &stage, self.opts.release)?;
             let stem = Path::new(entry)
                 .file_stem()
                 .unwrap_or_default()

@@ -67,6 +67,10 @@ pub struct Watch {
     server_dirs: Vec<PathBuf>,
     extra_dirs: Vec<PathBuf>,
     public: Option<PathBuf>,
+    /// Extensions a preprocessor turns into CSS.
+    styles: Vec<String>,
+    /// Absolute `watch` globs of the preprocessors.
+    style_globs: Vec<glob::Pattern>,
 }
 
 fn canonical(p: &Path) -> PathBuf {
@@ -85,8 +89,23 @@ impl Watch {
         .iter()
         .filter(|d| d.is_dir())
         .map(|d| canonical(d))
-        .collect();
+        .collect::<Vec<_>>();
+        let web_dir = canonical(&web.dir);
+        let globs: Vec<String> = web
+            .config
+            .preprocess
+            .values()
+            .flat_map(|p| &p.watch)
+            .map(|g| web_dir.join(g).to_string_lossy().into_owned())
+            .collect();
+        let mut extra_dirs = extra_dirs;
+        extra_dirs.extend(globs.iter().map(|g| glob_root(g)).filter(|d| d.is_dir()));
         Watch {
+            styles: web.config.preprocess.keys().cloned().collect(),
+            style_globs: globs
+                .iter()
+                .filter_map(|g| glob::Pattern::new(g).ok())
+                .collect(),
             ignore: vec![canonical(&ws.target_directory)],
             wasm_dirs: ws
                 .source_dirs(&web.name)
@@ -136,6 +155,17 @@ impl Watch {
     }
 }
 
+/// The directory a glob starts in: everything before its first wildcard.
+fn glob_root(glob: &str) -> PathBuf {
+    let fixed = glob.split(['*', '?', '[', '{']).next().unwrap_or(glob);
+    let p = Path::new(fixed);
+    if fixed.ends_with('/') {
+        p.to_owned()
+    } else {
+        p.parent().unwrap_or(p).to_owned()
+    }
+}
+
 /// Decide what to rebuild for a batch of changed paths.
 pub fn classify<'a>(paths: impl IntoIterator<Item = &'a Path>, w: &Watch) -> Plan {
     let mut plan = Plan::default();
@@ -149,6 +179,17 @@ pub fn classify<'a>(paths: impl IntoIterator<Item = &'a Path>, w: &Watch) -> Pla
         }
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        // A preprocessor's own output, written and removed by the build.
+        if w.styles
+            .iter()
+            .any(|s| name.ends_with(&format!(".{s}.css")))
+        {
+            continue;
+        }
+        if w.styles.iter().any(|s| s == ext) || w.style_globs.iter().any(|g| g.matches_path(p)) {
+            plan.css = true;
+            continue;
+        }
         match ext {
             "rs" | "toml" if ext == "rs" || name == "Cargo.toml" => {
                 if p.parent() == Some(w.root.as_path()) && name == "Cargo.toml" {
@@ -664,6 +705,8 @@ mod tests {
             server_dirs: vec!["/app/server".into(), "/app/api".into()],
             extra_dirs: vec!["/app/style".into()],
             public: Some("/app/web/public".into()),
+            styles: vec!["scss".into()],
+            style_globs: vec![glob::Pattern::new("/app/web/theme/**/*.json").unwrap()],
         }
     }
 
@@ -807,6 +850,18 @@ mod tests {
     }
 
     #[test]
+    fn preprocessed_styles_and_their_globs_rebuild_css_but_not_their_output() {
+        let css = Plan {
+            css: true,
+            ..Plan::default()
+        };
+        assert_eq!(plan(&["/app/web/style/_vars.scss"]), css);
+        assert_eq!(plan(&["/app/web/theme/brand/colors.json"]), css);
+        assert!(plan(&["/app/web/style/app.scss.css"]).is_empty());
+        assert_eq!(glob_root("/w/style/**/*.scss"), Path::new("/w/style"));
+    }
+
+    #[test]
     fn build_output_and_noise_are_ignored() {
         assert!(plan(&["/app/target/doxa/stage/css/app.tailwind-in.css"]).is_empty());
         assert!(plan(&["/app/web/node_modules/react/index.js"]).is_empty());
@@ -831,6 +886,8 @@ mod tests {
             server_dirs: vec![root.join("server"), root.join("api")],
             extra_dirs: vec![],
             public: None,
+            styles: vec![],
+            style_globs: vec![],
         };
         let roots: Vec<_> = w.roots().into_iter().map(|(d, _)| d).collect();
         assert_eq!(

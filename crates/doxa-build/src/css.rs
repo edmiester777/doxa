@@ -7,6 +7,9 @@ use lightningcss::bundler::{Bundler, FileProvider};
 use lightningcss::dependencies::{Dependency, DependencyOptions};
 use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
 
+use std::collections::BTreeMap;
+
+use crate::config::Preprocess;
 use crate::error::{run, Error, IoContext, Result};
 
 /// A built stylesheet and the local files its `url()`s point at, under hashed names.
@@ -34,15 +37,90 @@ pub fn tailwind_wrapper(input: &Path, sources: &[PathBuf]) -> String {
     css
 }
 
+/// What a stylesheet entry is built from.
+#[derive(Debug, Clone, Copy)]
+pub struct Inputs<'a> {
+    /// The web crate's directory.
+    pub web_dir: &'a Path,
+    /// Extra directories Tailwind scans.
+    pub sources: &'a [String],
+    /// Preprocessors by extension.
+    pub preprocess: &'a BTreeMap<String, Preprocess>,
+    /// Where npm installed the tools a preprocessor runs.
+    pub node_modules: Option<&'a Path>,
+}
+
+/// Where a preprocessor writes `input`'s CSS: beside it, so relative paths still resolve.
+pub fn preprocessed_path(input: &Path) -> PathBuf {
+    let mut name = input.file_name().unwrap_or_default().to_owned();
+    name.push(".css");
+    input.with_file_name(name)
+}
+
+/// Run the preprocessor for `input`'s extension, if there is one, returning its output.
+fn preprocess(at: &Inputs<'_>, input: &Path) -> Result<Option<PathBuf>> {
+    let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let Some(pre) = at.preprocess.get(ext) else {
+        return Ok(None);
+    };
+    let Some((program, args)) = pre.command.split_first() else {
+        return Err(Error::config(
+            format!("[package.metadata.doxa.preprocess.{ext}] has an empty command"),
+            "set `command = [\"program\", \"{input}\", \"{output}\"]`",
+        ));
+    };
+    let output = preprocessed_path(input);
+    let fill = |a: &String| {
+        a.replace("{input}", &input.to_string_lossy())
+            .replace("{output}", &output.to_string_lossy())
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(args.iter().map(fill)).current_dir(at.web_dir);
+    if let Some(bin) = at.node_modules.map(|d| d.join("node_modules").join(".bin")) {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
+            .unwrap_or(path);
+        cmd.env("PATH", joined);
+    }
+    run(
+        "preprocessor",
+        &mut cmd,
+        &format!("fix the error above, or the `{ext}` preprocess command"),
+    )?;
+    if !output.is_file() {
+        return Err(Error::config(
+            format!(
+                "the `{ext}` preprocessor wrote nothing to {}",
+                output.display()
+            ),
+            "pass `{output}` where the command expects its output file",
+        ));
+    }
+    Ok(Some(output))
+}
+
 /// Build one stylesheet entry of the web crate, returning the CSS text.
-pub fn build(
+pub fn build(at: &Inputs<'_>, entry: &str, stage: &Path, release: bool) -> Result<Built> {
+    let web_dir = at.web_dir;
+    let sources = at.sources;
+    let source = web_dir.join(entry);
+    let pre = preprocess(at, &source)?;
+    let built = build_css(web_dir, &source, pre.as_deref(), sources, stage, release);
+    if let Some(out) = pre {
+        let _ = std::fs::remove_file(out);
+    }
+    built
+}
+
+fn build_css(
     web_dir: &Path,
-    entry: &str,
+    source: &Path,
+    pre: Option<&Path>,
     sources: &[String],
     stage: &Path,
     release: bool,
 ) -> Result<Built> {
-    let input = web_dir.join(entry);
+    let input = pre.unwrap_or(source).to_owned();
     let text = std::fs::read_to_string(&input).at(&input)?;
     let to_bundle = if uses_tailwind(&text) {
         std::fs::create_dir_all(stage).at(stage)?;
@@ -146,6 +224,67 @@ fn local(url: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
 
+    static NONE: BTreeMap<String, Preprocess> = BTreeMap::new();
+
+    fn plain(web_dir: &Path) -> Inputs<'_> {
+        Inputs {
+            web_dir,
+            sources: &[],
+            preprocess: &NONE,
+            node_modules: None,
+        }
+    }
+
+    fn with(web_dir: &Path, pre: &BTreeMap<String, Preprocess>) -> String {
+        let at = Inputs {
+            preprocess: pre,
+            ..plain(web_dir)
+        };
+        match build(&at, "style/app.scss", &web_dir.join("stage"), true) {
+            Ok(b) => b.css,
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    fn command(argv: &[&str]) -> BTreeMap<String, Preprocess> {
+        let pre = Preprocess {
+            command: argv.iter().map(|a| a.to_string()).collect(),
+            watch: vec![],
+        };
+        BTreeMap::from([("scss".to_owned(), pre)])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_preprocessed_entry_resolves_imports_beside_its_source_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("style")).unwrap();
+        std::fs::write(dir.path().join("style/base.css"), "body { color: red; }\n").unwrap();
+        std::fs::write(
+            dir.path().join("style/app.scss"),
+            "@import \"base.css\";\n.a { margin: 0px; }\n",
+        )
+        .unwrap();
+        let css = with(dir.path(), &command(&["cp", "{input}", "{output}"]));
+        assert_eq!(css, "body{color:red}.a{margin:0}");
+        assert!(!dir.path().join("style/app.scss.css").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_preprocessor_fails_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("style")).unwrap();
+        std::fs::write(dir.path().join("style/app.scss"), "a {}").unwrap();
+        let css = with(dir.path(), &command(&["false"]));
+        assert!(
+            css.starts_with("error:") && css.contains("preprocessor"),
+            "{css}"
+        );
+        let css = with(dir.path(), &command(&["true"]));
+        assert!(css.contains("wrote nothing"), "{css}");
+    }
+
     #[test]
     fn tailwind_detection() {
         assert!(uses_tailwind("@import \"tailwindcss\";\n"));
@@ -171,7 +310,13 @@ mod tests {
             "@import \"base.css\";\n.a  {  margin: 0px; }\n",
         )
         .unwrap();
-        let out = build(dir.path(), "app.css", &[], &dir.path().join("stage"), true).unwrap();
+        let out = build(
+            &plain(dir.path()),
+            "app.css",
+            &dir.path().join("stage"),
+            true,
+        )
+        .unwrap();
         assert_eq!(out.css, "body{color:red}.a{margin:0}");
     }
 
@@ -191,9 +336,8 @@ mod tests {
         )
         .unwrap();
         let out = build(
-            dir.path(),
+            &plain(dir.path()),
             "style/app.css",
-            &[],
             &dir.path().join("stage"),
             true,
         )
@@ -221,9 +365,14 @@ mod tests {
             ".a { background: url(gone.png); }\n",
         )
         .unwrap();
-        let err = build(dir.path(), "app.css", &[], &dir.path().join("stage"), false)
-            .unwrap_err()
-            .to_string();
+        let err = build(
+            &plain(dir.path()),
+            "app.css",
+            &dir.path().join("stage"),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("url(gone.png)"), "{err}");
     }
 }

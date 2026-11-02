@@ -32,6 +32,20 @@ pub struct DoxaConfig {
     /// Client crate to base URL, written to `services.json`; unlisted ones are same-origin.
     #[serde(default)]
     pub services: BTreeMap<String, String>,
+    /// Stylesheet extension (`scss`) to the command that turns it into CSS.
+    #[serde(default)]
+    pub preprocess: BTreeMap<String, Preprocess>,
+}
+
+/// A command run on each `css` entry with its extension, before Tailwind and bundling.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preprocess {
+    /// The program and its arguments; `{input}` and `{output}` become file paths.
+    pub command: Vec<String>,
+    /// Globs, relative to the web crate, whose changes rebuild stylesheets in `doxa dev`.
+    #[serde(default)]
+    pub watch: Vec<String>,
 }
 
 /// The workspace as `cargo metadata --no-deps` describes it.
@@ -111,7 +125,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, wasm_budget_kb, and npm and services tables",
+                    "keys are role, server, css, css_sources, public, wasm_budget_kb, and npm, services and preprocess tables",
                 )
             }),
         }
