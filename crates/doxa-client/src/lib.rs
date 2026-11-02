@@ -13,6 +13,7 @@ mod call;
 mod can;
 mod client;
 mod fetch;
+pub mod layer;
 mod response;
 mod sse;
 pub mod task;
@@ -25,6 +26,7 @@ pub use call::Call;
 pub use can::{Permission, Probe};
 pub use client::{Client, ClientConfig};
 pub use fetch::{Fetch, NoError};
+pub use layer::{layer_fn, layers, Layer, Next};
 pub use response::{AliasedResult, FromResponse, SseOnce, SseStream, StatusCode, Unsupported};
 pub use sse::{Backoff, EventStream, Once};
 

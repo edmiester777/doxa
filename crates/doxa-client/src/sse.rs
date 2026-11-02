@@ -166,7 +166,7 @@ impl Wake for Waiting {
 /// One open event stream, shared by every subscriber to the same route and arguments.
 #[doc(hidden)]
 pub struct Hub {
-    /// The request without credentials; each reconnect authorizes it afresh.
+    /// The request as the call built it; each reconnect sends it through the layers afresh.
     request: Request,
     client: Rc<Client>,
     waiting: Arc<Waiting>,
@@ -174,7 +174,7 @@ pub struct Hub {
 }
 
 /// A reconnect's answer, with the session it was sent in.
-type Reopened = (u64, Result<Response, String>);
+type Reopened = (u64, Result<Response, Fetch>);
 
 struct HubState {
     body: Option<Body>,
@@ -323,9 +323,8 @@ impl Hub {
         let client = self.client.clone();
         Box::pin(async move {
             futures_timer::Delay::new(delay).await;
-            client.authorize(&mut request);
             let session = client.session();
-            let mut result = client.transport.send(request).await;
+            let mut result = client.send(request).await;
             if let Ok(resp) = &mut result {
                 if resp.status >= 400 {
                     let body = std::mem::replace(&mut resp.body, Body::Full(Vec::new()));

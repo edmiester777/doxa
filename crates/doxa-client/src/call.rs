@@ -132,13 +132,7 @@ impl<R> Call<R> {
         self
     }
 
-    pub(crate) fn request(&self, client: &Client, url: String, accept: &str) -> Request {
-        let mut request = self.unauthorized(url, accept);
-        client.authorize(&mut request);
-        request
-    }
-
-    fn unauthorized(&self, url: String, accept: &str) -> Request {
+    pub(crate) fn request(&self, url: String, accept: &str) -> Request {
         let mut headers = self.out.headers().to_vec();
         headers.push(("accept".into(), accept.into()));
         let body = self.out.body().map(|(content_type, bytes)| {
@@ -226,11 +220,11 @@ async fn send<R: FromResponse>(
         request.headers.push(("if-none-match".into(), etag.into()));
     }
     let session = client.session();
-    let response = match client.transport.send(request).await {
+    let response = match client.send(request).await {
         Ok(r) => r,
         Err(e) => {
             let current = client.session() == session;
-            return (Sent::Failed(Fetch::Network(e)), current);
+            return (Sent::Failed(e), current);
         }
     };
     let current = client.observe_session(&response, session);
@@ -305,14 +299,10 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
         if let Some(hub) = client.open_stream(&key) {
             return Ok(R::stream(hub));
         }
-        let request = call.request(&client, url.clone(), "text/event-stream");
+        let request = call.request(url.clone(), "text/event-stream");
         client.cache.count_request();
         let session = client.session();
-        let response = client
-            .transport
-            .send(request)
-            .await
-            .map_err(Fetch::Network)?;
+        let response = client.send(request).await.map_err(widen)?;
         if client.observe_session(&response, session) {
             break response;
         }
@@ -324,7 +314,7 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     if let Some(hub) = client.open_stream(&key) {
         return Ok(R::stream(hub));
     }
-    let request = call.unauthorized(url, "text/event-stream");
+    let request = call.request(url, "text/event-stream");
     let hub = Rc::new(Hub::new(request, client.clone(), response.body));
     client.share_stream(key, &hub);
     Ok(R::stream(hub))
@@ -334,14 +324,10 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
 async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
-    let request = call.request(&client, url.clone(), "text/event-stream");
+    let request = call.request(url.clone(), "text/event-stream");
     client.cache.count_request();
     let session = client.session();
-    let response = client
-        .transport
-        .send(request)
-        .await
-        .map_err(Fetch::Network)?;
+    let response = client.send(request).await.map_err(widen)?;
     if !client.observe_session(&response, session) {
         return Err(Fetch::Stream("the session changed".into()));
     }
@@ -353,7 +339,7 @@ async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     let mut entities: Vec<&str> = call.route.entities.to_vec();
     entities.extend(extra.iter().map(String::as_str));
     client.cache.invalidate(&entities);
-    let request = call.unauthorized(url, "text/event-stream");
+    let request = call.request(url, "text/event-stream");
     let hub = Rc::new(Hub::new(request, client.clone(), response.body));
     client.own_stream(&hub);
     Ok(R::stream(hub))
@@ -377,7 +363,7 @@ async fn query_once<R: FromResponse>(
     url: &str,
     key: &str,
 ) -> Option<Result<R::Output, Fetch<R::Error>>> {
-    let request = call.request(client, url.to_owned(), "application/json");
+    let request = call.request(url.to_owned(), "application/json");
     if !call.fresh {
         match client.cache.lookup(key, now()) {
             Lookup::Fresh(v) => return Some(out_of::<R>(&v)),
@@ -511,7 +497,7 @@ fn revalidate<R: FromResponse>(
 async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = call.client.clone().unwrap_or_else(Client::current);
     let url = call.url().map_err(widen)?;
-    let request = call.request(&client, url.clone(), "application/json");
+    let request = call.request(url.clone(), "application/json");
     let key = call.out.first_key().cloned();
     let previous = call.patch.map(|p| p(&client, key.as_ref()));
     client.cache.count_request();

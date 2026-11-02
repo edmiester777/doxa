@@ -16,8 +16,8 @@ use crate::{IntoView, View};
 /// A whole app, ready to mount.
 ///
 /// ```ignore
+/// layers().push(cookies());
 /// App::new(Router::new().page::<WidgetPage>())
-///     .config(ClientConfig::default().cookies())
 ///     .theme(LIGHT)
 ///     .mount("#app");
 /// ```

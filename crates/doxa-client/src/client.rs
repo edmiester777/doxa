@@ -1,4 +1,4 @@
-//! The installed client: transport, credentials, cache, and session.
+//! The installed client: transport, cache, and session.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -7,48 +7,27 @@ use crate::cache::{Cache, CacheConfig};
 use std::collections::HashMap;
 use std::rc::Weak;
 
+use futures_util::future::LocalBoxFuture;
+
+use crate::fetch::Fetch;
+use crate::layer::{layers, Next};
 use crate::sse::Hub;
 use crate::transport::{Request, Response, Transport};
 
-/// How a call proves who is making it.
-#[derive(Clone, Default)]
-enum Auth {
-    #[default]
-    None,
-    Bearer(Rc<dyn Fn() -> Option<String>>),
-    Cookies,
-}
-
-/// Everything a call needs that isn't one of its arguments.
+/// Everything a call needs that isn't one of its arguments or a [layer](crate::layer).
 ///
 /// ```
 /// use doxa_client::{ClientConfig, transport::MockTransport};
 ///
-/// ClientConfig::default()
-///     .bearer(|| Some("token".to_owned()))
-///     .transport(MockTransport::new())
-///     .install();
+/// ClientConfig::default().transport(MockTransport::new()).install();
 /// ```
 #[derive(Clone, Default)]
 pub struct ClientConfig {
     transport: Option<Rc<dyn Transport>>,
-    auth: Auth,
     cache: CacheConfig,
 }
 
 impl ClientConfig {
-    /// Send `Authorization: Bearer <token>` with every call, asking `token` each time.
-    pub fn bearer(mut self, token: impl Fn() -> Option<String> + 'static) -> Self {
-        self.auth = Auth::Bearer(Rc::new(token));
-        self
-    }
-
-    /// Authenticate with the browser's cookies, sending the CSRF header on every mutation.
-    pub fn cookies(mut self) -> Self {
-        self.auth = Auth::Cookies;
-        self
-    }
-
     /// Send calls through `transport` instead of `fetch`.
     pub fn transport(mut self, transport: impl Transport) -> Self {
         self.transport = Some(Rc::new(transport));
@@ -71,8 +50,7 @@ impl ClientConfig {
 
 /// An installed client. Calls use the current one unless told otherwise.
 pub struct Client {
-    pub(crate) transport: Rc<dyn Transport>,
-    auth: Auth,
+    transport: Rc<dyn Transport>,
     pub(crate) cache: Cache,
     epoch: RefCell<Option<String>>,
     /// Bumped on every session change; a response to an older one is dropped.
@@ -91,7 +69,6 @@ impl Client {
         *cache.config.borrow_mut() = config.cache;
         Self {
             transport: config.transport.unwrap_or_else(default_transport),
-            auth: config.auth,
             cache,
             epoch: RefCell::new(None),
             session: Cell::new(0),
@@ -141,26 +118,12 @@ impl Client {
         self.streams.borrow_mut().insert(key, Rc::downgrade(hub));
     }
 
-    pub(crate) fn authorize(&self, request: &mut Request) {
-        match &self.auth {
-            Auth::None => {}
-            Auth::Bearer(token) => {
-                if let Some(token) = token() {
-                    request
-                        .headers
-                        .push(("authorization".into(), format!("Bearer {token}")));
-                }
-            }
-            Auth::Cookies => {
-                request.credentials = true;
-                if !request.method.is_safe() || request.header(doxa_wire::DRY_RUN_HEADER).is_some()
-                {
-                    request
-                        .headers
-                        .push((doxa_wire::CSRF_HEADER.into(), "1".into()));
-                }
-            }
-        }
+    /// Send `request` through the layers, then the transport. Holds no borrow while it runs.
+    pub(crate) fn send(
+        &self,
+        request: Request,
+    ) -> LocalBoxFuture<'static, Result<Response, Fetch>> {
+        Next::new(layers().snapshot().into(), self.transport.clone()).run(request)
     }
 
     /// The session counter to tag a request with as it is sent.

@@ -76,16 +76,15 @@ impl IntoFuture for Probe {
                     }
                 }
                 client.cache.count_request();
-                let mut request = Request {
+                let request = Request {
                     method: self.route.method,
                     url: url.clone(),
                     headers: vec![(doxa_wire::DRY_RUN_HEADER.into(), "1".into())],
                     body: None,
                     credentials: false,
                 };
-                client.authorize(&mut request);
                 let session = client.session();
-                let Ok(resp) = client.transport.send(request).await else {
+                let Ok(resp) = client.send(request).await else {
                     break Permission::Unknown;
                 };
                 if !client.observe_session(&resp, session) {

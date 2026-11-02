@@ -7,6 +7,7 @@ use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use doxa_client::cache::{self, Observer};
+use doxa_client::layer::{bearer, layers};
 use doxa_client::transport::{Body, MockTransport, Request, Response, Transport};
 use doxa_client::{
     task, CacheConfig, Cached, Call, Client, ClientConfig, Granted, Json, Permission, Probe, Query,
@@ -623,10 +624,8 @@ fn a_reconnect_sends_the_current_credentials() {
     script.text(200, vec![], RENAMED).text(200, vec![], RENAMED);
     let token = Rc::new(RefCell::new("t1".to_owned()));
     let t = token.clone();
-    ClientConfig::default()
-        .bearer(move || Some(t.borrow().clone()))
-        .transport(script.clone())
-        .install();
+    let _auth = layers().push_scoped(bearer(move || Some(t.borrow().clone())));
+    ClientConfig::default().transport(script.clone()).install();
     task::block_on(async {
         let mut s = events("cog").await.unwrap().reconnect(fast());
         s.next().await.unwrap();
