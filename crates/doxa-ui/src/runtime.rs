@@ -237,6 +237,13 @@ pub(crate) fn schedule_all(readers: Vec<Rc<Instance>>) {
     readers.iter().for_each(schedule);
 }
 
+/// Re-render every live component, as after a hot patch.
+#[cfg_attr(not(all(target_arch = "wasm32", debug_assertions)), allow(dead_code))]
+pub(crate) fn rerender_all() {
+    let live: Vec<_> = LIVE.with(|l| l.borrow().values().filter_map(Weak::upgrade).collect());
+    schedule_all(live);
+}
+
 /// Re-render everything scheduled, parents first.
 pub(crate) fn flush() {
     SCHEDULED.with(|s| s.set(false));
@@ -319,7 +326,7 @@ pub(crate) fn run(inst: &Rc<Instance>) {
     let props = inst.props.borrow().clone();
     let mut fut = Box::pin(Tracked {
         inst: inst.clone(),
-        fut: inside(inst, || (inst.render)(&props)),
+        fut: inside(inst, || crate::hot::render(inst.render, &props)),
     });
     match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(out) => commit(inst, out),

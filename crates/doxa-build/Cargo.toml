@@ -29,6 +29,11 @@ wasm-bindgen-cli-support = "=0.2.117"
 # Its walrus differs from wasm-bindgen's; they only exchange bytes.
 wasm-split-cli = "=0.7.0"
 anyhow = "1"
+# Hot-patching: the walrus wasm-split-cli already uses, and subsecond's jump table.
+walrus = "=0.23.3"
+wasmparser = "0.214"
+ar = "0.9"
+subsecond-types = "=0.7.0"
 
 [dev-dependencies]
 tempfile = "3"

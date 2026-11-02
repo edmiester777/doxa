@@ -10,7 +10,7 @@ use crate::bundle::{
 use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
 use crate::error::{run, Error, IoContext, Result};
-use crate::{bindgen, css, npm, split};
+use crate::{bindgen, css, hot, npm, split};
 
 /// How to build.
 #[derive(Debug, Clone, Default)]
@@ -25,6 +25,8 @@ pub struct BuildOptions {
     pub compress: bool,
     /// Build the `#[story]` gallery into `target/doxa/gallery` instead of the app.
     pub gallery: bool,
+    /// Build a fat base that [`Pipeline::patch`] can hot-patch.
+    pub hot: bool,
 }
 
 /// One app's build, holding what earlier steps produced.
@@ -43,9 +45,12 @@ pub struct Pipeline {
     pub(crate) wasm_file: Option<String>,
     /// Modules split off the app wasm, as (hashed name, bytes).
     pub(crate) split_files: Vec<(String, Vec<u8>)>,
+    hot: Option<hot::Base>,
     bundle: Option<BundleOutput>,
     pub(crate) stylesheets: Vec<(String, css::Built)>,
 }
+
+const PATCH_URL: &str = "/__doxa_patch";
 
 /// Print a progress line.
 pub fn note(msg: impl std::fmt::Display) {
@@ -69,6 +74,7 @@ impl Pipeline {
             library: false,
             wasm_file: None,
             split_files: Vec::new(),
+            hot: None,
             bundle: None,
             stylesheets: Vec::new(),
         })
@@ -125,6 +131,15 @@ impl Pipeline {
         if self.opts.gallery {
             cmd.args(["--cfg", "doxa_gallery"]);
         }
+        let records = if self.opts.hot {
+            let records = hot::Records::new(&self.layout.stage())?;
+            records.configure(&mut cmd, &self.web.lib_name)?;
+            // Cargo only runs rustc for a stale crate, and the run is what gets recorded.
+            hot::forget_fingerprint(&self.profile_dir().join(".fingerprint"), &self.web.name);
+            Some(records)
+        } else {
+            None
+        };
         run(
             "cargo",
             &mut cmd,
@@ -135,12 +150,30 @@ impl Pipeline {
         }
         let wasm = self.linked_wasm();
         let out = self.bindgen_dir();
+        self.hot = None;
+        if let Some(records) = &records {
+            note("linking the hot-patchable base");
+            let base = records.fat_link(
+                &self.layout.wasm_target(),
+                &self.workspace.workspace_root,
+                &wasm,
+            )?;
+            let fat = std::fs::read(&wasm).at(&wasm)?;
+            let prepared = hot::wasm::prepare_base(&fat).map_err(hot::patch_error)?;
+            std::fs::write(&wasm, prepared).at(&wasm)?;
+            self.hot = Some(base);
+        }
         let original = std::fs::read(&wasm).at(&wasm)?;
         let splits = split::has_split_points(&original);
-        bindgen::generate(&wasm, &out, self.opts.release, splits)?;
+        bindgen::generate(&wasm, &out, self.opts.release, splits, self.opts.hot)?;
         let app_wasm = out.join("app_bg.wasm");
         self.split_files.clear();
-        if splits {
+        if let Some(base) = &mut self.hot {
+            let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
+            let bytes = hot::wasm::stub_placeholder_imports(&bytes).map_err(hot::patch_error)?;
+            base.set_bindgened(bytes.clone())?;
+            std::fs::write(&app_wasm, split::strip_link_sections(&bytes, true)).at(&app_wasm)?;
+        } else if splits {
             self.split(&original, &app_wasm)?;
         } else {
             let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
@@ -216,8 +249,30 @@ impl Pipeline {
         Ok(())
     }
 
+    /// Recompile only the web crate and link it as a patch of the hot base into
+    /// [`patch_dir`](Self::patch_dir). Returns the jump table the page applies, as JSON, or
+    /// `None` when the crate didn't compile.
+    pub fn patch(&mut self) -> Result<Option<String>> {
+        let dir = self.patch_dir();
+        let base = self.hot.as_mut().ok_or_else(|| {
+            Error::config("no hot-patchable base", "run a full build with hot on")
+        })?;
+        note(format!("patching {}", self.web.name));
+        base.patch(&dir, PATCH_URL)
+    }
+
+    /// Where patches are written; the page fetches them from `/__doxa_patch/`.
+    pub fn patch_dir(&self) -> PathBuf {
+        self.layout.stage().join("hot").join("patches")
+    }
+
     /// The wasm as the linker wrote it, before bindgen.
     pub(crate) fn linked_wasm(&self) -> PathBuf {
+        self.profile_dir()
+            .join(format!("{}.wasm", self.web.lib_name))
+    }
+
+    fn profile_dir(&self) -> PathBuf {
         let profile = if self.opts.release {
             "release"
         } else {
@@ -227,7 +282,6 @@ impl Pipeline {
             .wasm_target()
             .join("wasm32-unknown-unknown")
             .join(profile)
-            .join(format!("{}.wasm", self.web.lib_name))
     }
 
     fn check_lock(&self, lock: &Path) -> Result<bool> {

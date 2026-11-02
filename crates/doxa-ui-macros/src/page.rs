@@ -101,7 +101,7 @@ pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
     let chunk = args.lazy.then(|| {
         let loader = component::lazy_mod(name);
         quote! {
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(doxa_hot)))]
             fn chunk() -> ::core::option::Option<::doxa::ui::Prefetch> {
                 ::core::option::Option::Some(::doxa::ui::Prefetch::of(#loader::LOADER.load()))
             }
@@ -110,6 +110,7 @@ pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
     Ok(quote! {
         #component
 
+        #[allow(unexpected_cfgs)]
         impl ::doxa::ui::Page for #name {
             const PATH: &'static str = #path;
             fn parse(segments: &::doxa::ui::Segments) -> ::core::option::Option<#props_ty> {

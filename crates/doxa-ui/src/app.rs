@@ -113,6 +113,7 @@ impl App {
     /// Mount at `at` in `dom`; tests pass a [`MemDom`](crate::dom::MemDom). Mounting on
     /// another document than the current one first unmounts every root on the old one.
     pub fn mount_on(self, dom: Rc<dyn Dom>, at: NodeId) -> RootHandle {
+        crate::hot::install();
         if !runtime::is_dom(&dom) {
             reconcile::finish_leaving();
             let old: Vec<_> = ROOTS.with(|r| r.borrow_mut().drain(..).collect());

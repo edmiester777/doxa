@@ -60,8 +60,9 @@ pub fn check_lock(lock: &str, path: &Path) -> Result<()> {
 }
 
 /// Generate `--target web` bindings for `wasm` into `out_dir` as `app.js` and
-/// `app_bg.wasm`. A wasm to be split keeps its symbols as the linker wrote them.
-pub fn generate(wasm: &Path, out_dir: &Path, release: bool, split: bool) -> Result<()> {
+/// `app_bg.wasm`. A wasm to be split or hot-patched keeps its symbols as the linker
+/// wrote them; a hot one also keeps the exports a patch links against.
+pub fn generate(wasm: &Path, out_dir: &Path, release: bool, split: bool, hot: bool) -> Result<()> {
     if out_dir.exists() {
         std::fs::remove_dir_all(out_dir).at(out_dir)?;
     }
@@ -71,7 +72,8 @@ pub fn generate(wasm: &Path, out_dir: &Path, release: bool, split: bool) -> Resu
         .typescript(false)
         .debug(!release)
         .keep_debug(!release)
-        .demangle(!split);
+        .demangle(!split && !hot)
+        .keep_lld_exports(hot);
     b.web(true)
         .and_then(|b| b.generate(out_dir))
         .map_err(|e| Error::Tool {

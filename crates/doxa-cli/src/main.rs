@@ -53,6 +53,9 @@ enum Command {
         /// Install npm dependencies from the lockfile only.
         #[arg(long)]
         locked: bool,
+        /// Rebuild and reload on a web crate change instead of patching the running page.
+        #[arg(long)]
+        no_hot: bool,
     },
     /// Build the `#[story]` functions into a gallery and serve it.
     Gallery {
@@ -74,6 +77,9 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    if let Some(code) = doxa_build::hot::intercept() {
+        return code;
+    }
     let cli = Cli::parse();
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
         Command::New { name } => std::env::current_dir()
@@ -90,7 +96,7 @@ fn main() -> ExitCode {
                 package,
                 locked,
                 compress: !lib,
-                gallery: false,
+                ..BuildOptions::default()
             },
             lib,
         ),
@@ -98,9 +104,10 @@ fn main() -> ExitCode {
             package,
             port,
             locked,
+            no_hot,
         } => tokio::runtime::Runtime::new()
             .map_err(Into::into)
-            .and_then(|rt| rt.block_on(dev::run(package, port, locked))),
+            .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot))),
         Command::Gallery {
             package,
             port,
@@ -169,7 +176,11 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["doxa", "dev", "--port", "8080", "--package", "w"]),
-            Command::Dev { port: 8080, package: Some(p), .. } if p == "w"
+            Command::Dev { port: 8080, package: Some(p), no_hot: false, .. } if p == "w"
+        ));
+        assert!(matches!(
+            parse(&["doxa", "dev", "--no-hot"]),
+            Command::Dev { no_hot: true, .. }
         ));
         assert!(matches!(
             parse(&["doxa", "gallery"]),

@@ -120,7 +120,7 @@ utoipa = "5"             # required — see note below
 | `ui` | `doxa-ui` | Client-rendered components, `view!`, hooks and a router |
 | `embed` | `doxa-docs` | Compile the built web app into the server binary |
 
-The `doxa` binary (`cargo install doxa-cli`) scaffolds an app (`doxa new`), builds the browser half (`doxa build`), serves it with reload (`doxa dev`), and formats `view!` markup (`doxa fmt`).
+The `doxa` binary (`cargo install doxa-cli`) scaffolds an app (`doxa new`), builds the browser half (`doxa build`), serves it with reload, hot-patching web crate changes into the running page (`doxa dev`), and formats `view!` markup (`doxa fmt`).
 
 Each crate also works standalone if you prefer fine-grained control over your dependency graph.
 

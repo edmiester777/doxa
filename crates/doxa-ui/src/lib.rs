@@ -17,6 +17,7 @@ mod export;
 mod form;
 mod head;
 mod hooks;
+mod hot;
 mod plugin;
 mod portal;
 #[cfg(feature = "react")]

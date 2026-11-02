@@ -222,22 +222,28 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     let (split, render) = if opts.lazy {
         let module = lazy_mod(name);
         let abi = syn::LitStr::new(&snake(&name_str), name.span());
+        // A hot-patched build stays one module, so `doxa dev` loads lazy pages eagerly.
+        // The lint allowance only reaches a cfg from an enclosing item.
         let split = quote! {
             #[cfg(target_arch = "wasm32")]
             #[doc(hidden)]
-            #[allow(non_snake_case)]
+            #[allow(non_snake_case, unexpected_cfgs)]
             mod #module {
+                #[cfg(not(doxa_hot))]
                 use super::*;
+                #[cfg(not(doxa_hot))]
                 use ::doxa::ui::__private::wasm_split;
 
+                #[cfg(not(doxa_hot))]
                 pub(super) fn render(props: #props_ty) -> ::doxa::ui::RenderFuture { #render }
 
+                #[cfg(not(doxa_hot))]
                 pub(super) static LOADER: wasm_split::LazyLoader<#props_ty, ::doxa::ui::RenderFuture> =
                     wasm_split::lazy_loader!(extern #abi fn render(props: #props_ty) -> ::doxa::ui::RenderFuture);
             }
         };
         let render = quote! {
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(doxa_hot)))]
             return ::doxa::ui::RenderFuture::new(async move {
                 if !#module::LOADER.load().await {
                     return ::core::result::Result::Err(::doxa::ui::Thrown::msg(concat!("couldn't load the code for ", #name_str)));
@@ -247,7 +253,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
                     ::core::result::Result::Err(e) => ::core::result::Result::Err(::doxa::ui::Thrown::msg(e.to_string())),
                 }
             });
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), doxa_hot))]
             { #render }
         };
         (split, render)
@@ -271,6 +277,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
             const NAME: &'static str = #name_str;
             #same_props
 
+            #[allow(unexpected_cfgs)]
             fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
                 #render
             }

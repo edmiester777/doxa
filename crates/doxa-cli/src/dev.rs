@@ -24,11 +24,26 @@ use tokio::sync::{broadcast, mpsc};
 type DynError = Box<dyn std::error::Error>;
 
 const RELOAD_PATH: &str = "/__doxa/reload";
+/// Where hot patches are fetched from, matching [`Pipeline::patch`]'s jump tables.
+const PATCH_PREFIX: &str = "__doxa_patch/";
 const API_PREFIX: &str = "/api";
 
 const RELOAD_SCRIPT: &str = r#"<script type="module">
 const es = new EventSource("/__doxa/reload");
 es.addEventListener("reload", () => location.reload());
+es.addEventListener("patch", (e) => {
+  // Before the wasm starts, it applies the patch itself.
+  if (!globalThis.__doxa_hotpatch) {
+    globalThis.__doxa_pending_patch = e.data;
+    return;
+  }
+  try {
+    globalThis.__doxa_hotpatch(e.data);
+  } catch (err) {
+    console.error(err);
+    location.reload();
+  }
+});
 es.addEventListener("css", (e) => {
   const old = [...document.querySelectorAll("link[data-doxa-css]")];
   for (const href of JSON.parse(e.data)) {
@@ -47,6 +62,8 @@ es.addEventListener("css", (e) => {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
     pub wasm: bool,
+    /// Every wasm change is a web crate source file, which a hot patch covers.
+    pub patch: bool,
     pub server: bool,
     pub bundle: bool,
     pub css: bool,
@@ -63,6 +80,7 @@ impl Plan {
 pub struct Watch {
     root: PathBuf,
     ignore: Vec<PathBuf>,
+    web_dir: PathBuf,
     wasm_dirs: Vec<PathBuf>,
     server_dirs: Vec<PathBuf>,
     extra_dirs: Vec<PathBuf>,
@@ -107,6 +125,7 @@ impl Watch {
                 .filter_map(|g| glob::Pattern::new(g).ok())
                 .collect(),
             ignore: vec![canonical(&ws.target_directory)],
+            web_dir: web_dir.clone(),
             wasm_dirs: ws
                 .source_dirs(&web.name)
                 .iter()
@@ -169,6 +188,7 @@ fn glob_root(glob: &str) -> PathBuf {
 /// Decide what to rebuild for a batch of changed paths.
 pub fn classify<'a>(paths: impl IntoIterator<Item = &'a Path>, w: &Watch) -> Plan {
     let mut plan = Plan::default();
+    let mut unpatchable = false;
     let under = |p: &Path, dirs: &[PathBuf]| dirs.iter().any(|d| p.starts_with(d));
     for p in paths {
         let skipped = w.ignore.iter().any(|i| p.starts_with(i))
@@ -195,8 +215,12 @@ pub fn classify<'a>(paths: impl IntoIterator<Item = &'a Path>, w: &Watch) -> Pla
                 if p.parent() == Some(w.root.as_path()) && name == "Cargo.toml" {
                     plan.wasm = true;
                     plan.server = true;
+                    unpatchable = true;
                 }
-                plan.wasm |= under(p, &w.wasm_dirs);
+                if under(p, &w.wasm_dirs) {
+                    plan.wasm = true;
+                    unpatchable |= ext != "rs" || !p.starts_with(&w.web_dir);
+                }
                 plan.server |= under(p, &w.server_dirs);
             }
             "ts" | "tsx" | "js" | "jsx" | "mjs" => plan.bundle = true,
@@ -207,6 +231,7 @@ pub fn classify<'a>(paths: impl IntoIterator<Item = &'a Path>, w: &Watch) -> Pla
             _ => {}
         }
     }
+    plan.patch = plan.wasm && !unpatchable;
     plan
 }
 
@@ -231,15 +256,19 @@ fn rebuild(p: &mut Pipeline, plan: Plan) -> doxa_build::Result<Option<Dist>> {
     }
 }
 
-/// Run `doxa dev` until interrupted.
-pub async fn run(package: Option<String>, port: u16, locked: bool) -> Result<(), DynError> {
+/// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page.
+pub async fn run(
+    package: Option<String>,
+    port: u16,
+    locked: bool,
+    hot: bool,
+) -> Result<(), DynError> {
     let cwd = std::env::current_dir()?;
     let opts = BuildOptions {
-        release: false,
         package,
         locked,
-        compress: false,
-        gallery: false,
+        hot,
+        ..BuildOptions::default()
     };
     let pipeline = tokio::task::spawn_blocking(move || -> doxa_build::Result<Pipeline> {
         let mut p = Pipeline::new(&cwd, opts)?;
@@ -251,6 +280,7 @@ pub async fn run(package: Option<String>, port: u16, locked: bool) -> Result<(),
         "no server to run\n  fix: set server = \"<server package>\" in the web crate's [package.metadata.doxa]",
     )?;
     let dist = canonical(&pipeline.dist_dir());
+    let patches = pipeline.patch_dir();
     let watch = Watch::new(&pipeline.workspace, &pipeline.web, &server_pkg);
     let mut server = Server {
         root: pipeline.workspace.workspace_root.clone(),
@@ -265,16 +295,18 @@ pub async fn run(package: Option<String>, port: u16, locked: bool) -> Result<(),
     let (reload, _) = broadcast::channel(16);
     let proxy = Arc::new(Proxy {
         dist,
+        patches,
         upstream: format!("http://127.0.0.1:{}", server.port),
         client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()?,
         reload: reload.clone(),
+        latest_patch: Mutex::new(None),
     });
     let app = Router::new()
         .route(RELOAD_PATH, get(reload_events))
         .fallback(forward)
-        .with_state(proxy);
+        .with_state(proxy.clone());
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     note(format!("serving http://127.0.0.1:{port}"));
     tokio::spawn(async move { axum::serve(listener, app).await });
@@ -304,6 +336,22 @@ pub async fn run(package: Option<String>, port: u16, locked: bool) -> Result<(),
         if plan.is_empty() {
             continue;
         }
+        if hot && plan.patch && !plan.bundle && !plan.css && !plan.server {
+            let p = pipeline.clone();
+            match tokio::task::spawn_blocking(move || p.lock().expect("pipeline").patch()).await? {
+                Ok(Some(table)) => {
+                    *proxy.latest_patch.lock().expect("patch") = Some(table.clone());
+                    let _ = reload.send(Reload::Patch(table));
+                    continue;
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    note("rebuilding instead");
+                }
+            }
+        }
+        *proxy.latest_patch.lock().expect("patch") = None;
         let p = pipeline.clone();
         let built =
             tokio::task::spawn_blocking(move || rebuild(&mut p.lock().expect("pipeline"), plan))
@@ -396,28 +444,39 @@ impl Server {
 enum Reload {
     Page,
     Css(Vec<String>),
+    /// A jump table, as JSON.
+    Patch(String),
 }
 
 struct Proxy {
     dist: PathBuf,
+    patches: PathBuf,
     upstream: String,
     client: reqwest::Client,
     reload: broadcast::Sender<Reload>,
+    /// What a page loading the base wasm still has to apply.
+    latest_patch: Mutex<Option<String>>,
 }
 
 async fn reload_events(State(p): State<Arc<Proxy>>) -> impl IntoResponse {
-    let events = futures::stream::unfold(p.reload.subscribe(), |mut rx| async move {
+    let latest = p.latest_patch.lock().expect("patch").clone();
+    let state = (p.reload.subscribe(), latest);
+    let events = futures::stream::unfold(state, |(mut rx, mut pending)| async move {
+        if let Some(table) = pending.take() {
+            let event = Event::default().event("patch").data(table);
+            return Some((Ok::<_, Infallible>(event), (rx, None)));
+        }
         loop {
             match rx.recv().await {
+                Ok(Reload::Patch(table)) => {
+                    return Some((Ok(Event::default().event("patch").data(table)), (rx, None)))
+                }
                 Ok(Reload::Page) => {
-                    return Some((
-                        Ok::<_, Infallible>(Event::default().event("reload").data("")),
-                        rx,
-                    ))
+                    return Some((Ok(Event::default().event("reload").data("")), (rx, None)))
                 }
                 Ok(Reload::Css(hrefs)) => {
                     let data = serde_json::to_string(&hrefs).expect("json");
-                    return Some((Ok(Event::default().event("css").data(data)), rx));
+                    return Some((Ok(Event::default().event("css").data(data)), (rx, None)));
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -479,7 +538,11 @@ fn html_response(status: StatusCode, mut headers: HeaderMap, html: String) -> Re
 
 impl Proxy {
     async fn disk(&self, rel: &str) -> Option<Response> {
-        let bytes = tokio::fs::read(self.dist.join(rel)).await.ok()?;
+        let path = match rel.strip_prefix(PATCH_PREFIX) {
+            Some(patch) => self.patches.join(patch),
+            None => self.dist.join(rel),
+        };
+        let bytes = tokio::fs::read(path).await.ok()?;
         Some(
             (
                 [
@@ -698,6 +761,7 @@ mod tests {
         Watch {
             root: "/app".into(),
             ignore: vec!["/app/target".into()],
+            web_dir: "/app/web".into(),
             wasm_dirs: vec![
                 "/app/web".into(),
                 "/app/client".into(),
@@ -746,9 +810,11 @@ mod tests {
         let upstream = echo_server().await;
         let proxy = Arc::new(Proxy {
             dist: PathBuf::from("/nonexistent"),
+            patches: PathBuf::from("/nonexistent"),
             upstream: format!("http://127.0.0.1:{upstream}"),
             client: reqwest::Client::new(),
             reload: broadcast::channel(1).0,
+            latest_patch: Mutex::new(None),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -790,6 +856,7 @@ mod tests {
             plan(&["/app/web/src/lib.rs"]),
             Plan {
                 wasm: true,
+                patch: true,
                 ..Plan::default()
             }
         );
@@ -815,6 +882,14 @@ mod tests {
                 ..Plan::default()
             }
         );
+    }
+
+    #[test]
+    fn only_web_crate_sources_are_patched() {
+        assert!(plan(&["/app/web/src/a.rs", "/app/web/src/b.rs"]).patch);
+        assert!(!plan(&["/app/web/src/a.rs", "/app/client/src/lib.rs"]).patch);
+        assert!(!plan(&["/app/web/src/a.rs", "/app/web/Cargo.toml"]).patch);
+        assert!(!plan(&["/app/web/src/a.rs", "/app/Cargo.toml"]).patch);
     }
 
     #[test]
@@ -879,6 +954,7 @@ mod tests {
         let w = Watch {
             root: root.clone(),
             ignore: vec![root.join("target")],
+            web_dir: root.join("web"),
             wasm_dirs: vec![
                 root.join("web"),
                 root.join("api/src"),
