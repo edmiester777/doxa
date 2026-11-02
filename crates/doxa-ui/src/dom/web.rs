@@ -301,6 +301,20 @@ impl Dom for WebDom {
         }
     }
 
+    fn confirm(&self, message: &str) -> bool {
+        web_sys::window()
+            .and_then(|w| w.confirm_with_message(message).ok())
+            .unwrap_or(true)
+    }
+
+    fn title(&self) -> String {
+        self.doc.title()
+    }
+
+    fn set_title(&self, title: &str) {
+        self.doc.set_title(title);
+    }
+
     fn storage_get(&self, key: &str) -> Option<String> {
         local_storage()?.get_item(key).ok()?
     }

@@ -75,6 +75,7 @@ fn WidgetRow(widget: Widget) -> View {
 async fn WidgetPage(name: String) -> Result<View> {
     let key = WidgetKey { name };
     let widget = get_widget(&key).await?;
+    title(format!("{} · Widgets", widget.name));
     let editing = state(false);
     Ok(view! {
         <h1>{&widget.name}</h1>

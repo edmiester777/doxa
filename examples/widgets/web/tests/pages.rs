@@ -133,6 +133,7 @@ async fn the_shell_stays_mounted_across_pages() {
     settle().await;
     assert_eq!(dom.text(dom.find_tag("h1").unwrap()), "gear");
     assert_eq!(dom.find_tag("header"), Some(header));
+    assert_eq!(dom.document_title(), "gear · Widgets");
 }
 
 #[tokio::test]

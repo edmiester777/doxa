@@ -77,6 +77,12 @@ pub trait Dom {
     fn storage_get(&self, key: &str) -> Option<String>;
     /// Set or, with `None`, remove a `localStorage` value.
     fn storage_set(&self, key: &str, value: Option<&str>);
+    /// Ask the user to confirm `message`, as `window.confirm`.
+    fn confirm(&self, message: &str) -> bool;
+    /// The document's title.
+    fn title(&self) -> String;
+    /// Set the document's title.
+    fn set_title(&self, title: &str);
     /// The browser node behind `node`.
     #[cfg(target_arch = "wasm32")]
     fn raw(&self, _node: NodeId) -> Option<web_sys::Node> {

@@ -17,7 +17,7 @@ use crate::hooks::{effect, slot, state, state_with, ElementRef, State};
 use crate::{runtime, Result};
 
 /// A registration with the current [`Dom`](crate::Dom), ended when dropped.
-struct Registration(u32);
+pub(crate) struct Registration(pub(crate) u32);
 
 impl Drop for Registration {
     fn drop(&mut self) {
@@ -28,7 +28,7 @@ impl Drop for Registration {
 }
 
 /// Keep `r` until the effect holding this future is dropped.
-async fn hold(r: Registration) -> Result<()> {
+pub(crate) async fn hold<R>(r: R) -> Result<()> {
     let _r = r;
     std::future::pending::<()>().await;
     Ok(())
@@ -343,7 +343,7 @@ impl Channel {
 impl Drop for Channel {
     fn drop(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
-        BUS.with(|b| b.borrow_mut().1.retain(|(id, ..)| *id != self.id));
+        let _ = BUS.try_with(|b| b.borrow_mut().1.retain(|(id, ..)| *id != self.id));
         #[cfg(target_arch = "wasm32")]
         if let Some((bc, _)) = &self.web {
             bc.set_onmessage(None);

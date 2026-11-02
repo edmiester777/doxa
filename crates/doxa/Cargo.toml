@@ -139,6 +139,10 @@ name = "browser"
 required-features = ["ui"]
 
 [[test]]
+name = "router"
+required-features = ["ui"]
+
+[[test]]
 name = "react"
 required-features = ["react"]
 

@@ -123,7 +123,7 @@ impl Instance {
         self.ancestors().last().map_or(self.id, |r| r.id)
     }
 
-    fn ancestors(self: &Rc<Self>) -> impl Iterator<Item = Rc<Instance>> {
+    pub(crate) fn ancestors(self: &Rc<Self>) -> impl Iterator<Item = Rc<Instance>> {
         std::iter::successors(Some(self.clone()), |i| i.parent())
     }
 
@@ -176,8 +176,9 @@ pub(crate) fn is_dom(dom: &Rc<dyn Dom>) -> bool {
     })
 }
 
+/// The document, if one is mounted and the thread isn't shutting down.
 pub(crate) fn try_dom() -> Option<Rc<dyn Dom>> {
-    DOM.with(|d| d.borrow().clone())
+    DOM.try_with(|d| d.borrow().clone()).ok().flatten()
 }
 
 pub(crate) fn dom() -> Rc<dyn Dom> {
@@ -387,6 +388,9 @@ fn commit_contexts(inst: &Instance) {
 
 /// Hand an error to the nearest `<Catch>` above `from`.
 pub(crate) fn throw(from: Option<&Rc<Instance>>, e: Thrown) {
+    if crate::router::follow_redirect(&e) {
+        return;
+    }
     let catcher = from.and_then(|f| f.ancestors().skip(1).find(|a| a.catcher.get()));
     match catcher {
         Some(c) => {

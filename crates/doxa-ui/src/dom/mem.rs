@@ -40,6 +40,10 @@ struct World {
     watches: HashMap<u32, Watch>,
     media: HashMap<String, bool>,
     storage: HashMap<String, String>,
+    /// What `confirm` answers; `None` answers yes.
+    answer: Option<bool>,
+    asked: Vec<String>,
+    title: String,
 }
 
 /// An in-memory [`Dom`]. Clone it to keep a handle after mounting.
@@ -160,6 +164,21 @@ impl MemDom {
     /// A `localStorage` value.
     pub fn storage(&self, key: &str) -> Option<String> {
         self.storage_get(key)
+    }
+
+    /// Answer every later `confirm` with `yes`.
+    pub fn answer_confirm(&self, yes: bool) {
+        self.world.borrow_mut().answer = Some(yes);
+    }
+
+    /// The messages `confirm` was asked since the last call, oldest first.
+    pub fn confirms(&self) -> Vec<String> {
+        std::mem::take(&mut self.world.borrow_mut().asked)
+    }
+
+    /// The document's title.
+    pub fn document_title(&self) -> String {
+        self.title()
     }
 
     /// Change a `localStorage` value as another tab would, firing `storage` at the window.
@@ -562,5 +581,19 @@ impl Dom for MemDom {
             Some(v) => w.storage.insert(key.to_owned(), v.to_owned()),
             None => w.storage.remove(key),
         };
+    }
+
+    fn confirm(&self, message: &str) -> bool {
+        let mut w = self.world.borrow_mut();
+        w.asked.push(message.to_owned());
+        w.answer.unwrap_or(true)
+    }
+
+    fn title(&self) -> String {
+        self.world.borrow().title.clone()
+    }
+
+    fn set_title(&self, title: &str) {
+        self.world.borrow_mut().title = title.to_owned();
     }
 }

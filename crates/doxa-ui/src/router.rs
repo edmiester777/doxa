@@ -81,15 +81,10 @@ fn match_template(template: &str, url: &str, prefix: bool) -> Option<Segments> {
             _ => return None,
         }
     }
-    let query = query
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .map(|kv| {
-            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            (decode(k), decode(v))
-        })
-        .collect();
-    Some(Segments { params, query })
+    Some(Segments {
+        params,
+        query: parse_query(query),
+    })
 }
 
 /// A concrete URL in the app, from `SomePage::route(…)`.
@@ -144,6 +139,12 @@ impl From<&str> for Route {
     }
 }
 
+impl From<String> for Route {
+    fn from(s: String) -> Route {
+        Route(s)
+    }
+}
+
 /// Data a page needs, fetched ahead of time.
 pub struct Prefetch(LocalBoxFuture<'static, ()>);
 
@@ -169,6 +170,7 @@ impl Prefetch {
 type Resolved = Option<(View, Option<Prefetch>)>;
 type Matcher = fn(&Segments) -> Resolved;
 type Wrap = fn(&Segments, View) -> Resolved;
+type Guard = Rc<dyn Fn(String) -> LocalBoxFuture<'static, Option<Route>>>;
 
 #[derive(Clone)]
 enum Entry {
@@ -178,6 +180,17 @@ enum Entry {
         wrap: Wrap,
         inner: Router,
     },
+    Redirect(&'static str, Route),
+}
+
+/// What stays on screen while the next page's data loads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Keep {
+    /// Switch at once; the new page shows its own loading state.
+    #[default]
+    Nothing,
+    /// Keep the current page until the next page's `load` resolves; see [`navigation`].
+    Previous,
 }
 
 /// The app's pages.
@@ -185,6 +198,8 @@ enum Entry {
 pub struct Router {
     entries: Vec<Entry>,
     not_found: Option<Rc<dyn Fn() -> View>>,
+    guards: Vec<Guard>,
+    keep: Keep,
 }
 
 impl Router {
@@ -231,11 +246,36 @@ impl Router {
         self
     }
 
+    /// Send `from` to `to`, replacing the history entry.
+    pub fn redirect(mut self, from: &'static str, to: impl Into<Route>) -> Self {
+        self.entries.push(Entry::Redirect(from, to.into()));
+        self
+    }
+
+    /// Before showing any page of this router, ask `check`; a route it returns is gone to instead.
+    pub fn guard<F>(mut self, check: F) -> Self
+    where
+        F: AsyncFn(&str) -> Option<Route> + 'static,
+    {
+        let check = Rc::new(check);
+        self.guards.push(Rc::new(move |url: String| {
+            let check = check.clone();
+            Box::pin(async move { check(&url).await })
+        }));
+        self
+    }
+
+    /// What to show while the next page loads.
+    pub fn transitions(mut self, keep: Keep) -> Self {
+        self.keep = keep;
+        self
+    }
+
     fn templates(&self) -> Vec<&'static str> {
         self.entries
             .iter()
             .flat_map(|e| match e {
-                Entry::Page(t, _) => vec![*t],
+                Entry::Page(t, _) | Entry::Redirect(t, _) => vec![*t],
                 Entry::Layout { prefix, inner, .. } => {
                     let mut all = vec![*prefix];
                     all.extend(inner.templates());
@@ -264,11 +304,56 @@ impl Router {
                 let (view, own) = wrap(&s, child)?;
                 Some((view, Prefetch::both(own, load)))
             }
+            Entry::Redirect(..) => None,
         })
+    }
+
+    /// Where `url` redirects, following up to a few hops.
+    fn redirected(&self, mut url: String) -> String {
+        for _ in 0..8 {
+            match self.redirect_of(&url) {
+                Some(to) => url = to.0,
+                None => break,
+            }
+        }
+        url
+    }
+
+    fn redirect_of(&self, url: &str) -> Option<Route> {
+        self.entries.iter().find_map(|e| match e {
+            Entry::Redirect(from, to) => match_path(from, url).map(|_| to.clone()),
+            Entry::Layout { prefix, inner, .. } => {
+                match_template(prefix, url, true).and_then(|_| inner.redirect_of(url))
+            }
+            Entry::Page(..) => None,
+        })
+    }
+
+    /// The guards of every router on the way to the page `url` shows.
+    fn guards_for(&self, url: &str) -> Vec<Guard> {
+        let mut out = self.guards.clone();
+        for e in &self.entries {
+            match e {
+                Entry::Page(t, m) if match_path(t, url).and_then(|s| m(&s)).is_some() => break,
+                Entry::Layout { prefix, inner, .. }
+                    if match_template(prefix, url, true).is_some()
+                        && inner.resolve(url).is_some() =>
+                {
+                    out.extend(inner.guards_for(url));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     pub(crate) fn view(&self) -> View {
         let url = location();
+        // Until the first URL's guards pass, nothing behind them shows.
+        if NAV.with(|n| n.borrow().starting) {
+            return View::empty();
+        }
         match self.resolve(&url) {
             Some((view, _)) => view,
             None => self.not_found.as_ref().map(|f| f()).unwrap_or_default(),
@@ -353,15 +438,298 @@ struct LocationCell {
     readers: Readers,
 }
 
+#[derive(Default)]
+struct NavCell {
+    to: Option<String>,
+    generation: u64,
+    /// The first URL's guards haven't answered yet.
+    starting: bool,
+    readers: Readers,
+    blockers: Vec<(u64, &'static str)>,
+    next_blocker: u64,
+}
+
 thread_local! {
     static LOCATION: RefCell<LocationCell> = RefCell::new(LocationCell { url: initial_url(), readers: Readers::default() });
     static ROUTER: RefCell<Option<Router>> = const { RefCell::new(None) };
+    static NAV: RefCell<NavCell> = RefCell::default();
 }
 
 pub(crate) fn install(router: Router) {
     ROUTER.with(|r| *r.borrow_mut() = Some(router));
     #[cfg(target_arch = "wasm32")]
     web::listen_popstate();
+    go(current_url(), Nav::replace(), Origin::Start);
+}
+
+fn current_url() -> String {
+    LOCATION.with(|l| l.borrow().url.clone())
+}
+
+/// How [`navigate_with`] changes history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nav {
+    replace: bool,
+    keep_scroll: bool,
+}
+
+impl Nav {
+    /// Add a history entry; the default.
+    pub fn push() -> Nav {
+        Nav {
+            replace: false,
+            keep_scroll: false,
+        }
+    }
+
+    /// Replace the current history entry.
+    pub fn replace() -> Nav {
+        Nav {
+            replace: true,
+            keep_scroll: false,
+        }
+    }
+
+    /// Leave the scroll position alone instead of going to the top.
+    pub fn keep_scroll(mut self) -> Nav {
+        self.keep_scroll = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Origin {
+    /// `navigate`: history hasn't moved yet.
+    App,
+    /// Back or forward: history already moved; restore this scroll position.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Pop(Option<f64>),
+    /// The URL the app loaded at.
+    Start,
+}
+
+/// Run redirects and guards, wait for the page if [`Keep::Previous`], then show `url`.
+fn go(url: String, mut nav: Nav, origin: Origin) {
+    let generation = NAV.with(|n| {
+        let mut n = n.borrow_mut();
+        n.generation += 1;
+        n.generation
+    });
+    let Some(router) = installed() else {
+        return commit(url, nav, origin);
+    };
+    let url = {
+        let to = router.redirected(url.clone());
+        nav.replace |= to != url;
+        to
+    };
+    if router.guards_for(&url).is_empty() && router.keep == Keep::Nothing {
+        return commit(url, nav, origin);
+    }
+    set_pending(Some(url.clone()), matches!(origin, Origin::Start));
+    doxa_client::task::spawn(async move {
+        let mut url = url;
+        'hops: for _ in 0..8 {
+            for g in router.guards_for(&url) {
+                if let Some(to) = g(url.clone()).await {
+                    url = router.redirected(to.0);
+                    nav.replace = true;
+                    continue 'hops;
+                }
+            }
+            break;
+        }
+        let current = || NAV.with(|n| n.borrow().generation) == generation;
+        if !current() {
+            return;
+        }
+        if router.keep == Keep::Previous {
+            if let Some((_, Some(Prefetch(load)))) = router.resolve(&url) {
+                load.await;
+            }
+            if !current() {
+                return;
+            }
+        }
+        set_pending(None, false);
+        commit(url, nav, origin);
+    });
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+fn commit(url: String, nav: Nav, origin: Origin) {
+    #[cfg(target_arch = "wasm32")]
+    match origin {
+        Origin::App => web::write(&url, nav.replace),
+        Origin::Pop(_) | Origin::Start if url != web::current() => web::write(&url, true),
+        _ => {}
+    }
+    set_location(url);
+    #[cfg(target_arch = "wasm32")]
+    web::scroll(match origin {
+        Origin::Pop(y) => y,
+        Origin::Start => None,
+        Origin::App => (!nav.keep_scroll).then_some(0.0),
+    });
+}
+
+fn set_pending(to: Option<String>, starting: bool) {
+    let readers = NAV.with(|n| {
+        let mut n = n.borrow_mut();
+        n.to = to;
+        n.starting = starting;
+        n.readers.live()
+    });
+    runtime::schedule_all(readers);
+}
+
+/// Where the app is navigating to, while redirects, guards or [`Keep::Previous`] hold it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Navigation {
+    to: Option<String>,
+}
+
+impl Navigation {
+    /// Whether a navigation hasn't finished.
+    pub fn pending(&self) -> bool {
+        self.to.is_some()
+    }
+
+    /// The URL being gone to.
+    pub fn to(&self) -> Option<&str> {
+        self.to.as_deref()
+    }
+}
+
+/// The navigation in progress; the calling component re-renders when it changes.
+pub fn navigation() -> Navigation {
+    NAV.with(|n| {
+        let mut n = n.borrow_mut();
+        n.readers.track();
+        Navigation { to: n.to.clone() }
+    })
+}
+
+/// While `when`, ask the user to confirm `message` before leaving: in-app, back/forward, or the tab.
+#[track_caller]
+pub fn block_navigation(when: bool, message: &'static str) {
+    crate::hooks::effect(
+        &(when, message),
+        async move |&(when, message): &(bool, &'static str)| {
+            if !when {
+                return Ok(());
+            }
+            let id = NAV.with(|n| {
+                let mut n = n.borrow_mut();
+                n.next_blocker += 1;
+                let id = n.next_blocker;
+                n.blockers.push((id, message));
+                id
+            });
+            let unload = runtime::dom().listen_global(
+                crate::dom::Global::Window,
+                "beforeunload",
+                crate::dom::Listen::default(),
+                Rc::new(|e: crate::Event| e.prevent_default()),
+            );
+            crate::browser::hold((Unblock(id), crate::browser::Registration(unload))).await
+        },
+    );
+}
+
+struct Unblock(u64);
+
+impl Drop for Unblock {
+    fn drop(&mut self) {
+        let _ = NAV.try_with(|n| n.borrow_mut().blockers.retain(|(id, _)| *id != self.0));
+    }
+}
+
+/// Whether leaving is allowed, asking the latest blocker if there is one.
+fn allowed() -> bool {
+    match NAV.with(|n| n.borrow().blockers.last().map(|(_, m)| *m)) {
+        None => true,
+        Some(message) => runtime::try_dom().is_none_or(|d| d.confirm(message)),
+    }
+}
+
+/// Go to `to` instead: return `Err(redirect(to))` from a page. No `<Catch>` sees it.
+pub fn redirect(to: impl Into<Route>) -> crate::Thrown {
+    crate::Thrown::from(Redirect(to.into()))
+}
+
+#[derive(Debug)]
+struct Redirect(Route);
+
+impl std::fmt::Display for Redirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "redirect to {}", self.0 .0)
+    }
+}
+
+impl std::error::Error for Redirect {}
+
+/// If `e` is a [`redirect`], go there and return true.
+pub(crate) fn follow_redirect(e: &crate::Thrown) -> bool {
+    let Some(Redirect(to)) = e.downcast_ref::<Redirect>() else {
+        return false;
+    };
+    let to = to.0.clone();
+    doxa_client::task::spawn(async move { go(to, Nav::replace(), Origin::App) });
+    true
+}
+
+/// The current query, to edit with [`set_query`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Query(Vec<(String, String)>);
+
+impl Query {
+    /// A parameter's value.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Set `key`, replacing any value it had.
+    pub fn set(&mut self, key: &str, value: impl ToString) -> &mut Query {
+        let value = value.to_string();
+        match self.0.iter_mut().find(|(k, _)| k == key) {
+            Some(kv) => kv.1 = value,
+            None => self.0.push((key.to_owned(), value)),
+        }
+        self
+    }
+
+    /// Remove `key`.
+    pub fn remove(&mut self, key: &str) -> &mut Query {
+        self.0.retain(|(k, _)| k != key);
+        self
+    }
+}
+
+/// Edit the current URL's query in place, replacing the history entry and keeping the scroll.
+pub fn set_query(edit: impl FnOnce(&mut Query) -> &mut Query) {
+    let url = current_url();
+    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+    let mut q = Query(parse_query(query));
+    edit(&mut q);
+    let route =
+        q.0.iter()
+            .fold(Route(path.to_owned()), |r, (k, v)| r.query(k, v));
+    navigate_with(route, Nav::replace().keep_scroll());
+}
+
+fn parse_query(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            (decode(k), decode(v))
+        })
+        .collect()
 }
 
 pub(crate) fn installed() -> Option<Router> {
@@ -388,10 +756,14 @@ pub(crate) fn set_location(url: String) {
 
 /// Go to `to`, adding a history entry.
 pub fn navigate(to: impl Into<Route>) {
-    let to = to.into();
-    #[cfg(target_arch = "wasm32")]
-    web::push(&to.0);
-    set_location(to.0);
+    navigate_with(to, Nav::push());
+}
+
+/// Go to `to`, e.g. with `Nav::replace()`; a [`block_navigation`] may refuse.
+pub fn navigate_with(to: impl Into<Route>, nav: Nav) {
+    if allowed() {
+        go(to.into().0, nav, Origin::App);
+    }
 }
 
 fn initial_url() -> String {
@@ -408,7 +780,7 @@ fn initial_url() -> String {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use wasm_bindgen::closure::Closure;
-    use wasm_bindgen::JsCast;
+    use wasm_bindgen::{JsCast, JsValue};
 
     pub fn current() -> String {
         let loc = web_sys::window().map(|w| w.location());
@@ -422,10 +794,32 @@ mod web {
         .unwrap_or_else(|| "/".to_owned())
     }
 
-    pub fn push(url: &str) {
-        if let Some(h) = web_sys::window().and_then(|w| w.history().ok()) {
-            let _ = h.push_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(url));
+    const SCROLL: &str = "doxaScroll";
+
+    /// Push or replace `url`, first recording the scroll position on the entry being left.
+    pub fn write(url: &str, replace: bool) {
+        let Some(w) = web_sys::window() else { return };
+        let Ok(h) = w.history() else { return };
+        if replace {
+            let state = h.state().unwrap_or(JsValue::NULL);
+            let _ = h.replace_state_with_url(&state, "", Some(url));
+        } else {
+            let here = js_sys::Object::new();
+            let _ =
+                js_sys::Reflect::set(&here, &SCROLL.into(), &w.scroll_y().unwrap_or(0.0).into());
+            let _ = h.replace_state(&here, "");
+            let _ = h.push_state_with_url(&JsValue::NULL, "", Some(url));
         }
+    }
+
+    /// After the next render, scroll to `y`.
+    pub fn scroll(y: Option<f64>) {
+        let Some(y) = y else { return };
+        doxa_client::task::spawn(async move {
+            if let Some(w) = web_sys::window() {
+                w.scroll_to_with_x_and_y(0.0, y);
+            }
+        });
     }
 
     pub fn listen_popstate() {
@@ -434,7 +828,20 @@ mod web {
             return;
         }
         let Some(w) = web_sys::window() else { return };
-        let cb = Closure::<dyn Fn()>::new(|| super::set_location(current()));
+        if let Ok(h) = w.history() {
+            let _ = js_sys::Reflect::set(&h, &"scrollRestoration".into(), &"manual".into());
+        }
+        let cb = Closure::<dyn Fn(web_sys::PopStateEvent)>::new(|e: web_sys::PopStateEvent| {
+            if !super::allowed() {
+                // Undo the move by putting the page we stayed on back on top.
+                write(&super::current_url(), false);
+                return;
+            }
+            let y = js_sys::Reflect::get(&e.state(), &SCROLL.into())
+                .ok()
+                .and_then(|v| v.as_f64());
+            super::go(current(), super::Nav::replace(), super::Origin::Pop(y));
+        });
         let _ = w.add_event_listener_with_callback("popstate", cb.as_ref().unchecked_ref());
         cb.forget();
     }

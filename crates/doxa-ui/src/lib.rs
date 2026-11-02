@@ -11,6 +11,7 @@ mod component;
 mod directive;
 pub mod dom;
 mod error;
+mod head;
 mod hooks;
 mod plugin;
 mod portal;
@@ -34,6 +35,7 @@ pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
 pub use dom::{Event, Listen, NodeRef, Phase, Rect};
 pub use error::{Result, Thrown};
+pub use head::title;
 pub use hooks::{
     action, context, effect, memo, node_ref, provide, state, try_context, Action, Deps, ElementRef,
     Singleton, State,
@@ -41,8 +43,9 @@ pub use hooks::{
 pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
 pub use portal::{Portal, PortalBuilder, PortalProps, PortalTarget};
 pub use router::{
-    location, match_path, navigate, Link, LinkBuilder, LinkProps, Outlet, OutletBuilder,
-    OutletProps, Page, Prefetch, Route, Router, Segments,
+    block_navigation, location, match_path, navigate, navigate_with, navigation, redirect,
+    set_query, Keep, Link, LinkBuilder, LinkProps, Nav, Navigation, Outlet, OutletBuilder,
+    OutletProps, Page, Prefetch, Query, Route, Router, Segments,
 };
 pub use theme::{set_theme, theme, Theme};
 pub use view::{
@@ -70,10 +73,11 @@ pub mod prelude {
     pub use crate::react;
     pub use crate::{
         action, component, context, debounced, document_event, effect, interval, media_query, memo,
-        navigate, node_ref, page, provide, set_theme, sleep, state, stored, theme, try_context,
-        view, window_event, Action, App, Callback, Can, Catch, DangerousHtml, Directive,
-        ElementRef, Event, IntoView, Link, NodeRef, Outlet, Page, Plugin, Portal, Result, Route,
-        Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
+        navigate, navigate_with, navigation, node_ref, page, provide, redirect, set_query,
+        set_theme, sleep, state, stored, theme, title, try_context, view, window_event, Action,
+        App, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event, IntoView, Keep,
+        Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route, Router, SafeUrl,
+        Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }
