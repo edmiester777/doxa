@@ -12,11 +12,13 @@ pub(crate) struct Args {
     module: LitStr,
     export: LitStr,
     lazy: bool,
+    /// `handle = Api`: what React's `ref` points at.
+    handle: Option<Type>,
 }
 
 impl syn::parse::Parse for Args {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let (mut module, mut export, mut lazy) = (None, None, false);
+        let (mut module, mut export, mut lazy, mut handle) = (None, None, false, None);
         let start = input.span();
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
@@ -30,12 +32,16 @@ impl syn::parse::Parse for Args {
                     export = Some(input.parse::<LitStr>()?);
                 }
                 "lazy" => lazy = true,
-                other => {
-                    return Err(syn::Error::new(
-                        ident.span(),
-                        format!("unknown option `{other}`; expected `module`, `export` or `lazy`"),
-                    ))
+                "handle" => {
+                    input.parse::<syn::Token![=]>()?;
+                    handle = Some(input.parse::<Type>()?);
                 }
+                other => return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "unknown option `{other}`; expected `module`, `export`, `lazy` or `handle`"
+                    ),
+                )),
             }
             if !input.is_empty() {
                 input.parse::<syn::Token![,]>()?;
@@ -66,6 +72,7 @@ impl syn::parse::Parse for Args {
             module,
             export,
             lazy,
+            handle,
         })
     }
 }
@@ -288,7 +295,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         item.attrs.iter().partition(|a| a.path().is_ident("doc"));
     let struct_fields = named.named.iter();
 
-    let props: Vec<Prop> = fields
+    let mut props: Vec<Prop> = fields
         .iter()
         .map(|f| Prop {
             name: f.name.clone(),
@@ -300,6 +307,41 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             optional: false,
         })
         .collect();
+    // `handle = Api` adds an optional `handle={h}` prop.
+    let handle_field = match &args.handle {
+        Some(api) => {
+            if let Some(f) = fields.iter().find(|f| f.name == "handle") {
+                return Err(syn::Error::new(
+                    f.name.span(),
+                    "`handle` is the prop `#[react(handle = …)]` adds; rename this field",
+                ));
+            }
+            let ty: Type =
+                syn::parse_quote!(::core::option::Option<::doxa::ui::react::Handle<#api>>);
+            props.push(Prop {
+                name: format_ident!("handle"),
+                ty: ty.clone(),
+                default: Some(quote!(::core::option::Option::None)),
+                optional: false,
+            });
+            Some(quote! { #[doc = "Where React's `ref` is published."] pub handle: #ty })
+        }
+        None => None,
+    };
+    let has_handle = args.handle.as_ref().map(|api| {
+        quote! {
+            impl ::doxa::ui::react::HasHandle for #name {
+                type Api = #api;
+            }
+        }
+    });
+    let handle_fn = args.handle.as_ref().map(|_| {
+        quote! {
+            fn handle(&self) -> ::core::option::Option<::doxa::ui::react::HandleSink> {
+                self.handle.as_ref().map(::doxa::ui::react::Handle::sink)
+            }
+        }
+    });
     let builder = builder(vis, name, &props_ty, &props);
 
     let same = fields
@@ -351,7 +393,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         #[doc = concat!("Props of [`", #name_str, "`].")]
         #[derive(Clone)]
         #(#others)*
-        #vis struct #props_ty { #(#struct_fields),* }
+        #vis struct #props_ty { #(#struct_fields,)* #handle_field }
 
         #builder
 
@@ -386,6 +428,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 #(#data)*
             }
 
+            #handle_fn
+
             #[allow(unused_variables)]
             fn views(&self, out: &mut ::doxa::ui::react::Views) {
                 #(#views)*
@@ -396,6 +440,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 #(#events)*
             }
         }
+
+        #has_handle
 
         impl ::doxa::ui::Component for #name {
             type Props = #props_ty;

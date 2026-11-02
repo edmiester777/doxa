@@ -49,6 +49,7 @@ struct Calls {
     funcs: HashMap<u32, Vec<(&'static str, FuncFn)>>,
     async_funcs: HashMap<u32, Vec<(&'static str, AsyncFuncFn)>>,
     renders: HashMap<u32, Vec<(&'static str, RenderFns)>>,
+    handles: HashMap<u32, doxa::ui::react::HandleSink>,
 }
 
 #[derive(Clone, Default)]
@@ -96,6 +97,9 @@ impl Bridge for Fake {
         c.funcs.insert(m.id, m.funcs);
         c.async_funcs.insert(m.id, m.async_funcs);
         c.renders.insert(m.id, m.renders);
+        if let Some(h) = m.on_handle {
+            c.handles.insert(m.id, h);
+        }
     }
 
     fn update(&self, id: u32, content: &Content) {
@@ -550,4 +554,62 @@ fn react_calls_funcs_awaits_async_funcs_and_places_renders() {
             .is_err_and(|e| e.contains("while doxa was rendering"))),
         "{probed:?}"
     );
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeApi(&'static str);
+
+#[react(module = "./ts/code.tsx", export = "Code", handle = CodeApi, lazy)]
+pub struct Code {
+    pub value: String,
+}
+
+thread_local! {
+    static READY: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+}
+
+#[component]
+fn Coded() -> View {
+    let ed = doxa::ui::react::handle::<Code>();
+    effect((), async move |_| {
+        let api = ed.ready().await;
+        READY.with(|r| r.borrow_mut().push(api.0));
+        Ok(())
+    });
+    view! {
+        <Code handle={ed} value={"x".to_string()}/>
+        <p>{ed.get().map_or("none", |a| a.0)}</p>
+    }
+}
+
+#[test]
+fn a_handle_is_ready_once_react_publishes_it() {
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    App::new(|| view! { <Coded/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    let settle = doxa::client::task::run_until_stalled;
+    settle();
+    let p = || dom.text(dom.find_tag("p").unwrap());
+    assert_eq!(p(), "none");
+    assert!(READY.with(|r| r.borrow().is_empty()), "ready() waits");
+
+    let publish = fake
+        .0
+        .borrow()
+        .handles
+        .values()
+        .next()
+        .cloned()
+        .expect("a handle sink");
+    publish(Some(Rc::new(CodeApi("api"))));
+    settle();
+    assert_eq!(p(), "api", "readers re-render");
+    assert_eq!(READY.with(|r| r.take()), ["api"]);
+
+    publish(None);
+    settle();
+    assert_eq!(p(), "none");
 }

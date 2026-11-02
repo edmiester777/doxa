@@ -41,7 +41,9 @@ function Adopt({ node }) {
   return createElement("div", { ref, style: { display: "contents" } });
 }
 
-const IslandView = memo(({ component, props }) => createElement(component, props));
+const IslandView = memo(({ component, props, handle }) =>
+  createElement(component, handle === undefined ? props : { ...props, ref: handle }),
+);
 
 // One per island, so a throwing island goes blank and tells Rust instead of unmounting the shared root.
 class Boundary extends Component {
@@ -71,7 +73,7 @@ function Portals({ parent }) {
       createElement(
         Boundary,
         { onError: i.onError },
-        createElement(Suspense, { fallback: null }, createElement(IslandView, { component: i.component, props: i.props })),
+        createElement(Suspense, { fallback: null }, createElement(IslandView, { component: i.component, props: i.props, handle: i.ref })),
       ),
       i.host,
       String(i.id),
@@ -171,7 +173,7 @@ function DoxaRender({ fns, args }) {
   return createElement("div", { ref, style: { display: "contents" } });
 }
 
-export function mount(id, parent, host, component, content, handlers, onError, calls) {
+export function mount(id, parent, host, component, content, handlers, onError, calls, onHandle) {
   if (root === null) {
     const el = document.createElement("div");
     el.hidden = true;
@@ -182,6 +184,10 @@ export function mount(id, parent, host, component, content, handlers, onError, c
   const island = { id, parent: parent ?? null, host, component, live: true, events: {}, props: null };
   island.onError = (message) => {
     if (island.live) onError(message);
+  };
+  // React calls it with `ref.current` on commit and `null` on unmount.
+  island.ref = onHandle === undefined ? undefined : (v) => {
+    if (island.live || v === null) onHandle(v);
   };
   for (const [name, f] of Object.entries(handlers)) {
     // Created once per island, so React sees the same function on every update.

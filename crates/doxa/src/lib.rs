@@ -214,6 +214,30 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
+/// `handle = Api` adds a `handle={h}` prop for React's `ref`:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[derive(Clone)]
+/// pub struct EditorApi;
+/// #[react(module = "./ts/editor.tsx", export = "Editor", handle = EditorApi)]
+/// pub struct Editor {
+///     pub value: String,
+/// }
+/// ```
+///
+/// so a field of that name is "`handle` is the prop `#[react(handle = …)]` adds":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[derive(Clone)]
+/// pub struct EditorApi;
+/// #[react(module = "./ts/editor.tsx", export = "Editor", handle = EditorApi)]
+/// pub struct Editor {
+///     pub handle: String,
+/// }
+/// ```
+///
 /// An npm module this crate doesn't declare is rejected; the local module above compiles:
 ///
 /// ```compile_fail

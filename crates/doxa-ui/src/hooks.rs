@@ -101,6 +101,11 @@ impl<T: 'static> State<T> {
             .expect("state read after its component unmounted")
     }
 
+    /// Change the value without re-rendering; `None` once unmounted.
+    pub(crate) fn update_silently<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        self.with_cell(|c| f(&mut c.borrow_mut()))
+    }
+
     /// Replace the value and re-render.
     pub fn set(&self, value: T) {
         self.update(|v| *v = value);

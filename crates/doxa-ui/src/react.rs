@@ -41,6 +41,10 @@ pub trait IslandProps: Clone + 'static {
     fn events(&self, out: &mut Events);
     /// Its `View` props: slots doxa renders, and elements React renders.
     fn views(&self, _out: &mut Views) {}
+    /// Where to publish React's `ref`, for a `#[react(handle = …)]` component given `handle={h}`.
+    fn handle(&self) -> Option<HandleSink> {
+        None
+    }
 }
 
 /// An island's non-event props, by React prop name.
@@ -141,6 +145,106 @@ impl<A> Clone for Render<A> {
 impl<A, V: IntoView, F: Fn(A) -> V + 'static> From<F> for Render<A> {
     fn from(f: F) -> Self {
         Render(Rc::new(move |a| f(a).into_view()))
+    }
+}
+
+/// What a bridge publishes as an island's handle: React's `ref.current`, a `JsValue` in the browser.
+pub type RawHandle = Rc<dyn std::any::Any>;
+
+/// Told an island's handle when React commits it, and `None` when it goes.
+pub type HandleSink = Rc<dyn Fn(Option<RawHandle>)>;
+
+/// A type `#[react(handle = T)]` can name: built from what React's `ref` points at.
+pub trait IslandHandle: Clone + 'static {
+    /// `None` if `raw` isn't one.
+    fn from_raw(raw: &RawHandle) -> Option<Self>;
+}
+
+/// Any JS type, e.g. a `#[wasm_bindgen] extern "C" { type EditorApi; }`, read without an
+/// `instanceof` check, since `ref.current` is usually a plain object.
+#[cfg(target_arch = "wasm32")]
+impl<T: wasm_bindgen::JsCast + Clone + 'static> IslandHandle for T {
+    fn from_raw(raw: &RawHandle) -> Option<Self> {
+        let v = raw.downcast_ref::<wasm_bindgen::JsValue>()?;
+        Some(wasm_bindgen::JsCast::unchecked_into(v.clone()))
+    }
+}
+
+/// Natively a test's fake bridge publishes the value itself.
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Clone + 'static> IslandHandle for T {
+    fn from_raw(raw: &RawHandle) -> Option<Self> {
+        raw.downcast_ref::<T>().cloned()
+    }
+}
+
+/// A `#[react(handle = Api)]` component.
+pub trait HasHandle {
+    /// What its handle is.
+    type Api: IslandHandle;
+}
+
+struct HandleCell<T> {
+    value: Option<T>,
+    waiters: Vec<std::task::Waker>,
+}
+
+/// An island's imperative handle, from [`handle`]; `Copy`, and reactive: readers re-render
+/// when React publishes it.
+pub struct Handle<T: 'static>(crate::State<HandleCell<T>>);
+
+impl<T> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Handle<T> {}
+
+/// A handle to pass as `handle={h}` to a `#[react(handle = …)]` component `C`.
+#[track_caller]
+pub fn handle<C: HasHandle>() -> Handle<C::Api> {
+    Handle(crate::hooks::state(HandleCell {
+        value: None,
+        waiters: Vec::new(),
+    }))
+}
+
+impl<T: IslandHandle> Handle<T> {
+    /// The handle, once React has committed the island.
+    pub fn get(&self) -> Option<T> {
+        self.0.with(|c| c.value.clone())
+    }
+
+    /// Wait until React has committed the island, e.g. a lazy one that mounts late.
+    pub fn ready(&self) -> impl std::future::Future<Output = T> + 'static {
+        let state = self.0;
+        std::future::poll_fn(move |cx| {
+            let got = state.update_silently(|c| {
+                if c.value.is_none() {
+                    c.waiters.push(cx.waker().clone());
+                }
+                c.value.clone()
+            });
+            match got.flatten() {
+                Some(v) => std::task::Poll::Ready(v),
+                None => std::task::Poll::Pending,
+            }
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn sink(&self) -> HandleSink {
+        let state = self.0;
+        Rc::new(move |raw: Option<RawHandle>| {
+            let value = raw.as_ref().and_then(T::from_raw);
+            state.update(|c| {
+                c.value = value;
+                if c.value.is_some() {
+                    c.waiters.drain(..).for_each(std::task::Waker::wake);
+                }
+            });
+        })
     }
 }
 
@@ -331,6 +435,8 @@ pub struct Mount<'a> {
     pub async_funcs: Vec<(&'static str, AsyncFuncFn)>,
     /// Its [`Render`] props.
     pub renders: Vec<(&'static str, RenderFns)>,
+    /// Where to publish React's `ref.current`, if it was given a handle.
+    pub on_handle: Option<HandleSink>,
 }
 
 /// The JS side of islands. [`set_bridge`] swaps it, e.g. for a fake in native tests.
@@ -410,6 +516,8 @@ struct Live<P> {
     /// Each `Render` React has mounted: its key, prop, element and arguments.
     rendered: crate::State<Vec<Rendered>>,
     shell_events: RefCell<Vec<ShellEvent>>,
+    /// This render's `handle={…}`.
+    handle: Shared<Option<HandleSink>>,
     shell_nodes: RefCell<Vec<(&'static str, NodeFn)>>,
     slots: RefCell<Vec<(&'static str, NodeRef)>>,
     /// This render's props and shells.
@@ -581,6 +689,16 @@ impl<P: IslandProps> Live<P> {
             funcs,
             async_funcs,
             renders,
+            on_handle: self.handle.borrow().is_some().then(|| {
+                let cell = self.handle.clone();
+                let sink: HandleSink = Rc::new(move |raw| {
+                    let h = cell.borrow().clone();
+                    if let Some(h) = h {
+                        h(raw)
+                    }
+                });
+                sink
+            }),
             on_error: Rc::new(move |message: &str| {
                 runtime::throw(
                     owner.upgrade().as_ref(),
@@ -670,6 +788,7 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
         renders: RefCell::default(),
         rendered,
         shell_events: RefCell::default(),
+        handle: Rc::default(),
         shell_nodes: RefCell::default(),
         slots: RefCell::default(),
         latest: RefCell::new(None),
@@ -685,6 +804,7 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     };
     props.events(&mut events);
     live.retarget(events);
+    *live.handle.borrow_mut() = props.handle();
 
     let mut views = Views::default();
     props.views(&mut views);
@@ -780,6 +900,8 @@ mod web {
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
 
+    use std::rc::Rc;
+
     use super::{Bridge, Content, Mount};
     use crate::dom::NodeRef;
 
@@ -795,6 +917,7 @@ mod web {
             events: &js_sys::Object,
             on_error: &JsValue,
             calls: &JsValue,
+            on_handle: &JsValue,
         );
         #[wasm_bindgen(js_name = update)]
         fn js_update(id: u32, content: &JsValue);
@@ -976,6 +1099,19 @@ mod web {
             let on_error = Closure::<dyn Fn(String)>::new(move |msg: String| on_error(&msg));
             let mut keep: Vec<Box<dyn std::any::Any>> = Vec::new();
             let calls = calls(m.funcs, m.async_funcs, m.renders, &mut keep);
+            let on_handle = match m.on_handle {
+                Some(sink) => {
+                    let c = Closure::<dyn Fn(JsValue)>::new(move |v: JsValue| {
+                        let raw = (!v.is_null() && !v.is_undefined())
+                            .then(|| Rc::new(v) as super::RawHandle);
+                        sink(raw)
+                    });
+                    let f = c.as_ref().clone();
+                    keep.push(Box::new(c));
+                    f
+                }
+                None => JsValue::UNDEFINED,
+            };
             let component = (m.island.load)();
             js_mount(
                 m.id,
@@ -986,6 +1122,7 @@ mod web {
                 &obj,
                 on_error.as_ref(),
                 &calls,
+                &on_handle,
             );
             events.push(on_error);
             self.0
