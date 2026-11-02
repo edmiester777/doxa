@@ -69,6 +69,11 @@ pub trait Dom {
 pub struct NodeRef(pub(crate) NodeId);
 
 impl NodeRef {
+    /// The node `id` names in the current [`Dom`], e.g. one a test created.
+    pub fn from_id(id: NodeId) -> NodeRef {
+        NodeRef(id)
+    }
+
     /// Its id in the current [`Dom`].
     pub fn id(self) -> NodeId {
         self.0
@@ -79,6 +84,67 @@ impl NodeRef {
     pub fn raw(self) -> Option<web_sys::Node> {
         crate::runtime::dom().raw(self.0)
     }
+
+    /// The browser node as `T`, e.g. `web_sys::HtmlInputElement`, if it is one.
+    #[cfg(target_arch = "wasm32")]
+    pub fn as_element<T: wasm_bindgen::JsCast>(self) -> Option<T> {
+        wasm_bindgen::JsCast::dyn_into(self.raw()?).ok()
+    }
+
+    /// Give it keyboard focus.
+    pub fn focus(self) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(el) = self.as_element::<web_sys::HtmlElement>() {
+            let _ = el.focus();
+        }
+    }
+
+    /// Take keyboard focus away from it.
+    pub fn blur(self) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(el) = self.as_element::<web_sys::HtmlElement>() {
+            let _ = el.blur();
+        }
+    }
+
+    /// Scroll its nearest scrollable ancestors until it is visible.
+    pub fn scroll_into_view(self) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(el) = self.as_element::<web_sys::Element>() {
+            el.scroll_into_view();
+        }
+    }
+
+    /// Where it is in the viewport, in CSS pixels; `None` without a browser layout.
+    pub fn rect(self) -> Option<Rect> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let r = self
+                .as_element::<web_sys::Element>()?
+                .get_bounding_client_rect();
+            Some(Rect {
+                x: r.x(),
+                y: r.y(),
+                width: r.width(),
+                height: r.height(),
+            })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        None
+    }
+}
+
+/// An element's box in the viewport, in CSS pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Rect {
+    /// Left edge.
+    pub x: f64,
+    /// Top edge.
+    pub y: f64,
+    /// Width.
+    pub width: f64,
+    /// Height.
+    pub height: f64,
 }
 
 /// Where an element is in its life, for [`Element::lifecycle`](crate::Element::lifecycle).

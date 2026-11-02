@@ -104,6 +104,7 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                 out
             }
             ("inner_html", Some(v)) => quote_spanned! { span => #out.inner_html(#v) },
+            ("ref", Some(v)) => quote_spanned! { span => #out.node_ref(#v) },
             (n, Some(v)) if n.starts_with("on:") => {
                 let event = &n[3..];
                 let method = if is_async_closure(a) {

@@ -202,6 +202,23 @@ pub mod react_diagnostics {}
 #[doc(hidden)]
 pub mod directive_diagnostics {}
 
+/// A portal names where it renders:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// let _ = view! { <Portal to="body"><p>"over"</p></Portal> };
+/// ```
+///
+/// Without `to` it is "`<Portal>` is missing the `to` prop":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// let _ = view! { <Portal><p>"over"</p></Portal> };
+/// ```
+#[cfg(feature = "ui")]
+#[doc(hidden)]
+pub mod portal_diagnostics {}
+
 /// A route that returns JSON is called from the browser:
 ///
 /// ```

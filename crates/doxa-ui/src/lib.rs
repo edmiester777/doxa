@@ -12,6 +12,7 @@ pub mod dom;
 mod error;
 mod hooks;
 mod plugin;
+mod portal;
 #[cfg(feature = "react")]
 pub mod react;
 mod reconcile;
@@ -25,12 +26,14 @@ pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, S
 pub use can::{Can, CanBuilder, CanProps};
 pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
-pub use dom::{Event, NodeRef, Phase};
+pub use dom::{Event, NodeRef, Phase, Rect};
 pub use error::{Result, Thrown};
 pub use hooks::{
-    action, context, effect, memo, provide, state, try_context, Action, Deps, Singleton, State,
+    action, context, effect, memo, node_ref, provide, state, try_context, Action, Deps, ElementRef,
+    Singleton, State,
 };
 pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
+pub use portal::{Portal, PortalBuilder, PortalProps, PortalTarget};
 pub use router::{
     location, match_path, navigate, Link, LinkBuilder, LinkProps, Outlet, OutletBuilder,
     OutletProps, Page, Prefetch, Route, Router, Segments,
@@ -60,10 +63,11 @@ pub mod prelude {
     #[cfg(feature = "react")]
     pub use crate::react;
     pub use crate::{
-        action, component, context, effect, memo, navigate, page, provide, set_theme, state, theme,
-        try_context, view, Action, App, Callback, Can, Catch, DangerousHtml, Directive, Event,
-        IntoView, Link, NodeRef, Outlet, Page, Plugin, Result, Route, Router, SafeUrl, Singleton,
-        Slot, Slots, State, Suspense, Theme, Thrown, View,
+        action, component, context, effect, memo, navigate, node_ref, page, provide, set_theme,
+        state, theme, try_context, view, Action, App, Callback, Can, Catch, DangerousHtml,
+        Directive, ElementRef, Event, IntoView, Link, NodeRef, Outlet, Page, Plugin, Portal,
+        Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown,
+        View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }

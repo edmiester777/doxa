@@ -21,6 +21,7 @@ pub(crate) enum Node {
     Element(Rc<Element>),
     Component(Rc<ComponentNode>),
     Fragment(Rc<[Node]>),
+    Portal(Rc<crate::portal::PortalNode>),
 }
 
 /// Identity of a child among its siblings, from `key={…}`.
@@ -141,6 +142,11 @@ impl Element {
     /// Run `f` with the element's node after it mounts or is patched, and before it is removed.
     pub fn lifecycle(self, f: impl Fn(Phase, NodeRef) + 'static) -> Self {
         self.directive(Lifecycle(Rc::new(f)))
+    }
+
+    /// Point `r` at this element, as `ref={r}`.
+    pub fn node_ref(self, r: crate::ElementRef) -> Self {
+        self.directive(r)
     }
 
     /// Attach a [`Directive`], as `use:name={value}`.
@@ -308,6 +314,7 @@ impl FromChildren for String {
                 Node::Fragment(items) => items.iter().for_each(|n| text(n, out)),
                 Node::Element(e) => panic!("this `children` prop takes text, not a <{}>", e.tag),
                 Node::Component(c) => panic!("this `children` prop takes text, not a <{}>", c.name),
+                Node::Portal(_) => panic!("this `children` prop takes text, not a <Portal>"),
             }
         }
         let mut out = String::new();

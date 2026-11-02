@@ -1008,3 +1008,103 @@ fn only_the_outermost_node_holds_and_its_parent_releases_it() {
         "its future was dropped"
     );
 }
+
+#[derive(Clone)]
+struct Tone(&'static str);
+
+#[component]
+fn ToneText() -> View {
+    view! { <i id="tone">{context::<Tone>().0}</i> }
+}
+
+thread_local! {
+    static PORTAL_ORDER: std::cell::RefCell<Option<State<Vec<u32>>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[component]
+fn Portaled(layer: doxa::ui::dom::NodeId) -> View {
+    let order = state(vec![1u32, 2, 3]);
+    PORTAL_ORDER.with(|o| *o.borrow_mut() = Some(order));
+    provide(Tone("warm"));
+    let layer = doxa::ui::NodeRef::from_id(layer);
+    view! {
+        <ul>
+            {order.get().into_iter().map(|n| view! {
+                <li key={n}>
+                    {n}
+                    {(n == 2).then(|| view! {
+                        <Portal to={layer}>
+                            <p id="popover">"over"</p>
+                            <ToneText/>
+                        </Portal>
+                    })}
+                </li>
+            }).collect::<Vec<_>>()}
+        </ul>
+    }
+}
+
+#[test]
+fn a_portal_renders_elsewhere_with_its_context_and_ignores_reorders() {
+    let dom = MemDom::new();
+    let layer = element(&dom, "layer");
+    let doc: Rc<dyn doxa::ui::dom::Dom> = Rc::new(dom.clone());
+    App::new(move || view! { <Portaled layer={layer}/> })
+        .mount_on(doc, dom.body())
+        .keep();
+    settle();
+    let popover = dom.find("id", "popover").unwrap();
+    assert_eq!(
+        dom.text(layer),
+        "overwarm",
+        "rendered into the layer, with the context"
+    );
+    assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "123");
+
+    PORTAL_ORDER.with(|o| o.borrow().unwrap().set(vec![3, 2, 1]));
+    settle();
+    assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "321");
+    assert_eq!(
+        dom.find("id", "popover"),
+        Some(popover),
+        "the reorder left it alone"
+    );
+    assert_eq!(dom.text(layer), "overwarm");
+
+    PORTAL_ORDER.with(|o| o.borrow().unwrap().set(vec![3]));
+    settle();
+    assert_eq!(
+        dom.text(layer),
+        "",
+        "removing its <li> removed what it rendered"
+    );
+}
+
+#[component]
+fn Refd() -> View {
+    let input = node_ref();
+    let shown = state(true);
+    SHOWN.with(|s| *s.borrow_mut() = Some(shown));
+    SEEN_REF.with(|s| s.borrow_mut().push(input.get().is_some()));
+    view! { {shown.get().then(|| view! { <input id="field" ref={input}/> })} }
+}
+
+thread_local! {
+    static SHOWN: std::cell::RefCell<Option<State<bool>>> = const { std::cell::RefCell::new(None) };
+    static SEEN_REF: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[test]
+fn a_node_ref_points_at_its_element_while_mounted() {
+    let dom = mount(|| view! { <Refd/> });
+    settle();
+    assert_eq!(
+        SEEN_REF.with(|s| s.take()),
+        [false, true],
+        "mounting re-rendered it"
+    );
+    let _ = dom;
+    SHOWN.with(|s| s.borrow().unwrap().set(false));
+    settle();
+    assert_eq!(SEEN_REF.with(|s| s.take()), [true, false]);
+}

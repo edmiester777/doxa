@@ -124,6 +124,55 @@ impl State<bool> {
     }
 }
 
+/// The element `ref={r}` is on, once it mounts. `Copy`, like [`State`].
+pub struct ElementRef(State<Option<crate::NodeRef>>);
+
+impl Clone for ElementRef {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for ElementRef {}
+
+/// A handle to an element, like React's `useRef` on a DOM node: pass it as `ref={r}`.
+/// The component re-renders when the element mounts or goes.
+#[track_caller]
+pub fn node_ref() -> ElementRef {
+    ElementRef(state(None))
+}
+
+impl ElementRef {
+    /// The element, while it is mounted.
+    pub fn get(&self) -> Option<crate::NodeRef> {
+        self.0.with_cell(|c| *c.borrow()).flatten()
+    }
+
+    fn point_at(&self, node: Option<crate::NodeRef>) {
+        if self.get() != node {
+            self.0.set(node);
+        }
+    }
+}
+
+impl crate::Directive for ElementRef {
+    fn mounted(&mut self, node: crate::NodeRef) {
+        self.point_at(Some(node));
+    }
+    fn update(&mut self, next: Self) {
+        if next.0.instance != self.0.instance || next.0.slot != self.0.slot {
+            self.point_at(None);
+        }
+        *self = next;
+    }
+    fn updated(&mut self, node: crate::NodeRef) {
+        self.point_at(Some(node));
+    }
+    fn unmounted(&mut self, _: crate::NodeRef) {
+        self.point_at(None);
+    }
+}
+
 /// Dependencies of a `memo` or `effect`: values, references, or tuples of them.
 pub trait Deps {
     /// The owned copy compared between renders.

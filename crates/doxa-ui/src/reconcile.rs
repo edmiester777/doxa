@@ -8,6 +8,7 @@ use futures_util::future::LocalBoxFuture;
 
 use crate::directive::{self, Proto};
 use crate::dom::{Dom, NodeId, NodeRef, Prop};
+use crate::portal::{PortalNode, PortalTarget};
 use crate::runtime::{self, Cancel, Instance};
 use crate::view::{ComponentNode, Element, Handler, Key, Node};
 use crate::View;
@@ -22,6 +23,13 @@ pub(crate) enum Mounted {
     Component {
         inst: Rc<Instance>,
         key: Option<Key>,
+    },
+    /// Only `anchor` sits here; `content` renders into `target`, so moves never touch it.
+    Portal {
+        anchor: NodeId,
+        target: NodeId,
+        to: PortalTarget,
+        content: Rc<Instance>,
     },
 }
 
@@ -51,6 +59,7 @@ impl Mounted {
     fn first_node(&self) -> Option<NodeId> {
         match self {
             Mounted::Anchor(n) | Mounted::Text { node: n, .. } => Some(*n),
+            Mounted::Portal { anchor, .. } => Some(*anchor),
             Mounted::Element(e) => Some(e.node),
             Mounted::Component { inst, .. } => {
                 inst.region.borrow().first().and_then(Mounted::first_node)
@@ -61,6 +70,7 @@ impl Mounted {
     fn last_node(&self) -> Option<NodeId> {
         match self {
             Mounted::Anchor(n) | Mounted::Text { node: n, .. } => Some(*n),
+            Mounted::Portal { anchor, .. } => Some(*anchor),
             Mounted::Element(e) => Some(e.node),
             Mounted::Component { inst, .. } => {
                 inst.region.borrow().last().and_then(Mounted::last_node)
@@ -82,6 +92,7 @@ impl Mounted {
     fn nodes(&self, out: &mut Vec<NodeId>) {
         match self {
             Mounted::Anchor(n) | Mounted::Text { node: n, .. } => out.push(*n),
+            Mounted::Portal { anchor, .. } => out.push(*anchor),
             Mounted::Element(e) => out.push(e.node),
             Mounted::Component { inst, .. } => {
                 inst.region.borrow().iter().for_each(|m| m.nodes(out))
@@ -97,6 +108,7 @@ fn same_kind(old: &Mounted, new: &Node) -> bool {
         (Mounted::Component { inst, key }, Node::Component(n)) => {
             inst.type_id == n.type_id && *key == n.key
         }
+        (Mounted::Portal { to, .. }, Node::Portal(p)) => *to == p.to,
         _ => false,
     }
 }
@@ -297,6 +309,47 @@ fn mount(
             Mounted::Element(Box::new(m))
         }
         Node::Component(c) => mount_component(dom, owner, parent, &c, before),
+        Node::Portal(p) => mount_portal(dom, owner, parent, &p, before),
+    }
+}
+
+struct PortalContent;
+
+fn mount_portal(
+    dom: &dyn Dom,
+    owner: &Rc<Instance>,
+    parent: NodeId,
+    p: &PortalNode,
+    before: Option<NodeId>,
+) -> Mounted {
+    let target = match &p.to {
+        PortalTarget::Node(n) => n.id(),
+        PortalTarget::Selector(s) => dom
+            .query(s)
+            .unwrap_or_else(|| panic!("no element matches `<Portal to={s:?}>`")),
+    };
+    let anchor = dom.create_anchor();
+    dom.insert(parent, anchor, before);
+    let content = Instance::new(
+        "Portal",
+        std::any::TypeId::of::<PortalContent>(),
+        Some(owner),
+        |v| {
+            let view = v.downcast_ref::<View>().expect("portal content").clone();
+            crate::RenderFuture::ready(Ok(view))
+        },
+        Rc::new(p.children.clone()),
+        target,
+    );
+    let end = dom.create_anchor();
+    dom.insert(target, end, None);
+    content.region.borrow_mut().push(Mounted::Anchor(end));
+    runtime::run(&content);
+    Mounted::Portal {
+        anchor,
+        target,
+        to: p.to.clone(),
+        content,
     }
 }
 
@@ -396,6 +449,10 @@ fn patch(dom: &dyn Dom, owner: &Rc<Instance>, old: &mut Mounted, new: Node) {
             }
         }
         (Mounted::Element(m), Node::Element(e)) => patch_element(dom, owner, m, &e),
+        (Mounted::Portal { content, .. }, Node::Portal(p)) => {
+            *content.props.borrow_mut() = Rc::new(p.children.clone());
+            runtime::run(content);
+        }
         (Mounted::Component { inst, .. }, Node::Component(c)) => {
             let unchanged = c
                 .same_props
@@ -576,6 +633,19 @@ fn unmount(dom: &dyn Dom, parent: NodeId, m: Mounted, hold: bool) {
                 unmount(dom, parent, m, hold);
             }
         }
+        Mounted::Portal {
+            anchor,
+            target,
+            content,
+            ..
+        } => {
+            dom.remove(anchor);
+            content.kill();
+            let region = std::mem::take(&mut *content.region.borrow_mut());
+            for m in region {
+                unmount(dom, target, m, hold);
+            }
+        }
     }
 }
 
@@ -623,6 +693,14 @@ fn kill_children(dom: &dyn Dom, children: &[Mounted]) {
             Mounted::Component { inst, .. } => {
                 inst.kill();
                 kill_children(dom, &inst.region.borrow());
+            }
+            // Its nodes live in another element, which an ancestor's removal won't reach.
+            Mounted::Portal { content, .. } => {
+                content.kill();
+                let region = std::mem::take(&mut *content.region.borrow_mut());
+                for m in region {
+                    unmount(dom, content.parent_node.get(), m, false);
+                }
             }
             _ => {}
         }
