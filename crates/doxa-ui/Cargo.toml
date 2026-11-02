@@ -21,12 +21,13 @@ serde_json = { workspace = true }
 
 [features]
 # `#[react]`: React components rendered as portals of one shared root.
-react = []
+react = ["dep:serde-wasm-bindgen"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+serde-wasm-bindgen = { version = "0.6", optional = true }
 web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Comment", "Event", "EventTarget", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "KeyboardEvent", "MouseEvent", "History", "Location", "PopStateEvent", "CssStyleDeclaration", "NodeList", "DomRect", "AddEventListenerOptions", "ResizeObserver", "IntersectionObserver", "MediaQueryList", "Storage", "BroadcastChannel", "MessageEvent", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator"] }
 
 [dev-dependencies]

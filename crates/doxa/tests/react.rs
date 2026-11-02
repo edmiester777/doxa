@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use doxa::ui::dom::MemDom;
 use doxa::ui::prelude::*;
-use doxa::ui::react::{Bridge, EventFn, IslandProps, Mount};
+use doxa::ui::react::{Bridge, EventFn, IslandProps, Mount, Props};
 use doxa::ui::NodeRef;
 
 #[react(module = "./ts/editor.tsx", export = "Editor")]
@@ -47,9 +47,8 @@ struct Calls {
 #[derive(Clone, Default)]
 struct Fake(Rc<RefCell<Calls>>);
 
-fn sorted(json: &str) -> String {
-    let map: std::collections::BTreeMap<String, serde_json::Value> =
-        serde_json::from_str(json).expect("props are a JSON object");
+fn sorted(props: &Props) -> String {
+    let map: std::collections::BTreeMap<_, _> = props.iter().collect();
     serde_json::to_string(&map).unwrap()
 }
 
@@ -69,7 +68,7 @@ impl Bridge for Fake {
         c.events.insert(m.id, m.events);
     }
 
-    fn update(&self, id: u32, props: &str) {
+    fn update(&self, id: u32, props: &Props) {
         self.0
             .borrow_mut()
             .log

@@ -44,10 +44,13 @@ pub trait IslandProps: Clone + 'static {
     }
 }
 
+/// An island's non-event props, by React prop name.
+pub type Props = serde_json::Map<String, serde_json::Value>;
+
 /// The non-event props, as a JSON object.
 #[doc(hidden)]
 #[derive(Default)]
-pub struct Data(serde_json::Map<String, serde_json::Value>);
+pub struct Data(Props);
 
 impl Data {
     pub fn set<T: Serialize + ?Sized>(&mut self, name: &'static str, value: &T) {
@@ -107,8 +110,8 @@ pub struct Mount<'a> {
     pub host: NodeRef,
     /// Its module and export.
     pub island: &'a Island,
-    /// Its non-event props, as a JSON object.
-    pub props: &'a str,
+    /// Its non-event props.
+    pub props: &'a Props,
     /// Its event props.
     pub events: Vec<(&'static str, EventFn)>,
     /// doxa's render of its `View` children, for React to place as `children`.
@@ -120,7 +123,7 @@ pub trait Bridge {
     /// Render an island; a child may mount before its parent.
     fn mount(&self, island: Mount<'_>);
     /// Give a mounted island new non-event props.
-    fn update(&self, id: u32, props: &str);
+    fn update(&self, id: u32, props: &Props);
     /// Remove an island's portal.
     fn unmount(&self, id: u32);
 }
@@ -161,7 +164,7 @@ fn default_bridge() -> Rc<dyn Bridge> {
     struct Inert;
     impl Bridge for Inert {
         fn mount(&self, _: Mount<'_>) {}
-        fn update(&self, _: u32, _: &str) {}
+        fn update(&self, _: u32, _: &Props) {}
         fn unmount(&self, _: u32) {}
     }
     Rc::new(Inert)
@@ -213,7 +216,7 @@ impl<P: IslandProps> Live<P> {
                     root: self.root,
                     host,
                     island: &P::ISLAND,
-                    props: &json(props),
+                    props: &data(props),
                     events: forwarders,
                     children: self.children.get(),
                 });
@@ -230,7 +233,7 @@ impl<P: IslandProps> Live<P> {
                     .as_ref()
                     .is_some_and(|s| s.same_data(props));
                 if !same {
-                    bridge().update(self.id, &json(props));
+                    bridge().update(self.id, &data(props));
                     *self.shown.borrow_mut() = Some(props.clone());
                 }
             }
@@ -244,10 +247,10 @@ impl<P: IslandProps> Live<P> {
     }
 }
 
-fn json<P: IslandProps>(props: &P) -> String {
+fn data<P: IslandProps>(props: &P) -> Props {
     let mut d = Data::default();
     props.data(&mut d);
-    serde_json::Value::Object(d.0).to_string()
+    d.0
 }
 
 /// The render of a `#[react]` component: an empty host the bridge renders into.
@@ -297,7 +300,7 @@ mod web {
 
     use wasm_bindgen::prelude::*;
 
-    use super::{Bridge, Mount};
+    use super::{Bridge, Mount, Props};
     use crate::dom::NodeRef;
 
     #[wasm_bindgen(module = "doxa-react:runtime")]
@@ -308,17 +311,25 @@ mod web {
             parent: Option<u32>,
             host: &web_sys::Node,
             component: &JsValue,
-            props: &str,
+            props: &JsValue,
             events: &js_sys::Object,
             children: Option<web_sys::Node>,
         );
         #[wasm_bindgen(js_name = update)]
-        fn js_update(id: u32, props: &str);
+        fn js_update(id: u32, props: &JsValue);
         #[wasm_bindgen(js_name = unmount)]
         fn js_unmount(id: u32);
     }
 
     type Handlers = Vec<Closure<dyn Fn(String)>>;
+
+    /// Plain objects, not ES `Map`s, so components read `props.name`.
+    fn to_js(props: &Props) -> JsValue {
+        use serde::Serialize;
+        props
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .unwrap_or(JsValue::NULL)
+    }
 
     /// Islands rendered by the shipped runtime, keeping each one's handlers alive.
     #[derive(Default)]
@@ -339,12 +350,20 @@ mod web {
                 })
                 .collect();
             let component = (m.island.load)();
-            js_mount(m.id, m.parent, &host, &component, m.props, &obj, children);
+            js_mount(
+                m.id,
+                m.parent,
+                &host,
+                &component,
+                &to_js(m.props),
+                &obj,
+                children,
+            );
             self.0.borrow_mut().insert(m.id, handlers);
         }
 
-        fn update(&self, id: u32, props: &str) {
-            js_update(id, props);
+        fn update(&self, id: u32, props: &Props) {
+            js_update(id, &to_js(props));
         }
 
         fn unmount(&self, id: u32) {

@@ -57,8 +57,8 @@ function toJson(value) {
   }
 }
 
-function propsOf(island, json) {
-  const props = { ...JSON.parse(json), ...island.events };
+function propsOf(island, data) {
+  const props = { ...data, ...island.events };
   if (island.children) {
     props.children = createElement(
       Fragment,
@@ -70,7 +70,7 @@ function propsOf(island, json) {
   return props;
 }
 
-export function mount(id, parent, host, component, json, handlers, children) {
+export function mount(id, parent, host, component, data, handlers, children) {
   if (root === null) {
     const el = document.createElement("div");
     el.hidden = true;
@@ -85,15 +85,15 @@ export function mount(id, parent, host, component, json, handlers, children) {
       if (island.live) f(toJson(arg));
     };
   }
-  island.props = propsOf(island, json);
+  island.props = propsOf(island, data);
   islands.set(id, island);
   publish();
 }
 
-export function update(id, json) {
+export function update(id, data) {
   const island = islands.get(id);
   if (island === undefined) return;
-  island.props = propsOf(island, json);
+  island.props = propsOf(island, data);
   publish();
 }
 
