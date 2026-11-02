@@ -88,6 +88,11 @@ pub trait Dom {
     fn raw(&self, _node: NodeId) -> Option<web_sys::Node> {
         None
     }
+    /// An id for a browser node something else created, e.g. React.
+    #[cfg(target_arch = "wasm32")]
+    fn adopt(&self, _node: web_sys::Node) -> Option<NodeId> {
+        None
+    }
 }
 
 /// An element the renderer placed, as [`Element::lifecycle`](crate::Element::lifecycle) sees it.

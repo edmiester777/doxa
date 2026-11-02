@@ -28,7 +28,7 @@ function subscribe(l) {
   return () => listeners.delete(l);
 }
 
-// Moves the element doxa renders an island's `View` children into to where React puts `children`.
+// Moves a slot's host, which doxa renders into, to where React puts that prop.
 function Adopt({ node }) {
   const ref = useRef(null);
   useLayoutEffect(() => {
@@ -87,20 +87,67 @@ function toJson(value) {
   }
 }
 
-function propsOf(island, data) {
-  const props = { ...data, ...island.events };
-  if (island.children) {
-    props.children = createElement(
-      Fragment,
-      null,
-      createElement(Adopt, { node: island.children }),
-      createElement(Portals, { parent: island.id }),
-    );
+// doxa's DOM event names as React prop names: `click` → `onClick`, `keydown` → `onKeyDown`.
+const REACT_EVENTS = {};
+for (const name of [
+  "Click", "DoubleClick", "ContextMenu", "KeyDown", "KeyUp", "KeyPress", "Focus", "Blur", "Change",
+  "Input", "Submit", "Wheel", "Scroll", "PointerDown", "PointerUp", "PointerMove", "PointerEnter",
+  "PointerLeave", "PointerOver", "PointerOut", "PointerCancel", "MouseDown", "MouseUp", "MouseMove",
+  "MouseEnter", "MouseLeave", "MouseOver", "MouseOut", "TouchStart", "TouchEnd", "TouchMove",
+  "DragStart", "Drag", "DragEnd", "DragEnter", "DragLeave", "DragOver", "Drop",
+]) {
+  REACT_EVENTS[name.toLowerCase()] = "on" + name;
+}
+REACT_EVENTS.dblclick = "onDoubleClick";
+
+function reactEvent(name) {
+  return REACT_EVENTS[name] ?? "on" + name[0].toUpperCase() + name.slice(1);
+}
+
+function styleObject(css) {
+  const out = {};
+  for (const decl of css.split(";")) {
+    const at = decl.indexOf(":");
+    if (at < 0) continue;
+    const key = decl.slice(0, at).trim();
+    const value = decl.slice(at + 1).trim();
+    out[key.startsWith("--") ? key : key.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
+  }
+  return out;
+}
+
+// The element React renders for a `#[react(element)]` prop; doxa renders its children into it.
+function shellElement(shell, portals) {
+  const props = { ref: shell.ref };
+  for (const [k, v] of Object.entries(shell.attrs)) {
+    if (k === "class") props.className = v;
+    else if (k === "for") props.htmlFor = v;
+    else if (k === "style") props.style = styleObject(v);
+    else props[k] = v;
+  }
+  for (const [name, f] of Object.entries(shell.events)) {
+    props[reactEvent(name)] = (e) => f(e.nativeEvent ?? e);
+  }
+  // Only portals go inside, which add no DOM, so React leaves doxa's children alone.
+  return createElement(shell.tag, props, portals);
+}
+
+// Nested islands render inside `children`, or else the first slot or element, so they get this island's context.
+function propsOf(island, content) {
+  const props = { ...content.props, ...island.events };
+  const slots = Object.keys(content.slots);
+  const home = slots.includes("children") ? "children" : (slots[0] ?? content.shells[0]?.prop);
+  const portals = (name) => (name === home ? createElement(Portals, { parent: island.id }) : null);
+  for (const [name, node] of Object.entries(content.slots)) {
+    props[name] = createElement(Fragment, null, createElement(Adopt, { node }), portals(name));
+  }
+  for (const shell of content.shells) {
+    props[shell.prop] = shellElement(shell, portals(shell.prop));
   }
   return props;
 }
 
-export function mount(id, parent, host, component, data, handlers, children, onError) {
+export function mount(id, parent, host, component, content, handlers, onError) {
   if (root === null) {
     const el = document.createElement("div");
     el.hidden = true;
@@ -108,7 +155,7 @@ export function mount(id, parent, host, component, data, handlers, children, onE
     root = createRoot(el);
     root.render(createElement(Portals, { parent: null }));
   }
-  const island = { id, parent: parent ?? null, host, component, children, live: true, events: {}, props: null };
+  const island = { id, parent: parent ?? null, host, component, live: true, events: {}, props: null };
   island.onError = (message) => {
     if (island.live) onError(message);
   };
@@ -118,15 +165,15 @@ export function mount(id, parent, host, component, data, handlers, children, onE
       if (island.live) f(toJson(arg));
     };
   }
-  island.props = propsOf(island, data);
+  island.props = propsOf(island, content);
   islands.set(id, island);
   publish();
 }
 
-export function update(id, data) {
+export function update(id, content) {
   const island = islands.get(id);
   if (island === undefined) return;
-  island.props = propsOf(island, data);
+  island.props = propsOf(island, content);
   publish();
 }
 

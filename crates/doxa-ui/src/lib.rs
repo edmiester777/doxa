@@ -55,7 +55,8 @@ pub use view::{
 
 /// A React component as a doxa one: `#[react(module = "…", export = "…")]` on its props struct.
 ///
-/// A `children: View` field reaches React as an element wrapping doxa's DOM, so Radix `asChild` can't take it.
+/// A `View` field reaches React as an element wrapping doxa's DOM; for a `render`/`asChild`
+/// prop, `#[react(element)]` has React render the element and doxa only its children.
 #[cfg(feature = "react")]
 pub use doxa_ui_macros::react;
 pub use doxa_ui_macros::{component, page, start, view};

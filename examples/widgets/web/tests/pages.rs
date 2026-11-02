@@ -8,7 +8,7 @@ use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
 use doxa::ui::dom::MemDom;
 use doxa::ui::navigate;
-use doxa::ui::react::{Bridge, EventFn, Mount, Props};
+use doxa::ui::react::{Bridge, Content, EventFn, Mount};
 
 thread_local! {
     static SERVED: RefCell<Option<Scoped>> = const { RefCell::new(None) };
@@ -104,12 +104,12 @@ impl Bridge for FakeReact {
             format!(
                 "{} {}",
                 m.island.name,
-                serde_json::to_string(m.props).unwrap()
+                serde_json::to_string(&m.content.props).unwrap()
             ),
             m.events,
         ));
     }
-    fn update(&self, _: u32, _: &Props) {}
+    fn update(&self, _: u32, _: &Content) {}
     fn unmount(&self, _: u32) {}
 }
 

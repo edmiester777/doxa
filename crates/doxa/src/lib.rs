@@ -167,6 +167,28 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
+/// An element prop React renders itself is a `View`, and the export may be dotted:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/popover.tsx", export = "Popover.Trigger")]
+/// pub struct Trigger {
+///     #[react(element)]
+///     pub render: View,
+/// }
+/// ```
+///
+/// Anything else is "`#[react(element)]` field `render` must be a `View`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/popover.tsx", export = "Popover.Trigger")]
+/// pub struct Trigger {
+///     #[react(element)]
+///     pub render: String,
+/// }
+/// ```
+///
 /// An npm module this crate doesn't declare is rejected; the local module above compiles:
 ///
 /// ```compile_fail

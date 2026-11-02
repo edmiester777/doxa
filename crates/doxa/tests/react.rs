@@ -6,8 +6,7 @@ use std::rc::Rc;
 
 use doxa::ui::dom::MemDom;
 use doxa::ui::prelude::*;
-use doxa::ui::react::{Bridge, EventFn, IslandProps, Mount, Props};
-use doxa::ui::NodeRef;
+use doxa::ui::react::{Bridge, Content, EventFn, IslandProps, Mount, Shell};
 
 #[react(module = "./ts/editor.tsx", export = "Editor")]
 pub struct Editor {
@@ -43,14 +42,32 @@ struct Calls {
     roots: Vec<u64>,
     events: HashMap<u32, Vec<(&'static str, EventFn)>>,
     errors: HashMap<u32, EventFn>,
+    shells: HashMap<u32, Vec<Shell>>,
 }
 
 #[derive(Clone, Default)]
 struct Fake(Rc<RefCell<Calls>>);
 
-fn sorted(props: &Props) -> String {
-    let map: std::collections::BTreeMap<_, _> = props.iter().collect();
-    serde_json::to_string(&map).unwrap()
+/// The props as sorted JSON, then any slot names and element shells.
+fn describe(c: &Content) -> String {
+    let map: std::collections::BTreeMap<_, _> = c.props.iter().collect();
+    let mut out = serde_json::to_string(&map).unwrap();
+    if !c.slots.is_empty() {
+        let names: Vec<_> = c.slots.iter().map(|(n, _)| *n).collect();
+        out.push_str(&format!(" slots:{}", names.join(",")));
+    }
+    for s in &c.shells {
+        let attrs: Vec<_> = s.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let events: Vec<_> = s.events.iter().map(|(n, _)| *n).collect();
+        out.push_str(&format!(
+            " {}=<{} {}|{}>",
+            s.prop,
+            s.tag,
+            attrs.join(" "),
+            events.join(",")
+        ));
+    }
+    out
 }
 
 impl Bridge for Fake {
@@ -60,21 +77,22 @@ impl Bridge for Fake {
             "mount {} {} {}",
             m.island.name,
             m.id,
-            sorted(m.props)
+            describe(m.content)
         ));
         c.hosts.push(m.host.id());
-        c.children.push(m.children.map(NodeRef::id));
+        let children = m.content.slots.iter().find(|(n, _)| *n == "children");
+        c.children.push(children.map(|(_, n)| n.id()));
         c.parents.push((m.island.name, m.parent));
         c.roots.push(m.root);
         c.events.insert(m.id, m.events);
         c.errors.insert(m.id, m.on_error);
+        c.shells.insert(m.id, m.content.shells.clone());
     }
 
-    fn update(&self, id: u32, props: &Props) {
-        self.0
-            .borrow_mut()
-            .log
-            .push(format!("update {id} {}", sorted(props)));
+    fn update(&self, id: u32, content: &Content) {
+        let mut c = self.0.borrow_mut();
+        c.log.push(format!("update {id} {}", describe(content)));
+        c.shells.insert(id, content.shells.clone());
     }
 
     fn unmount(&self, id: u32) {
@@ -239,10 +257,13 @@ fn view_children_render_into_a_host_the_island_is_given() {
     App::new(|| view! { <Confirm/> })
         .mount_on(Rc::new(dom.clone()), dom.body())
         .keep();
-    assert_eq!(fake.log(), [r#"mount Dialog 1 {"title":"Sure?"}"#]);
+    assert_eq!(
+        fake.log(),
+        [r#"mount Dialog 1 {"title":"Sure?"} slots:children"#]
+    );
 
     let host = dom
-        .find("data-island-children", "")
+        .find("data-island-slot", "children")
         .expect("a children host");
     assert_eq!(fake.0.borrow().children, [Some(host)]);
     let button = dom.find_tag("button").unwrap();
@@ -348,4 +369,64 @@ fn an_island_that_throws_in_react_reaches_its_catch_and_spares_its_siblings() {
         [format!("unmount {first}")],
         "island {second} stays"
     );
+}
+
+#[react(module = "./ts/popover.tsx", export = "Popover.Trigger")]
+pub struct PopoverTrigger {
+    #[react(element)]
+    pub render: View,
+    pub icon: Option<View>,
+    pub children: View,
+}
+
+#[component]
+fn Filter() -> View {
+    let with_icon = state(false);
+    view! {
+        <i id="icon" on:click={move |_| with_icon.toggle()}/>
+        <PopoverTrigger
+            render={view! { <button class="btn" on:click={|_| ()}>"Filter"</button> }}
+            icon={with_icon.get().then(|| view! { <b>"*"</b> })}
+        />
+    }
+}
+
+#[test]
+fn an_element_prop_is_rendered_by_react_with_doxa_children_inside() {
+    use doxa::ui::dom::Dom;
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    App::new(|| view! { <Filter/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    assert_eq!(
+        <PopoverTriggerProps as IslandProps>::ISLAND.export,
+        "Popover.Trigger"
+    );
+    assert_eq!(
+        fake.log(),
+        ["mount PopoverTrigger 1 {} slots:children render=<button class=btn|click>"]
+    );
+
+    // React commits its element; doxa fills it.
+    let shell = fake.0.borrow().shells[&1][0].clone();
+    let button = dom.create_element("button", None);
+    dom.insert(dom.body(), button, None);
+    (shell.node)(Some(doxa::ui::NodeRef::from_id(button)));
+    doxa::client::task::run_until_stalled();
+    assert_eq!(dom.text(button), "Filter");
+
+    // A second slot appearing is an update; the element and its children stay.
+    dom.click(dom.find("id", "icon").unwrap());
+    doxa::client::task::run_until_stalled();
+    assert_eq!(
+        fake.log(),
+        ["update 1 {} slots:children,icon render=<button class=btn|click>"]
+    );
+    assert_eq!(dom.text(button), "Filter");
+
+    (shell.node)(None);
+    doxa::client::task::run_until_stalled();
+    assert_eq!(dom.text(button), "");
 }

@@ -250,7 +250,16 @@ fn expr(a: &KeyedAttribute) -> Option<&Expr> {
 }
 
 fn value(a: &KeyedAttribute) -> Option<TokenStream> {
-    expr(a).map(ToTokens::to_token_stream)
+    let e = expr(a)?;
+    // `{view! { … }}` is a block holding a macro statement; unwrap it too, or `unused_braces` fires.
+    if let Expr::Block(b) = e {
+        if let [syn::Stmt::Macro(m)] = b.block.stmts.as_slice() {
+            if m.semi_token.is_none() && m.attrs.is_empty() && b.attrs.is_empty() {
+                return Some(m.mac.to_token_stream());
+            }
+        }
+    }
+    Some(e.to_token_stream())
 }
 
 fn is_async_closure(a: &KeyedAttribute) -> bool {

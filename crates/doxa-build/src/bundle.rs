@@ -266,16 +266,25 @@ fn island_js(spec: &str, web_root: &Path) -> String {
         None => module.to_owned(),
     };
     let lit = serde_json::to_string(&module).expect("json");
+    // `Popover.Trigger`: import `Popover`, then read `.Trigger` off it.
+    let (head, rest) = export.split_once('.').unwrap_or((export, ""));
+    let path = if rest.is_empty() {
+        String::new()
+    } else {
+        format!(".{rest}")
+    };
     if mode == "lazy" {
         format!(
             "import {{ lazy }} from \"react\";\n\
              const C = lazy(() => import({lit}).then((m) => ({{ default: m.{export} }})));\n\
              export const load = () => C;\n"
         )
-    } else if export == "default" {
-        format!("import C from {lit};\nexport const load = () => C;\n")
+    } else if head == "default" {
+        format!("import M from {lit};\nconst C = M{path};\nexport const load = () => C;\n")
     } else {
-        format!("import {{ {export} as C }} from {lit};\nexport const load = () => C;\n")
+        format!(
+            "import {{ {head} as M }} from {lit};\nconst C = M{path};\nexport const load = () => C;\n"
+        )
     }
 }
 
@@ -353,7 +362,7 @@ mod tests {
         );
         assert_eq!(
             files["react/island-0.js"],
-            "import { Editor as C } from \"/app/web/ts/editor.tsx\";\nexport const load = () => C;\n"
+            "import { Editor as M } from \"/app/web/ts/editor.tsx\";\nconst C = M;\nexport const load = () => C;\n"
         );
         assert!(
             files["react/island-1.js"].contains(
@@ -364,9 +373,26 @@ mod tests {
         );
         assert_eq!(
             files["react/island-2.js"],
-            "import C from \"react-select\";\nexport const load = () => C;\n"
+            "import M from \"react-select\";\nconst C = M;\nexport const load = () => C;\n"
         );
         assert!(files["react/runtime.js"].contains("createPortal"));
+    }
+
+    #[test]
+    fn a_dotted_export_reads_the_member_off_its_import() {
+        let eager = island_js(
+            "eager:Popover.Trigger:@base-ui/react/popover",
+            Path::new("/w"),
+        );
+        assert_eq!(
+            eager,
+            "import { Popover as M } from \"@base-ui/react/popover\";\nconst C = M.Trigger;\nexport const load = () => C;\n"
+        );
+        let lazy = island_js(
+            "lazy:Popover.Trigger:@base-ui/react/popover",
+            Path::new("/w"),
+        );
+        assert!(lazy.contains("default: m.Popover.Trigger"), "{lazy}");
     }
 
     #[test]

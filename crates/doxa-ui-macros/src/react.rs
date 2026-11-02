@@ -49,17 +49,17 @@ impl syn::parse::Parse for Args {
         };
         let module = module.ok_or_else(|| missing("module"))?;
         let export = export.ok_or_else(|| missing("export"))?;
-        let e = export.value();
-        let ident_like = e
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
-            && e.chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '$');
-        if !ident_like {
+        let ident_like = |e: &str| {
+            e.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+                && e.chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        };
+        if !export.value().split('.').all(ident_like) {
             return Err(syn::Error::new(
                 export.span(),
-                "`export` is a JS name, or `default`",
+                "`export` is a JS name, `default`, or a dotted path like `Popover.Trigger`",
             ));
         }
         Ok(Args {
@@ -74,8 +74,12 @@ enum Role {
     Data,
     Optional,
     Event,
-    /// `children: View`, rendered by doxa rather than serialized.
-    Children,
+    /// A `View` or `Option<View>`, rendered by doxa into a host React places.
+    Slot {
+        optional: bool,
+    },
+    /// `#[react(element)]`: a `View` of one element, which React renders itself.
+    Element,
 }
 
 struct Field {
@@ -118,6 +122,19 @@ fn camel(name: &str) -> String {
     out
 }
 
+/// `Option<T>` where `T`'s last segment is `name`.
+fn option_of(ty: &Type, name: &str) -> bool {
+    let Type::Path(p) = ty else { return false };
+    let Some(last) = p.path.segments.last() else {
+        return false;
+    };
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    last.ident == "Option"
+        && matches!(args.args.first(), Some(syn::GenericArgument::Type(t)) if last_segment_is(t, name))
+}
+
 fn last_segment_is(ty: &Type, name: &str) -> bool {
     matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.segments.last().is_some_and(|s| s.ident == name))
 }
@@ -144,7 +161,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 "`key` is reserved for list identity; rename the prop",
             ));
         }
-        let (mut optional, mut event, mut rename) = (false, false, None);
+        let (mut optional, mut event, mut element, mut rename) = (false, false, false, None);
         let mut kept = Vec::new();
         for attr in f.attrs.drain(..) {
             if !attr.path().is_ident("react") {
@@ -156,16 +173,33 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                     optional = true;
                 } else if m.path.is_ident("event") {
                     event = true;
+                } else if m.path.is_ident("element") {
+                    element = true;
                 } else if m.path.is_ident("rename") {
                     rename = Some(m.value()?.parse::<LitStr>()?.value());
                 } else {
-                    return Err(m.error("expected `optional`, `event` or `rename = \"…\"`"));
+                    return Err(
+                        m.error("expected `optional`, `event`, `element` or `rename = \"…\"`")
+                    );
                 }
                 Ok(())
             })?;
         }
         f.attrs = kept;
+        if element && !last_segment_is(&f.ty, "View") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(element)]` field `{name}` must be a `View`"),
+            ));
+        }
         let role = match (optional, event) {
+            _ if element && (optional || event) => {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "an `element` prop is neither `optional` nor an `event`",
+                ))
+            }
+            _ if element => Role::Element,
             (true, true) => {
                 return Err(syn::Error::new(
                     name.span(),
@@ -186,9 +220,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 ))
             }
             (false, true) => Role::Event,
-            (false, false) if name == "children" && last_segment_is(&f.ty, "View") => {
-                Role::Children
-            }
+            (false, false) if last_segment_is(&f.ty, "View") => Role::Slot { optional: false },
+            (false, false) if option_of(&f.ty, "View") => Role::Slot { optional: true },
             (false, false) => Role::Data,
         };
         fields.push(Field {
@@ -232,7 +265,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             name: f.name.clone(),
             ty: f.ty.clone(),
             default: (f.name == "children"
-                || matches!(f.role, Role::Optional)
+                || matches!(f.role, Role::Optional | Role::Slot { optional: true })
                 || (matches!(f.role, Role::Data) && last_segment_is(&f.ty, "Option")))
             .then(|| quote!(::core::default::Default::default())),
             optional: false,
@@ -252,20 +285,18 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         match f.role {
             Role::Data => Some(quote_spanned! { f.ty.span() => out.set(#js, &self.#n); }),
             Role::Optional => Some(quote_spanned! { f.ty.span() => out.opt(#js, &self.#n); }),
-            Role::Event | Role::Children => None,
+            Role::Event | Role::Slot { .. } | Role::Element => None,
         }
     });
-    let children = fields
-        .iter()
-        .find(|f| matches!(f.role, Role::Children))
-        .map(|f| {
-            let n = &f.name;
-            quote! {
-                fn children(&self) -> ::core::option::Option<::doxa::ui::View> {
-                    ::core::option::Option::Some(::core::clone::Clone::clone(&self.#n))
-                }
-            }
-        });
+    let views = fields.iter().filter_map(|f| {
+        let (n, js) = (&f.name, &f.js);
+        match f.role {
+            Role::Slot { optional: false } => Some(quote! { out.slot(#js, &self.#n); }),
+            Role::Slot { optional: true } => Some(quote! { out.slot_opt(#js, &self.#n); }),
+            Role::Element => Some(quote! { out.element(#js, &self.#n); }),
+            _ => None,
+        }
+    });
     let events = fields.iter().filter_map(|f| {
         let (n, js) = (&f.name, &f.js);
         matches!(f.role, Role::Event)
@@ -314,7 +345,10 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 #(#data)*
             }
 
-            #children
+            #[allow(unused_variables)]
+            fn views(&self, out: &mut ::doxa::ui::react::Views) {
+                #(#views)*
+            }
 
             #[allow(unused_variables)]
             fn events(&self, out: &mut ::doxa::ui::react::Events) {

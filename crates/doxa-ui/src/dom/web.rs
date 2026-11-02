@@ -330,6 +330,10 @@ impl Dom for WebDom {
     fn raw(&self, node: NodeId) -> Option<web_sys::Node> {
         self.node(node)
     }
+
+    fn adopt(&self, node: web_sys::Node) -> Option<NodeId> {
+        Some(self.id_of(&node).unwrap_or_else(|| self.add(node)))
+    }
 }
 
 fn add_listener(
