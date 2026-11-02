@@ -43,6 +43,12 @@ macros-sea-orm = ["macros", "doxa-macros/sea-orm"]
 # `doxa build` set `DOXA_DIST`; otherwise `dist!()` serves it from disk.
 embed = ["macros"]
 
+# `Cors`: a CORS layer preset with the headers a doxa client sends and reads.
+cors = ["dep:tower-http"]
+
+# `proxy`: forward a path prefix to another server, streaming both ways.
+proxy = ["dep:reqwest"]
+
 [dependencies]
 axum = { workspace = true }
 doxa-macros = { workspace = true, optional = true }
@@ -58,6 +64,8 @@ utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+tower-http = { workspace = true, features = ["cors"], optional = true }
+reqwest = { workspace = true, features = ["stream"], optional = true }
 
 [dev-dependencies]
 # Path-only (no version) so cargo publish strips it — avoids the

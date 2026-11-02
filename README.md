@@ -874,6 +874,8 @@ layers().push(bearer(|| session::token()));             // every crate's request
 orders_client::service().layers().push(cookies());      // one crate's requests
 ```
 
+A server the browser reaches cross-origin needs `.layer(doxa::Cors::allow([app_origin]))` (feature `cors`) so the client can read doxa's wire headers. Or keep it same-origin: `.merge(doxa::proxy("/orders", orders_url))` (feature `proxy`) forwards a prefix and streams SSE through.
+
 ### 17. Pages that call routes
 
 ```rust

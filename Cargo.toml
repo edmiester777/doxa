@@ -78,6 +78,7 @@ http-body-util = "0.1"
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
 reqwest = { version = "0.13", features = ["json", "form"] }
+tower-http = "0.6"
 
 # OpenAPI
 utoipa = { version = "5", features = ["macros", "uuid", "chrono"] }

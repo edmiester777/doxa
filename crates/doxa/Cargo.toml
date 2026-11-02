@@ -20,6 +20,12 @@ docs = ["dep:doxa-docs", "dep:axum"]
 # Forward Scalar UI feature to doxa-docs.
 docs-scalar = ["docs", "doxa-docs/docs-scalar"]
 
+# `doxa::Cors`, for a server a doxa client reaches cross-origin.
+cors = ["docs", "doxa-docs/cors"]
+
+# `doxa::proxy`, to serve another server's routes same-origin.
+proxy = ["docs", "doxa-docs/proxy"]
+
 # Re-export doxa-macros proc-macros (#[derive(ApiError)],
 # #[derive(SseEvent)], #[get]/#[post]/…) through doxa-docs.
 macros = ["docs", "dep:doxa-macros", "doxa-docs/macros"]

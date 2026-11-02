@@ -20,6 +20,18 @@ pub const SESSION_HEADER: &str = "x-doxa-session";
 pub const INVALIDATE_HEADER: &str = "x-doxa-invalidate";
 /// Header every cookie-authenticated mutation must carry.
 pub const CSRF_HEADER: &str = "x-doxa-csrf";
+/// Request headers a doxa client sends, which a cross-origin server must allow.
+pub const REQUEST_HEADERS: &[&str] = &[
+    "accept",
+    "authorization",
+    "content-type",
+    "if-none-match",
+    "last-event-id",
+    DRY_RUN_HEADER,
+    CSRF_HEADER,
+];
+/// Response headers a doxa client reads, which a cross-origin server must expose.
+pub const RESPONSE_HEADERS: &[&str] = &["etag", DRY_RUN_HEADER, SESSION_HEADER, INVALIDATE_HEADER];
 
 /// Envelope for HTTP error responses produced by `#[derive(ApiError)]`.
 ///

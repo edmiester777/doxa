@@ -187,6 +187,8 @@
 
 mod builder;
 mod contribution;
+#[cfg(feature = "cors")]
+mod cors;
 mod doc_params;
 mod doc_responses;
 mod doc_traits;
@@ -199,6 +201,8 @@ mod inner_schema;
 mod mount;
 mod private_dispatch;
 mod problem;
+#[cfg(feature = "proxy")]
+mod proxy;
 mod router_ext;
 mod routes_macro;
 mod spa;
@@ -211,6 +215,8 @@ pub use contribution::{
     DocumentedLayer, LayerContribution, OperationContribution, ResponseContribution,
     SecurityContribution,
 };
+#[cfg(feature = "cors")]
+pub use cors::Cors;
 pub use doc_params::DocHeaderEntry;
 pub use doc_responses::DocResponseBody;
 pub use doc_traits::{
@@ -224,6 +230,8 @@ pub use headers::{DocumentedHeader, HeaderParam};
 pub use inner_schema::{ApidocHandlerSchemas, InnerToSchema};
 pub use mount::{mount_docs, MountDocsExt, MountOpts};
 pub use problem::{ApiErrorBody, ProblemDetails};
+#[cfg(feature = "proxy")]
+pub use proxy::proxy;
 pub use router_ext::OpenApiRouterExt;
 pub use spa::{Dist, EmbeddedFiles, MountSpaExt, Spa};
 pub use sse::{SseEventMeta, SseStream};
