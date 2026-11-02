@@ -815,3 +815,196 @@ fn an_embedded_root_keeps_its_theme_on_its_own_element() {
         "an unmounted root's element is no longer themed"
     );
 }
+
+thread_local! {
+    static HEARD: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static GATES: std::cell::RefCell<Vec<futures::channel::oneshot::Sender<()>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn heard() -> Vec<String> {
+    HEARD.with(|h| h.take())
+}
+
+/// Records each call; with `hold`, keeps a leaving node until its gate opens.
+#[derive(Clone)]
+struct Record {
+    tag: String,
+    hold: bool,
+}
+
+/// `use:track={(tag, hold)}`.
+fn track((tag, hold): (String, bool)) -> Record {
+    Record { tag, hold }
+}
+
+impl Directive for Record {
+    fn mounted(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("mounted {}", self.tag)));
+    }
+    fn update(&mut self, next: Self) {
+        HEARD.with(|h| {
+            h.borrow_mut()
+                .push(format!("update {}->{}", self.tag, next.tag))
+        });
+        *self = next;
+    }
+    fn updated(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("updated {}", self.tag)));
+    }
+    fn before_move(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("before {}", self.tag)));
+    }
+    fn after_move(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("after {}", self.tag)));
+    }
+    fn leaving(&mut self, _: NodeRef) -> Option<futures::future::LocalBoxFuture<'static, ()>> {
+        HEARD.with(|h| h.borrow_mut().push(format!("leaving {}", self.tag)));
+        if !self.hold {
+            return None;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        GATES.with(|g| g.borrow_mut().push(tx));
+        Some(Box::pin(async move {
+            let _ = rx.await;
+        }))
+    }
+    fn unmounted(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("unmounted {}", self.tag)));
+    }
+}
+
+thread_local! {
+    static ITEMS: std::cell::RefCell<Option<State<Vec<u32>>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn items() -> State<Vec<u32>> {
+    ITEMS.with(|i| i.borrow().expect("mounted"))
+}
+
+#[component]
+fn Listed(hold: bool) -> View {
+    let list = state(vec![1u32, 2]);
+    ITEMS.with(|i| *i.borrow_mut() = Some(list));
+    view! {
+        <ul>
+            {list.get().into_iter().map(|n| view! {
+                <li key={n} id={format!("i{n}")} use:track={(n.to_string(), hold)}>{n}</li>
+            }).collect::<Vec<_>>()}
+        </ul>
+    }
+}
+
+#[test]
+fn directives_hear_mount_update_move_and_leave_in_order() {
+    let dom = mount(|| view! { <Listed hold={false}/> });
+    settle();
+    assert_eq!(heard(), ["mounted 1", "mounted 2"]);
+
+    items().set(vec![1, 2]);
+    settle();
+    assert_eq!(
+        heard(),
+        [
+            "before 1",
+            "before 2",
+            "update 1->1",
+            "update 2->2",
+            "after 1",
+            "after 2",
+            "updated 1",
+            "updated 2"
+        ]
+    );
+
+    items().set(vec![2]);
+    settle();
+    let log = heard();
+    assert!(
+        log.contains(&"leaving 1".to_owned()) && log.contains(&"unmounted 1".to_owned()),
+        "{log:?}"
+    );
+    assert!(dom.find("id", "i1").is_none(), "nothing held it");
+}
+
+#[test]
+fn a_leaving_node_stays_until_its_future_resolves() {
+    let dom = mount(|| view! { <Listed hold={true}/> });
+    settle();
+    heard();
+    items().set(vec![2]);
+    settle();
+    assert!(dom.find("id", "i1").is_some(), "held while it leaves");
+    GATES.with(|g| g.borrow_mut().drain(..).for_each(|tx| tx.send(()).unwrap()));
+    settle();
+    assert!(dom.find("id", "i1").is_none());
+}
+
+#[test]
+fn a_returning_key_mounts_fresh_beside_the_leaving_node() {
+    let dom = mount(|| view! { <Listed hold={true}/> });
+    settle();
+    items().set(vec![2]);
+    settle();
+    heard();
+    items().set(vec![1, 2]);
+    settle();
+    assert_eq!(heard().iter().filter(|l| *l == "mounted 1").count(), 1);
+    let ul = dom.find_tag("ul").unwrap();
+    assert_eq!(dom.text(ul), "112", "the old 1 is still leaving");
+    dom.finish_leaving();
+    assert_eq!(dom.text(ul), "12");
+}
+
+#[component]
+fn Nest(show: State<bool>) -> View {
+    view! {
+        <section>
+            {show.get().then(|| view! {
+                <div id="outer" use:track={("outer".to_owned(), true)}>
+                    <p id="inner" use:track={("inner".to_owned(), true)}>"x"</p>
+                </div>
+            })}
+        </section>
+    }
+}
+
+thread_local! {
+    static SHOW: std::cell::RefCell<Option<State<bool>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[component]
+fn NestRoot() -> View {
+    let show = state(true);
+    let outer = state(true);
+    SHOW.with(|s| *s.borrow_mut() = Some(show));
+    OUTER.with(|s| *s.borrow_mut() = Some(outer));
+    view! { {outer.get().then(|| view! { <Nest show={show}/> })} }
+}
+
+thread_local! {
+    static OUTER: std::cell::RefCell<Option<State<bool>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[test]
+fn only_the_outermost_node_holds_and_its_parent_releases_it() {
+    let dom = mount(|| view! { <NestRoot/> });
+    settle();
+    heard();
+    SHOW.with(|s| s.borrow().unwrap().set(false));
+    settle();
+    let log = heard();
+    assert!(log.contains(&"leaving outer".to_owned()), "{log:?}");
+    assert!(!log.contains(&"leaving inner".to_owned()), "{log:?}");
+    assert!(dom.find("id", "outer").is_some());
+
+    OUTER.with(|s| s.borrow().unwrap().set(false));
+    settle();
+    assert!(
+        dom.find("id", "outer").is_none(),
+        "removing its parent released it"
+    );
+    assert!(
+        GATES.with(|g| g.borrow().iter().all(|tx| tx.is_canceled())),
+        "its future was dropped"
+    );
+}

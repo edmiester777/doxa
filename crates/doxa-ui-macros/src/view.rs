@@ -113,6 +113,17 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                 };
                 quote_spanned! { span => #out.#method(#event, #v) }
             }
+            (n, v) if n.starts_with("use:") => {
+                let Ok(name) = syn::parse_str::<syn::Path>(&n[4..]) else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`use:` names a function returning a `Directive`, e.g. `use:exit={\"fade\"}`",
+                    ));
+                };
+                let name = quote_spanned! { span => #name };
+                let args = v.into_iter();
+                quote_spanned! { span => #out.directive(#name(#(#args)*)) }
+            }
             (n, Some(v)) if n.starts_with("prop:") => {
                 let prop = &n[5..];
                 quote_spanned! { span => #out.prop(#prop, #v) }

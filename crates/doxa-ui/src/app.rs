@@ -114,6 +114,7 @@ impl App {
     /// another document than the current one first unmounts every root on the old one.
     pub fn mount_on(self, dom: Rc<dyn Dom>, at: NodeId) -> RootHandle {
         if !runtime::is_dom(&dom) {
+            reconcile::finish_leaving();
             let old: Vec<_> = ROOTS.with(|r| r.borrow_mut().drain(..).collect());
             for (inst, _) in old {
                 reconcile::unmount_root(&inst);

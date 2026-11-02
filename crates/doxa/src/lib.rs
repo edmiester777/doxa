@@ -180,6 +180,28 @@ pub mod ui_diagnostics {}
 #[doc(hidden)]
 pub mod react_diagnostics {}
 
+/// `use:name={value}` attaches what `name(value)` returns:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[derive(Clone)]
+/// struct Fade(&'static str);
+/// impl Directive for Fade {}
+/// fn fade(class: &'static str) -> Fade { Fade(class) }
+/// let _ = view! { <p use:fade={"out"}>"hi"</p> };
+/// ```
+///
+/// A function returning anything else is refused as "`String` isn't a `Directive`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// fn fade(class: &'static str) -> String { class.to_owned() }
+/// let _ = view! { <p use:fade={"out"}>"hi"</p> };
+/// ```
+#[cfg(feature = "ui")]
+#[doc(hidden)]
+pub mod directive_diagnostics {}
+
 /// A route that returns JSON is called from the browser:
 ///
 /// ```

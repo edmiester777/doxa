@@ -7,6 +7,7 @@ mod app;
 mod boundary;
 mod can;
 mod component;
+mod directive;
 pub mod dom;
 mod error;
 mod hooks;
@@ -23,6 +24,7 @@ pub use app::{App, IntoRoot, RootHandle};
 pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
 pub use can::{Can, CanBuilder, CanProps};
 pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
+pub use directive::Directive;
 pub use dom::{Event, NodeRef, Phase};
 pub use error::{Result, Thrown};
 pub use hooks::{
@@ -59,9 +61,9 @@ pub mod prelude {
     pub use crate::react;
     pub use crate::{
         action, component, context, effect, memo, navigate, page, provide, set_theme, state, theme,
-        try_context, view, Action, App, Callback, Can, Catch, DangerousHtml, Event, IntoView, Link,
-        Outlet, Page, Plugin, Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State,
-        Suspense, Theme, Thrown, View,
+        try_context, view, Action, App, Callback, Can, Catch, DangerousHtml, Directive, Event,
+        IntoView, Link, NodeRef, Outlet, Page, Plugin, Result, Route, Router, SafeUrl, Singleton,
+        Slot, Slots, State, Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }

@@ -42,6 +42,11 @@ impl MemDom {
         dom
     }
 
+    /// Let every node a directive holds in the document finish leaving now.
+    pub fn finish_leaving(&self) {
+        crate::reconcile::finish_leaving();
+    }
+
     /// The `<body>` element.
     pub fn body(&self) -> NodeId {
         0

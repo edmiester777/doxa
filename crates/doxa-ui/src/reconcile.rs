@@ -4,9 +4,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::dom::{Dom, NodeId, NodeRef, Phase, Prop};
-use crate::runtime::{self, Instance};
-use crate::view::{ComponentNode, Element, Handler, Key, Life, Node};
+use futures_util::future::LocalBoxFuture;
+
+use crate::directive::{self, Proto};
+use crate::dom::{Dom, NodeId, NodeRef, Prop};
+use crate::runtime::{self, Cancel, Instance};
+use crate::view::{ComponentNode, Element, Handler, Key, Node};
 use crate::View;
 
 pub(crate) enum Mounted {
@@ -31,7 +34,9 @@ pub(crate) struct MountedElement {
     events: Vec<(&'static str, Rc<RefCell<Handler>>)>,
     inner_html: Option<String>,
     children: Vec<Mounted>,
-    life: Option<Life>,
+    directives: Vec<directive::Live>,
+    /// The type of each of `directives`.
+    kinds: Vec<std::any::TypeId>,
 }
 
 impl Mounted {
@@ -60,6 +65,17 @@ impl Mounted {
             Mounted::Component { inst, .. } => {
                 inst.region.borrow().last().and_then(Mounted::last_node)
             }
+        }
+    }
+
+    /// The first element in this child, through components, with its directives.
+    fn first_element(&self) -> Option<(NodeId, Vec<directive::Live>)> {
+        match self {
+            Mounted::Element(e) => Some((e.node, e.directives.clone())),
+            Mounted::Component { inst, .. } => {
+                inst.region.borrow().iter().find_map(Mounted::first_element)
+            }
+            _ => None,
         }
     }
 
@@ -142,14 +158,14 @@ fn reconcile(
             Some(m) => {
                 let before = m.first_node();
                 let fresh = mount(dom, owner, parent, n, before);
-                unmount(dom, m);
+                unmount(dom, parent, m, true);
                 kept.push(fresh);
             }
             None => pending_tail.push(n),
         }
     }
     for m in old_iter {
-        unmount(dom, m);
+        unmount(dom, parent, m, true);
     }
     for n in pending_tail {
         kept.push(mount(dom, owner, parent, n, end));
@@ -174,6 +190,11 @@ fn reconcile_keyed(
     end: Option<NodeId>,
 ) {
     let mut previous: Vec<Option<Mounted>> = std::mem::take(old).into_iter().map(Some).collect();
+    // Measured before `patch` re-renders anything inside them.
+    for (node, ds) in previous.iter().flatten().filter_map(Mounted::first_element) {
+        ds.iter()
+            .for_each(|d| d.borrow_mut().before_move(NodeRef(node)));
+    }
     // Unkeyed children match the old unkeyed ones in order.
     let mut unkeyed = previous
         .iter()
@@ -203,7 +224,7 @@ fn reconcile_keyed(
         }
     }
     for m in previous.into_iter().flatten() {
-        unmount(dom, m);
+        unmount(dom, parent, m, true);
     }
     let order: Vec<usize> = placed.iter().filter_map(|(_, i)| *i).collect();
     let stay = lis(&order);
@@ -219,6 +240,11 @@ fn reconcile_keyed(
             }
         }
         next = m.first_node().or(next);
+    }
+    let moved = placed.iter().filter(|(_, i)| i.is_some());
+    for (node, ds) in moved.filter_map(|(m, _)| m.first_element()) {
+        ds.iter()
+            .for_each(|d| d.borrow_mut().after_move(NodeRef(node)));
     }
     *old = placed.into_iter().map(|(m, _)| m).collect();
 }
@@ -303,8 +329,13 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
             }
         }
     }
-    if let Some(life) = &e.life {
-        defer(life.clone(), Phase::Mounted, node);
+    let directives: Vec<directive::Live> = e
+        .directives
+        .iter()
+        .map(|p| Rc::new(RefCell::new(p.instance())))
+        .collect();
+    for d in &directives {
+        defer(d.clone(), Hook::Mounted, node);
     }
     MountedElement {
         node,
@@ -315,7 +346,8 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
         events,
         inner_html: e.inner_html.clone(),
         children,
-        life: e.life.clone(),
+        kinds: e.directives.iter().map(|p| p.kind()).collect(),
+        directives,
     }
 }
 
@@ -416,15 +448,12 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
         }
     }
 
-    m.life = e.life.clone();
-    if let Some(life) = &m.life {
-        defer(life.clone(), Phase::Patched, node);
-    }
+    patch_directives(m, &e.directives);
 
     if e.inner_html.is_some() {
         if m.inner_html != e.inner_html {
             for c in std::mem::take(&mut m.children) {
-                unmount(dom, c);
+                unmount(dom, node, c, false);
             }
             dom.set_inner_html(node, e.inner_html.as_deref().unwrap_or_default());
             m.inner_html = e.inner_html.clone();
@@ -439,20 +468,68 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
     reconcile(dom, owner, node, &mut m.children, flat, None);
 }
 
-thread_local! {
-    static DEPTH: Cell<usize> = const { Cell::new(0) };
-    static DEFERRED: RefCell<Vec<(Life, Phase, NodeId)>> = const { RefCell::new(Vec::new()) };
+/// The same directive kind at the same place takes this render's value; any other is
+/// unmounted and the new one mounted.
+fn patch_directives(m: &mut MountedElement, protos: &[Rc<dyn Proto>]) {
+    let node = m.node;
+    let old = std::mem::take(&mut m.directives);
+    let mut old = old.into_iter();
+    let mut kinds = std::mem::take(&mut m.kinds).into_iter();
+    for p in protos {
+        match (old.next(), kinds.next()) {
+            (Some(d), Some(k)) if k == p.kind() => {
+                d.borrow_mut().replace(p.value());
+                defer(d.clone(), Hook::Updated, node);
+                m.directives.push(d);
+            }
+            (gone, _) => {
+                if let Some(d) = gone {
+                    d.borrow_mut().unmounted(NodeRef(node));
+                }
+                let d: directive::Live = Rc::new(RefCell::new(p.instance()));
+                defer(d.clone(), Hook::Mounted, node);
+                m.directives.push(d);
+            }
+        }
+        m.kinds.push(p.kind());
+    }
+    for d in old {
+        d.borrow_mut().unmounted(NodeRef(node));
+    }
 }
 
-/// Queue a lifecycle call for when the outermost region update finishes.
-fn defer(life: Life, phase: Phase, node: NodeId) {
-    DEFERRED.with(|d| d.borrow_mut().push((life, phase, node)));
+#[derive(Clone, Copy)]
+enum Hook {
+    Mounted,
+    Updated,
+}
+
+thread_local! {
+    static DEPTH: Cell<usize> = const { Cell::new(0) };
+    static DEFERRED: RefCell<Vec<(directive::Live, Hook, NodeId)>> = const { RefCell::new(Vec::new()) };
+    /// Removed nodes a directive keeps in the document, under their DOM parent.
+    static HELD: RefCell<Vec<Held>> = const { RefCell::new(Vec::new()) };
+}
+
+struct Held {
+    parent: NodeId,
+    node: NodeId,
+    task: Cancel,
+}
+
+/// Queue a directive call for when the outermost region update finishes.
+fn defer(d: directive::Live, hook: Hook, node: NodeId) {
+    DEFERRED.with(|q| q.borrow_mut().push((d, hook, node)));
 }
 
 fn run_deferred() {
     let calls = DEFERRED.with(|d| std::mem::take(&mut *d.borrow_mut()));
-    for (life, phase, node) in calls {
-        life(phase, NodeRef(node));
+    for (d, hook, node) in calls {
+        let mut d = d.borrow_mut();
+        match hook {
+            Hook::Mounted => d.mounted(NodeRef(node)),
+            Hook::Updated => d.updated(NodeRef(node)),
+        }
     }
 }
 
@@ -462,42 +539,90 @@ pub(crate) fn unmount_root(inst: &Rc<Instance>) {
     inst.kill();
     let region = std::mem::take(&mut *inst.region.borrow_mut());
     for m in region {
-        unmount(&*dom, m);
+        unmount(&*dom, inst.parent_node.get(), m, false);
     }
 }
 
-fn unmount(dom: &dyn Dom, m: Mounted) {
+/// Remove `m` from under `parent`. With `hold`, an element's `leaving` futures keep it in
+/// the document until they resolve; everything inside stops at once.
+fn unmount(dom: &dyn Dom, parent: NodeId, m: Mounted, hold: bool) {
     match m {
         Mounted::Anchor(n) | Mounted::Text { node: n, .. } => dom.remove(n),
         Mounted::Element(e) => {
-            if let Some(life) = &e.life {
-                life(Phase::Unmounting, NodeRef(e.node));
+            let node = NodeRef(e.node);
+            let leaving: Vec<_> = if hold {
+                e.directives
+                    .iter()
+                    .filter_map(|d| d.borrow_mut().leaving(node))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            e.directives
+                .iter()
+                .for_each(|d| d.borrow_mut().unmounted(node));
+            kill_children(dom, &e.children);
+            release_held(dom, |h| h.parent == e.node);
+            if leaving.is_empty() {
+                dom.remove(e.node);
+            } else {
+                hold_node(parent, e.node, leaving);
             }
-            kill_children(&e.children);
-            dom.remove(e.node);
         }
         Mounted::Component { inst, .. } => {
             inst.kill();
             let region = std::mem::take(&mut *inst.region.borrow_mut());
             for m in region {
-                unmount(dom, m);
+                unmount(dom, parent, m, hold);
             }
         }
     }
 }
 
-fn kill_children(children: &[Mounted]) {
+fn hold_node(parent: NodeId, node: NodeId, leaving: Vec<LocalBoxFuture<'static, ()>>) {
+    let task = runtime::spawn_cancellable(async move {
+        futures_util::future::join_all(leaving).await;
+        HELD.with(|h| h.borrow_mut().retain(|h| h.node != node));
+        runtime::dom().remove(node);
+    });
+    HELD.with(|h| h.borrow_mut().push(Held { parent, node, task }));
+}
+
+/// Drop the futures holding the nodes `which` picks, and remove the nodes.
+fn release_held(dom: &dyn Dom, which: impl Fn(&Held) -> bool) {
+    let released: Vec<Held> = HELD.with(|h| {
+        let mut h = h.borrow_mut();
+        let (out, keep) = h.drain(..).partition(|x| which(x));
+        *h = keep;
+        out
+    });
+    for h in released {
+        h.task.cancel();
+        dom.remove(h.node);
+    }
+}
+
+/// Remove every node a directive is holding, as if each had finished leaving.
+pub(crate) fn finish_leaving() {
+    if let Some(dom) = runtime::try_dom() {
+        release_held(&*dom, |_| true);
+    }
+}
+
+fn kill_children(dom: &dyn Dom, children: &[Mounted]) {
     for c in children {
         match c {
             Mounted::Element(e) => {
-                if let Some(life) = &e.life {
-                    life(Phase::Unmounting, NodeRef(e.node));
-                }
-                kill_children(&e.children)
+                let node = NodeRef(e.node);
+                e.directives
+                    .iter()
+                    .for_each(|d| d.borrow_mut().unmounted(node));
+                kill_children(dom, &e.children);
+                release_held(dom, |h| h.parent == e.node);
             }
             Mounted::Component { inst, .. } => {
                 inst.kill();
-                kill_children(&inst.region.borrow());
+                kill_children(dom, &inst.region.borrow());
             }
             _ => {}
         }

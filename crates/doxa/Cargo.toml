@@ -101,6 +101,7 @@ axum = { workspace = true, optional = true }
 axum = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
+futures = { workspace = true }
 futures-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

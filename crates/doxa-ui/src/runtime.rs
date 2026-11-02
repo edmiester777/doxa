@@ -175,7 +175,6 @@ pub(crate) fn is_dom(dom: &Rc<dyn Dom>) -> bool {
     })
 }
 
-#[cfg(target_arch = "wasm32")]
 pub(crate) fn try_dom() -> Option<Rc<dyn Dom>> {
     DOM.with(|d| d.borrow().clone())
 }

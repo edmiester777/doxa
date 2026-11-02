@@ -3,6 +3,9 @@
 use doxa::ui::prelude::*;
 use widgets_client::widgets::*;
 
+pub mod motion;
+use motion::{exit, flip};
+
 /// The default look.
 pub const LIGHT: Theme = Theme::new("light", &[("--bg", "#fff"), ("--fg", "#111")]);
 /// The other look.
@@ -61,7 +64,7 @@ pub struct Count {
 #[component]
 fn WidgetRow(widget: Widget) -> View {
     view! {
-        <li>
+        <li use:flip use:exit={"leaving"}>
             <Link to={WidgetPage::route(&widget.name)}>{&widget.name}</Link>
         </li>
     }

@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::component::{Component, RenderFuture};
+use crate::directive::{Directive, Lifecycle, Proto};
 use crate::dom::{Event, NodeRef, Phase, Prop};
 
 /// What a component renders. Build one with `view!`.
@@ -36,7 +37,6 @@ impl Key {
 }
 
 pub(crate) type Handler = Rc<dyn Fn(Event)>;
-pub(crate) type Life = Rc<dyn Fn(Phase, NodeRef)>;
 
 /// An element under construction. `view!` writes these calls.
 #[derive(Clone)]
@@ -49,7 +49,7 @@ pub struct Element {
     pub(crate) events: Vec<(&'static str, Handler)>,
     pub(crate) children: Vec<Node>,
     pub(crate) inner_html: Option<String>,
-    pub(crate) life: Option<Life>,
+    pub(crate) directives: Vec<Rc<dyn Proto>>,
 }
 
 /// Start an element.
@@ -69,7 +69,7 @@ pub fn el(tag: &'static str) -> Element {
         events: Vec::new(),
         children: Vec::new(),
         inner_html: None,
-        life: None,
+        directives: Vec::new(),
     }
 }
 
@@ -139,8 +139,13 @@ impl Element {
     }
 
     /// Run `f` with the element's node after it mounts or is patched, and before it is removed.
-    pub fn lifecycle(mut self, f: impl Fn(Phase, NodeRef) + 'static) -> Self {
-        self.life = Some(Rc::new(f));
+    pub fn lifecycle(self, f: impl Fn(Phase, NodeRef) + 'static) -> Self {
+        self.directive(Lifecycle(Rc::new(f)))
+    }
+
+    /// Attach a [`Directive`], as `use:name={value}`.
+    pub fn directive(mut self, d: impl Directive) -> Self {
+        self.directives.push(Rc::new(d));
         self
     }
 }
