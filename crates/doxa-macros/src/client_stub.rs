@@ -32,6 +32,8 @@ const SERVER_ONLY: &[&str] = &[
 
 enum Arg {
     Dropped,
+    /// `#[server]`: read only on the server, and unknown to doxa.
+    Server,
     Sent {
         name: syn::Ident,
         ty: TokenStream,
@@ -40,13 +42,16 @@ enum Arg {
 }
 
 impl Arg {
-    fn is_foreign(&self) -> bool {
+    /// An extractor doxa can't vouch for: a dry run that stops at an earlier guard
+    /// never runs it, so may say yes to a call it would refuse.
+    fn unknown(&self) -> bool {
         matches!(
             self,
-            Arg::Sent {
-                kind: Kind::Foreign,
-                ..
-            }
+            Arg::Server
+                | Arg::Sent {
+                    kind: Kind::Foreign,
+                    ..
+                }
         )
     }
 }
@@ -89,6 +94,9 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
         .iter()
         .enumerate()
         .filter_map(|(i, arg)| match arg {
+            FnArg::Typed(pt) if pt.attrs.iter().any(crate::method::is_server_attr) => {
+                Some(Arg::Server)
+            }
             FnArg::Typed(pt) => Some(classify(&pt.pat, &pt.ty, i)),
             FnArg::Receiver(_) => None,
         })
@@ -107,7 +115,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
     let dry_run = match grant::dry_run_gate(item_fn) {
         Some(gate) if !may_authorize(item_fn) => {
             let after = typed.iter().position(|i| *i == gate).map_or(0, |p| p + 1);
-            !args[after..].iter().any(Arg::is_foreign)
+            !args[after..].iter().any(Arg::unknown)
         }
         _ => false,
     };
@@ -181,7 +189,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
                 quote!(#name: impl ::doxa::client::ArgFor<#ty>),
                 quote!(.arg::<#ty, _>(#name)),
             )),
-            Arg::Dropped => None,
+            Arg::Dropped | Arg::Server => None,
         })
         .unzip();
 
@@ -332,6 +340,7 @@ fn classify(pat: &Pat, ty: &Type, index: usize) -> Arg {
         return Arg::Dropped;
     }
     match (last.as_str(), first_type_arg(ty)) {
+        ("Valid", Some(t)) => classify(pat, t, index),
         ("Path", Some(t)) => sent(Kind::Path, quote!(::doxa::client::Path<#t>)),
         ("Query", Some(t)) => sent(Kind::Plain, quote!(::doxa::client::Query<#t>)),
         ("Json", Some(t)) => sent(Kind::Body, quote!(::doxa::client::Json<#t>)),
@@ -448,6 +457,37 @@ mod tests {
         );
         assert!(!out.contains("Db"), "{out}");
         assert!(out.contains(":: doxa :: client :: Call < :: core :: result :: Result < :: doxa :: client :: Json < Widget > , WidgetError > >"), "{out}");
+    }
+
+    #[test]
+    fn a_server_param_is_no_client_param_and_after_the_guard_ends_the_dry_run() {
+        let before = stub(
+            "post",
+            "/w/{name}",
+            quote! { async fn f(#[server] t: CallerToken, w: Granted<W>, Valid(Json(m)): Valid<Json<M>>) {} },
+        );
+        assert!(!before.contains("CallerToken"), "{before}");
+        assert!(
+            before.contains(
+                "fn f (w : impl :: doxa :: client :: ArgFor < :: doxa :: client :: Granted < W > >"
+            ),
+            "{before}"
+        );
+        assert!(
+            before.contains(
+                "m : impl :: doxa :: client :: ArgFor < :: doxa :: client :: Json < M > >"
+            ),
+            "{before}"
+        );
+        assert!(before.contains("dry_run : true"), "{before}");
+
+        let after = stub(
+            "post",
+            "/w/{name}",
+            quote! { async fn f(w: Granted<W>, #[server] t: CallerToken) {} },
+        );
+        assert!(!after.contains("CallerToken"), "{after}");
+        assert!(after.contains("dry_run : false"), "{after}");
     }
 
     #[test]

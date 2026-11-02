@@ -67,6 +67,21 @@ impl FetchSubset for Widget {
     }
 }
 
+/// Who sent a request, from the `x-role` header the demo signs in with.
+pub struct Caller(pub String);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Caller {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Infallible> {
+        let role = parts.headers.get("x-role").and_then(|v| v.to_str().ok());
+        Ok(Caller(role.unwrap_or("anonymous").to_owned()))
+    }
+}
+
 /// How this app's guards find the caller and the catalog.
 pub struct AppGrants;
 

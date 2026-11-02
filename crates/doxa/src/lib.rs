@@ -215,6 +215,34 @@ pub mod react_diagnostics {}
 ///     pub async fn home() -> Html<String> { unreachable!() }
 /// }
 /// ```
+///
+/// An extractor only the server reads is marked `#[server]`, and the call leaves it out:
+///
+/// ```
+/// pub struct CallerToken;
+/// doxa::client::__as_client! {
+///     #[post("/ping")]
+///     pub async fn ping(#[server] t: CallerToken, Json(n): Json<u32>) -> StatusCode { unreachable!() }
+/// }
+/// async fn page() -> Result<(), doxa::client::Fetch> {
+///     ping(1).await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// Unmarked, it is a parameter the browser can't send:
+///
+/// ```compile_fail
+/// pub struct CallerToken;
+/// doxa::client::__as_client! {
+///     #[post("/ping")]
+///     pub async fn ping(t: CallerToken, Json(n): Json<u32>) -> StatusCode { unreachable!() }
+/// }
+/// async fn page() -> Result<(), doxa::client::Fetch> {
+///     ping(CallerToken, 1).await?;
+///     Ok(())
+/// }
+/// ```
 #[cfg(feature = "client")]
 #[doc(hidden)]
 pub mod client_diagnostics {}

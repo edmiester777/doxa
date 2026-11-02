@@ -214,7 +214,7 @@ async fn a_probe_of_an_unguarded_route_is_unknown_and_never_runs_it() {
     .await
     .unwrap();
     assert_eq!(status, 202);
-    assert_eq!(catalog.suggestions(), ["bolt"]);
+    assert_eq!(catalog.suggestions(), ["bolt from viewer"]);
 }
 
 #[tokio::test]

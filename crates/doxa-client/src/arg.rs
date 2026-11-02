@@ -40,7 +40,8 @@ impl<T: Clone> Arg<Vec<T>> for &[T] {
 /// How one handler argument travels: a path segment, a query string, a body.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't sent by the browser",
-    note = "implement `doxa::client::ClientArg` for it, or set `client = false` on the route"
+    note = "mark the parameter `#[server]` if only the server reads it, implement \
+            `doxa::client::ClientArg` for it, or set `client = false` on the route"
 )]
 pub trait ClientArg {
     /// What the caller passes.
@@ -52,7 +53,8 @@ pub trait ClientArg {
 /// An argument for a parameter whose extractor is `X`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` can't be passed where the route reads `{X}`",
-    note = "pass the extractor's inner value, owned or borrowed"
+    note = "pass the extractor's inner value, owned or borrowed",
+    note = "a `Foreign<…>` the browser never sends is marked `#[server]` on the route"
 )]
 pub trait ArgFor<X> {
     #[doc(hidden)]

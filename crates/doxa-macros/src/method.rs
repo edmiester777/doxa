@@ -33,6 +33,7 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
     if doxa_macro_support::is_client() {
         return client_half(method, &path_lit, &extra, client, &item_fn);
     }
+    strip_server_params(&mut item_fn);
 
     // Rewrite `Granted<T>` arguments before inference runs, so the
     // signature the doc probes see is the one that actually compiles.
@@ -60,6 +61,7 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
         let method = parsed.method.to_string();
         return client_half(&method, &parsed.path, &parsed.extra, client, &item_fn);
     }
+    strip_server_params(&mut item_fn);
 
     let path_names = sig::parse_path_names(&parsed.path.value());
     let sites = grant::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
@@ -98,6 +100,24 @@ pub fn expand_as_client(input: TokenStream) -> Result<TokenStream> {
         out.extend(client_half(&method, &args.path, &extra, client, &item_fn)?);
     }
     Ok(out)
+}
+
+/// `#[server]` on a parameter: the client half drops it, the server half keeps it as is.
+pub(crate) fn is_server_attr(attr: &syn::Attribute) -> bool {
+    matches!(attr.meta, Meta::Path(_))
+        && attr
+            .path()
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "server")
+}
+
+fn strip_server_params(item_fn: &mut ItemFn) {
+    for arg in &mut item_fn.sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            pt.attrs.retain(|a| !is_server_attr(a));
+        }
+    }
 }
 
 /// The client half: a typed call to this route, unless `client = false`.

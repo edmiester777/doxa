@@ -3,7 +3,7 @@
 doxa::prelude!();
 
 #[server]
-use crate::store::{AppGrants, Catalog};
+use crate::store::{AppGrants, Caller, Catalog};
 #[server]
 use futures::stream::{self, Stream};
 #[server]
@@ -94,9 +94,10 @@ pub async fn rename_widget(
 #[post("/api/suggestions")]
 pub async fn suggest_name(
     State(catalog): State<Catalog>,
+    #[server] Caller(who): Caller,
     Json(suggestion): Json<Rename>,
 ) -> StatusCode {
-    catalog.suggest(suggestion.name);
+    catalog.suggest(format!("{} from {who}", suggestion.name));
     StatusCode::ACCEPTED
 }
 
