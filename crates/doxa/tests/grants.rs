@@ -116,7 +116,7 @@ async fn get_widget(widget: Granted<Widget>) -> &'static str {
 
 #[get("/widgets", tag = "Widgets")]
 async fn list_widgets(widgets: Granted<Many<Widget>>) -> &'static str {
-    let _ = widgets.into_inner();
+    widgets.into_inner();
     "ok"
 }
 
