@@ -26,6 +26,9 @@ cors = ["docs", "doxa-docs/cors"]
 # `doxa::proxy`, to serve another server's routes same-origin.
 proxy = ["docs", "doxa-docs/proxy"]
 
+# `doxa::Valid<Json<T>>`, checking garde rules with a `422` per failing field.
+garde = ["docs", "doxa-docs/garde"]
+
 # Re-export doxa-macros proc-macros (#[derive(ApiError)],
 # #[derive(SseEvent)], #[get]/#[post]/…) through doxa-docs.
 macros = ["docs", "dep:doxa-macros", "doxa-docs/macros"]
@@ -78,6 +81,8 @@ client-router = ["client", "doxa-client/router"]
 ui = ["client", "dep:doxa-ui"]
 # `#[react]`: React components inside `view!`.
 react = ["ui", "doxa-ui/react"]
+# `form()` and `#[derive(Form)]`: garde-checked forms with field-level errors.
+forms = ["ui", "doxa-ui/forms"]
 
 # Everything.
 full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
@@ -113,6 +118,8 @@ tokio = { workspace = true }
 tower = { workspace = true }
 utoipa = { workspace = true }
 uuid = { workspace = true }
+garde = { workspace = true, features = ["derive"] }
+http-body-util = { workspace = true }
 
 [[example]]
 name = "full_test"
@@ -141,6 +148,10 @@ required-features = ["ui"]
 [[test]]
 name = "router"
 required-features = ["ui"]
+
+[[test]]
+name = "forms"
+required-features = ["forms", "garde"]
 
 [[test]]
 name = "react"

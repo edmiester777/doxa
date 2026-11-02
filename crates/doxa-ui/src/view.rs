@@ -502,3 +502,132 @@ impl<T, F: Fn(T) + 'static> From<F> for Callback<T> {
         Callback(Rc::new(RefCell::new(Rc::new(f))))
     }
 }
+
+/// What `bind:value={x}` reads and writes: a [`State`](crate::State) or a form field.
+pub trait BindValue: Copy + 'static {
+    /// The text to show.
+    fn current(&self) -> String;
+    /// The user typed `text`.
+    fn input(&self, text: String);
+    /// The user left the input.
+    fn blur(&self) {}
+}
+
+/// A `State` of anything that parses: text that doesn't parse is dropped.
+impl<V: Clone + std::str::FromStr + ToString + 'static> BindValue for crate::State<V> {
+    fn current(&self) -> String {
+        self.get().to_string()
+    }
+
+    fn input(&self, text: String) {
+        if let Ok(v) = text.parse() {
+            self.set(v);
+        }
+    }
+}
+
+/// What `bind:checked={x}` reads and writes.
+pub trait BindChecked: Copy + 'static {
+    /// Whether it is checked.
+    fn checked(&self) -> bool;
+    /// The user checked or unchecked it.
+    fn set_checked(&self, on: bool);
+}
+
+impl BindChecked for crate::State<bool> {
+    fn checked(&self) -> bool {
+        self.get()
+    }
+
+    fn set_checked(&self, on: bool) {
+        self.set(on);
+    }
+}
+
+/// What `bind:selected={x}` on a `<select multiple>` reads and writes: the chosen values.
+pub trait BindSelected: Copy + 'static {
+    /// The chosen options' values.
+    fn selected(&self) -> Vec<String>;
+    /// The user changed the choice.
+    fn set_selected(&self, values: Vec<String>);
+}
+
+impl BindSelected for crate::State<Vec<String>> {
+    fn selected(&self) -> Vec<String> {
+        self.get()
+    }
+
+    fn set_selected(&self, values: Vec<String>) {
+        self.set(values);
+    }
+}
+
+/// Keeps a `<select multiple>`'s options selected to match its binding.
+#[derive(Clone)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+struct SelectSync(Vec<String>);
+
+impl Directive for SelectSync {
+    fn mounted(&mut self, node: NodeRef) {
+        self.sync(node);
+    }
+
+    fn updated(&mut self, node: NodeRef) {
+        self.sync(node);
+    }
+}
+
+impl SelectSync {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+    fn sync(&self, node: NodeRef) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(sel) = node.as_element::<web_sys::HtmlSelectElement>() {
+            for i in 0..sel.length() {
+                if let Some(opt) = sel.item(i) {
+                    let value = js_sys::Reflect::get(&opt, &"value".into())
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_default();
+                    let on = self.0.contains(&value);
+                    let _ = js_sys::Reflect::set(&opt, &"selected".into(), &on.into());
+                }
+            }
+        }
+    }
+}
+
+impl Element {
+    /// `bind:value={x}`: show `x` and write what's typed back to it.
+    pub fn bind_value(self, x: impl BindValue) -> Self {
+        let current = x.current();
+        self.prop("value", current)
+            .on("input", move |e| x.input(e.value()))
+            .on("blur", move |_| x.blur())
+    }
+
+    /// `bind:checked={x}`, for a checkbox.
+    pub fn bind_checked(self, x: impl BindChecked) -> Self {
+        let on = x.checked();
+        self.prop("checked", on)
+            .on("change", move |e| x.set_checked(e.checked()))
+    }
+
+    /// `bind:group={x}`, for a radio button whose `value` is `value`.
+    pub fn bind_group(self, x: impl BindValue, value: impl ToString) -> Self {
+        let value = value.to_string();
+        let on = x.current() == value;
+        self.prop("checked", on).on("change", move |e| {
+            if e.checked() {
+                x.input(value.clone());
+                x.blur();
+            }
+        })
+    }
+
+    /// `bind:selected={x}`, for a `<select multiple>`.
+    pub fn bind_selected(self, x: impl BindSelected) -> Self {
+        let chosen = x.selected();
+        self.directive(SelectSync(chosen))
+            .on("change", move |e| x.set_selected(e.selected()))
+    }
+}

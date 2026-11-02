@@ -74,6 +74,51 @@ impl<E> ApiErrorBody<E> {
     }
 }
 
+/// The `code` of a `422` whose `error` is [`FieldErrors`].
+pub const INVALID: &str = "invalid";
+
+/// One input field that failed validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct FieldError {
+    /// Where, as garde writes it: `name`, `lines[0].sku`.
+    pub path: String,
+    /// What's wrong.
+    pub message: String,
+}
+
+/// Every field that failed validation, as a `422`'s `error`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(transparent)]
+pub struct FieldErrors(pub Vec<FieldError>);
+
+impl FieldErrors {
+    /// The first message for `path`.
+    pub fn get(&self, path: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| e.message.as_str())
+    }
+}
+
+impl std::fmt::Display for FieldErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let all: Vec<String> = self
+            .0
+            .iter()
+            .map(|e| match e.path.as_str() {
+                "" => e.message.clone(),
+                p => format!("{p}: {}", e.message),
+            })
+            .collect();
+        f.write_str(&all.join("; "))
+    }
+}
+
+impl std::error::Error for FieldErrors {}
+
 /// HTTP method of a route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Method {

@@ -313,6 +313,31 @@ pub mod directive_diagnostics {}
 #[doc(hidden)]
 pub mod portal_diagnostics {}
 
+/// A radio button binds to a group by its own `value`:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Size() -> View {
+///     let size = state(String::from("s"));
+///     view! { <input type="radio" value="m" bind:group={size}/> }
+/// }
+/// ```
+///
+/// Without one it is "`bind:group` goes on a radio button with a `value`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Size() -> View {
+///     let size = state(String::from("s"));
+///     view! { <input type="radio" bind:group={size}/> }
+/// }
+/// ```
+#[cfg(feature = "ui")]
+#[doc(hidden)]
+pub mod bind_diagnostics {}
+
 /// A listener takes `capture`, `passive` and `once` modifiers:
 ///
 /// ```

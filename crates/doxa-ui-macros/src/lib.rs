@@ -5,6 +5,7 @@ use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
 mod component;
+mod form;
 mod npm;
 mod page;
 mod react;
@@ -46,6 +47,15 @@ pub fn react(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as react::Args);
     let item = parse_macro_input!(item as syn::ItemStruct);
     react::expand(args, item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// One `Field` per struct field, for `form(value).fields()`.
+#[proc_macro_derive(Form)]
+pub fn derive_form(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    form::expand(input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

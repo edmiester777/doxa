@@ -209,6 +209,8 @@ mod routes_macro;
 mod spa;
 mod sse;
 mod ui;
+#[cfg(feature = "garde")]
+mod valid;
 
 pub use attachment::Attachment;
 pub use builder::{ApiDoc, ApiDocBuilder, BuildError, SseSpecVersion};
@@ -238,8 +240,10 @@ pub use router_ext::OpenApiRouterExt;
 pub use spa::{Dist, EmbeddedFiles, MountSpaExt, Spa};
 pub use sse::{SseEventMeta, SseStream};
 
-#[cfg(feature = "docs-scalar")]
 pub use ui::{DeveloperTools, DocumentDownload, ScalarConfig, ScalarLayout, ScalarTheme};
+#[cfg(feature = "docs-scalar")]
+#[cfg(feature = "garde")]
+pub use valid::{Valid, ValidRejection};
 
 // Re-export the companion proc-macro crate so consumers only need
 // `doxa` on their dependency list to write an event-stream

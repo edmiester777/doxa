@@ -12,6 +12,7 @@ path = "../api/src/lib.rs"
 doxa = { workspace = true, features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
+garde = { workspace = true, features = ["derive"] }
 
 [build-dependencies]
 doxa-role = { workspace = true }

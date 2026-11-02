@@ -394,6 +394,22 @@ pub(crate) fn target_value(e: &web_sys::Event) -> String {
         .unwrap_or_default()
 }
 
+pub(crate) fn selected(e: &web_sys::Event) -> Vec<String> {
+    let Some(t) = e.target() else {
+        return Vec::new();
+    };
+    let options = js_sys::Reflect::get(&t, &JsValue::from_str("selectedOptions"))
+        .unwrap_or(JsValue::UNDEFINED);
+    js_sys::Array::from(&options)
+        .iter()
+        .filter_map(|o| {
+            js_sys::Reflect::get(&o, &JsValue::from_str("value"))
+                .ok()?
+                .as_string()
+        })
+        .collect()
+}
+
 pub(crate) fn target_checked(e: &web_sys::Event) -> bool {
     let Some(t) = e.target() else { return false };
     js_sys::Reflect::get(&t, &JsValue::from_str("checked"))

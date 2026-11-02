@@ -11,6 +11,8 @@ mod component;
 mod directive;
 pub mod dom;
 mod error;
+#[cfg(feature = "forms")]
+mod form;
 mod head;
 mod hooks;
 mod plugin;
@@ -34,7 +36,14 @@ pub use can::{Can, CanBuilder, CanProps};
 pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
 pub use dom::{Event, Listen, NodeRef, Phase, Rect};
+/// One [`Field`] per struct field: `#[derive(garde::Validate, Form)]`.
+///
+/// garde's `pattern` and `email` rules bring `regex` into the wasm; enable them only where the budget allows.
+#[cfg(feature = "forms")]
+pub use doxa_ui_macros::Form;
 pub use error::{Result, Thrown};
+#[cfg(feature = "forms")]
+pub use form::{field_errors, form, Field, Form, FormFields, Submit};
 pub use head::title;
 pub use hooks::{
     action, context, effect, memo, node_ref, provide, state, try_context, Action, Deps, ElementRef,
@@ -49,8 +58,8 @@ pub use router::{
 };
 pub use theme::{set_theme, theme, Theme};
 pub use view::{
-    comp, el, Callback, ComponentView, DangerousHtml, Element, IntoAttr, IntoProp, IntoView, Key,
-    SafeUrl, View,
+    comp, el, BindChecked, BindSelected, BindValue, Callback, ComponentView, DangerousHtml,
+    Element, IntoAttr, IntoProp, IntoView, Key, SafeUrl, View,
 };
 
 /// A React component as a doxa one: `#[react(module = "…", export = "…")]` on its props struct.

@@ -64,6 +64,7 @@ pub(crate) fn widen<E>(f: Fetch<NoError>) -> Fetch<E> {
         Fetch::Unauthorized(b) => Fetch::Unauthorized(b),
         Fetch::Forbidden(b) => Fetch::Forbidden(b),
         Fetch::Status { code, body } => Fetch::Status { code, body },
+        Fetch::Invalid(f) => Fetch::Invalid(f),
         Fetch::Encode(m) => Fetch::Encode(m),
         Fetch::Decode(m) => Fetch::Decode(m),
         Fetch::Network(m) => Fetch::Network(m),

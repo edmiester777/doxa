@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use doxa_wire::ApiErrorBody;
+use doxa_wire::{ApiErrorBody, FieldErrors};
 use serde::de::DeserializeOwned;
 
 /// A route that declares no error type of its own.
@@ -33,6 +33,8 @@ pub enum Fetch<E = NoError> {
         /// The body, when it was doxa's error envelope.
         body: Option<Box<ApiErrorBody>>,
     },
+    /// `422`: the input failed validation, field by field.
+    Invalid(FieldErrors),
     /// An argument could not be encoded into the request.
     Encode(String),
     /// The response did not decode as the route's return type.
@@ -66,6 +68,7 @@ impl<E> Fetch<E> {
             Fetch::NotFound(_) => Some(404),
             Fetch::Unauthorized(_) => Some(401),
             Fetch::Forbidden(_) => Some(403),
+            Fetch::Invalid(_) => Some(422),
             Fetch::Status { code, .. } => Some(*code),
             _ => None,
         }
@@ -93,6 +96,7 @@ impl<E> Fetch<E> {
             Fetch::Unauthorized(b) => Fetch::Unauthorized(b),
             Fetch::Forbidden(b) => Fetch::Forbidden(b),
             Fetch::Status { code, body } => Fetch::Status { code, body },
+            Fetch::Invalid(f) => Fetch::Invalid(f),
             Fetch::Encode(m) => Fetch::Encode(m),
             Fetch::Decode(m) => Fetch::Decode(m),
             Fetch::Network(m) => Fetch::Network(m),
@@ -106,6 +110,13 @@ impl<E> Fetch<E> {
     where
         E: DeserializeOwned,
     {
+        if status == 422 {
+            if let Ok(b) = serde_json::from_slice::<ApiErrorBody<FieldErrors>>(body) {
+                if b.code == doxa_wire::INVALID {
+                    return Fetch::Invalid(b.error);
+                }
+            }
+        }
         if let Ok(typed) = serde_json::from_slice::<ApiErrorBody<E>>(body) {
             return Fetch::Api(Box::new(typed));
         }
@@ -136,6 +147,7 @@ impl<E: fmt::Display> fmt::Display for Fetch<E> {
                 Some(m) => f.write_str(m),
                 None => write!(f, "request failed with status {code}"),
             },
+            Fetch::Invalid(fields) => write!(f, "{fields}"),
             Fetch::Encode(m) => write!(f, "could not encode the request: {m}"),
             Fetch::Decode(m) => write!(f, "could not decode the response: {m}"),
             Fetch::Network(m) => write!(f, "network error: {m}"),
@@ -145,4 +157,29 @@ impl<E: fmt::Display> fmt::Display for Fetch<E> {
     }
 }
 
-impl<E: fmt::Debug + fmt::Display> std::error::Error for Fetch<E> {}
+/// An [`Invalid`](Fetch::Invalid)'s source is its [`FieldErrors`], so a form can find them in any `Fetch<E>`.
+impl<E: fmt::Debug + fmt::Display> std::error::Error for Fetch<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Fetch::Invalid(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_422_with_the_invalid_code_decodes_to_its_fields_for_any_error_type() {
+        let body = br#"{"message":"name: too short","status":422,"code":"invalid","error":[{"path":"name","message":"too short"}]}"#;
+        let f = Fetch::<String>::from_status(422, body);
+        let Fetch::Invalid(fields) = &f else {
+            panic!("not Invalid")
+        };
+        assert_eq!(fields.get("name"), Some("too short"));
+        let source = std::error::Error::source(&f).and_then(|s| s.downcast_ref::<FieldErrors>());
+        assert_eq!(source, Some(fields));
+    }
+}

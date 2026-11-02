@@ -5,7 +5,8 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-doxa = { workspace = true, features = ["full"] }
+doxa = { workspace = true, features = ["full", "garde"] }
+garde = { workspace = true, features = ["derive"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }

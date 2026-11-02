@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 widgets-client = { path = "../client" }
-doxa = { workspace = true, features = ["ui", "react"] }
+doxa = { workspace = true, features = ["ui", "react", "forms"] }
 futures = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -28,6 +28,6 @@ react-dom = "^19"
 
 [dev-dependencies]
 widgets-server = { path = "../server" }
-doxa = { workspace = true, features = ["ui", "react", "client-router"] }
+doxa = { workspace = true, features = ["ui", "react", "forms", "client-router"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }

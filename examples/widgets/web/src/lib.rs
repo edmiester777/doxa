@@ -1,6 +1,7 @@
 //! The widgets UI: pages that call the server's routes as functions.
 
 use doxa::ui::prelude::*;
+use doxa::ui::{form, Field};
 use widgets_client::widgets::*;
 
 pub mod motion;
@@ -86,20 +87,26 @@ async fn WidgetPage(name: String) -> Result<View> {
     })
 }
 
+/// Checks the same rule as the server before sending.
 #[component]
 fn RenameForm(widget: Widget) -> View {
-    let name = state(widget.name.clone());
+    let form = form(Rename {
+        name: widget.name.clone(),
+    });
+    let name = Field::new(form, "name", |r: &Rename| &r.name, |r| &mut r.name);
     let key = WidgetKey::from(&widget);
-    let save = action(async move |name: String| {
-        let w = rename_widget(&key, Rename { name: name.clone() })
-            .optimistic(move |w: &mut Widget| w.name = name.clone())
+    let save = form.submit(async move |r: Rename| {
+        let to = r.name.clone();
+        let w = rename_widget(&key, r)
+            .optimistic(move |w: &mut Widget| w.name = to.clone())
             .await?;
         navigate(WidgetPage::route(&w.name));
         Ok(())
     });
     view! {
         <input class="name" bind:value={name}/>
-        <button class="save" disabled={save.pending()} on:click={move |_| save.run(name.get())}>
+        {name.error().map(|e| view! { <p class="invalid">{e}</p> })}
+        <button class="save" disabled={save.pending()} on:click={move |_| save.run()}>
             "Save"
         </button>
         {save.error().map(|e| view! { <p class="error">{e.to_string()}</p> })}

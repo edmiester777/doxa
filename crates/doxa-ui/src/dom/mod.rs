@@ -267,6 +267,8 @@ pub struct MemEvent {
     pub is_composing: bool,
     /// The node the event was fired at; [`MemDom::dispatch`] fills it in.
     pub target: Option<NodeId>,
+    /// For a `<select multiple>`, the chosen options' values.
+    pub selected: Vec<String>,
 }
 
 impl Event {
@@ -324,6 +326,15 @@ impl Event {
     /// Whether Alt was held.
     pub fn alt_key(&self) -> bool {
         self.modifier("altKey", |e| e.alt_key)
+    }
+
+    /// For a `<select multiple>`, the chosen options' values.
+    pub fn selected(&self) -> Vec<String> {
+        match &self.inner {
+            #[cfg(target_arch = "wasm32")]
+            EventInner::Web(e) => web::selected(e),
+            EventInner::Mem(e, _) => e.selected.clone(),
+        }
     }
 
     /// Whether an IME composition is in progress, so Enter shouldn't submit.

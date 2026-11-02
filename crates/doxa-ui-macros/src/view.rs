@@ -93,6 +93,11 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
     let span = e.name().span();
     let mut out = quote_spanned! { span => ::doxa::ui::el(#tag) };
     let mut key = None;
+    // `bind:group` needs the radio's own `value`, wherever it is written.
+    let radio_value = e.attributes().iter().find_map(|attr| {
+        let a = keyed(attr).ok()?;
+        (a.key.to_string() == "value").then(|| value(a)).flatten()
+    });
     for attr in e.attributes() {
         let a = keyed(attr)?;
         let name = a.key.to_string();
@@ -148,18 +153,22 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                 let prop = &n[5..];
                 quote_spanned! { span => #out.prop(#prop, #v) }
             }
-            ("bind:value", Some(v)) => quote_spanned! { span =>
-                #out.prop("value", ::doxa::ui::State::get(&#v))
-                    .on("input", { let s = #v; move |e: ::doxa::ui::Event| s.set(e.value()) })
-            },
-            ("bind:checked", Some(v)) => quote_spanned! { span =>
-                #out.prop("checked", ::doxa::ui::State::get(&#v))
-                    .on("change", { let s = #v; move |e: ::doxa::ui::Event| s.set(e.checked()) })
-            },
+            ("bind:value", Some(v)) => quote_spanned! { span => #out.bind_value(#v) },
+            ("bind:checked", Some(v)) => quote_spanned! { span => #out.bind_checked(#v) },
+            ("bind:selected", Some(v)) => quote_spanned! { span => #out.bind_selected(#v) },
+            ("bind:group", Some(v)) => {
+                let Some(value) = radio_value.clone() else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`bind:group` goes on a radio button with a `value`, e.g. `<input type=\"radio\" value=\"a\" bind:group={kind}/>`",
+                    ));
+                };
+                quote_spanned! { span => #out.bind_group(#v, #value) }
+            }
             (n, _) if n.starts_with("bind:") => {
                 return Err(syn::Error::new(
                     span,
-                    "`bind:` takes `value` or `checked`, with a `State`",
+                    "`bind:` takes `value`, `checked`, `group` or `selected`, with a `State` or a form field",
                 ));
             }
             (n, Some(v)) if URL_ATTRS.contains(&n) => {

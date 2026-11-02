@@ -157,6 +157,24 @@ async fn renaming_updates_the_page_and_the_url() {
 }
 
 #[tokio::test]
+async fn an_empty_name_is_refused_before_it_is_sent() {
+    let dom = mount("editor");
+    navigate("/widgets/cog");
+    settle().await;
+    dom.click(dom.find("class", "edit").unwrap());
+    settle().await;
+    dom.input(dom.find("class", "name").unwrap(), "");
+    dom.click(dom.find("class", "save").unwrap());
+    settle().await;
+    assert!(
+        dom.find("class", "invalid").is_some(),
+        "the rule the server also checks"
+    );
+    assert!(dom.find("class", "error").is_none(), "nothing was sent");
+    assert_eq!(doxa::ui::location(), "/widgets/cog");
+}
+
+#[tokio::test]
 async fn a_failed_rename_shows_the_routes_own_error() {
     let dom = mount("editor");
     navigate("/widgets/cog");

@@ -79,6 +79,7 @@ axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
 reqwest = { version = "0.13", features = ["json", "form"] }
 tower-http = "0.6"
+garde = { version = "0.23", default-features = false }
 
 # OpenAPI
 utoipa = { version = "5", features = ["macros", "uuid", "chrono"] }

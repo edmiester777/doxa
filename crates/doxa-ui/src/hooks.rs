@@ -102,6 +102,7 @@ impl<T: 'static> State<T> {
     }
 
     /// Change the value without re-rendering; `None` once unmounted.
+    #[cfg_attr(not(feature = "react"), allow(dead_code))]
     pub(crate) fn update_silently<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         self.with_cell(|c| f(&mut c.borrow_mut()))
     }

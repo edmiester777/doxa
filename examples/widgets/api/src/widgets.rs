@@ -7,6 +7,8 @@ use crate::store::{AppGrants, Caller, Catalog};
 #[server]
 use axum::{body::Bytes, extract::Multipart};
 #[server]
+use doxa::Valid;
+#[server]
 use futures::stream::{self, Stream};
 #[server]
 use std::convert::Infallible;
@@ -24,9 +26,10 @@ pub struct Widget {
 
 route_key!(pub WidgetKey { name: String });
 
-/// The new name for a widget.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+/// The new name for a widget; the server and the form check the same rule.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, garde::Validate)]
 pub struct Rename {
+    #[garde(length(min = 1, max = 40))]
     pub name: String,
 }
 
@@ -87,7 +90,7 @@ pub async fn list_widgets(
 pub async fn rename_widget(
     widget: Granted<WidgetByName>,
     State(catalog): State<Catalog>,
-    Json(rename): Json<Rename>,
+    Valid(Json(rename)): Valid<Json<Rename>>,
 ) -> Result<Json<Widget>, WidgetError> {
     catalog.rename(widget.id, &rename.name).map(Json)
 }

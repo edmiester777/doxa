@@ -35,6 +35,8 @@ pub use response::{
 pub use service::{on_any_session_change, service, Service};
 pub use sse::{Backoff, EventStream, Once};
 
+pub use doxa_wire::{FieldError, FieldErrors};
+
 #[doc(hidden)]
 pub use doxa_wire as __wire;
 
