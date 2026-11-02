@@ -52,6 +52,7 @@ pub struct MemDom {
     nodes: Rc<RefCell<HashMap<NodeId, MemNode>>>,
     next: Rc<RefCell<NodeId>>,
     world: Rc<RefCell<World>>,
+    ops: Rc<Cell<usize>>,
 }
 
 impl MemDom {
@@ -62,6 +63,12 @@ impl MemDom {
         debug_assert_eq!(body, 0);
         doxa_client::clock::manual();
         dom
+    }
+
+    /// How many changes the renderer has made to the document: nodes created, inserted or
+    /// removed, and text, attributes and properties set.
+    pub fn ops(&self) -> usize {
+        self.ops.get()
     }
 
     /// Move this thread's clock forward, firing each timer due on the way.
@@ -405,6 +412,7 @@ fn render(nodes: &HashMap<NodeId, MemNode>, at: NodeId, out: &mut String, _top: 
 
 impl Dom for MemDom {
     fn create_element(&self, tag: &str, _ns: Option<&str>) -> NodeId {
+        self.ops.set(self.ops.get() + 1);
         self.add(Kind::Element {
             tag: tag.to_owned(),
             attrs: Vec::new(),
@@ -413,20 +421,24 @@ impl Dom for MemDom {
     }
 
     fn create_text(&self, text: &str) -> NodeId {
+        self.ops.set(self.ops.get() + 1);
         self.add(Kind::Text(text.to_owned()))
     }
 
     fn create_anchor(&self) -> NodeId {
+        self.ops.set(self.ops.get() + 1);
         self.add(Kind::Anchor)
     }
 
     fn set_text(&self, node: NodeId, text: &str) {
+        self.ops.set(self.ops.get() + 1);
         if let Some(n) = self.nodes.borrow_mut().get_mut(&node) {
             n.kind = Kind::Text(text.to_owned());
         }
     }
 
     fn set_attr(&self, node: NodeId, name: &str, value: &str) {
+        self.ops.set(self.ops.get() + 1);
         if let Some(Kind::Element { attrs, .. }) =
             self.nodes.borrow_mut().get_mut(&node).map(|n| &mut n.kind)
         {
@@ -438,6 +450,7 @@ impl Dom for MemDom {
     }
 
     fn remove_attr(&self, node: NodeId, name: &str) {
+        self.ops.set(self.ops.get() + 1);
         if let Some(Kind::Element { attrs, .. }) =
             self.nodes.borrow_mut().get_mut(&node).map(|n| &mut n.kind)
         {
@@ -469,6 +482,7 @@ impl Dom for MemDom {
     }
 
     fn set_prop(&self, node: NodeId, name: &str, value: &Prop) {
+        self.ops.set(self.ops.get() + 1);
         if let Some(Kind::Element { props, .. }) =
             self.nodes.borrow_mut().get_mut(&node).map(|n| &mut n.kind)
         {
@@ -480,6 +494,7 @@ impl Dom for MemDom {
     }
 
     fn set_inner_html(&self, node: NodeId, html: &str) {
+        self.ops.set(self.ops.get() + 1);
         let old: Vec<NodeId> = self
             .nodes
             .borrow()
@@ -494,6 +509,7 @@ impl Dom for MemDom {
     }
 
     fn insert(&self, parent: NodeId, child: NodeId, before: Option<NodeId>) {
+        self.ops.set(self.ops.get() + 1);
         self.detach(child);
         let mut nodes = self.nodes.borrow_mut();
         if let Some(c) = nodes.get_mut(&child) {
@@ -508,6 +524,7 @@ impl Dom for MemDom {
     }
 
     fn remove(&self, node: NodeId) {
+        self.ops.set(self.ops.get() + 1);
         self.detach(node);
         let mut stack = vec![node];
         let mut nodes = self.nodes.borrow_mut();

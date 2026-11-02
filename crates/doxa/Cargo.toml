@@ -150,6 +150,10 @@ name = "router"
 required-features = ["ui"]
 
 [[test]]
+name = "stream_bench"
+required-features = ["ui"]
+
+[[test]]
 name = "forms"
 required-features = ["forms", "garde"]
 
