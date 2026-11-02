@@ -5,6 +5,7 @@
 
 mod app;
 mod boundary;
+mod browser;
 mod can;
 mod component;
 mod directive;
@@ -23,10 +24,15 @@ mod view;
 
 pub use app::{App, IntoRoot, RootHandle};
 pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
+pub use browser::{
+    broadcast, clipboard, debounced, document_event, exit_fullscreen, fullscreen, intersection,
+    interval, media_query, now, resize_observer, save, sleep, stored, window_event, Broadcast,
+    BrowserError, Stored,
+};
 pub use can::{Can, CanBuilder, CanProps};
 pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
-pub use dom::{Event, NodeRef, Phase, Rect};
+pub use dom::{Event, Listen, NodeRef, Phase, Rect};
 pub use error::{Result, Thrown};
 pub use hooks::{
     action, context, effect, memo, node_ref, provide, state, try_context, Action, Deps, ElementRef,
@@ -63,11 +69,11 @@ pub mod prelude {
     #[cfg(feature = "react")]
     pub use crate::react;
     pub use crate::{
-        action, component, context, effect, memo, navigate, node_ref, page, provide, set_theme,
-        state, theme, try_context, view, Action, App, Callback, Can, Catch, DangerousHtml,
-        Directive, ElementRef, Event, IntoView, Link, NodeRef, Outlet, Page, Plugin, Portal,
-        Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown,
-        View,
+        action, component, context, debounced, document_event, effect, interval, media_query, memo,
+        navigate, node_ref, page, provide, set_theme, sleep, state, stored, theme, try_context,
+        view, window_event, Action, App, Callback, Can, Catch, DangerousHtml, Directive,
+        ElementRef, Event, IntoView, Link, NodeRef, Outlet, Page, Plugin, Portal, Result, Route,
+        Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }

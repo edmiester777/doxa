@@ -106,13 +106,32 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
             ("inner_html", Some(v)) => quote_spanned! { span => #out.inner_html(#v) },
             ("ref", Some(v)) => quote_spanned! { span => #out.node_ref(#v) },
             (n, Some(v)) if n.starts_with("on:") => {
-                let event = &n[3..];
-                let method = if is_async_closure(a) {
-                    quote!(on_async)
-                } else {
-                    quote!(on)
+                let mut parts = n[3..].split('.');
+                let event = parts.next().unwrap_or_default();
+                let (mut capture, mut passive, mut once) = (false, false, false);
+                for m in parts {
+                    match m {
+                        "capture" => capture = true,
+                        "passive" => passive = true,
+                        "once" => once = true,
+                        _ => {
+                            return Err(syn::Error::new(
+                                span,
+                                format!("unknown `on:` modifier `{m}`: use `capture`, `passive` or `once`"),
+                            ));
+                        }
+                    }
+                }
+                let method = match (is_async_closure(a), capture || passive || once) {
+                    (true, false) => quote!(on_async),
+                    (false, false) => quote!(on),
+                    (true, true) => quote!(on_async_with),
+                    (false, true) => quote!(on_with),
                 };
-                quote_spanned! { span => #out.#method(#event, #v) }
+                let opts = (capture || passive || once).then(|| {
+                    quote! { ::doxa::ui::Listen { capture: #capture, passive: #passive, once: #once }, }
+                });
+                quote_spanned! { span => #out.#method(#event, #opts #v) }
             }
             (n, v) if n.starts_with("use:") => {
                 let Ok(name) = syn::parse_str::<syn::Path>(&n[4..]) else {

@@ -135,6 +135,10 @@ name = "ui"
 required-features = ["ui"]
 
 [[test]]
+name = "browser"
+required-features = ["ui"]
+
+[[test]]
 name = "react"
 required-features = ["react"]
 

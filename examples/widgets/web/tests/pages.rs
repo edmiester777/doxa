@@ -174,6 +174,7 @@ async fn the_theme_toggle_switches_the_root() {
     settle().await;
     assert_eq!(dom.find("data-theme", "dark"), Some(dom.body()));
     assert_eq!(dom.text(dom.find("class", "theme").unwrap()), "Light");
+    assert_eq!(dom.storage("dark").as_deref(), Some("true"));
 }
 
 #[tokio::test]

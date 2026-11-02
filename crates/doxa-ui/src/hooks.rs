@@ -69,7 +69,13 @@ impl<T> Copy for State<T> {}
 /// Component state, like React's `useState`: `init` is used on the first render only.
 #[track_caller]
 pub fn state<T: 'static>(init: T) -> State<T> {
-    let (inst, slot, _) = slot("state", || RefCell::new(init));
+    state_with(|| init)
+}
+
+/// [`state`] with an initial value computed on the first render only.
+#[track_caller]
+pub(crate) fn state_with<T: 'static>(init: impl FnOnce() -> T) -> State<T> {
+    let (inst, slot, _) = slot("state", || RefCell::new(init()));
     State {
         instance: inst.id,
         slot,

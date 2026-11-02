@@ -322,7 +322,7 @@ impl Hub {
         }
         let client = self.client.clone();
         Box::pin(async move {
-            futures_timer::Delay::new(delay).await;
+            crate::clock::sleep(delay).await;
             let session = client.session();
             let mut result = client.send(request).await;
             if let Ok(resp) = &mut result {

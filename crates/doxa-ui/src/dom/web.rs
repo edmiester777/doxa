@@ -6,7 +6,9 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
-use super::{Dom, Event, EventInner, NodeId, Prop};
+use super::{Dom, Event, EventInner, Global, Listen, NodeId, Observe, Observed, Prop, Rect};
+
+type Stops = Rc<RefCell<(u32, std::collections::HashMap<u32, Box<dyn FnOnce()>>)>>;
 
 thread_local! {
     static ID: JsValue = JsValue::from_str("__doxaNode");
@@ -23,6 +25,7 @@ pub struct WebDom {
     doc: web_sys::Document,
     nodes: Rc<RefCell<Vec<Option<Slot>>>>,
     free: Rc<RefCell<Vec<NodeId>>>,
+    stops: Stops,
 }
 
 impl Default for WebDom {
@@ -41,7 +44,17 @@ impl WebDom {
             doc,
             nodes: Rc::default(),
             free: Rc::default(),
+            stops: Rc::default(),
         }
+    }
+
+    /// Remember how to undo a registration; [`Dom::stop`] runs it.
+    fn keep(&self, stop: impl FnOnce() + 'static) -> u32 {
+        let mut s = self.stops.borrow_mut();
+        s.0 += 1;
+        let id = s.0;
+        s.1.insert(id, Box::new(stop));
+        id
     }
 
     fn add(&self, node: web_sys::Node) -> NodeId {
@@ -184,14 +197,9 @@ impl Dom for WebDom {
         self.id_of(&next)
     }
 
-    fn listen(&self, node: NodeId, event: &str, handler: Rc<dyn Fn(Event)>) {
+    fn listen(&self, node: NodeId, event: &str, opts: Listen, handler: Rc<dyn Fn(Event)>) {
         let Some(n) = self.node(node) else { return };
-        let closure = Closure::<dyn Fn(web_sys::Event)>::new(move |e: web_sys::Event| {
-            handler(Event {
-                inner: EventInner::Web(e),
-            })
-        });
-        let _ = n.add_event_listener_with_callback(event, closure.as_ref().unchecked_ref());
+        let closure = add_listener(&n, event, opts, handler);
         if let Some(Some(slot)) = self.nodes.borrow_mut().get_mut(node as usize) {
             slot.listeners.push(closure);
         }
@@ -202,9 +210,160 @@ impl Dom for WebDom {
         Some(self.add(el.into()))
     }
 
+    fn listen_global(
+        &self,
+        target: Global,
+        event: &str,
+        opts: Listen,
+        handler: Rc<dyn Fn(Event)>,
+    ) -> u32 {
+        let t: web_sys::EventTarget = match target {
+            Global::Window => web_sys::window().expect("a window").into(),
+            Global::Document => self.doc.clone().into(),
+        };
+        let closure = add_listener(&t, event, opts, handler);
+        let event = event.to_owned();
+        self.keep(move || {
+            let _ = t.remove_event_listener_with_callback_and_bool(
+                &event,
+                closure.as_ref().unchecked_ref(),
+                opts.capture,
+            );
+        })
+    }
+
+    fn observe(&self, node: NodeId, what: Observe, f: Rc<dyn Fn(Observed)>) -> u32 {
+        let Some(el) = self.element(node) else {
+            return self.keep(|| {});
+        };
+        let target = el.clone();
+        let cb = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+            let r = target.get_bounding_client_rect();
+            let intersecting = js_sys::Reflect::get(&entries.at(-1), &"isIntersecting".into())
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            f(Observed {
+                rect: Rect {
+                    x: r.x(),
+                    y: r.y(),
+                    width: r.width(),
+                    height: r.height(),
+                },
+                intersecting,
+            })
+        });
+        let func: &js_sys::Function = cb.as_ref().unchecked_ref();
+        match what {
+            Observe::Resize => {
+                let Ok(o) = web_sys::ResizeObserver::new(func) else {
+                    return self.keep(|| {});
+                };
+                o.observe(&el);
+                self.keep(move || {
+                    o.disconnect();
+                    drop(cb);
+                })
+            }
+            Observe::Intersection => {
+                let Ok(o) = web_sys::IntersectionObserver::new(func) else {
+                    return self.keep(|| {});
+                };
+                o.observe(&el);
+                self.keep(move || {
+                    o.disconnect();
+                    drop(cb);
+                })
+            }
+        }
+    }
+
+    fn media_matches(&self, query: &str) -> bool {
+        media(query).is_some_and(|m| m.matches())
+    }
+
+    fn watch_media(&self, query: &str, f: Rc<dyn Fn(bool)>) -> u32 {
+        let Some(list) = media(query) else {
+            return self.keep(|| {});
+        };
+        let l = list.clone();
+        let cb = Closure::<dyn Fn()>::new(move || f(l.matches()));
+        let _ = list.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
+        self.keep(move || {
+            let _ = list.remove_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
+        })
+    }
+
+    fn stop(&self, id: u32) {
+        let stop = self.stops.borrow_mut().1.remove(&id);
+        if let Some(stop) = stop {
+            stop();
+        }
+    }
+
+    fn storage_get(&self, key: &str) -> Option<String> {
+        local_storage()?.get_item(key).ok()?
+    }
+
+    fn storage_set(&self, key: &str, value: Option<&str>) {
+        let Some(s) = local_storage() else { return };
+        let _ = match value {
+            Some(v) => s.set_item(key, v),
+            None => s.remove_item(key),
+        };
+    }
+
     fn raw(&self, node: NodeId) -> Option<web_sys::Node> {
         self.node(node)
     }
+}
+
+fn add_listener(
+    target: &web_sys::EventTarget,
+    event: &str,
+    opts: Listen,
+    handler: Rc<dyn Fn(Event)>,
+) -> Closure<dyn Fn(web_sys::Event)> {
+    let closure = Closure::<dyn Fn(web_sys::Event)>::new(move |e: web_sys::Event| {
+        handler(Event {
+            inner: EventInner::Web(e),
+        })
+    });
+    let o = web_sys::AddEventListenerOptions::new();
+    o.set_capture(opts.capture);
+    o.set_passive(opts.passive);
+    o.set_once(opts.once);
+    let _ = target.add_event_listener_with_callback_and_add_event_listener_options(
+        event,
+        closure.as_ref().unchecked_ref(),
+        &o,
+    );
+    closure
+}
+
+fn media(query: &str) -> Option<web_sys::MediaQueryList> {
+    web_sys::window()?.match_media(query).ok()?
+}
+
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok()?
+}
+
+pub(crate) fn target_id(e: &web_sys::Event) -> Option<NodeId> {
+    let t = e.target()?;
+    Some(
+        js_sys::Reflect::get(&t, &ID.with(JsValue::clone))
+            .ok()?
+            .as_f64()? as NodeId,
+    )
+}
+
+/// A numeric event field such as `clientX`, zero where the event has none.
+pub(crate) fn number(e: &web_sys::Event, name: &str) -> f64 {
+    js_sys::Reflect::get(e, &JsValue::from_str(name))
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
 }
 
 pub(crate) fn target_value(e: &web_sys::Event) -> String {
@@ -238,8 +397,10 @@ pub(crate) fn flag(e: &web_sys::Event, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `key` of a keyboard or `storage` event.
 pub(crate) fn key(e: &web_sys::Event) -> String {
-    e.dyn_ref::<web_sys::KeyboardEvent>()
-        .map(|k| k.key())
+    js_sys::Reflect::get(e, &JsValue::from_str("key"))
+        .ok()
+        .and_then(|v| v.as_string())
         .unwrap_or_default()
 }

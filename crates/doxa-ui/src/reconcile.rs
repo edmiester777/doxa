@@ -7,7 +7,7 @@ use std::rc::Rc;
 use futures_util::future::LocalBoxFuture;
 
 use crate::directive::{self, Proto};
-use crate::dom::{Dom, NodeId, NodeRef, Prop};
+use crate::dom::{Dom, Listen, NodeId, NodeRef, Prop};
 use crate::portal::{PortalNode, PortalTarget};
 use crate::runtime::{self, Cancel, Instance};
 use crate::view::{ComponentNode, Element, Handler, Key, Node};
@@ -39,7 +39,7 @@ pub(crate) struct MountedElement {
     key: Option<Key>,
     attrs: Vec<(&'static str, Option<String>)>,
     props: Vec<(&'static str, Prop)>,
-    events: Vec<(&'static str, Rc<RefCell<Handler>>)>,
+    events: Vec<(&'static str, Listen, Rc<RefCell<Handler>>)>,
     inner_html: Option<String>,
     children: Vec<Mounted>,
     directives: Vec<directive::Live>,
@@ -366,7 +366,7 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
     let events = e
         .events
         .iter()
-        .map(|(name, h)| (*name, listen(dom, node, name, h.clone())))
+        .map(|(name, o, h)| (*name, *o, listen(dom, node, name, *o, h.clone())))
         .collect();
     let mut children = Vec::new();
     match &e.inner_html {
@@ -404,12 +404,19 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
     }
 }
 
-fn listen(dom: &dyn Dom, node: NodeId, event: &str, handler: Handler) -> Rc<RefCell<Handler>> {
+fn listen(
+    dom: &dyn Dom,
+    node: NodeId,
+    event: &str,
+    opts: Listen,
+    handler: Handler,
+) -> Rc<RefCell<Handler>> {
     let cell = Rc::new(RefCell::new(handler));
     let current = cell.clone();
     dom.listen(
         node,
         event,
+        opts,
         Rc::new(move |ev| {
             let h = current.borrow().clone();
             h(ev);
@@ -493,14 +500,16 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
     }
     m.props = e.props.clone();
 
-    for (name, h) in &e.events {
-        match m.events.iter().find(|(n, _)| n == name) {
-            Some((_, cell)) => *cell.borrow_mut() = h.clone(),
-            None => m.events.push((name, listen(dom, node, name, h.clone()))),
+    for (name, o, h) in &e.events {
+        match m.events.iter().find(|(n, mo, _)| n == name && mo == o) {
+            Some((.., cell)) => *cell.borrow_mut() = h.clone(),
+            None => m
+                .events
+                .push((name, *o, listen(dom, node, name, *o, h.clone()))),
         }
     }
-    for (name, cell) in &m.events {
-        if !e.events.iter().any(|(n, _)| n == name) {
+    for (name, o, cell) in &m.events {
+        if !e.events.iter().any(|(n, eo, _)| n == name && eo == o) {
             *cell.borrow_mut() = Rc::new(|_| {});
         }
     }

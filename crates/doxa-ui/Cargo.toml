@@ -17,17 +17,17 @@ doxa-wire = { workspace = true }
 doxa-ui-macros = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 serde = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 
 [features]
 # `#[react]`: React components rendered as portals of one shared root.
-react = ["dep:serde_json"]
+react = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Comment", "Event", "EventTarget", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "KeyboardEvent", "MouseEvent", "History", "Location", "PopStateEvent", "CssStyleDeclaration", "NodeList", "DomRect"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Comment", "Event", "EventTarget", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "KeyboardEvent", "MouseEvent", "History", "Location", "PopStateEvent", "CssStyleDeclaration", "NodeList", "DomRect", "AddEventListenerOptions", "ResizeObserver", "IntersectionObserver", "MediaQueryList", "Storage", "BroadcastChannel", "MessageEvent", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator"] }
 
 [dev-dependencies]
 # Path-only, so publishing strips it.

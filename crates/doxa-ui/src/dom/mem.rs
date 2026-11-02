@@ -4,7 +4,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::{Dom, Event, EventInner, MemEvent, NodeId, Prop};
+use super::{
+    Dom, Event, EventInner, Global, Listen, MemEvent, NodeId, Observe, Observed, Prop, Rect,
+};
 
 enum Kind {
     Element {
@@ -23,7 +25,21 @@ struct MemNode {
     kind: Kind,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
-    listeners: Vec<(String, Listener)>,
+    listeners: Vec<(String, Listen, Listener)>,
+}
+
+enum Watch {
+    Global(Global, String, Listen, Listener),
+    Observer(NodeId, Observe, Rc<dyn Fn(Observed)>),
+    Media(String, Rc<dyn Fn(bool)>),
+}
+
+#[derive(Default)]
+struct World {
+    next: u32,
+    watches: HashMap<u32, Watch>,
+    media: HashMap<String, bool>,
+    storage: HashMap<String, String>,
 }
 
 /// An in-memory [`Dom`]. Clone it to keep a handle after mounting.
@@ -31,15 +47,141 @@ struct MemNode {
 pub struct MemDom {
     nodes: Rc<RefCell<HashMap<NodeId, MemNode>>>,
     next: Rc<RefCell<NodeId>>,
+    world: Rc<RefCell<World>>,
 }
 
 impl MemDom {
-    /// An empty document with a `<body>` root.
+    /// An empty document with a `<body>` root, on a manual clock (see [`MemDom::advance`]).
     pub fn new() -> Self {
         let dom = Self::default();
         let body = dom.create_element("body", None);
         debug_assert_eq!(body, 0);
+        doxa_client::clock::manual();
         dom
+    }
+
+    /// Move this thread's clock forward, firing each timer due on the way.
+    pub fn advance(&self, d: std::time::Duration) {
+        doxa_client::clock::manual().advance(d);
+    }
+
+    /// Fire `event` at the window, as `window_event` hears it.
+    pub fn dispatch_window(&self, event: &str, detail: MemEvent) -> bool {
+        self.dispatch_global(Global::Window, event, detail)
+    }
+
+    /// Fire `event` at the document, as `document_event` hears it.
+    pub fn dispatch_document(&self, event: &str, detail: MemEvent) -> bool {
+        self.dispatch_global(Global::Document, event, detail)
+    }
+
+    fn dispatch_global(&self, target: Global, event: &str, detail: MemEvent) -> bool {
+        let hit: Vec<(u32, Listen, Listener)> = self
+            .world
+            .borrow()
+            .watches
+            .iter()
+            .filter_map(|(id, w)| match w {
+                Watch::Global(t, e, o, h) if *t == target && e == event => {
+                    Some((*id, *o, h.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let prevented = Rc::new(Cell::new(false));
+        for (id, opts, h) in hit {
+            if opts.once {
+                self.stop(id);
+            }
+            h(Event {
+                inner: EventInner::Mem(detail.clone(), prevented.clone()),
+            });
+        }
+        !prevented.get()
+    }
+
+    /// Report a new box for `node` to its resize observers.
+    pub fn resize(&self, node: NodeId, rect: Rect) {
+        self.notify(
+            node,
+            Observe::Resize,
+            Observed {
+                rect,
+                intersecting: false,
+            },
+        );
+    }
+
+    /// Report `node` entering or leaving the viewport to its intersection observers.
+    pub fn intersect(&self, node: NodeId, intersecting: bool) {
+        self.notify(
+            node,
+            Observe::Intersection,
+            Observed {
+                rect: Rect::default(),
+                intersecting,
+            },
+        );
+    }
+
+    fn notify(&self, node: NodeId, what: Observe, seen: Observed) {
+        let hit: Vec<_> = self
+            .world
+            .borrow()
+            .watches
+            .values()
+            .filter_map(|w| match w {
+                Watch::Observer(n, k, f) if *n == node && *k == what => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        hit.iter().for_each(|f| f(seen));
+    }
+
+    /// Make `query` match or not, telling its watchers.
+    pub fn set_media(&self, query: &str, matches: bool) {
+        self.world
+            .borrow_mut()
+            .media
+            .insert(query.to_owned(), matches);
+        let hit: Vec<_> = self
+            .world
+            .borrow()
+            .watches
+            .values()
+            .filter_map(|w| match w {
+                Watch::Media(q, f) if q == query => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        hit.iter().for_each(|f| f(matches));
+    }
+
+    /// A `localStorage` value.
+    pub fn storage(&self, key: &str) -> Option<String> {
+        self.storage_get(key)
+    }
+
+    /// Change a `localStorage` value as another tab would, firing `storage` at the window.
+    pub fn store_elsewhere(&self, key: &str, value: Option<&str>) {
+        self.storage_set(key, value);
+        self.dispatch_window(
+            "storage",
+            MemEvent {
+                key: key.to_owned(),
+                ..MemEvent::default()
+            },
+        );
+    }
+
+    /// The last thing `clipboard::write` wrote on this thread.
+    pub fn clipboard(&self) -> Option<crate::browser::clipboard::Clip> {
+        crate::browser::mem::clipboard()
+    }
+
+    /// Every `Download` passed to `save` on this thread, oldest first, draining them.
+    pub fn downloads(&self) -> Vec<doxa_client::Download> {
+        crate::browser::mem::downloads()
     }
 
     /// Let every node a directive holds in the document finish leaving now.
@@ -141,17 +283,21 @@ impl MemDom {
 
     /// Fire `event` at `node`, as a user would. Like the browser's
     /// `dispatchEvent`, false if a handler called `prevent_default`.
-    pub fn dispatch(&self, node: NodeId, event: &str, detail: MemEvent) -> bool {
+    pub fn dispatch(&self, node: NodeId, event: &str, mut detail: MemEvent) -> bool {
+        detail.target.get_or_insert(node);
         let handlers: Vec<_> = self
             .nodes
-            .borrow()
-            .get(&node)
+            .borrow_mut()
+            .get_mut(&node)
             .map(|n| {
-                n.listeners
+                let hit = n
+                    .listeners
                     .iter()
-                    .filter(|(e, _)| e == event)
-                    .map(|(_, h)| h.clone())
-                    .collect()
+                    .filter(|(e, ..)| e == event)
+                    .map(|(.., h)| h.clone())
+                    .collect();
+                n.listeners.retain(|(e, o, _)| !(o.once && e == event));
+                hit
             })
             .unwrap_or_default();
         let prevented = Rc::new(Cell::new(false));
@@ -178,6 +324,14 @@ impl MemDom {
                 ..MemEvent::default()
             },
         )
+    }
+
+    fn watch(&self, w: Watch) -> u32 {
+        let mut world = self.world.borrow_mut();
+        world.next += 1;
+        let id = world.next;
+        world.watches.insert(id, w);
+        id
     }
 
     fn detach(&self, node: NodeId) {
@@ -353,9 +507,9 @@ impl Dom for MemDom {
         siblings.get(at + 1).copied()
     }
 
-    fn listen(&self, node: NodeId, event: &str, handler: Rc<dyn Fn(Event)>) {
+    fn listen(&self, node: NodeId, event: &str, opts: Listen, handler: Rc<dyn Fn(Event)>) {
         if let Some(n) = self.nodes.borrow_mut().get_mut(&node) {
-            n.listeners.push((event.to_owned(), handler));
+            n.listeners.push((event.to_owned(), opts, handler));
         }
     }
 
@@ -364,5 +518,49 @@ impl Dom for MemDom {
             "body" => Some(0),
             s => s.strip_prefix('#').and_then(|id| self.find("id", id)),
         }
+    }
+
+    fn listen_global(
+        &self,
+        target: Global,
+        event: &str,
+        opts: Listen,
+        handler: Rc<dyn Fn(Event)>,
+    ) -> u32 {
+        self.watch(Watch::Global(target, event.to_owned(), opts, handler))
+    }
+
+    fn observe(&self, node: NodeId, what: Observe, f: Rc<dyn Fn(Observed)>) -> u32 {
+        self.watch(Watch::Observer(node, what, f))
+    }
+
+    fn media_matches(&self, query: &str) -> bool {
+        self.world
+            .borrow()
+            .media
+            .get(query)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn watch_media(&self, query: &str, f: Rc<dyn Fn(bool)>) -> u32 {
+        self.watch(Watch::Media(query.to_owned(), f))
+    }
+
+    fn stop(&self, id: u32) {
+        let gone = self.world.borrow_mut().watches.remove(&id);
+        drop(gone);
+    }
+
+    fn storage_get(&self, key: &str) -> Option<String> {
+        self.world.borrow().storage.get(key).cloned()
+    }
+
+    fn storage_set(&self, key: &str, value: Option<&str>) {
+        let mut w = self.world.borrow_mut();
+        match value {
+            Some(v) => w.storage.insert(key.to_owned(), v.to_owned()),
+            None => w.storage.remove(key),
+        };
     }
 }

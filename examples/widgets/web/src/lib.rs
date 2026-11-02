@@ -105,12 +105,17 @@ fn RenameForm(widget: Widget) -> View {
     }
 }
 
+/// Remembers the choice across visits and tabs.
 #[component]
 fn ThemeToggle() -> View {
-    let dark = theme() == Some(DARK);
+    let dark = stored::<bool>("dark", || false);
+    effect(&dark.get(), async |&d| {
+        set_theme(if d { DARK } else { LIGHT });
+        Ok(())
+    });
     view! {
-        <button class="theme" on:click={move |_| set_theme(if dark { LIGHT } else { DARK })}>
-            {if dark { "Light" } else { "Dark" }}
+        <button class="theme" on:click={move |_| dark.update(|d| *d = !*d)}>
+            {if dark.get() { "Light" } else { "Dark" }}
         </button>
     }
 }

@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::component::{Component, RenderFuture};
 use crate::directive::{Directive, Lifecycle, Proto};
-use crate::dom::{Event, NodeRef, Phase, Prop};
+use crate::dom::{Event, Listen, NodeRef, Phase, Prop};
 
 /// What a component renders. Build one with `view!`.
 #[derive(Clone, Default)]
@@ -47,7 +47,7 @@ pub struct Element {
     pub(crate) key: Option<Key>,
     pub(crate) attrs: Vec<(&'static str, Option<String>)>,
     pub(crate) props: Vec<(&'static str, Prop)>,
-    pub(crate) events: Vec<(&'static str, Handler)>,
+    pub(crate) events: Vec<(&'static str, Listen, Handler)>,
     pub(crate) children: Vec<Node>,
     pub(crate) inner_html: Option<String>,
     pub(crate) directives: Vec<Rc<dyn Proto>>,
@@ -94,13 +94,31 @@ impl Element {
     }
 
     /// Handle an event, as `on:click={…}`.
-    pub fn on(mut self, event: &'static str, handler: impl Fn(Event) + 'static) -> Self {
-        self.events.push((event, Rc::new(handler)));
+    pub fn on(self, event: &'static str, handler: impl Fn(Event) + 'static) -> Self {
+        self.on_with(event, Listen::default(), handler)
+    }
+
+    /// [`on`](Self::on) with listener options, as `on:scroll.passive={…}`.
+    pub fn on_with(
+        mut self,
+        event: &'static str,
+        opts: Listen,
+        handler: impl Fn(Event) + 'static,
+    ) -> Self {
+        self.events.push((event, opts, Rc::new(handler)));
         self
     }
 
     /// Handle an event with an async closure; an `Err` goes to the nearest `<Catch>`.
-    pub fn on_async<F>(mut self, event: &'static str, handler: F) -> Self
+    pub fn on_async<F>(self, event: &'static str, handler: F) -> Self
+    where
+        F: AsyncFn(Event) -> crate::Result<()> + 'static,
+    {
+        self.on_async_with(event, Listen::default(), handler)
+    }
+
+    /// [`on_async`](Self::on_async) with listener options.
+    pub fn on_async_with<F>(mut self, event: &'static str, opts: Listen, handler: F) -> Self
     where
         F: AsyncFn(Event) -> crate::Result<()> + 'static,
     {
@@ -108,6 +126,7 @@ impl Element {
         let owner = crate::runtime::current_instance();
         self.events.push((
             event,
+            opts,
             Rc::new(move |ev| {
                 let handler = handler.clone();
                 let owner = owner.clone();

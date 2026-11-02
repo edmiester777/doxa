@@ -219,6 +219,23 @@ pub mod directive_diagnostics {}
 #[doc(hidden)]
 pub mod portal_diagnostics {}
 
+/// A listener takes `capture`, `passive` and `once` modifiers:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// let _ = view! { <div on:scroll.passive={|_| ()} on:click.once.capture={|_| ()}/> };
+/// ```
+///
+/// Any other is "unknown `on:` modifier `stop`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// let _ = view! { <div on:click.stop={|_| ()}/> };
+/// ```
+#[cfg(feature = "ui")]
+#[doc(hidden)]
+pub mod listener_diagnostics {}
+
 /// A route that returns JSON is called from the browser:
 ///
 /// ```

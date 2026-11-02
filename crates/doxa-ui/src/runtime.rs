@@ -118,6 +118,7 @@ impl Instance {
     }
 
     /// The id of the root this instance is mounted under.
+    #[cfg_attr(not(feature = "react"), allow(dead_code))]
     pub fn root_id(self: &Rc<Self>) -> u64 {
         self.ancestors().last().map_or(self.id, |r| r.id)
     }
