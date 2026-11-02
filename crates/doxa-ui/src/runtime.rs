@@ -117,6 +117,11 @@ impl Instance {
         self.parent.as_ref().and_then(Weak::upgrade)
     }
 
+    /// The id of the root this instance is mounted under.
+    pub fn root_id(self: &Rc<Self>) -> u64 {
+        self.ancestors().last().map_or(self.id, |r| r.id)
+    }
+
     fn ancestors(self: &Rc<Self>) -> impl Iterator<Item = Rc<Instance>> {
         std::iter::successors(Some(self.clone()), |i| i.parent())
     }
@@ -159,6 +164,20 @@ thread_local! {
 
 pub(crate) fn set_dom(dom: Rc<dyn Dom>) {
     DOM.with(|d| *d.borrow_mut() = Some(dom));
+}
+
+/// Whether `dom` is the document roots on this thread render into.
+pub(crate) fn is_dom(dom: &Rc<dyn Dom>) -> bool {
+    DOM.with(|d| {
+        d.borrow()
+            .as_ref()
+            .is_some_and(|c| std::ptr::addr_eq(Rc::as_ptr(c), Rc::as_ptr(dom)))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn try_dom() -> Option<Rc<dyn Dom>> {
+    DOM.with(|d| d.borrow().clone())
 }
 
 pub(crate) fn dom() -> Rc<dyn Dom> {

@@ -101,6 +101,8 @@ pub struct Mount<'a> {
     pub id: u32,
     /// The nearest island around it in the doxa tree, whose React context it gets.
     pub parent: Option<u32>,
+    /// The [root](crate::RootHandle::id) it is mounted under.
+    pub root: u64,
     /// The element to render into.
     pub host: NodeRef,
     /// Its module and export.
@@ -170,6 +172,7 @@ type Slot = Rc<RefCell<EventFn>>;
 struct Live<P> {
     id: u32,
     parent: Option<u32>,
+    root: u64,
     mounted: Cell<bool>,
     children: Cell<Option<NodeRef>>,
     shown: RefCell<Option<P>>,
@@ -207,6 +210,7 @@ impl<P: IslandProps> Live<P> {
                 bridge().mount(Mount {
                     id: self.id,
                     parent: self.parent,
+                    root: self.root,
                     host,
                     island: &P::ISLAND,
                     props: &json(props),
@@ -249,9 +253,11 @@ fn json<P: IslandProps>(props: &P) -> String {
 /// The render of a `#[react]` component: an empty host the bridge renders into.
 #[doc(hidden)]
 pub fn render<P: IslandProps>(props: P) -> RenderFuture {
+    let root = crate::runtime::current_or_panic("island").root_id();
     let (inst, _, live) = crate::hooks::slot("island", || Live::<P> {
         id: next_id(),
         parent: crate::hooks::try_context::<Parent>().map(|p| p.0),
+        root,
         mounted: Cell::new(false),
         children: Cell::new(None),
         shown: RefCell::new(None),

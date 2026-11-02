@@ -40,6 +40,7 @@ struct Calls {
     hosts: Vec<u32>,
     children: Vec<Option<u32>>,
     parents: Vec<(&'static str, Option<u32>)>,
+    roots: Vec<u64>,
     events: HashMap<u32, Vec<(&'static str, EventFn)>>,
 }
 
@@ -64,6 +65,7 @@ impl Bridge for Fake {
         c.hosts.push(m.host.id());
         c.children.push(m.children.map(NodeRef::id));
         c.parents.push((m.island.name, m.parent));
+        c.roots.push(m.root);
         c.events.insert(m.id, m.events);
     }
 
@@ -125,7 +127,9 @@ fn mount() -> (MemDom, Fake) {
     let fake = Fake::default();
     doxa::ui::react::set_bridge(fake.clone());
     let dom = MemDom::new();
-    App::new(|| view! { <Page/> }).mount_on(Rc::new(dom.clone()), dom.body());
+    App::new(|| view! { <Page/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     (dom, fake)
 }
 
@@ -208,7 +212,8 @@ fn an_optional_prop_is_left_out_only_when_none() {
             />
         }
     })
-    .mount_on(Rc::new(dom.clone()), dom.body());
+    .mount_on(Rc::new(dom.clone()), dom.body())
+    .keep();
     assert_eq!(
         fake.log(),
         [r#"mount Editor 1 {"aria-label":"l","children":"","readOnly":true,"value":"v"}"#]
@@ -230,7 +235,9 @@ fn view_children_render_into_a_host_the_island_is_given() {
     let fake = Fake::default();
     doxa::ui::react::set_bridge(fake.clone());
     let dom = MemDom::new();
-    App::new(|| view! { <Confirm/> }).mount_on(Rc::new(dom.clone()), dom.body());
+    App::new(|| view! { <Confirm/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     assert_eq!(fake.log(), [r#"mount Dialog 1 {"title":"Sure?"}"#]);
 
     let host = dom
@@ -277,7 +284,8 @@ fn a_nested_island_mounts_inside_the_island_around_it() {
             <Badge label="outer"/>
         }
     })
-    .mount_on(Rc::new(dom.clone()), dom.body());
+    .mount_on(Rc::new(dom.clone()), dom.body())
+    .keep();
     let mut parents = fake.0.borrow().parents.clone();
     parents.sort();
     assert_eq!(
@@ -285,4 +293,22 @@ fn a_nested_island_mounts_inside_the_island_around_it() {
         [("Badge", None), ("Badge", Some(1)), ("ThemeProvider", None)],
         "the badge under the provider, through a doxa component, is its child"
     );
+}
+
+#[test]
+fn each_island_names_the_root_it_is_in() {
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    let doc: Rc<dyn doxa::ui::dom::Dom> = Rc::new(dom.clone());
+    let a =
+        App::new(|| view! { <Monaco value={"a".to_string()}/> }).mount_on(doc.clone(), dom.body());
+    let b = App::embedded(|| view! { <Monaco value={"b".to_string()}/> }).mount_on(doc, dom.body());
+    assert_eq!(fake.0.borrow().roots, [a.id(), b.id()]);
+    drop(b);
+    assert!(
+        fake.0.borrow().log.last().unwrap().starts_with("unmount"),
+        "dropping a root unmounts its islands"
+    );
+    a.keep();
 }

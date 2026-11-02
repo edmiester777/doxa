@@ -429,6 +429,10 @@ mod web {
     }
 
     pub fn listen_popstate() {
+        thread_local!(static LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+        if LISTENING.with(|l| l.replace(true)) {
+            return;
+        }
         let Some(w) = web_sys::window() else { return };
         let cb = Closure::<dyn Fn()>::new(|| super::set_location(current()));
         let _ = w.add_event_listener_with_callback("popstate", cb.as_ref().unchecked_ref());

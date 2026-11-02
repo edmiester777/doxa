@@ -1,4 +1,5 @@
-//! Themes: named sets of CSS custom properties on the document root.
+//! Themes: named sets of CSS custom properties on the document root, or an embedded root's
+//! own element.
 
 use std::cell::{Cell, RefCell};
 
@@ -32,26 +33,62 @@ struct ThemeCell {
 
 thread_local! {
     static THEME: RefCell<ThemeCell> = const { RefCell::new(ThemeCell { current: None, readers: Readers::new() }) };
-    static HOST: Cell<Option<NodeId>> = const { Cell::new(None) };
-    /// The theme whose variables are on the host now.
+    /// Each element a root put the theme on, and how many roots share it.
+    static HOSTS: RefCell<Vec<(NodeId, usize)>> = const { RefCell::new(Vec::new()) };
+    /// The theme whose variables are on the hosts now.
     static APPLIED: Cell<Option<Theme>> = const { Cell::new(None) };
 }
 
-pub(crate) fn set_host(node: NodeId) {
-    HOST.with(|h| h.set(Some(node)));
-    APPLIED.with(|a| a.set(None));
-    if let Some(t) = THEME.with(|t| t.borrow().current) {
-        apply(t);
+pub(crate) fn add_host(node: NodeId) {
+    let new = HOSTS.with(|h| {
+        let mut h = h.borrow_mut();
+        match h.iter_mut().find(|(n, _)| *n == node) {
+            Some((_, count)) => {
+                *count += 1;
+                false
+            }
+            None => {
+                h.push((node, 1));
+                true
+            }
+        }
+    });
+    if let (true, Some(t)) = (new, THEME.with(|t| t.borrow().current)) {
+        APPLIED.with(|a| a.set(Some(t)));
+        write(node, None, t);
     }
 }
 
+pub(crate) fn remove_host(node: NodeId) {
+    HOSTS.with(|h| {
+        let mut h = h.borrow_mut();
+        if let Some(at) = h.iter().position(|(n, _)| *n == node) {
+            h[at].1 -= 1;
+            if h[at].1 == 0 {
+                h.remove(at);
+            }
+        }
+    });
+}
+
+/// Forget every host, for a new document.
+pub(crate) fn clear_hosts() {
+    HOSTS.with(|h| h.borrow_mut().clear());
+    APPLIED.with(|a| a.set(None));
+}
+
 fn apply(theme: Theme) {
-    let Some(host) = HOST.with(Cell::get) else {
-        return;
-    };
+    let old = APPLIED.with(|a| a.replace(Some(theme)));
+    let hosts: Vec<NodeId> = HOSTS.with(|h| h.borrow().iter().map(|(n, _)| *n).collect());
+    for host in hosts {
+        write(host, old, theme);
+    }
+}
+
+fn write(host: NodeId, old: Option<Theme>, theme: Theme) {
     let dom = runtime::dom();
     dom.set_attr(host, "data-theme", theme.name);
-    if let Some(old) = APPLIED.with(|a| a.replace(Some(theme))) {
+    if let Some(old) = old {
         for (k, _) in old.vars {
             if !theme.vars.iter().any(|(n, _)| n == k) {
                 dom.set_style(host, k, None);

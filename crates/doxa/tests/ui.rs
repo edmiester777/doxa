@@ -8,7 +8,9 @@ use doxa::ui::prelude::*;
 
 fn mount<V: IntoView>(root: impl Fn() -> V + 'static) -> MemDom {
     let dom = MemDom::new();
-    App::new(root).mount_on(Rc::new(dom.clone()), dom.body());
+    App::new(root)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     dom
 }
 
@@ -213,7 +215,9 @@ fn Tracked() -> View {
 fn lifecycle_sees_the_node_attached_until_it_is_removed() {
     let dom = MemDom::new();
     DOC.with(|d| *d.borrow_mut() = Some(dom.clone()));
-    App::new(|| view! { <Tracked/> }).mount_on(Rc::new(dom.clone()), dom.body());
+    App::new(|| view! { <Tracked/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     dom.click(dom.find("id", "n").unwrap());
     settle();
     dom.click(dom.find("id", "off").unwrap());
@@ -238,7 +242,9 @@ fn Gizmo(name: String) -> View {
 #[test]
 fn a_page_remounts_when_its_params_change() {
     let dom = MemDom::new();
-    App::new(Router::new().page::<Gizmo>()).mount_on(Rc::new(dom.clone()), dom.body());
+    App::new(Router::new().page::<Gizmo>())
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     navigate("/gizmos/cog");
     settle();
     dom.click(dom.find_tag("button").unwrap());
@@ -297,7 +303,9 @@ fn shop() -> MemDom {
                 .layout::<Admin>(|r| r.page::<Users>())
         })
         .not_found(|| view! { <p>"no such page"</p> });
-    App::new(router).mount_on(Rc::new(dom.clone()), dom.body());
+    App::new(router)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     dom
 }
 
@@ -389,7 +397,8 @@ fn a_slot_shows_each_fill_once_however_often_apps_mount() {
             }
         })
         .plugin(Sidebar)
-        .mount_on(Rc::new(dom.clone()), dom.body());
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
         assert_eq!(dom.text(dom.find_tag("aside").unwrap()), "x");
     }
 }
@@ -464,7 +473,9 @@ fn mount_with(mock: &MockTransport, root: impl Fn() -> View + 'static) -> MemDom
     service("")
         .layers()
         .push(doxa::client::layer::transport(mock.clone()));
-    App::new(root).mount_on(Rc::new(dom.clone()), dom.body());
+    App::new(root)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     dom
 }
 
@@ -677,7 +688,8 @@ fn a_modified_link_click_is_left_to_the_browser() {
     use doxa::ui::dom::MemEvent;
     let dom = MemDom::new();
     App::new(Router::new().page::<Plain>().page::<Target>())
-        .mount_on(Rc::new(dom.clone()), dom.body());
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     navigate("/plain");
     settle();
     let a = dom.find_tag("a").unwrap();
@@ -722,7 +734,8 @@ fn a_theme_sets_only_its_own_variables() {
     doxa::ui::dom::Dom::set_attr(&dom, dom.body(), "style", "color: red;");
     App::new(View::empty)
         .theme(LIGHT)
-        .mount_on(Rc::new(dom.clone()), dom.body());
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     assert_eq!(
         dom.attr(dom.body(), "style").as_deref(),
         Some("color: red; --bg: white; --fg: black;")
@@ -731,5 +744,74 @@ fn a_theme_sets_only_its_own_variables() {
     assert_eq!(
         dom.attr(dom.body(), "style").as_deref(),
         Some("color: red; --bg: grey;")
+    );
+}
+
+thread_local! {
+    static STOPPED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct OnStop;
+
+impl Drop for OnStop {
+    fn drop(&mut self) {
+        STOPPED.with(|s| s.set(s.get() + 1));
+    }
+}
+
+#[component]
+fn Ticking(name: &'static str) -> View {
+    effect((), async |_: &()| {
+        let _running = OnStop;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    view! { <p id={name}>{name}</p> }
+}
+
+fn element(dom: &MemDom, id: &str) -> doxa::ui::dom::NodeId {
+    use doxa::ui::dom::Dom;
+    let el = dom.create_element("div", None);
+    dom.set_attr(el, "id", id);
+    dom.insert(dom.body(), el, None);
+    el
+}
+
+#[test]
+fn two_roots_live_side_by_side_and_each_unmounts_alone() {
+    let dom = MemDom::new();
+    let doc: Rc<dyn doxa::ui::dom::Dom> = Rc::new(dom.clone());
+    let (a, b) = (element(&dom, "a"), element(&dom, "b"));
+    let first = App::new(|| view! { <Ticking name="one"/> }).mount_on(doc.clone(), a);
+    let second = App::embedded(|| view! { <Ticking name="two"/> }).mount_on(doc, b);
+    settle();
+    assert_ne!(first.id(), second.id());
+    assert!(dom.find("id", "one").is_some() && dom.find("id", "two").is_some());
+
+    drop(first);
+    settle();
+    assert!(dom.find("id", "one").is_none(), "its nodes are gone");
+    assert_eq!(STOPPED.with(|s| s.get()), 1, "its effects stopped");
+    assert!(
+        dom.find("id", "two").is_some(),
+        "the other root is untouched"
+    );
+    second.keep();
+}
+
+#[test]
+fn an_embedded_root_keeps_its_theme_on_its_own_element() {
+    let dom = MemDom::new();
+    let doc: Rc<dyn doxa::ui::dom::Dom> = Rc::new(dom.clone());
+    let widget = element(&dom, "widget");
+    let root = App::embedded(View::empty).theme(DIM).mount_on(doc, widget);
+    assert_eq!(dom.attr(widget, "data-theme").as_deref(), Some("dim"));
+    assert_eq!(dom.attr(dom.body(), "data-theme"), None);
+    drop(root);
+    set_theme(LIGHT);
+    assert_eq!(
+        dom.attr(widget, "data-theme").as_deref(),
+        Some("dim"),
+        "an unmounted root's element is no longer themed"
     );
 }

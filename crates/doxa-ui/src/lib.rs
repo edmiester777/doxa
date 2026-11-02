@@ -19,7 +19,7 @@ mod runtime;
 mod theme;
 mod view;
 
-pub use app::{App, IntoRoot};
+pub use app::{App, IntoRoot, RootHandle};
 pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
 pub use can::{Can, CanBuilder, CanProps};
 pub use component::{Component, IntoRender, RenderFuture, Set, Unset};

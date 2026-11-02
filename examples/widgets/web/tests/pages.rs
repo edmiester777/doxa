@@ -29,7 +29,9 @@ fn serve(role: &str) {
 fn mount(role: &str) -> MemDom {
     serve(role);
     let dom = MemDom::new();
-    widgets_web::app().mount_on(Rc::new(dom.clone()), dom.body());
+    widgets_web::app()
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
     dom
 }
 
@@ -85,7 +87,8 @@ async fn a_renamed_can_takes_its_probe_directly() {
                 </Allowed>
             }
         })
-        .mount_on(Rc::new(dom.clone()), dom.body());
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
         settle().await;
         assert_eq!(dom.find("class", "edit").is_some(), shown, "{role}");
     }

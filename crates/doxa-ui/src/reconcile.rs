@@ -456,6 +456,16 @@ fn run_deferred() {
     }
 }
 
+/// Unmount a whole root: stop its components and remove its nodes.
+pub(crate) fn unmount_root(inst: &Rc<Instance>) {
+    let dom = runtime::dom();
+    inst.kill();
+    let region = std::mem::take(&mut *inst.region.borrow_mut());
+    for m in region {
+        unmount(&*dom, m);
+    }
+}
+
 fn unmount(dom: &dyn Dom, m: Mounted) {
     match m {
         Mounted::Anchor(n) | Mounted::Text { node: n, .. } => dom.remove(n),

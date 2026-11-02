@@ -1,11 +1,14 @@
-//! `App`: global providers, theme and plugins, mounted at one element.
+//! `App`: providers, theme and plugins, mounted at an element. A page may hold several roots;
+//! they share one document per thread.
 
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::component::{Component, RenderFuture};
 use crate::dom::{Dom, NodeId};
 use crate::plugin::{Fills, Plugin};
+use crate::reconcile;
 use crate::router::{self, Router};
 use crate::runtime::{self, Instance};
 use crate::theme::{self, Theme};
@@ -26,6 +29,7 @@ pub struct App {
     provided: Vec<(TypeId, Rc<dyn Any>)>,
     theme: Option<Theme>,
     plugins: Vec<Box<dyn Plugin>>,
+    embedded: bool,
 }
 
 /// What an app renders: a [`Router`], or a function returning its view.
@@ -57,6 +61,15 @@ impl App {
             provided: Vec::new(),
             theme: None,
             plugins: Vec::new(),
+            embedded: false,
+        }
+    }
+
+    /// An app embedded in a page it doesn't own: no router, and its theme on its own element.
+    pub fn embedded<V: IntoView>(root: impl Fn() -> V + 'static) -> Self {
+        Self {
+            embedded: true,
+            ..Self::new(root)
         }
     }
 
@@ -81,14 +94,15 @@ impl App {
 
     /// Mount into the page element matching `selector`. Only a browser has a page;
     /// natively, mount a [`MemDom`](crate::dom::MemDom) with [`App::mount_on`].
+    /// The root stays mounted for the page's life.
     pub fn mount(self, selector: &str) {
         #[cfg(target_arch = "wasm32")]
         {
-            let dom = Rc::new(crate::dom::WebDom::new());
+            let dom = runtime::try_dom().unwrap_or_else(|| Rc::new(crate::dom::WebDom::new()));
             let at = dom
                 .query(selector)
                 .unwrap_or_else(|| panic!("no element matches `{selector}`"));
-            self.mount_on(dom, at);
+            self.mount_on(dom, at).keep();
         }
         #[cfg(not(target_arch = "wasm32"))]
         panic!(
@@ -96,10 +110,23 @@ impl App {
         );
     }
 
-    /// Mount at `at` in `dom`; tests pass a [`MemDom`](crate::dom::MemDom).
-    pub fn mount_on(self, dom: Rc<dyn Dom>, at: NodeId) {
-        runtime::set_dom(dom.clone());
-        theme::set_host(dom.query("html").unwrap_or(at));
+    /// Mount at `at` in `dom`; tests pass a [`MemDom`](crate::dom::MemDom). Mounting on
+    /// another document than the current one first unmounts every root on the old one.
+    pub fn mount_on(self, dom: Rc<dyn Dom>, at: NodeId) -> RootHandle {
+        if !runtime::is_dom(&dom) {
+            let old: Vec<_> = ROOTS.with(|r| r.borrow_mut().drain(..).collect());
+            for (inst, _) in old {
+                reconcile::unmount_root(&inst);
+            }
+            runtime::set_dom(dom.clone());
+            theme::clear_hosts();
+        }
+        let host = if self.embedded {
+            at
+        } else {
+            dom.query("html").unwrap_or(at)
+        };
+        theme::add_host(host);
         if let Some(t) = self.theme {
             theme::set_theme(t);
         }
@@ -123,13 +150,47 @@ impl App {
             at,
         );
         *inst.contexts.borrow_mut() = provided;
+        let id = inst.id;
+        ROOTS.with(|r| r.borrow_mut().push((inst.clone(), host)));
         runtime::run(&inst);
-        ROOT.with(|r| *r.borrow_mut() = Some(inst));
+        RootHandle { id }
     }
 }
 
 thread_local! {
-    static ROOT: std::cell::RefCell<Option<Rc<Instance>>> = const { std::cell::RefCell::new(None) };
+    static ROOTS: RefCell<Vec<(Rc<Instance>, NodeId)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A mounted root. Dropping it unmounts the root: its effects stop and its nodes go.
+#[must_use = "dropping a RootHandle unmounts its root; call `.keep()` to keep it mounted"]
+pub struct RootHandle {
+    id: u64,
+}
+
+impl RootHandle {
+    /// Names this root; each island records the root it is in.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Keep the root mounted for the page's life.
+    pub fn keep(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for RootHandle {
+    fn drop(&mut self) {
+        let found = ROOTS.with(|r| {
+            let mut r = r.borrow_mut();
+            let at = r.iter().position(|(i, _)| i.id == self.id)?;
+            Some(r.remove(at))
+        });
+        if let Some((inst, host)) = found {
+            reconcile::unmount_root(&inst);
+            theme::remove_host(host);
+        }
+    }
 }
 
 struct Root;
