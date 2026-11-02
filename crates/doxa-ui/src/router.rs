@@ -23,6 +23,11 @@ pub trait Page: Component {
     fn load(_props: &Self::Props) -> Option<Prefetch> {
         None
     }
+    /// A `lazy` page's own wasm, fetched with its `load`.
+    #[doc(hidden)]
+    fn chunk() -> Option<Prefetch> {
+        None
+    }
 }
 
 /// The matched path's parameters and query.
@@ -212,7 +217,7 @@ impl Router {
     pub fn page<P: Page>(mut self) -> Self {
         self.entries.push(Entry::Page(P::PATH, |s| {
             let props = P::parse(s)?;
-            let load = P::load(&props);
+            let load = Prefetch::both(P::chunk(), P::load(&props));
             // Keyed by params too, so `/w/a` → `/w/b` remounts rather than keeping a's state.
             let key = (P::PATH, &s.params);
             Some((comp::<P>(props).key(key).into_view(), load))
@@ -236,7 +241,7 @@ impl Router {
             prefix: L::PATH,
             wrap: |s, child| {
                 let props = L::parse(s)?;
-                let load = L::load(&props);
+                let load = Prefetch::both(L::chunk(), L::load(&props));
                 let inner = comp::<L>(props).into_view();
                 let host = comp::<LayoutHost>(HostProps { inner, child });
                 Some((host.key((L::PATH, &s.params)).into_view(), load))

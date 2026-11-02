@@ -9,7 +9,7 @@ use crate::bundle::{
 use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
 use crate::error::{run, Error, IoContext, Result};
-use crate::{bindgen, css, npm};
+use crate::{bindgen, css, npm, split};
 
 /// How to build.
 #[derive(Debug, Clone, Default)]
@@ -36,6 +36,8 @@ pub struct Pipeline {
     npm: npm::Source,
     bundler: Box<dyn Bundler + Send>,
     wasm_file: Option<String>,
+    /// Modules split off the app wasm, as (hashed name, bytes).
+    split_files: Vec<(String, Vec<u8>)>,
     bundle: Option<BundleOutput>,
     stylesheets: Vec<(String, css::Built)>,
 }
@@ -60,6 +62,7 @@ impl Pipeline {
             npm,
             bundler: Box::new(Esbuild::managed()?),
             wasm_file: None,
+            split_files: Vec::new(),
             bundle: None,
             stylesheets: Vec::new(),
         })
@@ -94,7 +97,7 @@ impl Pipeline {
         note(format!("compiling {} to wasm", self.web.name));
         let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
         cmd.args([
-            "build",
+            "rustc",
             "--lib",
             "-p",
             &self.web.name,
@@ -106,6 +109,9 @@ impl Pipeline {
         if self.opts.release {
             cmd.arg("--release");
         }
+        // wasm-split builds its call graph from the relocations and finds functions by name;
+        // only this crate links. Both are stripped from what ships.
+        cmd.args(["--", "-C", "link-arg=--emit-relocs", "-C", "strip=none"]);
         run(
             "cargo",
             &mut cmd,
@@ -126,16 +132,84 @@ impl Pipeline {
             .join(profile)
             .join(format!("{}.wasm", self.web.lib_name));
         let out = self.bindgen_dir();
-        bindgen::generate(&wasm, &out, self.opts.release)?;
+        let original = std::fs::read(&wasm).at(&wasm)?;
+        let splits = split::has_split_points(&original);
+        bindgen::generate(&wasm, &out, self.opts.release, splits)?;
         let app_wasm = out.join("app_bg.wasm");
-        if self.opts.release && !bindgen::wasm_opt(&app_wasm)? {
-            note("wasm-opt not on PATH; skipping it");
+        self.split_files.clear();
+        if splits {
+            self.split(&original, &app_wasm)?;
+        } else {
+            let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
+            let stripped = split::strip_link_sections(&bytes, !self.opts.release);
+            std::fs::write(&app_wasm, stripped).at(&app_wasm)?;
+            if self.opts.release && !bindgen::wasm_opt(&app_wasm)? {
+                note("wasm-opt not on PATH; skipping it");
+            }
         }
         let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
         if self.opts.release {
-            check_budget(bytes.len(), self.web.config.wasm_budget_kb)?;
+            check_budget(
+                "the app wasm",
+                bytes.len(),
+                self.web.config.wasm_budget_kb,
+                "wasm_budget_kb",
+            )?;
         }
         self.wasm_file = Some(dist::hashed_name("app.wasm", &bytes));
+        Ok(())
+    }
+
+    /// Split `app_wasm` in place, optimize each part, and write the `__wasm_split.js` the glue imports.
+    fn split(&mut self, original: &[u8], app_wasm: &Path) -> Result<()> {
+        note("splitting the wasm at its lazy pages");
+        let bindgened = std::fs::read(app_wasm).at(app_wasm)?;
+        let mut out = split::split(original, &bindgened)?;
+        let names = !self.opts.release;
+        out.main = split::strip_link_sections(&out.main, names);
+        for part in out.chunks.iter_mut().chain(out.modules.iter_mut()) {
+            part.bytes = split::strip_link_sections(&part.bytes, names);
+        }
+        std::fs::write(app_wasm, &out.main).at(app_wasm)?;
+        let dir = self.bindgen_dir();
+        let mut skipped = false;
+        for part in out.chunks.iter_mut().chain(out.modules.iter_mut()) {
+            if !self.opts.release {
+                continue;
+            }
+            let path = dir.join(&part.file);
+            std::fs::write(&path, &part.bytes).at(&path)?;
+            skipped |= !bindgen::wasm_opt(&path)?;
+            part.bytes = std::fs::read(&path).at(&path)?;
+            check_budget(
+                &part.file,
+                part.bytes.len(),
+                self.web.config.chunk_budget_kb,
+                "chunk_budget_kb",
+            )?;
+        }
+        if self.opts.release {
+            skipped |= !bindgen::wasm_opt(app_wasm)?;
+        }
+        if skipped {
+            note("wasm-opt not on PATH; skipping it");
+        }
+        let hashed = |p: &split::Part| dist::hashed_name(&p.file, &p.bytes);
+        let js = split::loader_js(&out, hashed);
+        let loader = dir.join("__wasm_split.js");
+        std::fs::write(&loader, js).at(&loader)?;
+        note(format!(
+            "main module: {} KiB",
+            out.main.len().div_ceil(1024)
+        ));
+        for part in out.chunks.into_iter().chain(out.modules) {
+            note(format!(
+                "{}: {} KiB",
+                part.file,
+                part.bytes.len().div_ceil(1024)
+            ));
+            self.split_files.push((hashed(&part), part.bytes));
+        }
         Ok(())
     }
 
@@ -172,7 +246,16 @@ impl Pipeline {
         let entry_dir = self.layout.stage().join("entry");
         std::fs::create_dir_all(&entry_dir).at(&entry_dir)?;
         let entry = entry_dir.join("app.js");
-        std::fs::write(&entry, entry_js(&rewritten, &islands, &wasm_file)).at(&entry)?;
+        std::fs::write(
+            &entry,
+            entry_js(
+                &rewritten,
+                &islands,
+                &wasm_file,
+                !self.split_files.is_empty(),
+            ),
+        )
+        .at(&entry)?;
         let out_dir = self.esbuild_dir();
         self.bundle = Some(self.bundler.bundle(&BundleRequest {
             entry: &entry,
@@ -222,6 +305,9 @@ impl Pipeline {
             wasm_file,
             std::fs::read(&app_wasm).at(&app_wasm)?,
         );
+        for (hashed, bytes) in &self.split_files {
+            d.add(hashed, hashed, bytes.clone());
+        }
 
         for (logical, built) in &self.stylesheets {
             for (original, hashed, bytes) in &built.assets {
@@ -291,7 +377,7 @@ impl Pipeline {
     }
 }
 
-fn check_budget(bytes: usize, budget_kb: Option<u64>) -> Result<()> {
+fn check_budget(what: &str, bytes: usize, budget_kb: Option<u64>, key: &str) -> Result<()> {
     let Some(budget) = budget_kb else {
         return Ok(());
     };
@@ -300,8 +386,8 @@ fn check_budget(bytes: usize, budget_kb: Option<u64>) -> Result<()> {
         return Ok(());
     }
     Err(Error::config(
-        format!("the app wasm is {kb} KiB, over its {budget} KiB budget"),
-        "shrink it (put wasm-opt on PATH if it was skipped), or raise `wasm_budget_kb` in [package.metadata.doxa]",
+        format!("{what} is {kb} KiB, over its {budget} KiB budget"),
+        format!("shrink it (put wasm-opt on PATH if it was skipped), or raise `{key}` in [package.metadata.doxa]"),
     ))
 }
 
@@ -335,12 +421,21 @@ mod tests {
 
     #[test]
     fn a_wasm_over_its_budget_fails_with_its_size() {
-        assert!(check_budget(400 * 1024, None).is_ok());
-        assert!(check_budget(400 * 1024, Some(400)).is_ok());
-        let err = check_budget(400 * 1024 + 1, Some(400)).unwrap_err();
+        let k = "wasm_budget_kb";
+        assert!(check_budget("the app wasm", 400 * 1024, None, k).is_ok());
+        assert!(check_budget("the app wasm", 400 * 1024, Some(400), k).is_ok());
+        let err = check_budget(
+            "module_0_page.wasm",
+            400 * 1024 + 1,
+            Some(400),
+            "chunk_budget_kb",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
-            err.to_string().contains("401 KiB, over its 400 KiB budget"),
+            err.contains("module_0_page.wasm is 401 KiB, over its 400 KiB budget"),
             "{err}"
         );
+        assert!(err.contains("`chunk_budget_kb`"), "{err}");
     }
 }

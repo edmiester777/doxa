@@ -75,6 +75,8 @@ pub mod __private {
     pub use crate::view::FromChildren;
     #[cfg(target_arch = "wasm32")]
     pub use wasm_bindgen;
+    #[cfg(target_arch = "wasm32")]
+    pub use wasm_splitter as wasm_split;
 }
 
 /// Everything a component file uses.

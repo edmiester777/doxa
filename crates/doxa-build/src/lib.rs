@@ -12,6 +12,7 @@ pub mod dist;
 mod error;
 pub mod npm;
 pub mod pipeline;
+pub mod split;
 pub mod tool;
 
 pub use error::{Error, Result};

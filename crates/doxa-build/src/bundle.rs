@@ -290,9 +290,17 @@ fn island_js(spec: &str, web_root: &Path) -> String {
 
 /// The generated entry: load the glue and islands, read `services.json`, start the wasm.
 /// A missing file, or a server answering it with `index.html`, means no overrides.
-pub fn entry_js(glue: &Path, islands: &[PathBuf], wasm_file: &str) -> String {
+/// A `split` wasm's loader instantiates each part against the main module through `initSync`.
+pub fn entry_js(glue: &Path, islands: &[PathBuf], wasm_file: &str, split: bool) -> String {
     let lit = |p: &Path| serde_json::to_string(&js_path(p)).expect("json");
-    let mut js = format!("import init from {};\n", lit(glue));
+    let mut js = if split {
+        format!(
+            "import init, {{ initSync }} from {};\nglobalThis.__wasm_split_main_initSync = initSync;\n",
+            lit(glue)
+        )
+    } else {
+        format!("import init from {};\n", lit(glue))
+    };
     for island in islands {
         js.push_str(&format!("import {};\n", lit(island)));
     }
@@ -408,6 +416,7 @@ mod tests {
             Path::new("/s/bindgen/app.js"),
             &[PathBuf::from("/app/web/ts/editor.tsx")],
             "app-0123abcd.wasm",
+            false,
         );
         assert_eq!(
             js,
@@ -417,6 +426,14 @@ mod tests {
              .then((r) => (r.ok && /json/.test(r.headers.get(\"content-type\") ?? \"\") ? r.json() : {}))\n  \
              .catch(() => ({}));\n\
              await init({ module_or_path: new URL(\"./app-0123abcd.wasm\", import.meta.url) });\n"
+        );
+        let split = entry_js(Path::new("/s/bindgen/app.js"), &[], "app.wasm", true);
+        assert!(
+            split.starts_with(
+                "import init, { initSync } from \"/s/bindgen/app.js\";\n\
+             globalThis.__wasm_split_main_initSync = initSync;\n"
+            ),
+            "{split}"
         );
     }
 

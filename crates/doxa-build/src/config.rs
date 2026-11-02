@@ -29,6 +29,8 @@ pub struct DoxaConfig {
     pub npm: BTreeMap<String, String>,
     /// A release build fails when the optimized app wasm is larger, in KiB.
     pub wasm_budget_kb: Option<u64>,
+    /// A release build fails when any module split off for a `#[page(lazy)]` is larger, in KiB.
+    pub chunk_budget_kb: Option<u64>,
     /// Client crate to base URL, written to `services.json`; unlisted ones are same-origin.
     #[serde(default)]
     pub services: BTreeMap<String, String>,
@@ -125,7 +127,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, wasm_budget_kb, and npm, services and preprocess tables",
+                    "keys are role, server, css, css_sources, public, wasm_budget_kb, chunk_budget_kb, and npm, services and preprocess tables",
                 )
             }),
         }

@@ -26,6 +26,9 @@ brotli = "8"
 lightningcss = { version = "1.0.0-alpha.68", default-features = false, features = ["bundler"] }
 # Must equal the `wasm-bindgen` in the app's Cargo.lock; see `bindgen::WASM_BINDGEN_VERSION`.
 wasm-bindgen-cli-support = "=0.2.117"
+# Its walrus differs from wasm-bindgen's; they only exchange bytes.
+wasm-split-cli = "=0.7.0"
+anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"

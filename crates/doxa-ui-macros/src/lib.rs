@@ -31,6 +31,7 @@ pub fn component(args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// A component reached at a path: `#[page("/widgets/{name}", load = |p| get_widget(&p.name))]`.
+/// With `lazy`, `doxa build` splits its code into a wasm module fetched on hover or navigation.
 #[proc_macro_attribute]
 pub fn page(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as page::Args);
@@ -76,6 +77,10 @@ pub fn start(_args: TokenStream, item: TokenStream) -> TokenStream {
             fn __doxa_start() {
                 #name()
             }
+
+            // wasm-split hangs what only the main module calls off a function named `main`.
+            #[unsafe(no_mangle)]
+            pub extern "C" fn main() {}
         };
     }
     .into()

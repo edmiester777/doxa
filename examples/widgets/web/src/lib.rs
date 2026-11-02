@@ -72,7 +72,7 @@ fn WidgetRow(widget: Widget) -> View {
 }
 
 /// One widget, with a rename form for those allowed to rename it.
-#[page("/widgets/{name}", load = |p| get_widget(&p.name))]
+#[page("/widgets/{name}", load = |p| get_widget(&p.name), lazy)]
 async fn WidgetPage(name: String) -> Result<View> {
     let key = WidgetKey { name };
     let widget = get_widget(&key).await?;

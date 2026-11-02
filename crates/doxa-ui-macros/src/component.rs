@@ -20,6 +20,8 @@ pub(crate) struct Parsed {
 #[derive(Default)]
 pub(crate) struct Options {
     pub memo: bool,
+    /// Render from its own wasm module, split off by `doxa build`.
+    pub lazy: bool,
 }
 
 impl syn::parse::Parse for Options {
@@ -199,6 +201,49 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     };
     let builder = builder(vis, name, &props_ty, props);
 
+    let render = quote! {
+        #(#others)*
+        #[allow(non_snake_case, clippy::too_many_arguments)]
+        #inner_sig #body
+        let #props_ty { #(#names),* } = props;
+        #call
+    };
+    let (split, render) = if opts.lazy {
+        let module = lazy_mod(name);
+        let abi = syn::LitStr::new(&snake(&name_str), name.span());
+        let split = quote! {
+            #[cfg(target_arch = "wasm32")]
+            #[doc(hidden)]
+            #[allow(non_snake_case)]
+            mod #module {
+                use super::*;
+                use ::doxa::ui::__private::wasm_split;
+
+                pub(super) fn render(props: #props_ty) -> ::doxa::ui::RenderFuture { #render }
+
+                pub(super) static LOADER: wasm_split::LazyLoader<#props_ty, ::doxa::ui::RenderFuture> =
+                    wasm_split::lazy_loader!(extern #abi fn render(props: #props_ty) -> ::doxa::ui::RenderFuture);
+            }
+        };
+        let render = quote! {
+            #[cfg(target_arch = "wasm32")]
+            return ::doxa::ui::RenderFuture::new(async move {
+                if !#module::LOADER.load().await {
+                    return ::core::result::Result::Err(::doxa::ui::Thrown::msg(concat!("couldn't load the code for ", #name_str)));
+                }
+                match #module::LOADER.call(props) {
+                    ::core::result::Result::Ok(view) => view.await,
+                    ::core::result::Result::Err(e) => ::core::result::Result::Err(::doxa::ui::Thrown::msg(e.to_string())),
+                }
+            });
+            #[cfg(not(target_arch = "wasm32"))]
+            { #render }
+        };
+        (split, render)
+    } else {
+        (quote!(), render)
+    };
+
     quote! {
         #(#docs)*
         #vis struct #name;
@@ -216,14 +261,29 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
             #same_props
 
             fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
-                #(#others)*
-                #[allow(non_snake_case, clippy::too_many_arguments)]
-                #inner_sig #body
-                let #props_ty { #(#names),* } = props;
-                #call
+                #render
             }
         }
+
+        #split
     }
+}
+
+/// The module holding a lazy component's split point.
+pub(crate) fn lazy_mod(name: &Ident) -> Ident {
+    format_ident!("__doxa_lazy_{}", name)
+}
+
+/// `ReportsPage` → `reports_page`, the split module's name.
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
 }
 
 /// The typestate builder for `props_ty`: `build()` needs every prop without a default.
