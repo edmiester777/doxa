@@ -199,7 +199,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
     let mut bad = None;
     let ret = match &item_fn.sig.output {
         ReturnType::Default => quote!(()),
-        ReturnType::Type(_, ty) => response_type(ty, &mut bad),
+        ReturnType::Type(_, ty) => response_type(ty, route.method != "get", &mut bad),
     };
     // The bound names a lifetime so it is checked where the stub is called, not here.
     let (refusal, refused) = match bad {
@@ -344,8 +344,9 @@ fn classify(pat: &Pat, ty: &Type, index: usize) -> Arg {
 }
 
 /// The handler's return type, with every wrapper named under `::doxa::client`;
-/// `bad` gets the first part the browser can't decode.
-fn response_type<'a>(ty: &'a Type, bad: &mut Option<&'a Type>) -> TokenStream {
+/// `bad` gets the first part the browser can't decode. A stream from a route that
+/// isn't a GET (`once`) is sent once and never reopened.
+fn response_type<'a>(ty: &'a Type, once: bool, bad: &mut Option<&'a Type>) -> TokenStream {
     let unsupported = |ty: &'a Type, bad: &mut Option<&'a Type>| {
         bad.get_or_insert(ty);
         quote!(::doxa::client::Unsupported)
@@ -353,7 +354,11 @@ fn response_type<'a>(ty: &'a Type, bad: &mut Option<&'a Type>) -> TokenStream {
     match ty {
         Type::Tuple(t) if t.elems.is_empty() => quote!(()),
         Type::Tuple(t) => {
-            let elems: Vec<_> = t.elems.iter().map(|e| response_type(e, bad)).collect();
+            let elems: Vec<_> = t
+                .elems
+                .iter()
+                .map(|e| response_type(e, once, bad))
+                .collect();
             quote!((#(#elems),*))
         }
         Type::Path(_) => {
@@ -361,14 +366,15 @@ fn response_type<'a>(ty: &'a Type, bad: &mut Option<&'a Type>) -> TokenStream {
             let args = type_args(ty);
             match (last.as_str(), args.as_slice()) {
                 ("Result", [ok, err]) => {
-                    let ok = response_type(ok, bad);
+                    let ok = response_type(ok, once, bad);
                     quote!(::core::result::Result<#ok, #err>)
                 }
                 ("Result", [ok]) => {
-                    let ok = response_type(ok, bad);
+                    let ok = response_type(ok, once, bad);
                     quote!(::doxa::client::AliasedResult<#ok>)
                 }
                 ("Json", [t]) => quote!(::doxa::client::Json<#t>),
+                ("SseStream", [e, ..]) if once => quote!(::doxa::client::SseOnce<#e>),
                 ("SseStream", [e, ..]) => quote!(::doxa::client::SseStream<#e>),
                 ("StatusCode", []) => quote!(::doxa::client::StatusCode),
                 ("NoContent", []) => quote!(::doxa::client::StatusCode),
@@ -377,8 +383,8 @@ fn response_type<'a>(ty: &'a Type, bad: &mut Option<&'a Type>) -> TokenStream {
                 _ => unsupported(ty, bad),
             }
         }
-        Type::Paren(p) => response_type(&p.elem, bad),
-        Type::Group(g) => response_type(&g.elem, bad),
+        Type::Paren(p) => response_type(&p.elem, once, bad),
+        Type::Group(g) => response_type(&g.elem, once, bad),
         _ => unsupported(ty, bad),
     }
 }
@@ -473,6 +479,16 @@ mod tests {
             out.contains(":: doxa :: client :: SseStream < Ev >"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_stream_from_a_post_is_sent_once() {
+        let out = stub(
+            "post",
+            "/turns",
+            quote! { async fn turn() -> SseStream<Ev, impl Stream<Item = Result<Ev, Infallible>>> { todo!() } },
+        );
+        assert!(out.contains(":: doxa :: client :: SseOnce < Ev >"), "{out}");
     }
 
     #[test]

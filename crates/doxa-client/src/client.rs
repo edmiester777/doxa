@@ -135,6 +135,12 @@ impl Client {
         self.streams.borrow_mut().insert(key, Rc::downgrade(hub));
     }
 
+    /// Close `hub` with the session without offering it to other callers.
+    pub(crate) fn own_stream(&self, hub: &Rc<Hub>) {
+        let key = format!("once {:p}", Rc::as_ptr(hub));
+        self.streams.borrow_mut().insert(key, Rc::downgrade(hub));
+    }
+
     pub(crate) fn authorize(&self, request: &mut Request) {
         match &self.auth {
             Auth::None => {}

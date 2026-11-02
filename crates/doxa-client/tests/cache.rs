@@ -10,7 +10,7 @@ use doxa_client::cache::{self, Observer};
 use doxa_client::transport::{Body, MockTransport, Request, Response, Transport};
 use doxa_client::{
     task, CacheConfig, Cached, Call, Client, ClientConfig, Granted, Json, Permission, Probe, Query,
-    SseStream,
+    SseOnce, SseStream,
 };
 use doxa_wire::{Identity, Keyed, Method, RouteSpec};
 use futures_util::future::LocalBoxFuture;
@@ -696,4 +696,92 @@ fn a_reconnect_reports_its_session() {
     assert_eq!(changes.get(), 1);
     wait(get("gear")).unwrap();
     assert_eq!(script.seen.borrow().len(), 4);
+}
+
+/// Ends the session from inside the second send, as a sign-out on a 401 would.
+struct SignsOut(Scripted);
+
+impl Transport for SignsOut {
+    fn send(&self, request: Request) -> LocalBoxFuture<'static, Result<Response, String>> {
+        if self.0.seen.borrow().len() == 1 {
+            Client::current().end_session();
+        }
+        self.0.send(request)
+    }
+}
+
+#[test]
+fn ending_the_session_while_a_stream_reconnects_closes_it() {
+    let script = Scripted::default();
+    script.text(200, vec![], RENAMED).text(200, vec![], RENAMED);
+    ClientConfig::default()
+        .transport(SignsOut(script.clone()))
+        .install();
+    task::block_on(async {
+        let mut s = events("cog").await.unwrap().reconnect(fast());
+        s.next().await.unwrap();
+        assert!(s.next().await.is_err());
+    });
+}
+
+static TURN: RouteSpec = route(Method::Post, "/w/{name}/turns");
+
+fn turn(name: &str) -> Call<SseOnce<Event>> {
+    Call::new(&TURN).arg::<Granted<WidgetByName>, _>(name)
+}
+
+#[test]
+fn each_post_stream_is_its_own_request() {
+    let script = Scripted::default();
+    script.text(200, vec![], RENAMED).text(200, vec![], RENAMED);
+    ClientConfig::default().transport(script.clone()).install();
+    task::block_on(async {
+        let mut a = turn("cog").await.unwrap();
+        let mut b = turn("cog").await.unwrap();
+        assert!(a.next().await.unwrap().is_some());
+        assert!(b.next().await.unwrap().is_some());
+    });
+    assert_eq!(script.seen.borrow().len(), 2);
+}
+
+#[test]
+fn a_post_stream_invalidates_its_entities() {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "cog"))
+        .respond(200, vec![], RENAMED.into())
+        .json(200, &widget(1, "cog"));
+    install(&mock, Duration::from_secs(60));
+    wait(get("cog")).unwrap();
+    wait(turn("cog")).unwrap();
+    wait(get("cog")).unwrap();
+    assert_eq!(mock.requests().len(), 3);
+}
+
+#[test]
+fn dropping_a_post_stream_ends_its_request() {
+    let script = Scripted::default();
+    let dropped = Rc::new(Cell::new(false));
+    script.push(200, vec![], Body::Stream(Box::pin(Open(dropped.clone()))));
+    ClientConfig::default().transport(script.clone()).install();
+    let s = wait(turn("cog")).unwrap();
+    assert!(!dropped.get());
+    drop(s);
+    assert!(dropped.get());
+}
+
+#[test]
+fn a_post_stream_from_an_old_session_fails_without_being_resent() {
+    let manual = Manual::default();
+    ClientConfig::default().transport(manual.clone()).install();
+    spawn(get("gear"));
+    manual.answer(0, 200, Some("a"), widget(2, "gear"));
+    let failed = Rc::new(Cell::new(false));
+    let f = failed.clone();
+    task::spawn(async move { f.set(turn("cog").await.is_err()) });
+    task::run_until_stalled();
+    spawn(list());
+    manual.answer(2, 200, Some("b"), json!([]));
+    manual.answer(1, 200, Some("a"), json!(null));
+    assert!(failed.get());
+    assert_eq!(manual.urls(), ["/w/gear", "/w/cog/turns", "/w"]);
 }

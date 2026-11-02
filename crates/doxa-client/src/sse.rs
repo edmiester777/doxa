@@ -107,6 +107,28 @@ impl<E: DeserializeOwned> EventStream<E> {
     }
 }
 
+/// The events a mutating route answers with. Sent once and never reopened, since
+/// reopening would repeat the mutation; dropping it aborts the request.
+///
+/// ```compile_fail
+/// fn resume(s: doxa_client::Once<()>) { s.reconnect(Default::default()); }
+/// ```
+/// ```
+/// fn resume(s: doxa_client::EventStream<()>) { s.reconnect(Default::default()); }
+/// ```
+pub struct Once<E>(EventStream<E>);
+
+impl<E: DeserializeOwned> Once<E> {
+    pub(crate) fn subscribe(hub: Rc<Hub>) -> Self {
+        Self(EventStream::subscribe(hub))
+    }
+
+    /// The next event; `Ok(None)` once the server closes the stream.
+    pub async fn next(&mut self) -> Result<Option<E>, Fetch> {
+        self.0.next().await
+    }
+}
+
 #[derive(Default)]
 struct Inbox {
     items: RefCell<VecDeque<Item>>,
@@ -213,13 +235,16 @@ impl Hub {
         if s.done {
             return Poll::Ready(false);
         }
-        if let Some(reopening) = s.reopening.as_mut() {
+        if let Some(mut reopening) = s.reopening.take() {
+            // Polled unborrowed: sending can end the session, which closes this hub.
+            drop(s);
             let Poll::Ready((session, result)) = reopening.as_mut().poll(&mut cx) else {
+                let mut s = self.state.borrow_mut();
+                if !s.done {
+                    s.reopening = Some(reopening);
+                }
                 return Poll::Pending;
             };
-            s.reopening = None;
-            // Observing a new session closes this hub, which borrows its state.
-            drop(s);
             let current = match &result {
                 Ok(resp) => self.client.observe_session(resp, session),
                 Err(_) => self.client.session() == session,

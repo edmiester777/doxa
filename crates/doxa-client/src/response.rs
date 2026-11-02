@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 
 use crate::cached::Cached;
 use crate::fetch::{Fetch, NoError};
-use crate::sse::{EventStream, Hub};
+use crate::sse::{EventStream, Hub, Once};
 
 /// A route's return type, as the browser decodes it.
 #[diagnostic::on_unimplemented(
@@ -44,6 +44,8 @@ pub trait FromResponse: 'static {
 pub struct StatusCode;
 /// `SseStream<E, _>`: the call yields an [`EventStream`].
 pub struct SseStream<E>(PhantomData<fn() -> E>);
+/// `SseStream<E, _>` from a route that isn't a GET: the call yields a [`Once`].
+pub struct SseOnce<E>(PhantomData<fn() -> E>);
 /// A return type the browser can't decode. The route's stub refuses to be called.
 pub struct Unsupported;
 /// A one-argument `Result<T>` alias: the error type isn't visible, so it decodes as JSON.
@@ -197,6 +199,24 @@ impl<E: DeserializeOwned + 'static> FromResponse for SseStream<E> {
         None
     }
     fn load(_: Rc<dyn Any>) -> Option<EventStream<E>> {
+        None
+    }
+}
+
+impl<E: DeserializeOwned + 'static> FromResponse for SseOnce<E> {
+    type Output = Once<E>;
+    type Error = NoError;
+    const STREAMS: bool = true;
+    fn decode(_: u16, _: Vec<u8>) -> Result<Once<E>, String> {
+        Err("an event stream arrived buffered".to_owned())
+    }
+    fn stream(hub: Rc<Hub>) -> Once<E> {
+        Once::subscribe(hub)
+    }
+    fn store(_: &Once<E>) -> Option<Rc<dyn Any>> {
+        None
+    }
+    fn load(_: Rc<dyn Any>) -> Option<Once<E>> {
         None
     }
 }

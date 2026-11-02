@@ -160,8 +160,10 @@ impl<R: FromResponse> IntoFuture for Call<R> {
     type IntoFuture = LocalBoxFuture<'static, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
-        if R::STREAMS {
+        if R::STREAMS && self.route.method.is_safe() {
             Box::pin(subscribe(self))
+        } else if R::STREAMS {
+            Box::pin(open_once(self))
         } else if self.route.method.is_safe() {
             Box::pin(query(self))
         } else {
@@ -242,10 +244,7 @@ async fn decode<R: FromResponse>(response: crate::transport::Response) -> Sent<R
         etag: response.header("etag").map(str::to_owned),
         digest: None,
     };
-    let invalidates = response
-        .header(doxa_wire::INVALIDATE_HEADER)
-        .map(|h| h.split(',').map(|s| s.trim().to_owned()).collect())
-        .unwrap_or_default();
+    let invalidates = invalidates(&response);
     let status = response.status;
     if status == 304 {
         return Sent::NotModified(meta);
@@ -261,6 +260,14 @@ async fn decode<R: FromResponse>(response: crate::transport::Response) -> Sent<R
         }
         Err(e) => Sent::Failed(Fetch::Network(e)),
     }
+}
+
+/// The extra entity types a response says it changed.
+fn invalidates(response: &crate::transport::Response) -> Vec<String> {
+    response
+        .header(doxa_wire::INVALIDATE_HEADER)
+        .map(|h| h.split(',').map(|s| s.trim().to_owned()).collect())
+        .unwrap_or_default()
 }
 
 fn digest(bytes: &[u8]) -> u64 {
@@ -320,6 +327,35 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     let request = call.unauthorized(url, "text/event-stream");
     let hub = Rc::new(Hub::new(request, client.clone(), response.body));
     client.share_stream(key, &hub);
+    Ok(R::stream(hub))
+}
+
+/// Send a mutating route's stream request exactly once: never shared, resent or reopened.
+async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
+    let client = call.client.clone().unwrap_or_else(Client::current);
+    let url = call.url().map_err(widen)?;
+    let request = call.request(&client, url.clone(), "text/event-stream");
+    client.cache.count_request();
+    let session = client.session();
+    let response = client
+        .transport
+        .send(request)
+        .await
+        .map_err(Fetch::Network)?;
+    if !client.observe_session(&response, session) {
+        return Err(Fetch::Stream("the session changed".into()));
+    }
+    if response.status >= 400 {
+        let body = response.body.bytes().await.map_err(Fetch::Network)?;
+        return Err(Fetch::from_status(response.status, &body));
+    }
+    let extra = invalidates(&response);
+    let mut entities: Vec<&str> = call.route.entities.to_vec();
+    entities.extend(extra.iter().map(String::as_str));
+    client.cache.invalidate(&entities);
+    let request = call.unauthorized(url, "text/event-stream");
+    let hub = Rc::new(Hub::new(request, client.clone(), response.body));
+    client.own_stream(&hub);
     Ok(R::stream(hub))
 }
 

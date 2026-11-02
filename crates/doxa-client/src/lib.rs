@@ -25,8 +25,8 @@ pub use call::Call;
 pub use can::{Permission, Probe};
 pub use client::{Client, ClientConfig};
 pub use fetch::{Fetch, NoError};
-pub use response::{AliasedResult, FromResponse, SseStream, StatusCode, Unsupported};
-pub use sse::{Backoff, EventStream};
+pub use response::{AliasedResult, FromResponse, SseOnce, SseStream, StatusCode, Unsupported};
+pub use sse::{Backoff, EventStream, Once};
 
 #[doc(hidden)]
 pub use doxa_wire as __wire;
