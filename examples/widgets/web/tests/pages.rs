@@ -318,9 +318,12 @@ async fn find_moves_the_clock_to_a_pending_timer_but_not_past_its_timeout() {
     );
 }
 
+/// An island's name and props, and its event handlers.
+type Mounted = (String, Vec<(&'static str, EventFn)>);
+
 /// Stands in for React: records each island's props and keeps its event handlers.
 #[derive(Clone, Default)]
-struct FakeReact(Rc<std::cell::RefCell<Vec<(String, Vec<(&'static str, EventFn)>)>>>);
+struct FakeReact(Rc<std::cell::RefCell<Vec<Mounted>>>);
 
 impl Bridge for FakeReact {
     fn mount(&self, m: Mount<'_>) {

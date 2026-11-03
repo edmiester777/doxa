@@ -293,7 +293,7 @@ async fn get_widget(
     Extension(audit): Extension<AuditEventBuilder>,
 ) -> Result<Json<Widget>, WidgetError> {
     audit.set_event(EventType::DataAccess, "read");
-    audit.set_resource("widget", &id.to_string());
+    audit.set_resource("widget", id.to_string());
 
     if id == 0 {
         // Error path — emit explicitly so the outcome is Denied

@@ -12,11 +12,14 @@ use serde_json::Value;
 use crate::cached::Cached;
 use crate::response::FromResponse;
 
+type Find = fn(&Rc<dyn Any>, &Value) -> Option<Rc<dyn Any>>;
+type Key = fn(&Rc<dyn Any>) -> Option<Value>;
+
 /// How the cache finds a route's `T` in other cached values, and files one.
 #[derive(Clone, Copy)]
 pub struct Entity {
-    pub(crate) find: fn(&Rc<dyn Any>, &Value) -> Option<Rc<dyn Any>>,
-    pub(crate) key: fn(&Rc<dyn Any>) -> Option<Value>,
+    pub(crate) find: Find,
+    pub(crate) key: Key,
 }
 
 fn find<T: Identity + Clone + 'static>(value: &Rc<dyn Any>, key: &Value) -> Option<Rc<dyn Any>> {

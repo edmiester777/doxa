@@ -325,7 +325,7 @@ struct ParsedVariant {
 
 enum VariantKind {
     Unit,
-    Newtype(Type),
+    Newtype(Box<Type>),
     Struct(Vec<StructField>),
 }
 
@@ -350,7 +350,7 @@ fn parse_variant(variant: &Variant, rename_all: Option<&str>) -> Result<ParsedVa
     let kind = match &variant.fields {
         Fields::Unit => VariantKind::Unit,
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-            VariantKind::Newtype(fields.unnamed[0].ty.clone())
+            VariantKind::Newtype(Box::new(fields.unnamed[0].ty.clone()))
         }
         Fields::Named(fields) => VariantKind::Struct(
             fields

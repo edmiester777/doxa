@@ -364,21 +364,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                 (None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::fetch),
             };
             quote! {
+                // The `?` converts the lookup's error, which may differ from `Self::Error`.
+                #[allow(clippy::needless_question_mark)]
                 async fn load(
                     key: Self::Key,
                     state: &Self::State,
                     ctx: &Self::Ctx,
                 ) -> ::std::result::Result<::std::option::Option<Self::Row>, Self::Error> {
-                    // Every lookup is confined to the caller's tenant, so a
-                    // key belonging to someone else answers `None` exactly as
-                    // a key that does not exist would.
-                    //
-                    // A caller with no tenant has no scope to be confined
-                    // to, and the answer is that nothing is there. Defaulting
-                    // to the empty string instead would issue a real query
-                    // for `scope = ''` — which finds nothing on any sane
-                    // schema, and is a row somebody could create on the
-                    // wrong one.
+                    // Confined to the caller's tenant; no tenant finds nothing, never `scope = ''`.
                     let ::std::option::Option::Some(scope) =
                         ::doxa::auth::FromAuthExtensions::tenant(ctx)
                     else {
