@@ -4,6 +4,7 @@ use doxa::ui::prelude::*;
 use doxa::ui::{form, Field};
 use widgets_client::widgets::*;
 
+pub mod button;
 pub mod icons;
 pub mod kit;
 pub mod motion;

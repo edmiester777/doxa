@@ -122,21 +122,7 @@ impl Element {
     where
         F: AsyncFn(Event) -> crate::Result<()> + 'static,
     {
-        let handler = Rc::new(handler);
-        let owner = crate::runtime::current_instance();
-        self.events.push((
-            event,
-            opts,
-            Rc::new(move |ev| {
-                let handler = handler.clone();
-                let owner = owner.clone();
-                doxa_client::task::spawn(async move {
-                    if let Err(e) = handler(ev).await {
-                        crate::runtime::throw(owner.as_ref(), e);
-                    }
-                });
-            }),
-        ));
+        self.events.push((event, opts, async_handler(handler)));
         self
     }
 
@@ -173,6 +159,24 @@ impl Element {
         self.directives.push(Rc::new(d));
         self
     }
+}
+
+/// Spawn `handler` per event; an `Err` goes to the `<Catch>` around the instance rendering now.
+pub(crate) fn async_handler<F>(handler: F) -> Handler
+where
+    F: AsyncFn(Event) -> crate::Result<()> + 'static,
+{
+    let handler = Rc::new(handler);
+    let owner = crate::runtime::current_instance();
+    Rc::new(move |ev| {
+        let handler = handler.clone();
+        let owner = owner.clone();
+        doxa_client::task::spawn(async move {
+            if let Err(e) = handler(ev).await {
+                crate::runtime::throw(owner.as_ref(), e);
+            }
+        });
+    })
 }
 
 /// A child component, with its props.
@@ -434,7 +438,7 @@ impl<T: IntoProp> IntoProp for Option<T> {
 
 /// A URL checked not to run script: no `javascript:`, `vbscript:` or `data:` scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SafeUrl(Rc<str>);
+pub struct SafeUrl(pub(crate) Rc<str>);
 
 impl SafeUrl {
     /// Check `url`.
@@ -459,6 +463,12 @@ impl SafeUrl {
     /// The URL.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<SafeUrl> for String {
+    fn from(url: SafeUrl) -> String {
+        url.0.to_string()
     }
 }
 

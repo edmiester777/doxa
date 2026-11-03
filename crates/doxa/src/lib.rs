@@ -173,6 +173,33 @@ pub use doxa_ui::start;
 /// let _ = view! { <List items={vec![1, 2]}/> };
 /// ```
 ///
+/// A component with an `#[attrs]` prop takes attributes it doesn't declare:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Chip(children: View, #[attrs] rest: Attrs) -> View { view! { <span {..rest}>{children}</span> } }
+/// let _ = view! { <Chip title="t" href="/a">"x"</Chip> };
+/// ```
+///
+/// Without one, an attribute it doesn't declare doesn't compile:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Chip(children: View) -> View { view! { <span>{children}</span> } }
+/// let _ = view! { <Chip title="t" href="/a">"x"</Chip> };
+/// ```
+///
+/// A script URL is refused on a component's tag too:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Chip(children: View, #[attrs] rest: Attrs) -> View { view! { <span {..rest}>{children}</span> } }
+/// let _ = view! { <Chip title="t" href="javascript:alert(1)">"x"</Chip> };
+/// ```
+///
 /// A page compiles:
 ///
 /// ```

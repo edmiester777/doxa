@@ -403,7 +403,14 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             }
         }
     });
-    let builder = builder(vis, name, &props_ty, &props, &syn::Generics::default());
+    let builder = builder(
+        vis,
+        name,
+        &props_ty,
+        &props,
+        &syn::Generics::default(),
+        None,
+    );
 
     let same = fields
         .iter()

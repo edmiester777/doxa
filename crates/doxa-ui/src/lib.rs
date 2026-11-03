@@ -4,6 +4,7 @@
 //! Most apps only need `use doxa::ui::prelude::*;`.
 
 mod app;
+mod attrs;
 mod boundary;
 mod browser;
 mod can;
@@ -37,6 +38,7 @@ mod theme;
 mod view;
 
 pub use app::{App, IntoRoot, RootHandle};
+pub use attrs::Attrs;
 pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
 pub use browser::{
     broadcast, clipboard, debounced, document_event, exit_fullscreen, fullscreen, intersection,
@@ -94,6 +96,7 @@ pub use export::Exported;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::attrs::RestAttrs;
     pub use crate::component::comp_for;
     #[cfg(all(feature = "export", target_arch = "wasm32"))]
     pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
@@ -129,9 +132,9 @@ pub mod prelude {
         action, component, context, debounced, document_event, effect, interval, media_query, memo,
         navigate, navigate_with, navigation, node_ref, page, provide, redirect, set_query,
         set_theme, sleep, state, stored, theme, title, try_context, view, window_event, Action,
-        App, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event, IconExt, IntoView,
-        Keep, Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route, Router, SafeUrl,
-        Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
+        App, Attrs, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event, IconExt,
+        IntoView, Keep, Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route, Router,
+        SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }

@@ -15,6 +15,8 @@ pub(crate) struct Prop {
 pub(crate) struct Parsed {
     pub item: ItemFn,
     pub props: Vec<Prop>,
+    /// The `#[attrs]` prop, collecting what the tag passes that isn't a prop.
+    pub rest: Option<Ident>,
 }
 
 #[derive(Default)]
@@ -63,6 +65,7 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
         ));
     }
     let mut props = Vec::new();
+    let mut rest = None;
     for arg in &mut item.sig.inputs {
         let FnArg::Typed(pt) = arg else {
             return Err(syn::Error::new(
@@ -86,7 +89,22 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
         let mut default = None;
         let mut kept = Vec::new();
         for attr in pt.attrs.drain(..) {
-            if attr.path().is_ident("prop") {
+            if attr.path().is_ident("attrs") {
+                let is_attrs = matches!(&*pt.ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Attrs"));
+                if !is_attrs {
+                    return Err(syn::Error::new(
+                        pt.ty.span(),
+                        "an `#[attrs]` prop is a `doxa::ui::Attrs`",
+                    ));
+                }
+                if rest.replace(name.clone()).is_some() {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        "a component takes one `#[attrs]` prop",
+                    ));
+                }
+                default = Some(quote!(::core::default::Default::default()));
+            } else if attr.path().is_ident("prop") {
                 attr.parse_nested_meta(|m| {
                     if m.path.is_ident("default") {
                         default = Some(match m.value() {
@@ -119,7 +137,7 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
         });
     }
     no_spawn(&item.block)?;
-    Ok(Parsed { item, props })
+    Ok(Parsed { item, props, rest })
 }
 
 /// A render runs again on every change, so a task it spawns would be spawned again each time.
@@ -165,6 +183,13 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
         )
         .into_compile_error();
     }
+    if let (true, Some(r)) = (opts.export, &parsed.rest) {
+        return syn::Error::new(
+            r.span(),
+            "an exported component's props come from its host as JSON, so it can't take `#[attrs]`",
+        )
+        .into_compile_error();
+    }
     let exported = if opts.export {
         match crate::export::expand(parsed) {
             Ok(t) => t,
@@ -173,7 +198,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     } else {
         quote!()
     };
-    let Parsed { item, props } = parsed;
+    let Parsed { item, props, rest } = parsed;
     let vis = &item.vis;
     let name = &item.sig.ident;
     let name_str = name.to_string();
@@ -224,7 +249,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     } else {
         quote! { ::doxa::ui::RenderFuture::ready(::doxa::ui::IntoRender::into_render(__render(#(#names),*))) }
     };
-    let builder = builder(vis, name, &props_ty, props, generics);
+    let builder = builder(vis, name, &props_ty, props, generics, rest.as_ref());
     let (impl_g, ty_g, where_c) = generics.split_for_impl();
     let unit = if generics.params.is_empty() {
         quote!(#vis struct #name;)
@@ -337,6 +362,7 @@ pub(crate) fn builder(
     props_ty: &Ident,
     props: &[Prop],
     generics: &syn::Generics,
+    rest: Option<&Ident>,
 ) -> TokenStream {
     let builder = format_ident!("{}Builder", name);
     let names: Vec<_> = props.iter().map(|p| &p.name).collect();
@@ -434,7 +460,19 @@ pub(crate) fn builder(
         quote!(#n: ::core::option::Option<#t>)
     });
 
+    let rest = rest.map(|r| {
+        quote! {
+            impl #state_impl ::doxa::ui::__private::RestAttrs for #builder #state_ty #state_where {
+                fn __rest(&mut self) -> &mut ::doxa::ui::Attrs {
+                    self.#r.get_or_insert_with(::core::default::Default::default)
+                }
+            }
+        }
+    });
+
     quote! {
+        #rest
+
         #(
             #[doc(hidden)]
             #[allow(non_camel_case_types)]

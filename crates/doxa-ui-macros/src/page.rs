@@ -53,6 +53,12 @@ pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
             "pages can't be generic: a path renders one type; make a generic component and render it from the page",
         ));
     }
+    if let Some(r) = &parsed.rest {
+        return Err(syn::Error::new(
+            r.span(),
+            "a page is reached by its path, not a tag, so it can't take `#[attrs]`",
+        ));
+    }
     let name = &parsed.item.sig.ident;
     let vis = &parsed.item.vis;
     let props_ty = format_ident!("{}Props", name);

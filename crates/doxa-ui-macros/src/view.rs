@@ -98,7 +98,12 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
         let a = keyed(attr).ok()?;
         (a.key.to_string() == "value").then(|| value(a)).flatten()
     });
+    let mut spreads = Vec::new();
     for attr in e.attributes() {
+        if let NodeAttribute::Block(b) = attr {
+            spreads.push(spread(b)?);
+            continue;
+        }
         let a = keyed(attr)?;
         let name = a.key.to_string();
         let value = value(a);
@@ -111,31 +116,14 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
             ("inner_html", Some(v)) => quote_spanned! { span => #out.inner_html(#v) },
             ("ref", Some(v)) => quote_spanned! { span => #out.node_ref(#v) },
             (n, Some(v)) if n.starts_with("on:") => {
-                let mut parts = n[3..].split('.');
-                let event = parts.next().unwrap_or_default();
-                let (mut capture, mut passive, mut once) = (false, false, false);
-                for m in parts {
-                    match m {
-                        "capture" => capture = true,
-                        "passive" => passive = true,
-                        "once" => once = true,
-                        _ => {
-                            return Err(syn::Error::new(
-                                span,
-                                format!("unknown `on:` modifier `{m}`: use `capture`, `passive` or `once`"),
-                            ));
-                        }
-                    }
-                }
-                let method = match (is_async_closure(a), capture || passive || once) {
+                let (event, opts) = listen(n, span)?;
+                let method = match (is_async_closure(a), opts.is_some()) {
                     (true, false) => quote!(on_async),
                     (false, false) => quote!(on),
                     (true, true) => quote!(on_async_with),
                     (false, true) => quote!(on_with),
                 };
-                let opts = (capture || passive || once).then(|| {
-                    quote! { ::doxa::ui::Listen { capture: #capture, passive: #passive, once: #once }, }
-                });
+                let opts = opts.map(|o| quote!(#o,));
                 quote_spanned! { span => #out.#method(#event, #opts #v) }
             }
             (n, v) if n.starts_with("use:") => {
@@ -179,6 +167,10 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
             (n, None) => quote_spanned! { span => #out.attr(#n, true) },
         };
     }
+    // Last, so an attribute the element sets itself is already there to win.
+    for s in spreads {
+        out = quote! { #out.spread(#s) };
+    }
     for child in children(&e.children)? {
         out = quote! { #out.child(#child) };
     }
@@ -196,17 +188,56 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
     let mut out = quote_spanned! { path.span() => #path::props() };
     let (mut key, mut route, mut args) = (None, None, None);
     for attr in e.attributes() {
+        if let NodeAttribute::Block(b) = attr {
+            let s = spread(b)?;
+            out = quote! { #out.__spread(#s) };
+            continue;
+        }
         let a = keyed(attr)?;
         let name = a.key.to_string();
+        let span = a.key.span();
         let v = value(a);
         match (name.as_str(), v) {
             ("key", Some(v)) => key = Some(v),
             ("route", Some(v)) if is_can => route = Some(v),
             ("args", Some(_)) if is_can => args = expr(a).cloned(),
-            (n, v) => {
-                let ident = syn::Ident::new(&n.replace('-', "_"), a.key.span());
+            // An `#[attrs]` prop collects these; a component without one refuses them.
+            (n, Some(v)) if n.starts_with("on:") => {
+                let (event, opts) = listen(n, span)?;
+                let opts = opts.unwrap_or_else(|| quote!(::core::default::Default::default()));
+                let method = if is_async_closure(a) {
+                    quote!(__on_async)
+                } else {
+                    quote!(__on)
+                };
+                out = quote_spanned! { span => #out.#method(#event, #opts, #v) };
+            }
+            (n, v) if n.starts_with("use:") => {
+                let Ok(name) = syn::parse_str::<syn::Path>(&n[4..]) else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`use:` names a function returning a `Directive`, e.g. `use:exit={\"fade\"}`",
+                    ));
+                };
+                let name = quote_spanned! { span => #name };
+                let args = v.into_iter();
+                out = quote_spanned! { span => #out.__directive(#name(#(#args)*)) };
+            }
+            (n, v) if n.starts_with("aria-") || n.starts_with("data-") => {
                 let v = v.unwrap_or_else(|| quote!(true));
-                out = quote_spanned! { a.key.span() => #out.#ident(#v) };
+                out = quote_spanned! { span => #out.__attr(#n, #v) };
+            }
+            (n, v) => {
+                let n = n.replace('-', "_");
+                let ident = syn::parse_str::<syn::Ident>(&n)
+                    .map(|i| syn::Ident::new(&i.to_string(), span))
+                    .unwrap_or_else(|_| syn::Ident::new_raw(&n, span));
+                let v = match v {
+                    Some(v) if URL_ATTRS.contains(&n.as_str()) => url(a, v)?,
+                    Some(v) => v,
+                    None => quote!(true),
+                };
+                out = quote_spanned! { span => #out.#ident(#v) };
             }
         }
     }
@@ -229,11 +260,12 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
         let kids = fragment(&kids);
         out = quote! { #out.children(#kids) };
     }
-    let mut view = quote_spanned! { path.span() => ::doxa::ui::__private::comp_for(#out.build()) };
-    if let Some(k) = key {
-        view = quote! { #view.key(#k) };
-    }
-    Ok(view)
+    let key = key.map(|k| quote!(.key(#k)));
+    Ok(quote_spanned! { path.span() => {
+        #[allow(unused_imports)]
+        use ::doxa::ui::__private::RestAttrs as _;
+        ::doxa::ui::__private::comp_for(#out.build()) #key
+    } })
 }
 
 fn keyed(attr: &NodeAttribute) -> syn::Result<&KeyedAttribute> {
@@ -241,9 +273,52 @@ fn keyed(attr: &NodeAttribute) -> syn::Result<&KeyedAttribute> {
         NodeAttribute::Attribute(a) => Ok(a),
         NodeAttribute::Block(b) => Err(syn::Error::new(
             b.span(),
-            "spread attributes aren't supported; name each one",
+            "a `{…}` attribute spreads `Attrs`: `{..rest}`",
         )),
     }
+}
+
+/// `{..rest}`: the `Attrs` expression it spreads.
+fn spread(b: &NodeBlock) -> syn::Result<TokenStream> {
+    let refuse = || syn::Error::new(b.span(), "a `{…}` attribute spreads `Attrs`: `{..rest}`");
+    let NodeBlock::ValidBlock(block) = b else {
+        return Err(refuse());
+    };
+    match block.stmts.as_slice() {
+        [syn::Stmt::Expr(Expr::Range(r), None)]
+            if r.start.is_none() && matches!(r.limits, syn::RangeLimits::HalfOpen(_)) =>
+        {
+            r.end
+                .as_ref()
+                .map(|e| e.to_token_stream())
+                .ok_or_else(refuse)
+        }
+        _ => Err(refuse()),
+    }
+}
+
+/// `on:scroll.passive` as its event name and, with modifiers, its `Listen`.
+fn listen(name: &str, span: proc_macro2::Span) -> syn::Result<(String, Option<TokenStream>)> {
+    let mut parts = name[3..].split('.');
+    let event = parts.next().unwrap_or_default().to_owned();
+    let (mut capture, mut passive, mut once) = (false, false, false);
+    for m in parts {
+        match m {
+            "capture" => capture = true,
+            "passive" => passive = true,
+            "once" => once = true,
+            _ => {
+                return Err(syn::Error::new(
+                    span,
+                    format!("unknown `on:` modifier `{m}`: use `capture`, `passive` or `once`"),
+                ))
+            }
+        }
+    }
+    let opts = (capture || passive || once).then(|| {
+        quote! { ::doxa::ui::Listen { capture: #capture, passive: #passive, once: #once } }
+    });
+    Ok((event, opts))
 }
 
 /// An attribute's expression, looking through `{…}` around a single expression.

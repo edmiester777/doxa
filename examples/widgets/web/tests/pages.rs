@@ -127,6 +127,63 @@ async fn a_generic_table_infers_its_row_type_from_the_tag() {
     assert_eq!(dom.text(dom.body()), "id12namesprocket");
 }
 
+#[tokio::test]
+async fn a_tags_extra_attributes_handlers_and_directives_reach_the_element() {
+    use doxa::ui::prelude::{state, view, App, Directive, NodeRef};
+    use widgets_web::button::Button;
+
+    #[derive(Clone)]
+    struct Mark(std::rc::Rc<std::cell::Cell<bool>>);
+    impl Directive for Mark {
+        fn mounted(&mut self, _: NodeRef) {
+            self.0.set(true);
+        }
+    }
+    fn mark(m: Mark) -> Mark {
+        m
+    }
+
+    serve("viewer");
+    let dom = MemDom::new();
+    let marked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = Mark(marked.clone());
+    App::new(move || {
+        let clicks = state(0u32);
+        view! {
+            <Button
+                class="ghost"
+                type="submit"
+                aria-label="Close"
+                data-row="7"
+                title="close it"
+                on:click={move |_| clicks.update(|n| *n += 1)}
+                use:mark={seen.clone()}
+            >
+                "×"
+            </Button>
+            <p class="clicks">{clicks.get()}</p>
+        }
+    })
+    .mount_on(Rc::new(dom.clone()), dom.body())
+    .keep();
+    settle().await;
+
+    let button = dom.find_tag("button").unwrap();
+    assert_eq!(dom.attr(button, "class").as_deref(), Some("btn ghost"));
+    assert_eq!(
+        dom.attr(button, "type").as_deref(),
+        Some("button"),
+        "the element's own wins"
+    );
+    assert_eq!(dom.attr(button, "aria-label").as_deref(), Some("Close"));
+    assert_eq!(dom.attr(button, "data-row").as_deref(), Some("7"));
+    assert_eq!(dom.attr(button, "title").as_deref(), Some("close it"));
+    assert!(marked.get(), "the directive mounted on the button");
+    dom.click(button);
+    settle().await;
+    assert_eq!(dom.text(dom.find("class", "clicks").unwrap()), "1");
+}
+
 /// Stands in for React: records each island's props and keeps its event handlers.
 #[derive(Clone, Default)]
 struct FakeReact(Rc<std::cell::RefCell<Vec<(String, Vec<(&'static str, EventFn)>)>>>);
