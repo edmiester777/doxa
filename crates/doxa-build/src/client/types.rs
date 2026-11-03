@@ -62,6 +62,9 @@ pub(crate) struct Types<'a> {
     identities: BTreeMap<String, IdentityMeta>,
     mapped: BTreeSet<String>,
     errors: Vec<GenerateError>,
+    /// The schema being rendered; a field that leads back to it is boxed.
+    current: Option<Schema>,
+    box_next: bool,
 }
 
 impl<'a> Types<'a> {
@@ -82,7 +85,43 @@ impl<'a> Types<'a> {
                 .cloned()
                 .collect(),
             errors: Vec::new(),
+            current: None,
+            box_next: false,
         })
+    }
+
+    /// The type a field or variant holds `schema` as: boxed if it leads back to the type
+    /// being rendered without passing through a `Vec` or map.
+    fn held(&mut self, schema: &Schema, at: &At<'_>) -> Result<TokenStream, GenerateError> {
+        self.box_next = self
+            .current
+            .as_ref()
+            .is_some_and(|c| self.reaches(schema, c, &mut BTreeSet::new()));
+        let ty = self.ty(schema, at);
+        self.box_next = false;
+        ty
+    }
+
+    fn reaches(&self, s: &Schema, target: &Schema, seen: &mut BTreeSet<String>) -> bool {
+        if s == target {
+            return true;
+        }
+        if let Some(n) = s.ref_name() {
+            if self.map.schemas.contains_key(n) || !seen.insert(n.to_owned()) {
+                return false;
+            }
+            return self
+                .spec
+                .components
+                .schemas
+                .get(n)
+                .is_some_and(|c| self.reaches(c, target, seen));
+        }
+        s.all_of
+            .iter()
+            .chain(&s.one_of)
+            .chain(s.properties.values())
+            .any(|c| self.reaches(c, target, seen))
     }
 
     /// Note an error and carry on, so one run names every schema that needs a mapping.
@@ -209,7 +248,11 @@ impl<'a> Types<'a> {
                 operation: at.operation.to_owned(),
             });
         }
-        quote!(#ident)
+        if std::mem::take(&mut self.box_next) {
+            quote!(::std::boxed::Box<#ident>)
+        } else {
+            quote!(#ident)
+        }
     }
 
     fn inline(&mut self, schema: &Schema, at: &At<'_>) -> TokenStream {
@@ -274,6 +317,7 @@ impl<'a> Types<'a> {
         at: &At<'_>,
     ) -> Result<TokenStream, GenerateError> {
         let ident = Ident::new(&pascal(name), Span::call_site());
+        self.current = Some(schema.clone());
         let docs = doc(schema.description.as_deref());
         if !schema.values.is_empty() {
             return string_enum(&ident, &docs, schema, name, at);
@@ -384,7 +428,7 @@ impl<'a> Types<'a> {
                 }
             };
             let ident = field_ident(&name).0;
-            let ty = self.ty(member, &at.child(hint))?;
+            let ty = self.held(member, &at.child(hint))?;
             out.push(Field {
                 optional: false,
                 decl: quote!(#[serde(flatten)] pub #ident: #ty),
@@ -473,7 +517,7 @@ impl<'a> Types<'a> {
         for (name, prop) in &schema.properties {
             let required = schema.required.contains(name);
             let nullable = self.nullable(prop);
-            let ty = self.ty(prop, &at.child(format!("{}{}", at.hint, pascal(name))))?;
+            let ty = self.held(prop, &at.child(format!("{}{}", at.hint, pascal(name))))?;
             let (ident, renamed) = field_ident(name);
             let rename = renamed.then(|| quote!(#[serde(rename = #name)]));
             let docs = doc(prop.description.as_deref());
@@ -611,12 +655,12 @@ impl<'a> Types<'a> {
                         quote!({ #(#decls,)* })
                     }
                     Some(c) => {
-                        let ty = self.ty(c, &at.child(hint))?;
+                        let ty = self.held(c, &at.child(hint))?;
                         quote!((#ty))
                     }
                 },
                 None if newtype.is_some() => {
-                    let ty = self.ty(newtype.as_ref().expect("checked"), &at.child(hint))?;
+                    let ty = self.held(newtype.as_ref().expect("checked"), &at.child(hint))?;
                     quote!((#ty))
                 }
                 None => {
@@ -681,7 +725,7 @@ impl<'a> Types<'a> {
                 ));
             };
             let variant = Ident::new(&pascal(key), Span::call_site());
-            let ty = self.ty(payload, &at.child(format!("{}{}", at.hint, pascal(key))))?;
+            let ty = self.held(payload, &at.child(format!("{}{}", at.hint, pascal(key))))?;
             variants.push(quote!(#[serde(rename = #key)] #variant(#ty)));
         }
         Ok(enum_items(ident, docs, quote!(), &variants))
@@ -782,7 +826,7 @@ impl<'a> Types<'a> {
                 variants.push(quote!(#variant));
                 continue;
             }
-            let ty = self.ty(branch, &at.child(format!("{}{name}", at.hint)))?;
+            let ty = self.held(branch, &at.child(format!("{}{name}", at.hint)))?;
             variants.push(quote!(#variant(#ty)));
         }
         Ok(enum_items(
@@ -941,6 +985,11 @@ fn prelude(mapped: &[TokenStream]) -> TokenStream {
             }
         }
         impl<T> __Constraints for ::std::collections::BTreeMap<::std::string::String, T> {}
+        impl<T: __Constraints> __Constraints for ::std::boxed::Box<T> {
+            fn check_into(&self, path: &str, out: &mut ::doxa::wire::FieldErrors) {
+                (**self).check_into(path, out);
+            }
+        }
 
         /// A body the client checks against its schema's constraints before sending.
         pub struct Spec<E>(pub E);

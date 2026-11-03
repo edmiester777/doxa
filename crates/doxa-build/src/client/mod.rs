@@ -363,6 +363,37 @@ mod tests {
     }
 
     #[test]
+    fn a_type_that_holds_itself_boxes_it_but_not_through_a_vec() {
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Filter" }),
+            serde_json::json!({
+                "Filter": { "oneOf": [
+                    { "type": "object", "required": ["not"], "properties": { "not": { "$ref": "#/components/schemas/Filter" } } },
+                    { "type": "object", "required": ["and"], "properties": { "and": { "type": "array", "items": { "$ref": "#/components/schemas/Filter" } } } },
+                    { "type": "object", "required": ["node"], "properties": { "node": { "$ref": "#/components/schemas/Node" } } }
+                ] },
+                "Node": { "type": "object", "properties": {
+                    "parent": { "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/Node" }] }
+                } }
+            }),
+        ))
+        .unwrap();
+        assert!(
+            out.contains("Not (:: std :: boxed :: Box < Filter >)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("And (:: std :: vec :: Vec < Filter >)"),
+            "{out}"
+        );
+        assert!(out.contains("Node (Node)"), "{out}");
+        assert!(
+            out.contains("pub parent : :: core :: option :: Option < :: core :: option :: Option < :: std :: boxed :: Box < Node > > >"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn a_variant_named_self_is_no_keyword() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Target" }),
