@@ -55,7 +55,10 @@ pub use doxa_auth as auth;
 pub use doxa_policy as policy;
 
 #[cfg(any(feature = "macros", feature = "client"))]
-pub use doxa_macros::{client, client_only, prelude, server, server_only, service, Identity};
+pub use doxa_macros::{client, client_only, dto, prelude, server, server_only, service, Identity};
+
+#[doc(hidden)]
+pub use serde as __serde;
 
 /// The server half: what `doxa::prelude!()` brings in where the crate is the server.
 #[cfg(all(feature = "docs", feature = "macros", not(target_arch = "wasm32")))]
@@ -63,7 +66,7 @@ pub mod server {
     /// Names a shared route file needs when compiled as the server.
     pub mod prelude {
         pub use crate::{
-            asset, capability, client, client_only, delete, get, operation, patch, post, put,
+            asset, capability, client, client_only, delete, dto, get, operation, patch, post, put,
             server, server_only, Actions, ApiError, Attachment, Identity, IntoParams,
             PolicyResource, SseEvent, SseStream, ToSchema,
         };
@@ -458,7 +461,7 @@ pub mod client {
         pub use doxa_client::route_key;
         pub use doxa_client::{Form, Granted, Json, Path, Query, SseStream, StatusCode};
         pub use doxa_macros::{
-            asset, capability, client, client_only, delete, get, operation, patch, post, put,
+            asset, capability, client, client_only, delete, dto, get, operation, patch, post, put,
             server, server_only, Actions, ApiError, ClientIntoParams as IntoParams,
             ClientToSchema as ToSchema, Identity, PolicyResource, SseEvent,
         };

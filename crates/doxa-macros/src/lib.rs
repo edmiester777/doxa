@@ -191,6 +191,7 @@ mod api_error;
 mod asset;
 mod capability;
 mod client_stub;
+mod dto;
 mod grant;
 mod method;
 mod policy_resource;
@@ -797,6 +798,46 @@ pub fn prelude(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn service(input: TokenStream) -> TokenStream {
     role::service(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A wire type: serde both ways, `ToSchema`, `Debug`, `PartialEq` and `Clone`, in both halves.
+///
+/// `#[dto(query)]` adds `IntoParams`; `#[dto(skip(Debug))]` drops a default. The client half
+/// keeps serde and `Clone` whatever `skip` says, and strips derives it has no use for.
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Rename { pub name: String }
+///
+/// #[dto(query)]
+/// pub struct Filter { pub contains: Option<String> }
+///
+/// let back: Rename = serde_json::from_str(&serde_json::to_string(&Rename { name: "a".into() }).unwrap()).unwrap();
+/// assert_eq!(back, Rename { name: "a".into() });
+/// ```
+///
+/// A `skip` it doesn't know is an error:
+///
+/// ```compile_fail
+/// doxa::prelude!();
+///
+/// #[dto(skip(Hash))]
+/// pub struct Rename { pub name: String }
+/// ```
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto(skip(Debug))]
+/// pub struct Rename { pub name: String }
+/// ```
+#[proc_macro_attribute]
+pub fn dto(args: TokenStream, item: TokenStream) -> TokenStream {
+    dto::expand(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

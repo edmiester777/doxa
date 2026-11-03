@@ -865,6 +865,14 @@ pub async fn get_widget(widget: Granted<WidgetByName>) -> Json<Widget> {
 let w: Widget = get_widget("sprocket").await?;
 ```
 
+Wire types take `#[dto]`, which derives serde both ways, `ToSchema`, `Debug`, `PartialEq` and `Clone` (`#[dto(query)]` adds `IntoParams`, `#[dto(skip(Debug))]` drops one). In the client half it strips derives the browser has no use for, such as an ORM's, along with their attributes:
+
+```rust
+#[dto]
+#[derive(garde::Validate)]
+pub struct Rename { #[garde(length(min = 1))] pub name: String }
+```
+
 Server-only items in a shared file take `#[server]`, or `doxa::server_only! { mod store; }` for a module. GETs are cached and deduplicated, mutations invalidate what they touch, and `rename_widget::can(&key)` dry-runs the route's own guard.
 
 Each client crate's routes go to its own server. `doxa::service!();` in the shared `lib.rs` gives the client crate a `service()`, with its own cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and a deployment can change them in `services.json` without a rebuild. Credentials are layers:

@@ -12,9 +12,12 @@ use doxa::Valid;
 use futures::stream::{self, Stream};
 #[server]
 use std::convert::Infallible;
+#[server]
+use utoipa::ToResponse;
 
 /// A widget. `id` never changes; `name` is how routes address it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, PolicyResource, Identity)]
+#[dto]
+#[derive(PolicyResource, Identity)]
 #[resource(entity_type = "Widget")]
 #[identity(id = id, key = WidgetKey { name })]
 pub struct Widget {
@@ -27,20 +30,24 @@ pub struct Widget {
 route_key!(pub WidgetKey { name: String });
 
 /// The new name for a widget; the server and the form check the same rule.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, garde::Validate)]
+#[dto]
+#[derive(garde::Validate, ToResponse)]
+#[response(description = "A name for a widget")]
 pub struct Rename {
     #[garde(length(min = 1, max = 40))]
     pub name: String,
 }
 
 /// Narrows a listing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, IntoParams)]
+#[dto(query)]
+#[derive(Default)]
 pub struct Filter {
     pub contains: Option<String>,
 }
 
 /// What can go wrong renaming a widget.
-#[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize, ToSchema, ApiError)]
+#[dto]
+#[derive(thiserror::Error, ApiError)]
 pub enum WidgetError {
     #[error("the name `{0}` is taken")]
     #[api(status = 409, code = "name_taken")]
@@ -48,7 +55,8 @@ pub enum WidgetError {
 }
 
 /// Something that happened to a widget.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SseEvent)]
+#[dto]
+#[derive(SseEvent)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum WidgetEvent {
     Renamed { name: String },
