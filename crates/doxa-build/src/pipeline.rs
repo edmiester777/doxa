@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::bundle::{
-    entry_js, gallery_js, rewrite_islands, rewrite_react, BundleOutput, BundleRequest, Bundler,
-    Esbuild,
+    entry_js, gallery_js, rewrite_islands, rewrite_npm, rewrite_react, BundleOutput, BundleRequest,
+    Bundler, Esbuild,
 };
 use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
@@ -304,7 +304,9 @@ impl Pipeline {
         let glue_path = dir.join("app.js");
         let glue = std::fs::read_to_string(&glue_path).at(&glue_path)?;
         let glue = split::dedupe_loader_imports(&glue);
-        let (glue, react) = rewrite_react(&glue, &self.web.dir);
+        let (glue, mut react) = rewrite_react(&glue, &self.web.dir);
+        let (glue, npm) = rewrite_npm(&glue, &self.web.dir);
+        react.extend(npm);
         for (file, js) in react {
             let path = dir.join(file);
             if let Some(parent) = path.parent() {

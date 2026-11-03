@@ -18,8 +18,12 @@ mod form;
 mod head;
 mod hooks;
 mod hot;
+#[cfg(feature = "npm")]
+mod npm;
 #[cfg(feature = "oidc")]
 pub mod oidc;
+#[cfg(feature = "npm")]
+pub use npm::JsError;
 mod plugin;
 mod portal;
 #[cfg(feature = "react")]
@@ -70,6 +74,8 @@ pub use view::{
     Element, IntoAttr, IntoProp, IntoView, Key, SafeUrl, View,
 };
 
+#[cfg(feature = "npm")]
+pub use doxa_ui_macros::npm;
 /// A React component as a doxa one: `#[react(module = "…", export = "…")]` on its props struct.
 ///
 /// A `View` field reaches React as an element wrapping doxa's DOM; for a `render`/`asChild`
@@ -99,6 +105,10 @@ pub mod __private {
         js_sys::Reflect::get(&js_sys::global(), &"__DOXA_HOSTED__".into())
             .is_ok_and(|v| v.is_truthy())
     }
+    #[cfg(all(feature = "npm", target_arch = "wasm32"))]
+    pub use crate::npm::convert::{
+        await_promise, describe, from_js, js_error, js_error_from, to_js,
+    };
     #[cfg(target_arch = "wasm32")]
     pub use wasm_bindgen;
     #[cfg(target_arch = "wasm32")]

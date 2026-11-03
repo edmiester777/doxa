@@ -28,6 +28,8 @@ export = ["dep:serde-wasm-bindgen"]
 forms = []
 # `session()` and `SignInGuard`, over `doxa_client::oidc`.
 oidc = ["doxa-client/oidc"]
+# `#[npm]`: plain JS modules bound as typed Rust.
+npm = ["dep:serde-wasm-bindgen"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

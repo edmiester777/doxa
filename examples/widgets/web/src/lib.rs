@@ -7,6 +7,7 @@ use widgets_client::widgets::*;
 pub mod kit;
 pub mod motion;
 pub mod stories;
+pub mod words;
 use motion::{exit, flip};
 
 /// The default look.
@@ -17,7 +18,11 @@ pub const DARK: Theme = Theme::new("dark", &[("--bg", "#111"), ("--fg", "#eee")]
 /// Everything the browser runs, ready to mount.
 pub fn app() -> App {
     let router = Router::new()
-        .layout::<Shell>(|r| r.page::<WidgetsPage>().page::<WidgetPage>())
+        .layout::<Shell>(|r| {
+            r.page::<WidgetsPage>()
+                .page::<WidgetPage>()
+                .page::<words::WordsPage>()
+        })
         .not_found(|| view! { <p class="missing">"No such page"</p> });
     App::new(router).theme(LIGHT)
 }

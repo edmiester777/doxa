@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::bundle::{rewrite_islands, rewrite_react, BundleRequest};
+use crate::bundle::{rewrite_islands, rewrite_npm, rewrite_react, BundleRequest};
 use crate::config::Library;
 use crate::error::{Error, IoContext, Result};
 use crate::pipeline::{note, Pipeline};
@@ -288,7 +288,9 @@ impl Pipeline {
         let glue_path = dir.join("app.js");
         let glue = std::fs::read_to_string(&glue_path).at(&glue_path)?;
         let glue = split::dedupe_loader_imports(&glue);
-        let (glue, react) = rewrite_react(&glue, &self.web.dir);
+        let (glue, mut react) = rewrite_react(&glue, &self.web.dir);
+        let (glue, npm) = rewrite_npm(&glue, &self.web.dir);
+        react.extend(npm);
         let runtime = react
             .iter()
             .any(|(f, _)| f == "react/runtime.js")

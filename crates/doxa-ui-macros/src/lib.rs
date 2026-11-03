@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
+mod binding;
 mod component;
 mod export;
 mod form;
@@ -39,6 +40,17 @@ pub fn page(args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
     component::parse(item)
         .and_then(|parsed| page::expand(args, &parsed))
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A plain JS module as typed Rust: `#[npm(module = "cronstrue")] extern "js" { fn … }`.
+/// `#[npm(export = "…")]` on a `fn` names its export; `lazy` loads the module on first call.
+#[proc_macro_attribute]
+pub fn npm(args: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::ItemForeignMod);
+    binding::Args::parse(args.into())
+        .and_then(|args| binding::expand(args, item))
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

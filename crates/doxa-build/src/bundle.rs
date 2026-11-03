@@ -261,6 +261,48 @@ pub fn rewrite_react(glue: &str, web_root: &Path) -> (String, ReactModules) {
     (out, modules)
 }
 
+/// The prefix a `lazy` `#[npm]` block's module is imported under.
+pub const NPM_SCHEME: &str = "doxa-npm:";
+
+/// Point every `doxa-npm:lazy:<names>:<module>` specifier at a generated module whose
+/// exports load the real one on first call, so esbuild splits it into a chunk of its own.
+pub fn rewrite_npm(glue: &str, web_root: &Path) -> (String, ReactModules) {
+    let mut modules: ReactModules = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let out = rewrite_specifiers(glue, NPM_SCHEME, |spec| {
+        let i = match seen.iter().position(|s| s == spec) {
+            Some(i) => i,
+            None => {
+                seen.push(spec.to_owned());
+                let i = seen.len() - 1;
+                modules.push((format!("npm/lazy-{i}.js"), lazy_npm_js(spec, web_root)));
+                i
+            }
+        };
+        format!("./npm/lazy-{i}.js")
+    });
+    (out, modules)
+}
+
+/// `lazy:toString,parse:cronstrue` as async proxies over a dynamic import.
+fn lazy_npm_js(spec: &str, web_root: &Path) -> String {
+    let rest = spec.strip_prefix("lazy:").unwrap_or(spec);
+    let (names, module) = rest.split_once(':').unwrap_or(("", rest));
+    let module = match module.strip_prefix(ISLAND_SCHEME) {
+        Some(rel) => js_path(&web_root.join(rel)),
+        None => module.to_owned(),
+    };
+    let lit = serde_json::to_string(&module).expect("json");
+    let mut js = format!("let m;\nconst load = () => (m ??= import({lit}));\n");
+    for (i, name) in names.split(',').filter(|n| !n.is_empty()).enumerate() {
+        let key = serde_json::to_string(name).expect("json");
+        js.push_str(&format!(
+            "async function f{i}(...a) {{ return (await load())[{key}](...a); }}\nexport {{ f{i} as {key} }};\n"
+        ));
+    }
+    js
+}
+
 /// A loader for `<eager|lazy>:<export>:<module>`; `load()` returns the component.
 fn island_js(spec: &str, web_root: &Path) -> String {
     let mut parts = spec.splitn(3, ':');
@@ -544,5 +586,23 @@ mod tests {
         assert!(!Esbuild::args(&debug, Path::new("m"))
             .iter()
             .any(|a| a == "--minify"));
+    }
+
+    #[test]
+    fn a_lazy_npm_module_is_imported_on_first_call() {
+        let glue = "import { toString, parse } from 'doxa-npm:lazy:toString,parse:cronstrue';\n\
+                    import { pad } from 'doxa-npm:lazy:pad:doxa-island:ts/pad.js';\n";
+        let (out, modules) = rewrite_npm(glue, Path::new("/app/web"));
+        assert!(out.contains("from './npm/lazy-0.js'"), "{out}");
+        assert!(out.contains("from './npm/lazy-1.js'"), "{out}");
+        let (file, js) = &modules[0];
+        assert_eq!(file, "npm/lazy-0.js");
+        assert!(js.contains("import(\"cronstrue\")"), "{js}");
+        assert!(js.contains("export { f1 as \"parse\" }"), "{js}");
+        assert!(
+            modules[1].1.contains("/app/web/ts/pad.js"),
+            "{}",
+            modules[1].1
+        );
     }
 }

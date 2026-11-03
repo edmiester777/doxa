@@ -952,6 +952,25 @@ fn start() {
 
 The same pages render natively into an in-memory document for tests. [`examples/widgets`](examples/widgets) has the whole app: `api` (shared routes), `client` (their client half), `server`, and `web` (the pages, tested against the real router).
 
+### 18. Plain JS modules as Rust
+
+```rust
+use doxa::ui::{npm, JsError};
+
+#[npm(module = "cronstrue")]
+extern "js" {
+    #[npm(export = "toString")]
+    pub fn describe(expr: &str, opts: &DescribeOpts) -> Result<String, JsError>;
+}
+
+#[npm(module = "./ts/render.js", lazy)]          // fetched on first call, in its own chunk
+extern "js" {
+    pub async fn render(src: &str) -> Result<Rendered, JsError>;
+}
+```
+
+Arguments and returns cross through serde (feature `npm`); JS types declared with `type X;` and `JsValue` pass through untouched, and a `Promise` becomes a future.
+
 ## Design
 
 - **Framework-neutral cores.** Auth, policy, and audit work without axum. Axum integration is feature-gated.

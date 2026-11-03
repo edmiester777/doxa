@@ -109,7 +109,7 @@ struct Field {
 }
 
 /// `./ts/x.tsx` is under the web crate root; anything else is an npm specifier.
-fn specifier(module: &LitStr) -> syn::Result<String> {
+pub(crate) fn specifier(module: &LitStr) -> syn::Result<String> {
     let m = module.value();
     if let Some(rest) = m.strip_prefix("./") {
         Ok(format!("doxa-island:{rest}"))
