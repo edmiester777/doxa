@@ -198,6 +198,7 @@ mod policy_resource;
 mod role;
 mod sig;
 mod sse_event;
+mod validator;
 
 /// Derive [`axum::response::IntoResponse`] and [`utoipa::IntoResponses`]
 /// for an error enum from a single per-variant declaration.
@@ -927,6 +928,26 @@ pub fn client_only(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Identity, attributes(identity))]
 pub fn derive_identity(input: TokenStream) -> TokenStream {
     role::derive_identity(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A validating extractor wrapper: in the server half, `Json`, `Form` and `Query` inside it are
+/// extracted, checked by its [`Validates`](../doxa/wire/trait.Validates.html) impl, and refused
+/// with a `422` per failing field.
+///
+/// ```ignore
+/// #[derive(doxa::Validator)]
+/// pub struct Valid<E>(pub E);
+///
+/// impl<T: validator::Validate> doxa::wire::Validates for Valid<Json<T>> {
+///     type Value = T;
+///     fn check(v: &T) -> Result<(), FieldErrors> { v.validate().map_err(FieldErrors::from) }
+/// }
+/// ```
+#[proc_macro_derive(Validator)]
+pub fn derive_validator(input: TokenStream) -> TokenStream {
+    validator::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

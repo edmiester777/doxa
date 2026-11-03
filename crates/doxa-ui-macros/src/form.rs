@@ -1,4 +1,4 @@
-//! `#[derive(Form)]`: a struct of `Field`s, one per field, each named by its garde path.
+//! `#[derive(Form)]`: a struct of `Field`s, one per field, each named by its path in the rules' errors.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};

@@ -1,9 +1,11 @@
-//! `form(value)`: a value edited field by field and checked by its garde rules, with a
+//! `form(value)`: a value edited field by field and checked by the route's own rules, with a
 //! server's `422` mapped onto the same fields.
 
+use std::cell::OnceCell;
+use std::rc::Rc;
 use std::str::FromStr;
 
-use doxa_client::{FieldError, FieldErrors};
+use doxa_client::FieldErrors;
 
 use crate::hooks::{action, state, Action, State};
 use crate::view::{BindChecked, BindSelected, BindValue};
@@ -15,8 +17,8 @@ struct FormState<T> {
     /// Text typed into a field that didn't parse, by path.
     raw: Vec<(&'static str, String)>,
     touched: Vec<&'static str>,
-    /// The garde rules' verdict on `value`.
-    rules: FieldErrors,
+    /// Set once, by [`Form::rules`].
+    check: OnceCell<Rules<T>>,
     /// The server's last `422`, cleared field by field as they change.
     server: FieldErrors,
     submitted: bool,
@@ -41,21 +43,15 @@ pub trait FormFields: Sized + 'static {
     fn fields(form: Form<Self>) -> Self::Fields;
 }
 
-fn rules<T: garde::Validate>(v: &T) -> FieldErrors
-where
-    T::Context: Default,
-{
-    match v.validate() {
-        Ok(()) => FieldErrors::default(),
-        Err(report) => FieldErrors(
-            report
-                .iter()
-                .map(|(path, e)| FieldError {
-                    path: path.to_string(),
-                    message: e.message().to_owned(),
-                })
-                .collect(),
-        ),
+type Rules<T> = Rc<dyn Fn(&T) -> Result<(), FieldErrors>>;
+
+impl<T> FormState<T> {
+    /// What the rules say about the value now.
+    fn verdict(&self) -> FieldErrors {
+        match self.check.get() {
+            Some(check) => check(&self.value).err().unwrap_or_default(),
+            None => FieldErrors::default(),
+        }
     }
 }
 
@@ -63,16 +59,14 @@ where
 #[track_caller]
 pub fn form<T>(initial: T) -> Form<T>
 where
-    T: Clone + PartialEq + garde::Validate + 'static,
-    T::Context: Default,
+    T: Clone + PartialEq + 'static,
 {
-    let checked = rules(&initial);
     Form(state(FormState {
         value: initial.clone(),
         initial,
         raw: Vec::new(),
         touched: Vec::new(),
-        rules: checked,
+        check: OnceCell::new(),
         server: FieldErrors::default(),
         submitted: false,
     }))
@@ -86,9 +80,16 @@ fn under(path: &str, field: &str) -> bool {
 
 impl<T> Form<T>
 where
-    T: Clone + PartialEq + garde::Validate + 'static,
-    T::Context: Default,
+    T: Clone + PartialEq + 'static,
 {
+    /// Check each edit with `check`, such as a route's `create_order::check`. The first call wins.
+    pub fn rules(self, check: impl Fn(&T) -> Result<(), FieldErrors> + 'static) -> Self {
+        self.0.with(|s| {
+            let _ = s.check.set(Rc::new(check));
+        });
+        self
+    }
+
     /// The value as edited so far.
     pub fn value(&self) -> T {
         self.0.with(|s| s.value.clone())
@@ -97,7 +98,6 @@ where
     /// Replace the whole value, as if every field were typed.
     pub fn set(&self, value: T) {
         self.0.update(|s| {
-            s.rules = rules(&value);
             s.value = value;
             s.raw.clear();
             s.server = FieldErrors::default();
@@ -112,13 +112,13 @@ where
     /// Whether every rule passes and every field parsed.
     pub fn valid(&self) -> bool {
         self.0
-            .with(|s| s.rules.0.is_empty() && s.raw.is_empty() && s.server.0.is_empty())
+            .with(|s| s.verdict().0.is_empty() && s.raw.is_empty() && s.server.0.is_empty())
     }
 
     /// Every current error: rules, then the server's.
     pub fn errors(&self) -> FieldErrors {
         self.0.with(|s| {
-            let mut all = s.rules.clone();
+            let mut all = s.verdict();
             all.0.extend(s.server.0.iter().cloned());
             all
         })
@@ -139,7 +139,6 @@ where
     pub fn reset(&self) {
         self.0.update(|s| {
             s.value = s.initial.clone();
-            s.rules = rules(&s.value);
             s.raw.clear();
             s.touched.clear();
             s.server = FieldErrors::default();
@@ -204,8 +203,7 @@ impl<T, R> Copy for Submit<T, R> {}
 
 impl<T, R> Submit<T, R>
 where
-    T: Clone + PartialEq + garde::Validate + 'static,
-    T::Context: Default,
+    T: Clone + PartialEq + 'static,
     R: 'static,
 {
     /// Check the rules and, if they pass, send the value.
@@ -260,11 +258,10 @@ impl<T, V> Copy for Field<T, V> {}
 
 impl<T, V> Field<T, V>
 where
-    T: Clone + PartialEq + garde::Validate + 'static,
-    T::Context: Default,
+    T: Clone + PartialEq + 'static,
     V: Clone + PartialEq + 'static,
 {
-    /// The field at garde path `path`, for a type that can't `#[derive(Form)]`, such as one
+    /// The field at path `path`, for a type that can't `#[derive(Form)]`, such as one
     /// from a crate shared with the server: `Field::new(form, "name", |r| &r.name, |r| &mut r.name)`.
     pub fn new(
         form: Form<T>,
@@ -280,7 +277,7 @@ where
         }
     }
 
-    /// Its garde path.
+    /// Its path, as the rules name it.
     pub fn path(&self) -> &'static str {
         self.path
     }
@@ -297,7 +294,6 @@ where
             *get_mut(&mut s.value) = value;
             s.raw.retain(|(p, _)| *p != path);
             s.server.0.retain(|e| !under(&e.path, path));
-            s.rules = rules(&s.value);
         });
     }
 
@@ -332,7 +328,7 @@ where
             if s.raw.iter().any(|(p, _)| *p == self.path) {
                 return Some("isn't a valid value".to_owned());
             }
-            s.rules
+            s.verdict()
                 .0
                 .iter()
                 .chain(&s.server.0)
@@ -344,8 +340,7 @@ where
 
 impl<T, V> BindValue for Field<T, V>
 where
-    T: Clone + PartialEq + garde::Validate + 'static,
-    T::Context: Default,
+    T: Clone + PartialEq + 'static,
     V: Clone + PartialEq + FromStr + ToString + 'static,
 {
     fn current(&self) -> String {
@@ -379,8 +374,7 @@ where
 
 impl<T> BindChecked for Field<T, bool>
 where
-    T: Clone + PartialEq + garde::Validate + 'static,
-    T::Context: Default,
+    T: Clone + PartialEq + 'static,
 {
     fn checked(&self) -> bool {
         self.get()
@@ -394,8 +388,7 @@ where
 
 impl<T> BindSelected for Field<T, Vec<String>>
 where
-    T: Clone + PartialEq + garde::Validate + 'static,
-    T::Context: Default,
+    T: Clone + PartialEq + 'static,
 {
     fn selected(&self) -> Vec<String> {
         self.get()

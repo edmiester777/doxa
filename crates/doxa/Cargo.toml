@@ -26,8 +26,13 @@ cors = ["docs", "doxa-docs/cors"]
 # `doxa::proxy`, to serve another server's routes same-origin.
 proxy = ["docs", "doxa-docs/proxy"]
 
-# `doxa::Valid<Json<T>>`, checking garde rules with a `422` per failing field.
-garde = ["docs", "doxa-docs/garde"]
+# `doxa::Valid<Json<T>>`: garde rules, checked by the server (`422` per failing field) and by
+# the client before it sends.
+garde = ["dep:garde", "doxa-wire/garde"]
+# `doxa::validator::Valid<Json<T>>`, the same for the `validator` crate.
+validator = ["dep:validator", "doxa-wire/validator"]
+# `doxa::serde_valid::Valid<Json<T>>`, the same for `serde_valid`.
+serde-valid = ["dep:serde_valid", "doxa-wire/serde_valid"]
 
 # Re-export doxa-macros proc-macros (#[derive(ApiError)],
 # #[derive(SseEvent)], #[get]/#[post]/…) through doxa-docs.
@@ -96,6 +101,9 @@ doxa-client = { workspace = true, optional = true }
 doxa-ui = { workspace = true, optional = true }
 doxa-protected = { workspace = true, optional = true }
 serde = { workspace = true }
+garde = { workspace = true, optional = true }
+validator = { workspace = true, optional = true }
+serde_valid = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 doxa-docs = { workspace = true, optional = true }
@@ -121,6 +129,8 @@ tower = { workspace = true }
 utoipa = { workspace = true }
 uuid = { workspace = true }
 garde = { workspace = true, features = ["derive"] }
+validator = { workspace = true, features = ["derive"] }
+serde_valid = { workspace = true }
 http-body-util = { workspace = true }
 
 [[example]]
@@ -158,6 +168,10 @@ required-features = ["ui"]
 [[test]]
 name = "forms"
 required-features = ["forms", "garde"]
+
+[[test]]
+name = "validates"
+required-features = ["client", "garde", "validator", "serde-valid"]
 
 [[test]]
 name = "react"

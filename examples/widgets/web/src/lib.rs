@@ -94,7 +94,8 @@ async fn WidgetPage(name: String) -> Result<View> {
 fn RenameForm(widget: Widget) -> View {
     let form = form(Rename {
         name: widget.name.clone(),
-    });
+    })
+    .rules(rename_widget::check);
     let name = Field::new(form, "name", |r: &Rename| &r.name, |r| &mut r.name);
     let key = WidgetKey::from(&widget);
     let save = form.submit(async move |r: Rename| {

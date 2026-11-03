@@ -29,6 +29,21 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// `#[derive(Validator)]` names `::doxa`, and derives here too.
+extern crate self as doxa;
+
+#[cfg(any(feature = "garde", feature = "validator", feature = "serde-valid"))]
+mod valid;
+#[cfg(feature = "serde-valid")]
+pub use valid::serde_valid;
+#[cfg(feature = "validator")]
+pub use valid::validator;
+#[cfg(feature = "garde")]
+pub use valid::Valid;
+
+#[cfg(any(feature = "macros", feature = "client"))]
+pub use doxa_macros::Validator;
+
 #[cfg(all(feature = "docs", not(target_arch = "wasm32")))]
 pub use doxa_docs::*;
 
@@ -77,6 +92,8 @@ pub mod server {
         pub use axum::Json;
         pub use serde::{Deserialize, Serialize};
 
+        #[cfg(feature = "garde")]
+        pub use crate::Valid;
         #[cfg(feature = "auth")]
         pub use doxa_auth::{route_key, Cap, Granted, Many, One, Require};
     }
@@ -476,6 +493,8 @@ pub mod client {
 
     /// Names a shared route file needs when compiled as the client.
     pub mod prelude {
+        #[cfg(feature = "garde")]
+        pub use crate::Valid;
         pub use doxa_client::route_key;
         pub use doxa_client::{Form, Granted, Json, Path, Query, SseStream, StatusCode};
         pub use doxa_macros::{

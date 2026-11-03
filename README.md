@@ -873,6 +873,15 @@ Wire types take `#[dto]`, which derives serde both ways, `ToSchema`, `Debug`, `P
 pub struct Rename { #[garde(length(min = 1))] pub name: String }
 ```
 
+A validating extractor runs the same rules in both halves. The server answers `422` with each failing field, and the call refuses with those fields before anything is sent. `doxa::Valid` (feature `garde`), `doxa::validator::Valid` (`validator`) and `doxa::serde_valid::Valid` (`serde-valid`) ship. An app's own wrapper implements `doxa::wire::Validates` and derives `doxa::Validator`:
+
+```rust
+#[patch("/api/widgets/{name}")]
+pub async fn rename_widget(w: Granted<WidgetByName>, Valid(Json(r)): Valid<Json<Rename>>) -> Json<Widget> { … }
+
+let form = form(Rename::default()).rules(rename_widget::check);   // live field errors, by the route's rules
+```
+
 Server-only items in a shared file take `#[server]`, or `doxa::server_only! { mod store; }` for a module. A call is always `pub`, and `doxa::client_pub! { mod api; }` makes a module the server keeps private public in the client half. GETs are cached and deduplicated, mutations invalidate what they touch, and `rename_widget::can(&key)` dry-runs the route's own guard.
 
 Each client crate's routes go to its own server. `doxa::service!();` in the shared `lib.rs` gives the client crate a `service()`, with its own cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and a deployment can change them in `services.json` without a rebuild. Credentials are layers:

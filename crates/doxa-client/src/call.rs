@@ -6,11 +6,11 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::task::Poll;
 
-use doxa_wire::{Identity, Method, RouteSpec};
+use doxa_wire::{FieldErrors, Identity, Method, RouteSpec, Validates};
 use futures_util::future::LocalBoxFuture;
 use serde_json::Value;
 
-use crate::arg::{ArgFor, Outgoing};
+use crate::arg::{ArgFor, ClientArg, Outgoing};
 use crate::cache::entity::Entity;
 use crate::cache::{map_items, max_age, Lookup, Meta, Outcome, Revalidated, Revalidation, Slot};
 use crate::fetch::Fetch;
@@ -22,6 +22,12 @@ use crate::transport::Request;
 type Patch = Box<dyn FnOnce(&Service, Option<&Value>) -> Vec<(String, Rc<dyn Any>)>>;
 type Settle = Box<dyn FnOnce(&Service, &dyn Any, Option<&Value>)>;
 
+/// Why a call is refused before it is sent.
+enum Refused {
+    Encode(String),
+    Invalid(FieldErrors),
+}
+
 /// A call to a route, built by the route's client stub. Await it.
 ///
 /// ```ignore
@@ -31,7 +37,7 @@ type Settle = Box<dyn FnOnce(&Service, &dyn Any, Option<&Value>)>;
 pub struct Call<R> {
     route: &'static RouteSpec,
     out: Outgoing,
-    error: Option<String>,
+    refused: Option<Refused>,
     fresh: bool,
     patch: Option<Patch>,
     settle: Option<Settle>,
@@ -45,7 +51,7 @@ impl<R> Call<R> {
         Self {
             route,
             out: Outgoing::new(route.path),
-            error: None,
+            refused: None,
             fresh: false,
             patch: None,
             settle: None,
@@ -63,10 +69,26 @@ impl<R> Call<R> {
 
     /// Add the argument for a parameter the route reads with extractor `X`.
     pub fn arg<X, A: ArgFor<X>>(mut self, value: A) -> Self {
-        if self.error.is_none() {
+        if self.refused.is_none() {
             if let Err(e) = value.encode(&mut self.out) {
-                self.error = Some(e);
+                self.refused = Some(Refused::Encode(e));
             }
+        }
+        self
+    }
+
+    /// Add an argument the route checks with `W`; if it fails, the call is refused unsent.
+    #[doc(hidden)]
+    pub fn checked<W, X>(mut self, value: W::Value) -> Self
+    where
+        W: Validates,
+        X: ClientArg<Value = W::Value>,
+    {
+        if self.refused.is_none() {
+            self.refused = match W::check(&value) {
+                Err(fields) => Some(Refused::Invalid(fields)),
+                Ok(()) => X::apply(value, &mut self.out).err().map(Refused::Encode),
+            };
         }
         self
     }
@@ -90,8 +112,10 @@ impl<R> Call<R> {
 
     /// The path and query this call requests.
     pub fn url(&self) -> Result<String, Fetch> {
-        if let Some(e) = &self.error {
-            return Err(Fetch::Encode(e.clone()));
+        match &self.refused {
+            Some(Refused::Encode(e)) => return Err(Fetch::Encode(e.clone())),
+            Some(Refused::Invalid(f)) => return Err(Fetch::Invalid(f.clone())),
+            None => {}
         }
         self.out.url().map_err(Fetch::Encode)
     }

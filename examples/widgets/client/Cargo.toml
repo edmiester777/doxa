@@ -9,7 +9,7 @@ publish = false
 path = "../api/src/lib.rs"
 
 [dependencies]
-doxa = { workspace = true, features = ["client"] }
+doxa = { workspace = true, features = ["client", "garde"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
 garde = { workspace = true, features = ["derive"] }
@@ -21,3 +21,6 @@ doxa-role = { workspace = true }
 widgets-server = { path = "../server" }
 doxa = { workspace = true, features = ["client-router"] }
 tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+serde_json = { workspace = true }

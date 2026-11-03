@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 #[doc(hidden)]
 pub use serde_json::Value as __Value;
 
+mod valid;
+pub use valid::Validates;
+
 /// Header a `<Can>` probe sends; the guard answers `204` instead of running the handler.
 pub const DRY_RUN_HEADER: &str = "x-doxa-dry-run";
 /// Value the server echoes on [`DRY_RUN_HEADER`] when the probe was allowed.

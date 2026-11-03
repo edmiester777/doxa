@@ -38,7 +38,16 @@ enum Arg {
         name: syn::Ident,
         ty: TokenStream,
         kind: Kind,
+        check: Option<Box<Check>>,
     },
+}
+
+/// A validating wrapper around a sent argument: `Valid<Json<T>>`, checked before sending.
+struct Check {
+    /// The wrapper around the client's extractor: `Valid<::doxa::client::Json<T>>`.
+    wrapper: TokenStream,
+    /// `T`.
+    value: Type,
 }
 
 impl Arg {
@@ -184,6 +193,18 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
     let (params, pushes): (Vec<_>, Vec<_>) = args
         .iter()
         .filter_map(|a| match a {
+            Arg::Sent {
+                name,
+                ty,
+                check: Some(check),
+                ..
+            } => {
+                let Check { wrapper, value } = &**check;
+                Some((
+                    quote!(#name: impl ::doxa::client::Arg<#value>),
+                    quote!(.checked::<#wrapper, #ty>(::doxa::client::Arg::into_arg(#name))),
+                ))
+            }
             Arg::Sent { name, ty, .. } => Some((
                 quote!(#name: impl ::doxa::client::ArgFor<#ty>),
                 quote!(.arg::<#ty, _>(#name)),
@@ -192,10 +213,25 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
         })
         .unzip();
 
+    let check = args.iter().find_map(|a| match a {
+        Arg::Sent {
+            check: Some(check), ..
+        } => {
+            let Check { wrapper, value } = &**check;
+            Some(quote! {
+                /// The rules the route checks its input with, as the server runs them.
+                pub fn check(value: &#value) -> ::core::result::Result<(), ::doxa::wire::FieldErrors> {
+                    <#wrapper as ::doxa::wire::Validates>::check(value)
+                }
+            })
+        }
+        _ => None,
+    });
+
     let (probe_params, probe_pushes): (Vec<_>, Vec<_>) = args
         .iter()
         .filter_map(|a| match a {
-            Arg::Sent { name, ty, kind } if *kind != Kind::Body => Some((
+            Arg::Sent { name, ty, kind, .. } if *kind != Kind::Body => Some((
                 quote!(#name: impl ::doxa::client::ArgFor<#ty>),
                 quote!(.arg::<#ty, _>(#name)),
             )),
@@ -265,6 +301,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
             };
             #coverage
             #refusal
+            #check
 
             /// Whether this caller may call the route with these arguments, from a dry run.
             pub fn can(#(#probe_params),*) -> ::doxa::client::Probe {
@@ -342,19 +379,63 @@ fn binding(pat: &Pat, index: usize) -> syn::Ident {
     }
 }
 
+/// Extractors a wrapper such as `Valid<…>` is seen through.
+const EXTRACTORS: &[&str] = &["Path", "Query", "Json", "Form"];
+
+/// `inner`, classified, seen through the wrapper `ty`; its value checked first unless it is a path.
+fn wrapped(inner: Arg, ty: &Type, extractor: &str, inner_ty: &Type) -> Arg {
+    let Arg::Sent {
+        name,
+        ty: client_ty,
+        kind,
+        ..
+    } = inner
+    else {
+        return inner;
+    };
+    let value = match (extractor, first_type_arg(inner_ty)) {
+        ("Path", _) | (_, None) => None,
+        (_, Some(v)) => Some(v.clone()),
+    };
+    let check = match (value, ty) {
+        (Some(value), Type::Path(tp)) => {
+            let mut wrapper = tp.clone();
+            if let Some(seg) = wrapper.path.segments.last_mut() {
+                seg.arguments = PathArguments::AngleBracketed(syn::parse_quote!(<#client_ty>));
+            }
+            Some(Box::new(Check {
+                wrapper: quote!(#wrapper),
+                value,
+            }))
+        }
+        _ => None,
+    };
+    Arg::Sent {
+        name,
+        ty: client_ty,
+        kind,
+        check,
+    }
+}
+
 fn classify(pat: &Pat, ty: &Type, index: usize) -> Arg {
     let name = binding(pat, index);
     let sent = |kind: Kind, ty: TokenStream| Arg::Sent {
         name: name.clone(),
         ty,
         kind,
+        check: None,
     };
     let last = last_ident(ty).unwrap_or_default();
     if SERVER_ONLY.contains(&last.as_str()) {
         return Arg::Dropped;
     }
+    if let Some(inner) = first_type_arg(ty).filter(|_| !EXTRACTORS.contains(&last.as_str())) {
+        if let Some(extractor) = last_ident(inner).filter(|n| EXTRACTORS.contains(&n.as_str())) {
+            return wrapped(classify(pat, inner, index), ty, &extractor, inner);
+        }
+    }
     match (last.as_str(), first_type_arg(ty)) {
-        ("Valid", Some(t)) => classify(pat, t, index),
         ("Path", Some(t)) => sent(Kind::Path, quote!(::doxa::client::Path<#t>)),
         ("Query", Some(t)) => sent(Kind::Plain, quote!(::doxa::client::Query<#t>)),
         ("Json", Some(t)) => sent(Kind::Body, quote!(::doxa::client::Json<#t>)),
@@ -515,9 +596,7 @@ mod tests {
             "{before}"
         );
         assert!(
-            before.contains(
-                "m : impl :: doxa :: client :: ArgFor < :: doxa :: client :: Json < M > >"
-            ),
+            before.contains("m : impl :: doxa :: client :: Arg < M >"),
             "{before}"
         );
         assert!(before.contains("dry_run : true"), "{before}");
@@ -656,6 +735,30 @@ mod tests {
             quote! { async fn n() -> Json<u32> { todo!() } },
         );
         assert!(!json.contains("ClientCallable"), "{json}");
+    }
+
+    #[test]
+    fn a_wrapped_body_is_checked_before_it_is_sent() {
+        let out = stub(
+            "post",
+            "/orders",
+            quote! { async fn create(Checked(Json(o)): app::Checked<Json<NewOrder>>) -> StatusCode { todo!() } },
+        );
+        assert!(
+            out.contains(". checked :: < app :: Checked < :: doxa :: client :: Json < NewOrder > > , :: doxa :: client :: Json < NewOrder > >"),
+            "{out}"
+        );
+        assert!(out.contains("pub fn check (value : & NewOrder)"), "{out}");
+        let path = stub(
+            "get",
+            "/orders/{id}",
+            quote! { async fn get(Valid(Path(id)): Valid<Path<u32>>) -> StatusCode { todo!() } },
+        );
+        assert!(!path.contains("checked"), "{path}");
+        assert!(
+            path.contains("ArgFor < :: doxa :: client :: Path < u32 > >"),
+            "{path}"
+        );
     }
 
     #[test]

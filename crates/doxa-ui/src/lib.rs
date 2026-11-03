@@ -40,9 +40,7 @@ pub use can::{Can, CanBuilder, CanProps};
 pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
 pub use dom::{Event, Listen, NodeRef, Phase, Rect};
-/// One [`Field`] per struct field: `#[derive(garde::Validate, Form)]`.
-///
-/// garde's `pattern` and `email` rules bring `regex` into the wasm; enable them only where the budget allows.
+/// One [`Field`] per struct field, named by its path in the rules' errors.
 #[cfg(feature = "forms")]
 pub use doxa_ui_macros::Form;
 pub use error::{Result, Thrown};

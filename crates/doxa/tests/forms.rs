@@ -24,7 +24,8 @@ thread_local! {
 
 #[component]
 fn NewOrderForm() -> View {
-    let form = form(NewOrder::default());
+    let form = form(NewOrder::default())
+        .rules(<doxa::Valid<doxa::client::Json<NewOrder>> as doxa::wire::Validates>::check);
     let f = form.fields();
     let save = form.submit(async |v: NewOrder| {
         SENT.with(|s| s.borrow_mut().push(v.clone()));

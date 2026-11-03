@@ -100,6 +100,49 @@ async fn the_routes_own_error_comes_back_typed() {
 }
 
 #[tokio::test]
+async fn an_invalid_body_is_refused_with_the_servers_fields_and_never_sent() {
+    let client = install("editor");
+    let local = rename_widget(
+        "sprocket",
+        Rename {
+            name: String::new(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(client.requests_sent(), 0);
+    let Fetch::Invalid(local) = local else {
+        panic!("{local:?}")
+    };
+    assert_eq!(
+        rename_widget::check(&Rename {
+            name: String::new()
+        }),
+        Err(local.clone())
+    );
+
+    // The server, reached without the client's check, answers with the same fields.
+    let server = widgets_server::app(widgets_server::seeded());
+    let response = tower::ServiceExt::oneshot(
+        server,
+        axum::http::Request::patch("/api/widgets/sprocket")
+            .header("x-role", "editor")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"name":""}"#))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), 422);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: doxa::wire::ApiErrorBody<doxa::client::FieldErrors> =
+        serde_json::from_slice(&body).unwrap();
+    assert_eq!(body.error, local);
+}
+
+#[tokio::test]
 async fn a_refused_mutation_is_forbidden() {
     install("viewer");
     let err = rename_widget("sprocket", Rename { name: "x".into() })
