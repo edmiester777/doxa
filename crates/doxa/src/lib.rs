@@ -103,6 +103,10 @@ pub mod server {
 #[cfg(feature = "ui")]
 pub use doxa_ui as ui;
 
+/// `cn![]`: Tailwind class lists where the last conflicting class wins.
+#[cfg(feature = "tailwind")]
+pub use doxa_tailwind as tailwind;
+
 #[cfg(feature = "ui")]
 pub use doxa_ui::start;
 

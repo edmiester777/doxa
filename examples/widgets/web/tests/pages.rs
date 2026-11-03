@@ -151,7 +151,7 @@ async fn a_tags_extra_attributes_handlers_and_directives_reach_the_element() {
         let clicks = state(0u32);
         view! {
             <Button
-                class="ghost"
+                class="ghost px-1"
                 class:wide={true}
                 type="submit"
                 aria-label="Close"
@@ -170,7 +170,10 @@ async fn a_tags_extra_attributes_handlers_and_directives_reach_the_element() {
     settle().await;
 
     let button = dom.find_tag("button").unwrap();
-    assert_eq!(dom.attr(button, "class").as_deref(), Some("btn ghost wide"));
+    assert_eq!(
+        dom.attr(button, "class").as_deref(),
+        Some("btn ghost px-1 wide")
+    );
     assert_eq!(
         dom.attr(button, "type").as_deref(),
         Some("button"),

@@ -1,0 +1,23 @@
+[package]
+name = "doxa-tailwind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "cn![]: Tailwind class lists merged so the last conflicting class wins, following tailwind-merge."
+keywords = ["doxa", "tailwind", "css", "classes"]
+categories = ["web-programming", "wasm"]
+include = ["src/**", "data/**", "build.rs", "Cargo.toml"]
+
+[dependencies]
+doxa-ui = { workspace = true }
+regex-lite = "0.1"
+
+[build-dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -94,6 +94,8 @@ npm = ["ui", "doxa-ui/npm"]
 forms = ["ui", "doxa-ui/forms"]
 # `#[component(export)]`: components a foreign React host mounts, from `doxa build --lib`.
 export = ["ui", "doxa-ui/export"]
+# `cn![]`: Tailwind class lists merged so the last conflicting class wins.
+tailwind = ["ui", "dep:doxa-tailwind"]
 
 # Everything.
 full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
@@ -103,6 +105,7 @@ doxa-wire = { workspace = true }
 doxa-macros = { workspace = true, optional = true }
 doxa-client = { workspace = true, optional = true }
 doxa-ui = { workspace = true, optional = true }
+doxa-tailwind = { workspace = true, optional = true }
 doxa-protected = { workspace = true, optional = true }
 serde = { workspace = true }
 garde = { workspace = true, optional = true }

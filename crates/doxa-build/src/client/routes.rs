@@ -71,7 +71,7 @@ impl Guards {
                         #ident { #field: self }
                     }
                 }
-                impl<'a> ::doxa::client::Arg<#ident> for &'a #ty {
+                impl ::doxa::client::Arg<#ident> for &#ty {
                     fn into_arg(self) -> #ident {
                         #ident { #field: ::core::clone::Clone::clone(self) }
                     }

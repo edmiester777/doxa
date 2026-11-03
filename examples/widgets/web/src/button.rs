@@ -4,6 +4,7 @@ use doxa::ui::prelude::*;
 
 #[component]
 pub fn Button(children: View, #[attrs] rest: Attrs) -> View {
-    let class = classes!["btn", rest.class()];
+    // A `px-1` on the tag replaces `px-3` rather than fighting it.
+    let class = doxa::tailwind::cn!["btn px-3", rest.class()];
     view! { <button type="button" class={class} {..rest}>{children}</button> }
 }

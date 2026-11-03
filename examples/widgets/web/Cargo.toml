@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 widgets-client = { path = "../client" }
-doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm"] }
+doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind"] }
 futures = { workspace = true }
 serde = { workspace = true }
 
@@ -31,7 +31,7 @@ react-dom = "^19"
 
 [dev-dependencies]
 widgets-server = { path = "../server" }
-doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "client-router"] }
+doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind", "client-router"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
