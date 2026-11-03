@@ -190,8 +190,9 @@ mod tests {
     fn a_shape_with_no_rust_type_names_the_schema_and_the_route() {
         let err = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Either" }),
-            serde_json::json!({ "Either": { "oneOf": [
-                { "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": "string" } } }
+            serde_json::json!({ "Either": { "allOf": [
+                { "type": "string" },
+                { "type": "object", "properties": { "a": { "type": "string" } } }
             ] } }),
         ))
         .unwrap_err()
@@ -201,6 +202,55 @@ mod tests {
             "{err}"
         );
         assert!(err.contains(".types(|t| t.schema(\"Either\""), "{err}");
+    }
+
+    #[test]
+    fn a_tag_every_branch_holds_a_different_constant_of_is_inferred() {
+        let branch = |kind: &str, field: &str| {
+            serde_json::json!({ "type": "object", "required": ["kind", field], "properties": {
+                "kind": { "type": "string", "enum": [kind] },
+                field: { "type": "string" }
+            } })
+        };
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Location" }),
+            serde_json::json!({ "Location": { "oneOf": [
+                branch("chunk", "path"),
+                branch("http", "url")
+            ] } }),
+        ))
+        .unwrap();
+        assert!(out.contains("# [serde (tag = \"kind\")]"), "{out}");
+        assert!(
+            out.contains(
+                "# [serde (rename = \"chunk\")] Chunk { path : :: std :: string :: String , }"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_one_of_told_apart_only_by_shape_is_untagged() {
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Cursor" }),
+            serde_json::json!({
+                "Cursor": { "oneOf": [
+                    { "type": "integer" },
+                    { "type": "string" },
+                    { "$ref": "#/components/schemas/Page" },
+                    { "type": "null" }
+                ] },
+                "Page": { "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": "string" } } }
+            }),
+        ))
+        .unwrap();
+        assert!(
+            out.contains(
+                "# [serde (untagged)] # [non_exhaustive] pub enum Cursor { Integer (i64) , \
+                 String (:: std :: string :: String) , Page (Page) , Null , }"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

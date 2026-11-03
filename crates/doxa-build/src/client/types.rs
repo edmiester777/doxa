@@ -281,7 +281,13 @@ impl<'a> Types<'a> {
         if !schema.one_of.is_empty() {
             return match &schema.discriminator {
                 Some(d) => self.tagged(&ident, &docs, schema, &d.property_name, at),
-                None => self.external(&ident, &docs, schema, name, at),
+                None => match self.inferred_tag(schema, at)? {
+                    Some(tag) => self.tagged(&ident, &docs, schema, &tag, at),
+                    None if self.externally_tagged(schema) => {
+                        self.external(&ident, &docs, schema, name, at)
+                    }
+                    None => self.untagged(&ident, &docs, schema, at),
+                },
             };
         }
         let docs = match (&schema.description, schema.all_of.is_empty()) {
@@ -679,6 +685,112 @@ impl<'a> Types<'a> {
             variants.push(quote!(#[serde(rename = #key)] #variant(#ty)));
         }
         Ok(enum_items(ident, docs, quote!(), &variants))
+    }
+
+    /// `b`, through its `$ref`.
+    fn resolve(&self, b: &Schema) -> Schema {
+        match b.ref_name() {
+            Some(n) => self
+                .spec
+                .components
+                .schemas
+                .get(n)
+                .cloned()
+                .unwrap_or_default(),
+            None => b.clone(),
+        }
+    }
+
+    /// Whether every branch is string constants or an object of one key, as serde writes an
+    /// externally tagged enum.
+    fn externally_tagged(&self, schema: &Schema) -> bool {
+        schema.one_of.iter().map(|b| self.resolve(b)).all(|b| {
+            if !b.values.is_empty() {
+                return b.values.iter().all(|v| matches!(v, Scalar::Str(_)));
+            }
+            b.properties.len() == 1 && b.all_of.is_empty() && b.one_of.is_empty()
+        })
+    }
+
+    /// The property serde's `#[serde(tag = …)]` writes, when the document names no
+    /// discriminator: required in every branch, one string constant each, all different.
+    fn inferred_tag(&self, schema: &Schema, at: &At<'_>) -> Result<Option<String>, GenerateError> {
+        let mut objects = Vec::new();
+        for b in &schema.one_of {
+            let b = self.resolve(b);
+            objects.push(match b.all_of.len() {
+                0 | 1 => b,
+                _ => self.merge(&b, at)?.object,
+            });
+        }
+        let Some(first) = objects.first() else {
+            return Ok(None);
+        };
+        let constant = |o: &Schema, k: &str| match o.properties.get(k).map(|p| p.values.as_slice())
+        {
+            Some([Scalar::Str(v)]) if o.required.iter().any(|r| r == k) => Some(v.clone()),
+            _ => None,
+        };
+        let candidates: Vec<&String> = first
+            .properties
+            .keys()
+            .filter(|k| {
+                let values: Option<BTreeSet<String>> =
+                    objects.iter().map(|o| constant(o, k)).collect();
+                values.is_some_and(|v| v.len() == objects.len())
+            })
+            .collect();
+        let preferred = ["type", "kind", "tag", "event"]
+            .iter()
+            .find_map(|p| candidates.iter().find(|c| c.as_str() == *p));
+        Ok(preferred.or(candidates.first()).map(|c| (*c).clone()))
+    }
+
+    /// `oneOf` with nothing to tell its branches apart by but their shape, as serde writes an
+    /// untagged enum: the first branch that reads wins.
+    fn untagged(
+        &mut self,
+        ident: &Ident,
+        docs: &TokenStream,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> Result<TokenStream, GenerateError> {
+        let mut used = BTreeSet::new();
+        let mut variants = Vec::new();
+        for branch in &schema.one_of {
+            let resolved = self.resolve(branch);
+            let base = match branch.ref_name() {
+                Some(n) => pascal(n),
+                None => match resolved.ty.as_ref().and_then(|t| t.split().0) {
+                    Some("string") => "String".into(),
+                    Some("integer") => "Integer".into(),
+                    Some("number") => "Number".into(),
+                    Some("boolean") => "Bool".into(),
+                    Some("array") => "List".into(),
+                    None if resolved.ty.as_ref().is_some_and(|t| t.split().1) => "Null".into(),
+                    _ => "Object".into(),
+                },
+            };
+            let mut name = base.clone();
+            let mut n = 2;
+            while !used.insert(name.clone()) {
+                name = format!("{base}{n}");
+                n += 1;
+            }
+            let variant = Ident::new(&name, Span::call_site());
+            if name == "Null" {
+                variants.push(quote!(#variant));
+                continue;
+            }
+            let ty = self.ty(branch, &at.child(format!("{}{name}", at.hint)))?;
+            variants.push(quote!(#variant(#ty)));
+        }
+        Ok(enum_items(
+            ident,
+            docs,
+            quote!(#[serde(untagged)]),
+            &variants,
+        ))
     }
 }
 
