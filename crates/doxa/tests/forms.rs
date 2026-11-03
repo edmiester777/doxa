@@ -435,3 +435,44 @@ fn an_enum_field_switches_variant_and_binds_the_chosen_ones_fields() {
     assert_eq!(auth.note().unwrap().get(), "");
     assert!(auth.variant.dirty());
 }
+
+#[derive(Clone, Default, PartialEq, Debug, garde::Validate, Form)]
+pub struct Settings {
+    #[garde(dive)]
+    pub users: std::collections::BTreeMap<String, Basic>,
+}
+
+#[test]
+fn a_map_entry_is_a_field_named_by_its_key() {
+    let dom = MemDom::new();
+    let fields = Rc::new(RefCell::new(None));
+    let out = fields.clone();
+    App::new(move || {
+        let form = form(Settings {
+            users: [("ops".to_owned(), Basic { user: "ann".into() })].into(),
+        })
+        .rules(|s: &Settings| garde::Validate::validate(s).map_err(FieldErrors::from));
+        *out.borrow_mut() = Some(form);
+        let ops = form.fields().users.entry("ops").unwrap();
+        view! { <p id="ops">{ops.get().user}</p> }
+    })
+    .mount_on(Rc::new(dom.clone()), dom.body())
+    .keep();
+    settle();
+    let form: Form<Settings> = fields.borrow().expect("mounted");
+    let users = form.fields().users;
+    assert_eq!(users.keys(), ["ops"]);
+    assert!(users.entry("absent").is_none());
+    let ops = users.entry("ops").unwrap();
+    assert_eq!(ops.path(), "users.ops");
+
+    ops.set(Basic::default());
+    settle();
+    assert_eq!(dom.text(dom.find("id", "ops").unwrap()), "");
+    assert_eq!(
+        form.errors().get("users.ops.user"),
+        Some("length is lower than 1")
+    );
+    ops.touch();
+    assert_eq!(ops.error().as_deref(), Some("length is lower than 1"));
+}

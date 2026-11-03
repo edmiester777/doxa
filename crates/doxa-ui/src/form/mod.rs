@@ -6,6 +6,7 @@ mod lens;
 mod list;
 
 use std::cell::{OnceCell, RefCell};
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -106,7 +107,7 @@ impl<R: 'static, S: 'static> At<R, S> {
     fn part<V: 'static>(
         self,
         key: &str,
-        seg: &'static str,
+        seg: String,
         get: impl for<'a> Fn(&'a S) -> Option<&'a V> + 'static,
         get_mut: impl for<'a> Fn(&'a mut S) -> Option<&'a mut V> + 'static,
     ) -> At<R, V> {
@@ -127,7 +128,7 @@ impl<R: 'static, S: 'static> At<R, S> {
     ) -> At<R, V> {
         self.part(
             &format!(".{name}"),
-            name,
+            name.to_owned(),
             move |s| Some(get(s)),
             move |s| Some(get_mut(s)),
         )
@@ -191,7 +192,7 @@ impl<R: 'static, S: 'static> At<R, S> {
         get: fn(&S) -> Option<&V>,
         get_mut: fn(&mut S) -> Option<&mut V>,
     ) -> At<R, V> {
-        self.part(&format!("::{variant}.{seg}"), seg, get, get_mut)
+        self.part(&format!("::{variant}.{seg}"), seg.to_owned(), get, get_mut)
     }
 
     /// Whether this is now as `f` says, such as which variant it holds.
@@ -200,6 +201,31 @@ impl<R: 'static, S: 'static> At<R, S> {
             let lens = s.lens::<S>(self.lens);
             (lens.get)(&s.value, &s.rows.borrow()).is_some_and(f)
         })
+    }
+}
+
+impl<R: 'static, V: 'static> At<R, BTreeMap<String, V>> {
+    /// The value at `key`, named `{map}.{key}` in errors, while the map holds it.
+    fn entry(self, key: String) -> Option<At<R, V>> {
+        let at = self.part(
+            &format!("[{key:?}]"),
+            key.clone(),
+            {
+                let key = key.clone();
+                move |m| m.get(&key)
+            },
+            {
+                let key = key.clone();
+                move |m| m.get_mut(&key)
+            },
+        );
+        at.form
+            .0
+            .with(|s| {
+                let lens = s.lens::<V>(at.lens);
+                (lens.get)(&s.value, &s.rows.borrow()).is_some()
+            })
+            .then_some(at)
     }
 }
 

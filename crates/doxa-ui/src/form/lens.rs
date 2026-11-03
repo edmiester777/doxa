@@ -109,13 +109,13 @@ impl<R: 'static, S: 'static> Lens<R, S> {
     /// The part `seg` of what this lens reaches, while `get` finds it there.
     pub(crate) fn part<V: 'static>(
         self: &Rc<Self>,
-        seg: &'static str,
+        seg: String,
         get: impl for<'a> Fn(&'a S) -> Option<&'a V> + 'static,
         get_mut: impl for<'a> Fn(&'a mut S) -> Option<&'a mut V> + 'static,
     ) -> Lens<R, V> {
         let (p, g, m) = (self.path.clone(), self.get.clone(), self.get_mut.clone());
         Lens::new(
-            Rc::new(move |rows| p(rows).map(|p| join(&p, seg))),
+            Rc::new(move |rows| p(rows).map(|p| join(&p, &seg))),
             getter(move |r, rows| g(r, rows).and_then(&get)),
             setter(move |r, rows| m(r, rows).and_then(&get_mut)),
         )

@@ -1,9 +1,10 @@
 //! One field of a form, bindable with `bind:value`, `bind:checked` or `bind:selected`.
 
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
-use super::{under, Form, Lens};
+use super::{under, At, Form, Lens};
 use crate::view::{BindChecked, BindSelected, BindValue};
 
 /// One field of a [`Form`]: its value, whether it was touched, and its error. `Copy`.
@@ -47,7 +48,11 @@ where
         let lens = form.0.with(|s| {
             let root = s.lens::<T>(0);
             s.lenses.borrow_mut().intern(format!(".{path}"), || {
-                root.part(path, move |r| Some(get(r)), move |r| Some(get_mut(r)))
+                root.part(
+                    path.to_owned(),
+                    move |r| Some(get(r)),
+                    move |r| Some(get_mut(r)),
+                )
             })
         });
         Field::at(form, lens)
@@ -129,6 +134,31 @@ where
                 .chain(&s.server.0)
                 .find(|e| under(&e.path, &path))
                 .map(|e| e.message.clone())
+        })
+    }
+}
+
+impl<T, V> Field<T, BTreeMap<String, V>>
+where
+    T: Clone + PartialEq + 'static,
+    V: Clone + PartialEq + 'static,
+{
+    /// The value at `key` as a field, named `{map}.{key}` in errors, while the map holds it.
+    pub fn entry(&self, key: impl Into<String>) -> Option<Field<T, V>> {
+        let at = At::<T, BTreeMap<String, V>> {
+            form: self.form,
+            lens: self.lens,
+            _s: PhantomData,
+        };
+        at.entry(key.into()).map(At::value)
+    }
+
+    /// The map's keys, in order.
+    pub fn keys(&self) -> Vec<String> {
+        let lens = self.lens();
+        self.form.0.with(|s| {
+            (lens.get)(&s.value, &s.rows.borrow())
+                .map_or_else(Vec::new, |m| m.keys().cloned().collect())
         })
     }
 }
