@@ -34,7 +34,7 @@ pub mod split;
 pub mod tool;
 
 #[cfg(feature = "client")]
-pub use client::{ClientSpec, GenerateError};
+pub use client::{openapi_from_json, ClientSpec, GenerateError};
 #[cfg(feature = "pipeline")]
 pub use error::{Error, Result};
 #[cfg(feature = "pipeline")]

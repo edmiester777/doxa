@@ -9,6 +9,7 @@
 //! }
 //! ```
 
+mod readable;
 mod routes;
 mod spec;
 mod types;
@@ -75,6 +76,17 @@ pub enum GenerateError {
     },
 }
 
+/// A document in JSON, such as a server's `/openapi.json`, read for [`ClientSpec::from_server`].
+///
+/// utoipa can't read back an any-value schema (`{}`), a 3.2 document, or 3.2's `itemSchema`, so
+/// these are rewritten to the 3.1 forms it reads first.
+pub fn openapi_from_json(json: &str) -> Result<utoipa::openapi::OpenApi, GenerateError> {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| GenerateError::Unreadable(e.to_string()))?;
+    readable::document(&mut doc);
+    serde_json::from_value(doc).map_err(|e| GenerateError::Unreadable(e.to_string()))
+}
+
 /// A client to generate from a server's OpenAPI document.
 pub struct ClientSpec {
     spec: Result<spec::Spec, String>,
@@ -134,7 +146,7 @@ mod tests {
     use super::*;
 
     fn client(doc: serde_json::Value) -> Result<String, GenerateError> {
-        ClientSpec::from_server(serde_json::from_value(doc).unwrap()).render()
+        ClientSpec::from_server(openapi_from_json(&doc.to_string()).unwrap()).render()
     }
 
     fn doc(body: serde_json::Value, schemas: serde_json::Value) -> serde_json::Value {
@@ -275,10 +287,13 @@ mod tests {
     #[test]
     fn a_mapped_schema_is_used_as_written() {
         let out = ClientSpec::from_server(
-            serde_json::from_value(doc(
-                serde_json::json!({ "$ref": "#/components/schemas/NewOrder" }),
-                serde_json::json!({ "NewOrder": { "type": "object", "properties": {} } }),
-            ))
+            openapi_from_json(
+                &doc(
+                    serde_json::json!({ "$ref": "#/components/schemas/NewOrder" }),
+                    serde_json::json!({ "NewOrder": { "type": "object", "properties": {} } }),
+                )
+                .to_string(),
+            )
             .unwrap(),
         )
         .types(|t| t.schema("NewOrder", "my_crate::Order"))
