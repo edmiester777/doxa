@@ -1,0 +1,205 @@
+//! A client crate generated from a server's OpenAPI document, in the crate's `build.rs`.
+//!
+//! ```ignore
+//! fn main() {
+//!     doxa_build::ClientSpec::from_server(orders_server::__doxa_spec())
+//!         .types(|t| t.format("uuid", "uuid::Uuid"))
+//!         .generate()
+//!         .unwrap_or_else(|e| panic!("{e}"));
+//! }
+//! ```
+
+mod routes;
+mod spec;
+mod types;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use proc_macro2::TokenStream;
+
+/// What the client's types are where the spec alone would guess wrong.
+#[derive(Debug, Default, Clone)]
+pub struct TypeMap {
+    formats: BTreeMap<String, String>,
+    schemas: BTreeMap<String, String>,
+}
+
+impl TypeMap {
+    /// Strings of `format` as the Rust type at `path`, e.g. `("uuid", "uuid::Uuid")`.
+    pub fn format(mut self, format: &str, path: &str) -> Self {
+        self.formats.insert(format.to_owned(), path.to_owned());
+        self
+    }
+
+    /// The component schema `name` as a hand-written type instead of a generated one.
+    pub fn schema(mut self, name: &str, path: &str) -> Self {
+        self.schemas.insert(name.to_owned(), path.to_owned());
+        self
+    }
+}
+
+/// Why a client couldn't be generated.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum GenerateError {
+    /// The document isn't one the generator can read.
+    #[error("the server's OpenAPI document doesn't parse: {0}")]
+    Unreadable(String),
+    /// A schema has a shape no Rust type is generated for.
+    #[error(
+        "schema `{schema}`, used by `{operation}`, {reason}\n  \
+         fix: map it to a hand-written type with `.types(|t| t.schema(\"{schema}\", \"my_crate::Type\"))`"
+    )]
+    Unsupported {
+        /// The schema's name, or where it sits inline.
+        schema: String,
+        /// The operation that reaches it.
+        operation: String,
+        /// What about it isn't supported.
+        reason: String,
+    },
+    /// A path given to [`TypeMap`] isn't a Rust type.
+    #[error("`{0}` given to `.types(…)` isn't a Rust type path")]
+    BadPath(String),
+    /// `OUT_DIR` is unset, so this isn't running in a build script.
+    #[error("`OUT_DIR` is unset; call `generate()` from the client crate's build.rs")]
+    NoOutDir,
+    /// The generated file couldn't be written.
+    #[error("writing {path}: {source}")]
+    Write {
+        /// Where.
+        path: PathBuf,
+        /// Why.
+        source: std::io::Error,
+    },
+}
+
+/// A client to generate from a server's OpenAPI document.
+pub struct ClientSpec {
+    spec: Result<spec::Spec, String>,
+    types: TypeMap,
+}
+
+impl ClientSpec {
+    /// The document a server's `#[doxa::spec]` function builds, read as `__doxa_spec()`.
+    pub fn from_server(spec: utoipa::openapi::OpenApi) -> Self {
+        let parsed = serde_json::to_value(&spec)
+            .and_then(serde_json::from_value)
+            .map_err(|e| e.to_string());
+        ClientSpec {
+            spec: parsed,
+            types: TypeMap::default(),
+        }
+    }
+
+    /// Override how schemas map to Rust types.
+    pub fn types(mut self, f: impl FnOnce(TypeMap) -> TypeMap) -> Self {
+        self.types = f(self.types);
+        self
+    }
+
+    /// The client's source, for `doxa::include_client!()` to include.
+    pub fn render(&self) -> Result<String, GenerateError> {
+        let spec = self
+            .spec
+            .as_ref()
+            .map_err(|e| GenerateError::Unreadable(e.clone()))?;
+        let mut types = types::Types::new(spec, &self.types)?;
+        let routes: TokenStream = routes::render(spec, &mut types)?;
+        let defs = types.render()?;
+        Ok(quote::quote! {
+            #defs
+            #routes
+        }
+        .to_string())
+    }
+
+    /// Write the client to `OUT_DIR` and mark this crate as the client half.
+    pub fn generate(self) -> Result<(), GenerateError> {
+        let source = self.render()?;
+        let dir = std::env::var_os("OUT_DIR").ok_or(GenerateError::NoOutDir)?;
+        let path = PathBuf::from(dir).join("doxa_client.rs");
+        std::fs::write(&path, source).map_err(|source| GenerateError::Write { path, source })?;
+        println!("cargo::rustc-env=DOXA_ROLE=client");
+        println!("cargo::rustc-cfg=doxa_client");
+        println!("cargo::rustc-check-cfg=cfg(doxa_client)");
+        println!("cargo::rerun-if-changed=build.rs");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(doc: serde_json::Value) -> Result<String, GenerateError> {
+        ClientSpec::from_server(serde_json::from_value(doc).unwrap()).render()
+    }
+
+    fn doc(body: serde_json::Value, schemas: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "t", "version": "0" },
+            "paths": { "/orders": { "post": {
+                "operationId": "create_order",
+                "requestBody": { "content": { "application/json": { "schema": body } } },
+                "responses": { "204": { "description": "" } },
+                "x-doxa": { "entities": [], "dry_run": false, "body": "json" }
+            } } },
+            "components": { "schemas": schemas }
+        })
+    }
+
+    #[test]
+    fn a_body_is_checked_against_its_schemas_constraints() {
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/NewOrder" }),
+            serde_json::json!({ "NewOrder": {
+                "type": "object",
+                "required": ["name"],
+                "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 40 } }
+            } }),
+        ))
+        .unwrap();
+        assert!(out.contains("pub struct NewOrder"), "{out}");
+        assert!(out.contains("length is lower than {}"), "{out}");
+        assert!(
+            out.contains("Spec (Json (body)) : Spec < Json < NewOrder >>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_shape_with_no_rust_type_names_the_schema_and_the_route() {
+        let err = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Either" }),
+            serde_json::json!({ "Either": { "oneOf": [
+                { "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": "string" } } }
+            ] } }),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("schema `Either`, used by `create_order`"),
+            "{err}"
+        );
+        assert!(err.contains(".types(|t| t.schema(\"Either\""), "{err}");
+    }
+
+    #[test]
+    fn a_mapped_schema_is_used_as_written() {
+        let out = ClientSpec::from_server(
+            serde_json::from_value(doc(
+                serde_json::json!({ "$ref": "#/components/schemas/NewOrder" }),
+                serde_json::json!({ "NewOrder": { "type": "object", "properties": {} } }),
+            ))
+            .unwrap(),
+        )
+        .types(|t| t.schema("NewOrder", "my_crate::Order"))
+        .render()
+        .unwrap();
+        assert!(out.contains("Spec < Json < my_crate :: Order >>"), "{out}");
+        assert!(!out.contains("pub struct NewOrder"), "{out}");
+    }
+}

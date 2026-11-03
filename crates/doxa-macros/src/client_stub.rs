@@ -91,12 +91,8 @@ fn may_authorize(item_fn: &ItemFn) -> bool {
     })
 }
 
-/// Emit the stub and its `ROUTE` module.
-pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
-    let name = &item_fn.sig.ident;
-    let docs = item_fn.attrs.iter().filter(|a| a.path().is_ident("doc"));
-
-    let args: Vec<Arg> = item_fn
+fn args(item_fn: &ItemFn) -> Vec<Arg> {
+    item_fn
         .sig
         .inputs
         .iter()
@@ -108,8 +104,12 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
             FnArg::Typed(pt) => Some(classify(&pt.pat, &pt.ty, i)),
             FnArg::Receiver(_) => None,
         })
-        .collect();
+        .collect()
+}
 
+/// Only a `Granted` guard answers a dry run wherever the route is mounted; an
+/// unguarded route is answered only by `routes!`, so a probe of it stays Unknown.
+fn dry_run(item_fn: &ItemFn, args: &[Arg]) -> bool {
     let typed: Vec<usize> = item_fn
         .sig
         .inputs
@@ -118,15 +118,165 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
         .filter(|(_, a)| matches!(a, FnArg::Typed(_)))
         .map(|(i, _)| i)
         .collect();
-    // Only a `Granted` guard answers a dry run wherever the route is mounted; an
-    // unguarded route is answered only by `routes!`, so a probe of it stays Unknown.
-    let dry_run = match grant::dry_run_gate(item_fn) {
+    match grant::dry_run_gate(item_fn) {
         Some(gate) if !may_authorize(item_fn) => {
             let after = typed.iter().position(|i| *i == gate).map_or(0, |p| p + 1);
             !args[after..].iter().any(Arg::unknown)
         }
         _ => false,
+    }
+}
+
+/// The server half's `x-doxa` stamp: what a client generated from the spec needs that
+/// OpenAPI can't say. `path` is the handler's utoipa path struct.
+pub fn server_meta(method: &str, item_fn: &ItemFn, path: &syn::Ident) -> TokenStream {
+    let dry_run = dry_run(item_fn, &args(item_fn));
+    let typed = || {
+        item_fn.sig.inputs.iter().filter_map(|arg| match arg {
+            FnArg::Typed(pt) => Some(&*pt.ty),
+            FnArg::Receiver(_) => None,
+        })
     };
+    let entities: Vec<TokenStream> = typed()
+        .filter_map(grant::guarded_asset)
+        .map(|asset| quote!((&::doxa::__private::EntityOf::<#asset>::new()).entity()))
+        .collect();
+    let key = match typed().find_map(grant::instance_asset) {
+        Some(asset) => quote! {
+            ::doxa::__private::serde_json::json!({
+                "asset": ::core::any::type_name::<#asset>(),
+                "entity": (&::doxa::__private::EntityOf::<#asset>::new()).entity(),
+                "type": ::core::any::type_name::<<#asset as ::doxa::auth::Granting>::Key>(),
+                "names": <#asset as ::doxa::auth::Granting>::KEY_NAMES,
+            })
+        },
+        None => quote!(::doxa::__private::serde_json::Value::Null),
+    };
+    let ret = match &item_fn.sig.output {
+        ReturnType::Default => None,
+        ReturnType::Type(_, ty) => Some(&**ty),
+    };
+    let stream = match ret.and_then(|t| find_named(t, "SseStream")) {
+        Some(_) if method == "get" => quote!("events"),
+        Some(_) => quote!("once"),
+        None => quote!(::doxa::__private::serde_json::Value::Null),
+    };
+    let error = match ret.and_then(error_type) {
+        Some(e) => quote! {{
+            #[allow(unused_imports)]
+            use ::doxa::__private::{SchemaKnown as _, SchemaUnknown as _};
+            (&::doxa::__private::SchemaOf::<#e>::new()).name()
+        }},
+        None => quote!(::core::option::Option::<::std::string::String>::None),
+    };
+    let seen: Vec<(String, &Type)> = typed().filter_map(seen_extractor).collect();
+    let body = seen
+        .iter()
+        .find_map(|(n, _)| match n.as_str() {
+            "Json" => Some("json"),
+            "Form" => Some("form"),
+            "Bytes" => Some("bytes"),
+            "Multipart" => Some("multipart"),
+            _ => None,
+        })
+        .map_or(
+            quote!(::doxa::__private::serde_json::Value::Null),
+            |b| quote!(#b),
+        );
+    let query = seen
+        .iter()
+        .find(|(n, _)| n == "Query")
+        .and_then(|(_, t)| first_type_arg(t))
+        .and_then(last_ident)
+        .map_or(
+            quote!(::doxa::__private::serde_json::Value::Null),
+            |q| quote!(#q),
+        );
+    let identity = match ret.and_then(entity_type) {
+        Some(t) => quote! {{
+            #[allow(unused_imports)]
+            use ::doxa::__private::{IdentityKnown as _, IdentityUnknown as _};
+            (&::doxa::__private::IdentityOf::<#t>::new()).describe()
+        }},
+        None => quote!(::doxa::__private::serde_json::Value::Null),
+    };
+    quote! {
+        impl ::doxa::__private::ClientMeta for #path {
+            fn meta() -> ::doxa::__private::serde_json::Value {
+                #[allow(unused_imports)]
+                use ::doxa::__private::{EntityKnown as _, EntityUnknown as _};
+                let key: ::doxa::__private::serde_json::Value = #key;
+                let identity: ::doxa::__private::serde_json::Value = #identity;
+                let error: ::core::option::Option<::std::string::String> = #error;
+                #[allow(unused_imports)]
+                use ::doxa::__private::{EntityKnown as _, EntityUnknown as _};
+                let found: &[::core::option::Option<&'static str>] = &[#(#entities),*];
+                let entities: ::std::vec::Vec<&str> = found.iter().flatten().copied().collect();
+                ::doxa::__private::serde_json::json!({
+                    "entities": entities,
+                    "key": key,
+                    "dry_run": #dry_run,
+                    "stream": #stream,
+                    "identity": identity,
+                    "error": error,
+                    "body": #body,
+                    "query": #query,
+                })
+            }
+        }
+    }
+}
+
+/// `E` in a return type of `Result<_, E>`.
+fn error_type(ret: &Type) -> Option<&Type> {
+    match (last_ident(ret).as_deref(), type_args(ret).as_slice()) {
+        (Some("Result" | "ApiResult"), [_, e]) => Some(e),
+        _ => None,
+    }
+}
+
+/// The extractor an argument reads, seen through one wrapper such as `Valid<…>`.
+fn seen_extractor(ty: &Type) -> Option<(String, &Type)> {
+    let last = last_ident(ty)?;
+    if ["Json", "Form", "Query", "Path", "Bytes", "Multipart"].contains(&last.as_str()) {
+        return Some((last, ty));
+    }
+    let inner = first_type_arg(ty)?;
+    let name = last_ident(inner)?;
+    EXTRACTORS.contains(&name.as_str()).then_some((name, inner))
+}
+
+/// The first type named `name` anywhere in `ty`.
+fn find_named<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
+    if last_ident(ty).as_deref() == Some(name) {
+        return Some(ty);
+    }
+    match ty {
+        Type::Tuple(t) => t.elems.iter().find_map(|e| find_named(e, name)),
+        Type::Paren(p) => find_named(&p.elem, name),
+        Type::Group(g) => find_named(&g.elem, name),
+        Type::Path(_) => type_args(ty).into_iter().find_map(|t| find_named(t, name)),
+        _ => None,
+    }
+}
+
+/// `T` in a success body of `Json<T>` or `Json<Vec<T>>`, where `T` may be an entity.
+fn entity_type(ret: &Type) -> Option<&Type> {
+    let json = find_named(ret, "Json")?;
+    let inner = first_type_arg(json)?;
+    match last_ident(inner).as_deref() {
+        Some("Vec") => first_type_arg(inner),
+        _ => Some(inner),
+    }
+}
+
+/// Emit the stub and its `ROUTE` module.
+pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
+    let name = &item_fn.sig.ident;
+    let docs = item_fn.attrs.iter().filter(|a| a.path().is_ident("doc"));
+
+    let args = args(item_fn);
+    let dry_run = dry_run(item_fn, &args);
 
     let entities: Vec<TokenStream> = item_fn
         .sig

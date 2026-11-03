@@ -884,6 +884,28 @@ let form = form(Rename::default()).rules(rename_widget::check);   // live field 
 
 Server-only items in a shared file take `#[server]`, or `doxa::server_only! { mod store; }` for a module. A call is always `pub`, and `doxa::client_pub! { mod api; }` makes a module the server keeps private public in the client half. GETs are cached and deduplicated, mutations invalidate what they touch, and `rename_widget::can(&key)` dry-runs the route's own guard.
 
+A server whose routes can't be shared as source still gets a client crate. Its `build.rs` reads the server's own OpenAPI document, and the frontend depends only on the generated crate:
+
+```rust
+// orders-server: the document, built without state or I/O
+#[doxa::spec]
+pub fn api_doc() -> doxa::ApiDoc { /* ApiDocBuilder::new()…merge(api).build() */ }
+
+// orders-client/build.rs, with orders-server and doxa-build (feature `client`) as build-dependencies
+fn main() {
+    doxa_build::ClientSpec::from_server(orders_server::__doxa_spec())
+        .types(|t| t.format("uuid", "uuid::Uuid"))
+        .generate()
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+// orders-client/src/lib.rs
+doxa::service!();
+doxa::include_client!();
+```
+
+Its calls are made by the same stub, so they cache, invalidate, probe with `::can` and stream as a shared-source client's do. The route macros stamp what OpenAPI can't say (entities, keys, dry runs, streams, error types) as `x-doxa`.
+
 Each client crate's routes go to its own server. `doxa::service!();` in the shared `lib.rs` gives the client crate a `service()`, with its own cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and a deployment can change them in `services.json` without a rebuild. Credentials are layers:
 
 ```rust

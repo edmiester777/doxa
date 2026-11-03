@@ -1,0 +1,19 @@
+[package]
+name = "widgets-spec-client"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+# A client generated from the server's own OpenAPI document at build time, for a server
+# whose routes can't be shared as source.
+[dependencies]
+doxa = { workspace = true, features = ["client"] }
+
+[build-dependencies]
+doxa-build = { workspace = true, features = ["client"] }
+widgets-server = { path = "../server" }
+
+[dev-dependencies]
+widgets-server = { path = "../server" }
+doxa = { workspace = true, features = ["client-router"] }
+tokio = { workspace = true }

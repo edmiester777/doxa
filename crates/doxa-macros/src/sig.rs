@@ -579,6 +579,10 @@ impl InferredAttrs {
                         )> = ::std::vec::Vec::new();
                         #response_body_ops_tt
                         drop(__schemas);
+                        ::doxa::__private::stamp_client_meta(
+                            __op,
+                            <Self as ::doxa::__private::ClientMeta>::meta(),
+                        );
                     }
                 }
             }

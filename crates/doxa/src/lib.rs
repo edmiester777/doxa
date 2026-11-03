@@ -483,6 +483,20 @@ pub mod export_diagnostics {}
 #[doc(hidden)]
 pub mod client_diagnostics {}
 
+/// The client a crate's `build.rs` generated with `doxa_build::ClientSpec`.
+///
+/// ```ignore
+/// doxa::service!();
+/// doxa::include_client!();
+/// ```
+#[cfg(feature = "client")]
+#[macro_export]
+macro_rules! include_client {
+    () => {
+        ::core::include!(::core::concat!(::core::env!("OUT_DIR"), "/doxa_client.rs"));
+    };
+}
+
 /// The client half: typed calls to the server's routes.
 #[cfg(feature = "client")]
 pub mod client {

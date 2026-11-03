@@ -133,6 +133,19 @@ pub fn derive_identity(input: TokenStream) -> syn::Result<TokenStream> {
         .entity
         .unwrap_or_else(|| syn::LitStr::new(&name.to_string(), name.span()));
 
+    let id_field = id.to_string();
+    let key_consts = args.key.as_ref().map(|(path, fields)| {
+        let ty = path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        let fields = fields.iter().map(|f| f.to_string());
+        quote! {
+            const KEY_TYPE: ::core::option::Option<&'static str> = ::core::option::Option::Some(#ty);
+            const KEY_FIELDS: &'static [&'static str] = &[#(#fields),*];
+        }
+    });
     let route_key = args.key.as_ref().map(|(path, _)| {
         quote! {
             fn route_key(&self) -> ::core::option::Option<::doxa::wire::__Value> {
@@ -169,6 +182,8 @@ pub fn derive_identity(input: TokenStream) -> syn::Result<TokenStream> {
             type Id = #id_ty;
             const ENTITY_TYPE: &'static str = #entity;
             const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+            const ID_FIELD: &'static str = #id_field;
+            #key_consts
             fn identity(&self) -> #id_ty {
                 ::core::clone::Clone::clone(&self.#id)
             }

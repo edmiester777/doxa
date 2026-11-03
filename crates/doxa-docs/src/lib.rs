@@ -187,6 +187,7 @@
 
 mod attachment;
 mod builder;
+mod client_meta;
 mod contribution;
 #[cfg(feature = "cors")]
 mod cors;
@@ -249,8 +250,8 @@ pub use valid::ValidRejection;
 // out of when the derives aren't needed.
 #[cfg(feature = "macros")]
 pub use doxa_macros::{
-    asset, capability, delete, get, operation, patch, post, put, Actions, ApiError, PolicyResource,
-    SseEvent,
+    asset, capability, delete, get, operation, patch, post, put, spec, Actions, ApiError,
+    PolicyResource, SseEvent,
 };
 
 // Re-export the underlying utoipa types so consumers depend on a single
@@ -281,6 +282,11 @@ pub mod __private {
     /// Named by `#[derive(Validator)]`'s extractor and doc impls.
     pub use axum;
     pub use utoipa;
+
+    pub use crate::client_meta::{
+        stamp as stamp_client_meta, ClientMeta, EntityKnown, EntityOf, EntityUnknown,
+        IdentityKnown, IdentityOf, IdentityUnknown, IntoSpec, SchemaKnown, SchemaOf, SchemaUnknown,
+    };
 
     #[cfg(feature = "embed")]
     pub use doxa_macros::__embedded_dist as embedded_dist;

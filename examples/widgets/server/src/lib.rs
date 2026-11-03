@@ -50,9 +50,8 @@ impl CapabilityChecker for RoleChecker {
     }
 }
 
-/// The app, with the caller's role read from `x-role` in place of a real token.
-pub fn app(catalog: Catalog) -> Router {
-    let (router, _api) = OpenApiRouter::<AppState>::new()
+fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::<AppState>::new()
         .routes(routes!(get_widget))
         .routes(routes!(list_widgets))
         .routes(routes!(rename_widget))
@@ -62,7 +61,23 @@ pub fn app(catalog: Catalog) -> Router {
         .routes(routes!(upload_photo))
         .routes(routes!(upload_files))
         .merge(widgets_api::meta_routes())
-        .split_for_parts();
+}
+
+/// The widgets API's OpenAPI document.
+#[doxa::spec]
+pub fn api_doc() -> doxa::ApiDoc {
+    let (_, api) = routes().split_for_parts();
+    doxa::ApiDocBuilder::new()
+        .title("Widgets")
+        .version("0.0.0")
+        .bearer_security("bearer")
+        .merge(api)
+        .build()
+}
+
+/// The app, with the caller's role read from `x-role` in place of a real token.
+pub fn app(catalog: Catalog) -> Router {
+    let (router, _api) = routes().split_for_parts();
     router
         .layer(axum::middleware::from_fn(
             |mut req: Request, next: Next| async move {

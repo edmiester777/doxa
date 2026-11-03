@@ -11,29 +11,43 @@ description = "The asset pipeline behind `doxa build`: wasm, bindings, JS bundle
 keywords = ["doxa", "wasm", "bundler", "build"]
 categories = ["development-tools::build-utils", "wasm"]
 
+[features]
+default = ["pipeline"]
+# `doxa build`: wasm, bindings, the JS bundle, CSS and a hashed dist.
+pipeline = [
+    "dep:sha2", "dep:hex", "dep:reqwest", "dep:base64", "dep:toml", "dep:tar", "dep:flate2",
+    "dep:brotli", "dep:lightningcss", "dep:wasm-bindgen-cli-support", "dep:wasm-split-cli",
+    "dep:anyhow", "dep:walrus", "dep:wasmparser", "dep:ar", "dep:subsecond-types",
+]
+# `ClientSpec`: a client crate generated from a server's OpenAPI document, in its `build.rs`.
+client = ["dep:utoipa", "dep:proc-macro2", "dep:quote"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
-reqwest = { workspace = true, features = ["blocking"] }
-base64 = "0.22"
-toml = "0.9"
-tar = "0.4"
-flate2 = "1"
-brotli = "8"
-lightningcss = { version = "1.0.0-alpha.68", default-features = false, features = ["bundler"] }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["blocking"], optional = true }
+base64 = { version = "0.22", optional = true }
+toml = { version = "0.9", optional = true }
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
+brotli = { version = "8", optional = true }
+lightningcss = { version = "1.0.0-alpha.68", default-features = false, features = ["bundler"], optional = true }
 # Must equal the `wasm-bindgen` in the app's Cargo.lock; see `bindgen::WASM_BINDGEN_VERSION`.
-wasm-bindgen-cli-support = "=0.2.117"
+wasm-bindgen-cli-support = { version = "=0.2.117", optional = true }
 # Its walrus differs from wasm-bindgen's; they only exchange bytes.
-wasm-split-cli = "=0.7.0"
-anyhow = "1"
+wasm-split-cli = { version = "=0.7.0", optional = true }
+anyhow = { version = "1", optional = true }
 # Hot-patching: the walrus wasm-split-cli already uses, and subsecond's jump table.
-walrus = "=0.23.3"
-wasmparser = "0.214"
-ar = "0.9"
-subsecond-types = "=0.7.0"
+walrus = { version = "=0.23.3", optional = true }
+wasmparser = { version = "0.214", optional = true }
+ar = { version = "0.9", optional = true }
+subsecond-types = { version = "=0.7.0", optional = true }
+utoipa = { workspace = true, optional = true }
+proc-macro2 = { workspace = true, optional = true }
+quote = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -18,7 +18,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-doxa-build = { workspace = true }
+doxa-build = { workspace = true, features = ["pipeline"] }
 doxa-fmt = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { workspace = true }

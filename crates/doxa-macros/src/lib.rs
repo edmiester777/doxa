@@ -843,6 +843,48 @@ pub fn dto(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// The function that builds this server's OpenAPI document, which a generated client crate's
+/// `build.rs` reads as `__doxa_spec()`. It must need no state or I/O.
+///
+/// ```ignore
+/// #[doxa::spec]
+/// pub fn api_doc() -> doxa::OpenApi {
+///     let (_, api) = routes().split_for_parts();
+///     ApiDocBuilder::new().title("Orders").merge(api).build()
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn spec(args: TokenStream, item: TokenStream) -> TokenStream {
+    let expand = || -> syn::Result<proc_macro2::TokenStream> {
+        if !args.is_empty() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`#[spec]` takes no arguments",
+            ));
+        }
+        let item: syn::ItemFn = syn::parse(item)?;
+        if !item.sig.inputs.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &item.sig.inputs,
+                "a client's build script calls this with nothing, so it takes no arguments",
+            ));
+        }
+        let name = &item.sig.ident;
+        Ok(quote::quote! {
+            #item
+
+            /// This server's OpenAPI document, for a generated client crate's `build.rs`.
+            #[doc(hidden)]
+            pub fn __doxa_spec() -> ::doxa::OpenApi {
+                ::doxa::__private::IntoSpec::into_spec(#name())
+            }
+        })
+    };
+    expand()
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Keep this item only in the server half, e.g. `#[server] use sea_orm::DatabaseConnection;`.
 #[proc_macro_attribute]
 pub fn server(args: TokenStream, item: TokenStream) -> TokenStream {

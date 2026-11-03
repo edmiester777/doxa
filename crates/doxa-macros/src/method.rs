@@ -34,6 +34,7 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
         return client_half(method, &path_lit, &extra, client, &item_fn);
     }
     strip_server_params(&mut item_fn);
+    let meta = client_meta(method, client, &item_fn);
 
     // Rewrite `Granted<T>` arguments before inference runs, so the
     // signature the doc probes see is the one that actually compiles.
@@ -43,6 +44,7 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
     let utoipa_attr = build_utoipa_attr(&method_ident, &path_lit, &extra, &item_fn)?;
 
     Ok(quote! {
+        #meta
         #sites
         #utoipa_attr
         #item_fn
@@ -62,6 +64,7 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
         return client_half(&method, &parsed.path, &parsed.extra, client, &item_fn);
     }
     strip_server_params(&mut item_fn);
+    let meta = client_meta(&parsed.method.to_string(), client, &item_fn);
 
     let path_names = sig::parse_path_names(&parsed.path.value());
     let sites = grant::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
@@ -69,10 +72,29 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let utoipa_attr = build_utoipa_attr(&parsed.method, &parsed.path, &parsed.extra, &item_fn)?;
 
     Ok(quote! {
+        #meta
         #sites
         #utoipa_attr
         #item_fn
     })
+}
+
+/// The `x-doxa` stamp for this route's operation; `{"client": false}` when it has no client half.
+fn client_meta(method: &str, client: bool, item_fn: &ItemFn) -> TokenStream {
+    let path = syn::Ident::new(
+        &format!("__path_{}", item_fn.sig.ident),
+        item_fn.sig.ident.span(),
+    );
+    if client {
+        return client_stub::server_meta(method, item_fn, &path);
+    }
+    quote! {
+        impl ::doxa::__private::ClientMeta for #path {
+            fn meta() -> ::doxa::__private::serde_json::Value {
+                ::doxa::__private::serde_json::json!({ "client": false })
+            }
+        }
+    }
 }
 
 /// Expand every `#[get]` / `#[post]` / … in `input` as the client half, whatever the role.

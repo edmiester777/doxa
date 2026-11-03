@@ -463,6 +463,13 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
 
             #load
         }
+
+        // What the spec tells a generated client about routes this asset guards.
+        impl ::doxa::wire::Keyed for #name {
+            type Key = #key;
+            const ENTITY_TYPE: &'static str = <#actions as ::doxa::wire::Vocabulary>::ENTITY_TYPE;
+            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+        }
     })
 }
 

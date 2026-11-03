@@ -223,6 +223,12 @@ pub trait Identity {
     const ENTITY_TYPE: &'static str;
     /// The client crate whose service caches it.
     const PACKAGE: &'static str = "";
+    /// The field holding the identity.
+    const ID_FIELD: &'static str = "";
+    /// The name of the route key it declares, if any.
+    const KEY_TYPE: Option<&'static str> = None;
+    /// The key's fields, which are this value's fields of the same names.
+    const KEY_FIELDS: &'static [&'static str] = &[];
     /// This value's identity.
     fn identity(&self) -> Self::Id;
     /// The route key naming this value, as it serializes, if it declares one.
