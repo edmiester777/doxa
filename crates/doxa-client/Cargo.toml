@@ -14,6 +14,8 @@ categories = ["web-programming::http-client", "wasm"]
 [features]
 default = []
 router = ["dep:axum", "dep:tower", "dep:http", "dep:http-body-util", "dep:bytes"]
+# `oidc::Oidc`: sign-in with authorization code and PKCE, refreshed and shared across tabs.
+oidc = ["dep:sha2"]
 
 [dependencies]
 doxa-wire = { workspace = true }
@@ -24,13 +26,14 @@ percent-encoding = "2"
 futures-core = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 futures-timer = "3"
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 futures-timer = { version = "3", features = ["wasm-bindgen"] }
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Request", "RequestInit", "RequestCredentials", "RequestCache", "Headers", "Response", "ReadableStream", "ReadableStreamDefaultReader", "AbortController", "AbortSignal", "Performance", "Blob", "BlobPropertyBag", "FormData"] }
+web-sys = { version = "0.3", features = ["Window", "Request", "RequestInit", "RequestCredentials", "RequestCache", "Headers", "Response", "ReadableStream", "ReadableStreamDefaultReader", "AbortController", "AbortSignal", "Performance", "Blob", "BlobPropertyBag", "FormData", "Location", "History", "Storage", "Crypto", "BroadcastChannel", "MessageEvent"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum = { workspace = true, optional = true }

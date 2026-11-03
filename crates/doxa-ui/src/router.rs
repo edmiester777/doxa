@@ -117,6 +117,12 @@ impl Route {
         Route(out)
     }
 
+    /// A path and query already encoded.
+    #[cfg_attr(not(feature = "oidc"), allow(dead_code))]
+    pub(crate) fn raw(url: String) -> Route {
+        Route(url)
+    }
+
     /// Add a query parameter.
     pub fn query(mut self, key: &str, value: &str) -> Route {
         self.0.push(if self.0.contains('?') { '&' } else { '?' });

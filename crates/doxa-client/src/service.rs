@@ -51,6 +51,13 @@ pub fn service(package: &'static str) -> Rc<Service> {
     })
 }
 
+/// Run `f` on every service created so far.
+#[cfg_attr(not(feature = "oidc"), allow(dead_code))]
+pub(crate) fn each(f: impl Fn(&Service)) {
+    let all: Vec<Rc<Service>> = SERVICES.with(|s| s.borrow().values().cloned().collect());
+    all.iter().for_each(|s| f(s));
+}
+
 /// Run `f` with the package name whenever any service's session changes.
 pub fn on_any_session_change(f: impl Fn(&'static str) + 'static) {
     ANY_SESSION.with(|a| a.borrow_mut().push(Rc::new(f)));
@@ -140,6 +147,15 @@ impl Service {
         let mut stack = layers().snapshot();
         stack.extend(self.layers.snapshot());
         Next::new(stack.into(), self.transport.clone()).run(request)
+    }
+
+    /// Send `request` through this service's layers and transport, skipping the global ones.
+    #[cfg_attr(not(feature = "oidc"), allow(dead_code))]
+    pub(crate) fn send_own(
+        &self,
+        request: Request,
+    ) -> LocalBoxFuture<'static, Result<Response, Fetch>> {
+        Next::new(self.layers.snapshot().into(), self.transport.clone()).run(request)
     }
 
     /// The session counter to tag a request with as it is sent.

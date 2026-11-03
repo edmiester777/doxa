@@ -15,6 +15,8 @@ pub mod clock;
 mod fetch;
 pub mod layer;
 mod multipart;
+#[cfg(feature = "oidc")]
+pub mod oidc;
 mod response;
 mod service;
 mod sse;

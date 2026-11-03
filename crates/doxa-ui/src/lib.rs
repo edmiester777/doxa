@@ -18,6 +18,8 @@ mod form;
 mod head;
 mod hooks;
 mod hot;
+#[cfg(feature = "oidc")]
+pub mod oidc;
 mod plugin;
 mod portal;
 #[cfg(feature = "react")]

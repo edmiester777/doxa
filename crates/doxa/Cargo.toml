@@ -81,6 +81,8 @@ policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-s
 embed = ["docs", "doxa-docs/embed"]
 
 client = ["dep:doxa-client", "dep:doxa-macros"]
+# `doxa::client::oidc`: sign-in in the browser with authorization code and PKCE.
+oidc = ["client", "doxa-client/oidc", "doxa-ui?/oidc"]
 # Drive client calls through an in-process axum `Router`, for native tests.
 client-router = ["client", "doxa-client/router"]
 ui = ["client", "dep:doxa-ui"]
@@ -131,6 +133,8 @@ uuid = { workspace = true }
 garde = { workspace = true, features = ["derive"] }
 validator = { workspace = true, features = ["derive"] }
 serde_valid = { workspace = true }
+sha2 = { workspace = true }
+serde_urlencoded = "0.7"
 http-body-util = { workspace = true }
 
 [[example]]
@@ -168,6 +172,10 @@ required-features = ["ui"]
 [[test]]
 name = "forms"
 required-features = ["forms", "garde"]
+
+[[test]]
+name = "oidc"
+required-features = ["oidc", "client-router", "ui"]
 
 [[test]]
 name = "validates"

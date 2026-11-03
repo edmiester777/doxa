@@ -913,6 +913,17 @@ layers().push(bearer(|| session::token()));             // every crate's request
 orders_client::service().layers().push(cookies());      // one crate's requests
 ```
 
+Feature `oidc` signs in with an OpenID Connect issuer (authorization code with PKCE). It refreshes ahead of expiry, and one tab refreshes for all of them:
+
+```rust
+let auth = Oidc::<Claims>::issuer("https://id.example.com/realms/acme").client_id("web").install();
+layers().push(auth.bearer()).push(on_status(401, move |_| auth.sign_in()));
+App::new(router().guard(auth.required())).mount("#app");
+
+// in a component; re-renders when the session changes
+if let Some(t) = doxa::ui::oidc::session::<Claims>().tokens() { /* t.claims().name */ }
+```
+
 A server the browser reaches cross-origin needs `.layer(doxa::Cors::allow([app_origin]))` (feature `cors`) so the client can read doxa's wire headers. Or keep it same-origin: `.merge(doxa::proxy("/orders", orders_url))` (feature `proxy`) forwards a prefix and streams SSE through.
 
 ### 17. Pages that call routes
