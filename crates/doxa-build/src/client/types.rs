@@ -440,13 +440,15 @@ impl<'a> Types<'a> {
             _ => docs,
         };
         let fields = self.object_fields(schema, at)?;
-        let default = fields
-            .iter()
-            .all(|f| f.optional)
-            .then(|| quote!(#[derive(::core::default::Default)]));
         let default = match self.options.forms {
-            true => quote!(#default #[derive(::doxa::ui::Form)]),
-            false => default.unwrap_or_default(),
+            true => quote!(#[derive(::core::default::Default, ::doxa::ui::Form)]),
+            false => {
+                if fields.iter().all(|f| f.optional) {
+                    quote!(#[derive(::core::default::Default)])
+                } else {
+                    Default::default()
+                }
+            }
         };
         let checks = fields.iter().map(|f| f.check.clone());
         let decls = fields.iter().map(|f| f.decl.clone());
@@ -536,6 +538,7 @@ impl<'a> Types<'a> {
             let ty = self.held(member, &at.child(hint))?;
             out.push(Field {
                 optional: false,
+                ident: ident.clone(),
                 decl: quote!(#[serde(flatten)] pub #ident: #ty),
                 bare: quote!(#[serde(flatten)] #ident: #ty),
                 check: quote!(__Constraints::check_into(&self.#ident, path, out);),
@@ -657,16 +660,21 @@ impl<'a> Types<'a> {
             };
             out.push(Field {
                 optional: layers > 0,
+                ident: ident.clone(),
                 decl: quote!(#docs #rename #default #shape pub #ident: #ty),
-                bare: quote!(#docs #rename #default #ident: #ty),
+                bare: quote!(#docs #rename #default #shape #ident: #ty),
                 check,
             });
         }
         Ok(out)
     }
 
-    /// `#[form(nested)]` for a field of a generated struct, `#[form(list)]` for a `Vec` of one.
+    /// `#[form(nested)]` for a field of a generated type, `#[form(list)]` for a `Vec` of them;
+    /// nothing unless `.forms()`.
     fn form_shape(&self, prop: &Schema) -> TokenStream {
+        if !self.options.forms {
+            return quote!();
+        }
         let boxed = self
             .current
             .as_ref()
@@ -674,18 +682,18 @@ impl<'a> Types<'a> {
         if boxed {
             return quote!();
         }
-        if self.is_struct(prop) {
+        if self.generated(prop) {
             return quote!(#[form(nested)]);
         }
         let array = prop.ty.as_ref().map(super::spec::Types::split) == Some((Some("array"), false));
         match &prop.items {
-            Some(items) if array && self.is_struct(items) => quote!(#[form(list)]),
+            Some(items) if array && self.generated(items) => quote!(#[form(list)]),
             _ => quote!(),
         }
     }
 
-    /// Whether `s` is generated as a struct, which derives `Form` too.
-    fn is_struct(&self, s: &Schema) -> bool {
+    /// Whether `s` is a type this crate generates, which derives `Form` too.
+    fn generated(&self, s: &Schema) -> bool {
         if let Some(n) = s.ref_name() {
             return !self.map.schemas.contains_key(n)
                 && self
@@ -693,18 +701,25 @@ impl<'a> Types<'a> {
                     .components
                     .schemas
                     .get(n)
-                    .is_some_and(|c| nameable(c) && c.one_of.is_empty() && c.values.is_empty());
+                    .is_some_and(|c| nameable(c) || self.generated(c));
         }
         if let [only] = s.all_of.as_slice() {
-            return self.is_struct(only);
+            return self.generated(only);
         }
-        or_null(s).is_none()
-            && (!s.properties.is_empty() || s.all_of.len() > 1)
-            && s.one_of.is_empty()
-            && s.values.is_empty()
-            && !self
-                .component_like(s)
-                .is_some_and(|n| self.map.schemas.contains_key(&n))
+        let (ty, nullable) = s.ty.as_ref().map_or((None, false), |t| t.split());
+        if or_null(s).is_some() || nullable {
+            return false;
+        }
+        match ty {
+            Some("string") => !s.values.is_empty(),
+            Some("object") | None => {
+                (!s.properties.is_empty() || !s.one_of.is_empty() || s.all_of.len() > 1)
+                    && !self
+                        .component_like(s)
+                        .is_some_and(|n| self.map.schemas.contains_key(&n))
+            }
+            _ => false,
+        }
     }
 
     /// One branch of a tagged `oneOf`, its `allOf` merged. A branch that is another type plus
@@ -807,39 +822,34 @@ impl<'a> Types<'a> {
                 })?;
             let variant = Ident::new(&pascal(&value), Span::call_site());
             let hint = format!("{}{}", at.hint, pascal(&value));
-            let body = match &content {
+            let rename = quote!(#[serde(rename = #value)]);
+            variants.push(match &content {
                 Some(key) => match branch.properties.get(key) {
-                    None => quote!(),
+                    None => Variant::unit(rename, variant),
                     Some(c) if c.ref_name().is_none() && !c.properties.is_empty() => {
                         let fields = self.fields(c, &at.child(hint))?;
-                        let decls = fields.iter().map(|f| &f.bare);
-                        quote!({ #(#decls,)* })
+                        Variant::fields(rename, variant, &fields)
                     }
-                    Some(c) => {
-                        let ty = self.held(c, &at.child(hint))?;
-                        quote!((#ty))
-                    }
+                    Some(c) => self.newtype(rename, variant, c, &at.child(hint))?,
                 },
                 None if newtype.is_some() => {
-                    let ty = self.held(newtype.as_ref().expect("checked"), &at.child(hint))?;
-                    quote!((#ty))
+                    let held = newtype.as_ref().expect("checked");
+                    self.newtype(rename, variant, held, &at.child(hint))?
                 }
                 None => {
                     let mut rest = branch.clone();
                     rest.properties.remove(tag);
                     rest.required.retain(|r| r != tag);
                     if rest.properties.is_empty() && flattened.is_empty() {
-                        quote!()
+                        Variant::unit(rename, variant)
                     } else {
                         let at = at.child(hint);
                         let mut fields = self.fields(&rest, &at)?;
                         fields.extend(self.flattened_fields(flattened, &at)?);
-                        let decls = fields.iter().map(|f| &f.bare);
-                        quote!({ #(#decls,)* })
+                        Variant::fields(rename, variant, &fields)
                     }
                 }
-            };
-            variants.push(quote!(#[serde(rename = #value)] #variant #body));
+            });
         }
         let repr = match &content {
             Some(c) => quote!(#[serde(tag = #tag, content = #c)]),
@@ -863,7 +873,11 @@ impl<'a> Types<'a> {
             if let Some(n) = raw.ref_name().filter(|n| self.map.schemas.contains_key(*n)) {
                 let variant = Ident::new(&pascal(n), Span::call_site());
                 let ty = parse_path(&self.map.schemas[n])?;
-                mapped.push(quote!(#[serde(untagged)] #variant(#ty)));
+                mapped.push(Variant::tuple(
+                    quote!(#[serde(untagged)]),
+                    variant,
+                    quote!(#ty),
+                ));
                 continue;
             }
             let branch = self.resolve(raw);
@@ -873,7 +887,7 @@ impl<'a> Types<'a> {
                         return Err(at.here("has a non-string enum value"));
                     };
                     let variant = Ident::new(&pascal(v), Span::call_site());
-                    variants.push(quote!(#[serde(rename = #v)] #variant));
+                    variants.push(Variant::unit(quote!(#[serde(rename = #v)]), variant));
                 }
                 continue;
             }
@@ -881,11 +895,24 @@ impl<'a> Types<'a> {
                 return Err(at.here("is a `oneOf` that is neither tagged nor one key per branch"));
             };
             let variant = Ident::new(&pascal(key), Span::call_site());
-            let ty = self.held(payload, &at.child(format!("{}{}", at.hint, pascal(key))))?;
-            variants.push(quote!(#[serde(rename = #key)] #variant(#ty)));
+            let at = at.child(format!("{}{}", at.hint, pascal(key)));
+            variants.push(self.newtype(quote!(#[serde(rename = #key)]), variant, payload, &at)?);
         }
         variants.extend(mapped);
         Ok(self.enum_items(ident, docs, quote!(), &variants))
+    }
+
+    /// A variant holding `payload`'s type.
+    fn newtype(
+        &mut self,
+        attrs: TokenStream,
+        name: Ident,
+        payload: &Schema,
+        at: &At<'_>,
+    ) -> Result<Variant, GenerateError> {
+        let ty = self.held(payload, at)?;
+        let shape = self.form_shape(payload);
+        Ok(Variant::tuple(attrs, name, quote!(#shape #ty)))
     }
 
     /// `b`, through its `$ref`.
@@ -987,18 +1014,54 @@ impl<'a> Types<'a> {
             }
             let variant = Ident::new(&name, Span::call_site());
             if name == "Null" {
-                variants.push(quote!(#variant));
+                variants.push(Variant::unit(quote!(), variant));
                 continue;
             }
-            let ty = self.held(branch, &at.child(format!("{}{name}", at.hint)))?;
-            variants.push(quote!(#variant(#ty)));
+            let at = at.child(format!("{}{name}", at.hint));
+            variants.push(self.newtype(quote!(), variant, branch, &at)?);
         }
         Ok(self.enum_items(ident, docs, quote!(#[serde(untagged)]), &variants))
     }
 }
 
+/// One variant of a generated enum, and the value it starts at in a form.
+struct Variant {
+    decl: TokenStream,
+    default: TokenStream,
+    unit: bool,
+}
+
+impl Variant {
+    fn unit(attrs: TokenStream, name: Ident) -> Self {
+        Variant {
+            decl: quote!(#attrs #name),
+            default: quote!(Self::#name),
+            unit: true,
+        }
+    }
+
+    fn tuple(attrs: TokenStream, name: Ident, field: TokenStream) -> Self {
+        Variant {
+            decl: quote!(#attrs #name(#field)),
+            default: quote!(Self::#name(::core::default::Default::default())),
+            unit: false,
+        }
+    }
+
+    fn fields(attrs: TokenStream, name: Ident, fields: &[Field]) -> Self {
+        let decls = fields.iter().map(|f| &f.bare);
+        let idents = fields.iter().map(|f| &f.ident);
+        Variant {
+            decl: quote!(#attrs #name { #(#decls,)* }),
+            default: quote!(Self::#name { #(#idents: ::core::default::Default::default(),)* }),
+            unit: false,
+        }
+    }
+}
+
 struct Field {
     optional: bool,
+    ident: Ident,
     decl: TokenStream,
     /// Without `pub`, for an enum variant.
     bare: TokenStream,
@@ -1030,15 +1093,31 @@ impl Types<'_> {
         ident: &Ident,
         docs: &TokenStream,
         repr: TokenStream,
-        variants: &[TokenStream],
+        variants: &[Variant],
     ) -> TokenStream {
         let open = (!self.options.exhaustive).then(|| quote!(#[non_exhaustive]));
+        let form = self.options.forms.then(|| {
+            let first = variants.iter().find(|v| v.unit).or(variants.first());
+            let default = first.map_or_else(|| quote!(unreachable!()), |v| v.default.clone());
+            quote! {
+                impl ::core::default::Default for #ident {
+                    fn default() -> Self {
+                        #default
+                    }
+                }
+            }
+        });
+        let derive = form.is_some().then(|| quote!(#[derive(::doxa::ui::Form)]));
+        let decls = variants.iter().map(|v| &v.decl);
         quote! {
             #docs
             #DERIVES
+            #derive
             #repr
             #open
-            pub enum #ident { #(#variants,)* }
+            pub enum #ident { #(#decls,)* }
+
+            #form
 
             impl ::core::fmt::Display for #ident {
                 fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
@@ -1063,7 +1142,7 @@ impl Types<'_> {
                 return Err(at.here("has a non-string enum value"));
             };
             let variant = Ident::new(&pascal(v), Span::call_site());
-            variants.push(quote!(#[serde(rename = #v)] #variant));
+            variants.push(Variant::unit(quote!(#[serde(rename = #v)]), variant));
         }
         Ok(self.enum_items(ident, docs, quote!(), &variants))
     }

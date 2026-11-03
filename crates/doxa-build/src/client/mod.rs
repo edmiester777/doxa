@@ -123,8 +123,8 @@ impl ClientSpec {
         self
     }
 
-    /// Derive `doxa::ui::Form` on every struct, so a request binds to a form field by field.
-    /// The client crate needs doxa's `forms` feature.
+    /// Derive `doxa::ui::Form` and `Default` on every type, so a request binds to a form field by
+    /// field. Needs doxa's `forms` feature, and `Default` on every `.types()` mapping.
     pub fn forms(mut self) -> Self {
         self.options.forms = true;
         self
@@ -550,13 +550,23 @@ mod tests {
         let d = doc(
             serde_json::json!({ "$ref": "#/components/schemas/Order" }),
             serde_json::json!({
-                "Order": { "type": "object", "required": ["size", "lines", "ship"], "properties": {
+                "Order": { "type": "object", "required": ["size", "lines", "ship", "pay"], "properties": {
                     "size": { "type": "string", "enum": ["s", "m"] },
+                    "pay": { "$ref": "#/components/schemas/Pay" },
                     "lines": { "type": "array", "items": { "$ref": "#/components/schemas/Line" } },
                     "ship": { "$ref": "#/components/schemas/Line" },
                     "note": { "$ref": "#/components/schemas/Line" }
                 } },
-                "Line": { "type": "object", "properties": { "n": { "type": "integer" } } }
+                "Line": { "type": "object", "properties": { "n": { "type": "integer" } } },
+                "Pay": { "oneOf": [
+                    { "type": "object", "required": ["kind", "line"], "properties": {
+                        "kind": { "type": "string", "enum": ["card"] },
+                        "line": { "$ref": "#/components/schemas/Line" }
+                    } },
+                    { "type": "object", "required": ["kind"], "properties": {
+                        "kind": { "type": "string", "enum": ["cash"] }
+                    } }
+                ] }
             }),
         );
         let plain = client(d.clone()).unwrap();
@@ -573,12 +583,23 @@ mod tests {
             .unwrap();
         assert!(!out.contains("non_exhaustive"), "{out}");
         assert!(
-            out.contains("# [derive (:: doxa :: ui :: Form)] pub struct Order"),
+            out.contains(
+                "# [derive (:: core :: default :: Default , :: doxa :: ui :: Form)] pub struct Order"
+            ),
             "{out}"
         );
         assert!(out.contains("# [form (list)] pub lines"), "{out}");
         assert!(out.contains("# [form (nested)] pub ship"), "{out}");
         assert!(!out.contains("# [form (nested)] pub note"), "{out}");
+        assert!(out.contains("# [form (nested)] pub size"), "{out}");
+        assert!(out.contains("# [form (nested)] pub pay"), "{out}");
+        assert!(out.contains("# [derive (:: doxa :: ui :: Form)] # [serde (tag = \"kind\" , content = \"line\")] pub enum Pay"), "{out}");
+        assert!(out.contains("Card (# [form (nested)] Line)"), "{out}");
+        assert!(
+            out.contains("fn default () -> Self { Self :: Cash }"),
+            "{out}"
+        );
+        assert!(out.contains("fn default () -> Self { Self :: S }"), "{out}");
     }
 
     #[test]
