@@ -162,6 +162,33 @@ pub use doxa_ui::start;
 /// }
 /// ```
 ///
+/// A generic component infers its parameter from the tag:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn List<T: Clone + ToString + 'static>(items: Vec<T>) -> View {
+///     items.iter().map(|i| view! { <li>{i.to_string()}</li> }).collect()
+/// }
+/// let _ = view! { <List items={vec![1, 2]}/> };
+/// ```
+///
+/// A page compiles:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[page("/items")]
+/// fn Items() -> View { view! { <ul/> } }
+/// ```
+///
+/// The same page made generic is "pages can't be generic":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[page("/items")]
+/// fn Items<T: 'static>() -> View { view! { <ul/> } }
+/// ```
+///
 /// An icon whose SVG file exists compiles:
 ///
 /// ```

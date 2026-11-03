@@ -25,6 +25,39 @@ pub trait Component: 'static {
     fn render(props: Self::Props) -> RenderFuture;
 }
 
+/// The component a props type belongs to, so `<Tag …/>` infers a generic component's parameters.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` isn't the props of a component `view!` can render",
+    label = "add `impl ComponentProps for {Self} {{ type Of = …; }}` beside its `Component` impl"
+)]
+pub trait ComponentProps: Clone + 'static {
+    type Of: Component<Props = Self>;
+}
+
+macro_rules! props_of {
+    ($($props:ident => $c:ident),* $(,)?) => {$(
+        impl ComponentProps for crate::$props {
+            type Of = crate::$c;
+        }
+    )*};
+}
+
+props_of!(
+    PortalProps => Portal,
+    OutletProps => Outlet,
+    LinkProps => Link,
+    CatchProps => Catch,
+    SuspenseProps => Suspense,
+    SlotProps => Slot,
+    CanProps => Can,
+);
+
+/// `<Tag …/>` in `view!`: the component its built props belong to.
+#[doc(hidden)]
+pub fn comp_for<P: ComponentProps>(props: P) -> crate::ComponentView {
+    crate::comp::<P::Of>(props)
+}
+
 /// A component's render, possibly still waiting on data.
 pub struct RenderFuture(Inner);
 

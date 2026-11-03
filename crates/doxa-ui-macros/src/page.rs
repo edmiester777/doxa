@@ -3,6 +3,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
+use syn::spanned::Spanned;
 use syn::{Expr, LitStr, Token};
 
 use crate::component::{self, Options, Parsed};
@@ -45,6 +46,13 @@ fn template_names(path: &str) -> Vec<String> {
 }
 
 pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
+    let generics = &parsed.item.sig.generics;
+    if !generics.params.is_empty() {
+        return Err(syn::Error::new(
+            generics.span(),
+            "pages can't be generic: a path renders one type; make a generic component and render it from the page",
+        ));
+    }
     let name = &parsed.item.sig.ident;
     let vis = &parsed.item.vis;
     let props_ty = format_ident!("{}Props", name);

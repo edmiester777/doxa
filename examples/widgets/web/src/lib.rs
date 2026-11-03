@@ -8,6 +8,7 @@ pub mod icons;
 pub mod kit;
 pub mod motion;
 pub mod stories;
+pub mod table;
 pub mod words;
 use motion::{exit, flip};
 

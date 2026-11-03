@@ -50,10 +50,16 @@ impl syn::parse::Parse for Options {
 }
 
 pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
-    if !item.sig.generics.params.is_empty() {
+    if let Some(p) = item
+        .sig
+        .generics
+        .params
+        .iter()
+        .find(|p| !matches!(p, syn::GenericParam::Type(_)))
+    {
         return Err(syn::Error::new(
-            item.sig.generics.span(),
-            "components can't be generic",
+            p.span(),
+            "a component's generic parameters are types; lifetimes and consts aren't supported",
         ));
     }
     let mut props = Vec::new();
@@ -151,6 +157,14 @@ fn is_option(ty: &Type) -> bool {
 }
 
 pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
+    let generics = &parsed.item.sig.generics;
+    if opts.export && !generics.params.is_empty() {
+        return syn::Error::new(
+            generics.span(),
+            "an exported component can't be generic: its host passes props as JSON to one type",
+        )
+        .into_compile_error();
+    }
     let exported = if opts.export {
         match crate::export::expand(parsed) {
             Ok(t) => t,
@@ -184,7 +198,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     let same_props = if opts.memo {
         quote! {
             const SAME_PROPS: ::core::option::Option<fn(&::std::rc::Rc<dyn ::core::any::Any>, &::std::rc::Rc<dyn ::core::any::Any>) -> bool> =
-                ::core::option::Option::Some(|a, b| a.downcast_ref::<#props_ty>() == b.downcast_ref::<#props_ty>());
+                ::core::option::Option::Some(|a, b| a.downcast_ref::<Self::Props>() == b.downcast_ref::<Self::Props>());
         }
     } else {
         quote!()
@@ -210,7 +224,14 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     } else {
         quote! { ::doxa::ui::RenderFuture::ready(::doxa::ui::IntoRender::into_render(__render(#(#names),*))) }
     };
-    let builder = builder(vis, name, &props_ty, props);
+    let builder = builder(vis, name, &props_ty, props, generics);
+    let (impl_g, ty_g, where_c) = generics.split_for_impl();
+    let unit = if generics.params.is_empty() {
+        quote!(#vis struct #name;)
+    } else {
+        let tys = generics.type_params().map(|t| &t.ident);
+        quote!(#vis struct #name #generics (::core::marker::PhantomData<fn() -> (#(#tys,)*)>) #where_c;)
+    };
 
     let render = quote! {
         #(#others)*
@@ -263,24 +284,28 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
 
     quote! {
         #(#docs)*
-        #vis struct #name;
+        #unit
 
         #[doc = concat!("Props of [`", #name_str, "`].")]
         #[derive(Clone)]
         #derive_eq
-        #vis struct #props_ty { #(#fields),* }
+        #vis struct #props_ty #generics #where_c { #(#fields),* }
 
         #builder
 
-        impl ::doxa::ui::Component for #name {
-            type Props = #props_ty;
+        impl #impl_g ::doxa::ui::Component for #name #ty_g #where_c {
+            type Props = #props_ty #ty_g;
             const NAME: &'static str = #name_str;
             #same_props
 
             #[allow(unexpected_cfgs)]
-            fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
+            fn render(props: Self::Props) -> ::doxa::ui::RenderFuture {
                 #render
             }
+        }
+
+        impl #impl_g ::doxa::ui::ComponentProps for #props_ty #ty_g #where_c {
+            type Of = #name #ty_g;
         }
 
         #split
@@ -311,6 +336,7 @@ pub(crate) fn builder(
     name: &Ident,
     props_ty: &Ident,
     props: &[Prop],
+    generics: &syn::Generics,
 ) -> TokenStream {
     let builder = format_ident!("{}Builder", name);
     let names: Vec<_> = props.iter().map(|p| &p.name).collect();
@@ -318,6 +344,16 @@ pub(crate) fn builder(
     let params: Vec<_> = (0..required.len())
         .map(|i| format_ident!("__P{}", i))
         .collect();
+    let tys: Vec<Ident> = generics.type_params().map(|t| t.ident.clone()).collect();
+    let (impl_g, ty_g, where_c) = generics.split_for_impl();
+    let mut with_state = generics.clone();
+    with_state.params.extend(
+        params
+            .iter()
+            .map(|p| -> syn::GenericParam { syn::parse_quote!(#p) }),
+    );
+    let (state_impl, state_ty, state_where) = with_state.split_for_impl();
+    let mut finished = with_state.clone();
     let needs: Vec<_> = required
         .iter()
         .map(|p| format_ident!("{}_needs_{}", name, p.name))
@@ -329,6 +365,24 @@ pub(crate) fn builder(
         .iter()
         .map(|p| format!("add `{}={{{{…}}}}` to the tag", p.name));
     let unset = required.iter().map(|_| quote!(::doxa::ui::Unset));
+    finished.make_where_clause().predicates.extend(
+        params
+            .iter()
+            .zip(&needs)
+            .map(|(p, n)| -> syn::WherePredicate { syn::parse_quote!(#p: #n) }),
+    );
+    let (finished_impl, _, finished_where) = finished.split_for_impl();
+    // A prop over a component's own parameter takes exactly its type, so the tag infers it.
+    let mentions_param = |t: &Type| {
+        fn walk(ts: TokenStream, tys: &[Ident]) -> bool {
+            ts.into_iter().any(|tt| match tt {
+                proc_macro2::TokenTree::Ident(i) => tys.contains(&i),
+                proc_macro2::TokenTree::Group(g) => walk(g.stream(), tys),
+                _ => false,
+            })
+        }
+        walk(quote!(#t), &tys)
+    };
 
     let setters = props.iter().map(|p| {
         let (n, t) = (&p.name, &p.ty);
@@ -345,6 +399,8 @@ pub(crate) fn builder(
                 quote!(value: ::doxa::ui::View),
                 quote!(::doxa::ui::__private::FromChildren::from_children(value)),
             )
+        } else if mentions_param(t) {
+            (quote!(value: #t), quote!(value))
         } else {
             (
                 quote!(value: impl ::core::convert::Into<#t>),
@@ -360,7 +416,7 @@ pub(crate) fn builder(
         });
         quote_spanned! { n.span() =>
             #[allow(missing_docs)]
-            pub fn #n(self, #arg) -> #builder<#(#out_params),*> {
+            pub fn #n(self, #arg) -> #builder<#(#tys,)* #(#out_params),*> {
                 #builder { #(#moves,)* _set: ::core::marker::PhantomData }
             }
         }
@@ -388,26 +444,26 @@ pub(crate) fn builder(
         )*
 
         #[doc = concat!("Builds [`", stringify!(#props_ty), "`].")]
-        #vis struct #builder<#(#params),*> {
+        #vis struct #builder #with_state #state_where {
             #(#builder_fields,)*
-            _set: ::core::marker::PhantomData<(#(#params,)*)>,
+            _set: ::core::marker::PhantomData<(fn() -> (#(#tys,)*), #(#params,)*)>,
         }
 
-        impl #name {
+        impl #impl_g #name #ty_g #where_c {
             /// Start building its props.
-            #vis fn props() -> #builder<#(#unset),*> {
+            #vis fn props() -> #builder<#(#tys,)* #(#unset),*> {
                 #builder { #(#names: ::core::option::Option::None,)* _set: ::core::marker::PhantomData }
             }
         }
 
         #[allow(dead_code)]
-        impl<#(#params),*> #builder<#(#params),*> {
+        impl #state_impl #builder #state_ty #state_where {
             #(#setters)*
         }
 
-        impl<#(#params),*> #builder<#(#params),*> {
+        impl #finished_impl #builder #state_ty #finished_where {
             /// Finish; every required prop must be given.
-            #vis fn build(self) -> #props_ty where #(#params: #needs),* {
+            #vis fn build(self) -> #props_ty #ty_g {
                 #props_ty { #(#build_fields),* }
             }
         }

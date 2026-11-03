@@ -950,7 +950,7 @@ fn start() {
 }
 ```
 
-The same pages render natively into an in-memory document for tests. [`examples/widgets`](examples/widgets) has the whole app: `api` (shared routes), `client` (their client half), `server`, and `web` (the pages, tested against the real router).
+A component can be generic, `fn Table<T: Clone + 'static>(rows: Vec<T>, …)`, and `<Table rows={runs}/>` infers `T`. The same pages render natively into an in-memory document for tests. [`examples/widgets`](examples/widgets) has the whole app: `api` (shared routes), `client` (their client half), `server`, and `web` (the pages, tested against the real router).
 
 ### 18. Plain JS modules as Rust
 

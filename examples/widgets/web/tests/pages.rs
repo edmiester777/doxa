@@ -94,6 +94,39 @@ async fn a_renamed_can_takes_its_probe_directly() {
     }
 }
 
+#[tokio::test]
+async fn a_generic_table_infers_its_row_type_from_the_tag() {
+    use doxa::ui::prelude::{view, App};
+    use widgets_client::widgets::Widget;
+    use widgets_web::table::{Column, Table};
+
+    serve("viewer");
+    let dom = MemDom::new();
+    App::new(|| {
+        let rows = vec![(1u32, "gear"), (2, "cog")];
+        let widgets = vec![Widget {
+            id: 7,
+            name: "sprocket".into(),
+        }];
+        view! {
+            <Table
+                rows={rows}
+                columns={vec![Column { header: "id", cell: |r: &(u32, &str)| r.0.to_string() }]}
+                row_key={|r: &(u32, &str)| r.1.to_owned()}
+            />
+            <Table
+                rows={widgets}
+                columns={vec![Column { header: "name", cell: |w: &Widget| w.name.clone() }]}
+                row_key={|w: &Widget| w.id.to_string()}
+            />
+        }
+    })
+    .mount_on(Rc::new(dom.clone()), dom.body())
+    .keep();
+    settle().await;
+    assert_eq!(dom.text(dom.body()), "id12namesprocket");
+}
+
 /// Stands in for React: records each island's props and keeps its event handlers.
 #[derive(Clone, Default)]
 struct FakeReact(Rc<std::cell::RefCell<Vec<(String, Vec<(&'static str, EventFn)>)>>>);

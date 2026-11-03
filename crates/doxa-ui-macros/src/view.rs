@@ -229,7 +229,7 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
         let kids = fragment(&kids);
         out = quote! { #out.children(#kids) };
     }
-    let mut view = quote_spanned! { path.span() => ::doxa::ui::comp::<#path>(#out.build()) };
+    let mut view = quote_spanned! { path.span() => ::doxa::ui::__private::comp_for(#out.build()) };
     if let Some(k) = key {
         view = quote! { #view.key(#k) };
     }

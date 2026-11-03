@@ -44,7 +44,7 @@ pub use browser::{
     BrowserError, Stored,
 };
 pub use can::{Can, CanBuilder, CanProps};
-pub use component::{Component, IntoRender, RenderFuture, Set, Unset};
+pub use component::{Component, ComponentProps, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
 pub use dom::{Event, Listen, NodeRef, Phase, Rect};
 /// One [`Field`] per struct field, named by its path in the rules' errors.
@@ -94,6 +94,7 @@ pub use export::Exported;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::component::comp_for;
     #[cfg(all(feature = "export", target_arch = "wasm32"))]
     pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
     pub use crate::icon::{svg_el, svg_root};

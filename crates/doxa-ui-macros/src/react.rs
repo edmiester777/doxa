@@ -403,7 +403,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             }
         }
     });
-    let builder = builder(vis, name, &props_ty, &props);
+    let builder = builder(vis, name, &props_ty, &props, &syn::Generics::default());
 
     let same = fields
         .iter()
@@ -519,6 +519,10 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
                 ::doxa::ui::react::render(props)
             }
+        }
+
+        impl ::doxa::ui::ComponentProps for #props_ty {
+            type Of = #name;
         }
     })
 }
