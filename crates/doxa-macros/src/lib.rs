@@ -898,6 +898,21 @@ pub fn server_only(input: TokenStream) -> TokenStream {
     doxa_macro_support::tag(doxa_macro_support::Side::Server, input.into()).into()
 }
 
+/// Make these items `pub` in the client half, which is the crate's public API, and leave
+/// them as written on the server.
+///
+/// ```ignore
+/// doxa::client_pub! {
+///     mod api;
+/// }
+/// ```
+#[proc_macro]
+pub fn client_pub(input: TokenStream) -> TokenStream {
+    role::client_pub(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Keep these items only in the client half.
 #[proc_macro]
 pub fn client_only(input: TokenStream) -> TokenStream {

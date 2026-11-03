@@ -179,3 +179,36 @@ pub fn derive_identity(input: TokenStream) -> syn::Result<TokenStream> {
         #owned
     })
 }
+
+/// `client_pub! { mod api; }`: these items are `pub` in the client half and as written on the server.
+pub fn client_pub(input: TokenStream) -> syn::Result<TokenStream> {
+    let mut file: syn::File = syn::parse2(input)?;
+    if doxa_macro_support::is_client() {
+        for item in &mut file.items {
+            *visibility(item)? = syn::parse_quote!(pub);
+        }
+    }
+    let items = &file.items;
+    Ok(quote!(#(#items)*))
+}
+
+fn visibility(item: &mut syn::Item) -> syn::Result<&mut syn::Visibility> {
+    use syn::Item;
+    Ok(match item {
+        Item::Mod(i) => &mut i.vis,
+        Item::Use(i) => &mut i.vis,
+        Item::Fn(i) => &mut i.vis,
+        Item::Struct(i) => &mut i.vis,
+        Item::Enum(i) => &mut i.vis,
+        Item::Type(i) => &mut i.vis,
+        Item::Const(i) => &mut i.vis,
+        Item::Static(i) => &mut i.vis,
+        Item::Trait(i) => &mut i.vis,
+        other => {
+            return Err(syn::Error::new_spanned(
+                other,
+                "`client_pub!` takes items with a visibility, such as `mod x;` or `use …;`",
+            ))
+        }
+    })
+}

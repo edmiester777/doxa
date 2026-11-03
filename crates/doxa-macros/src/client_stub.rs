@@ -84,7 +84,6 @@ fn may_authorize(item_fn: &ItemFn) -> bool {
 
 /// Emit the stub and its `ROUTE` module.
 pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
-    let vis = &item_fn.vis;
     let name = &item_fn.sig.ident;
     let docs = item_fn.attrs.iter().filter(|a| a.path().is_ident("doc"));
 
@@ -207,7 +206,22 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
     let mut bad = None;
     let ret = match &item_fn.sig.output {
         ReturnType::Default => quote!(()),
-        ReturnType::Type(_, ty) => response_type(ty, route.method != "get", &mut bad),
+        ReturnType::Type(_, ty) => {
+            let mut unread = None;
+            let ret = response_type(ty, route.method != "get", &mut bad, &mut unread);
+            if let Some(ty) = unread {
+                let name = last_ident(ty).unwrap_or_default();
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    format!(
+                        "doxa can't tell what `{name}` returns in the browser\n\
+                         help: write `SseStream<…>`, `Json<…>` or `Result<…, …>` (or the `doxa::` path), \
+                         or set `client = false` on the route"
+                    ),
+                ));
+            }
+            ret
+        }
     };
     // The bound names a lifetime so it is checked where the stub is called, not here.
     let (refusal, refused) = match bad {
@@ -237,7 +251,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         #[allow(non_snake_case, missing_docs)]
-        #vis mod #name {
+        pub mod #name {
             #[allow(unused_imports)]
             use super::*;
             /// The route this call is made to.
@@ -260,7 +274,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
 
         #(#docs)*
         #[allow(clippy::too_many_arguments)]
-        #vis fn #name #lifetime (#(#params),*) -> ::doxa::client::Call<#ret> #refused {
+        pub fn #name #lifetime (#(#params),*) -> ::doxa::client::Call<#ret> #refused {
             #[allow(unused_imports)]
             use ::doxa::client::__private::{IsEntity as _, NotEntity as _};
             ::doxa::client::Call::new(&#name::ROUTE)
@@ -355,10 +369,30 @@ fn classify(pat: &Pat, ty: &Type, index: usize) -> Arg {
     }
 }
 
-/// The handler's return type, with every wrapper named under `::doxa::client`;
-/// `bad` gets the first part the browser can't decode. A stream from a route that
-/// isn't a GET (`once`) is sent once and never reopened.
-fn response_type<'a>(ty: &'a Type, once: bool, bad: &mut Option<&'a Type>) -> TokenStream {
+/// Response types doxa knows and the browser can't decode; the call is refused where it's made.
+const UNDECODABLE: &[&str] = &[
+    "Html",
+    "Redirect",
+    "Response",
+    "Sse",
+    "Body",
+    "Bytes",
+    "Vec",
+    "Box",
+    "Cow",
+    "AppendHeaders",
+    "HeaderMap",
+];
+
+/// The handler's return type, with every wrapper named under `::doxa::client`. `bad` gets
+/// the first part the browser can't decode, `unread` the first name doxa doesn't know. A
+/// stream from a route that isn't a GET (`once`) is sent once and never reopened.
+fn response_type<'a>(
+    ty: &'a Type,
+    once: bool,
+    bad: &mut Option<&'a Type>,
+    unread: &mut Option<&'a Type>,
+) -> TokenStream {
     let unsupported = |ty: &'a Type, bad: &mut Option<&'a Type>| {
         bad.get_or_insert(ty);
         quote!(::doxa::client::Unsupported)
@@ -369,7 +403,7 @@ fn response_type<'a>(ty: &'a Type, once: bool, bad: &mut Option<&'a Type>) -> To
             let elems: Vec<_> = t
                 .elems
                 .iter()
-                .map(|e| response_type(e, once, bad))
+                .map(|e| response_type(e, once, bad, unread))
                 .collect();
             quote!((#(#elems),*))
         }
@@ -377,12 +411,12 @@ fn response_type<'a>(ty: &'a Type, once: bool, bad: &mut Option<&'a Type>) -> To
             let last = last_ident(ty).unwrap_or_default();
             let args = type_args(ty);
             match (last.as_str(), args.as_slice()) {
-                ("Result", [ok, err]) => {
-                    let ok = response_type(ok, once, bad);
+                ("Result" | "ApiResult", [ok, err]) => {
+                    let ok = response_type(ok, once, bad, unread);
                     quote!(::core::result::Result<#ok, #err>)
                 }
                 ("Result", [ok]) => {
-                    let ok = response_type(ok, once, bad);
+                    let ok = response_type(ok, once, bad, unread);
                     quote!(::doxa::client::AliasedResult<#ok>)
                 }
                 ("Json", [t]) => quote!(::doxa::client::Json<#t>),
@@ -393,11 +427,15 @@ fn response_type<'a>(ty: &'a Type, once: bool, bad: &mut Option<&'a Type>) -> To
                 ("String", []) => quote!(::std::string::String),
                 ("Attachment", []) => quote!(::doxa::client::Attachment),
                 ("Cached", [t]) => quote!(::doxa::client::Json<#t>),
-                _ => unsupported(ty, bad),
+                (name, _) if UNDECODABLE.contains(&name) => unsupported(ty, bad),
+                _ => {
+                    unread.get_or_insert(ty);
+                    quote!(::doxa::client::Unsupported)
+                }
             }
         }
-        Type::Paren(p) => response_type(&p.elem, once, bad),
-        Type::Group(g) => response_type(&g.elem, once, bad),
+        Type::Paren(p) => response_type(&p.elem, once, bad, unread),
+        Type::Group(g) => response_type(&g.elem, once, bad, unread),
         _ => unsupported(ty, bad),
     }
 }
@@ -618,6 +656,35 @@ mod tests {
             quote! { async fn n() -> Json<u32> { todo!() } },
         );
         assert!(!json.contains("ClientCallable"), "{json}");
+    }
+
+    #[test]
+    fn a_renamed_return_type_is_an_error_at_the_route() {
+        let item: ItemFn = syn::parse2(quote! {
+            async fn chat() -> DoxaSseStream<Ev, impl Stream<Item = Result<Ev, Infallible>>> { todo!() }
+        })
+        .unwrap();
+        let path = LitStr::new("/chat", Span::call_site());
+        let route = Route {
+            method: "get",
+            path: &path,
+            operation_id: None,
+        };
+        let err = expand(&route, &item).unwrap_err().to_string();
+        assert!(
+            err.contains("doxa can't tell what `DoxaSseStream` returns in the browser"),
+            "{err}"
+        );
+        let aliased = stub(
+            "get",
+            "/n",
+            quote! { async fn n() -> ApiResult<Json<u32>, E> { todo!() } },
+        );
+        assert!(
+            aliased
+                .contains(":: core :: result :: Result < :: doxa :: client :: Json < u32 > , E >"),
+            "{aliased}"
+        );
     }
 
     #[test]

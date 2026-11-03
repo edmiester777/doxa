@@ -873,7 +873,7 @@ Wire types take `#[dto]`, which derives serde both ways, `ToSchema`, `Debug`, `P
 pub struct Rename { #[garde(length(min = 1))] pub name: String }
 ```
 
-Server-only items in a shared file take `#[server]`, or `doxa::server_only! { mod store; }` for a module. GETs are cached and deduplicated, mutations invalidate what they touch, and `rename_widget::can(&key)` dry-runs the route's own guard.
+Server-only items in a shared file take `#[server]`, or `doxa::server_only! { mod store; }` for a module. A call is always `pub`, and `doxa::client_pub! { mod api; }` makes a module the server keeps private public in the client half. GETs are cached and deduplicated, mutations invalidate what they touch, and `rename_widget::can(&key)` dry-runs the route's own guard.
 
 Each client crate's routes go to its own server. `doxa::service!();` in the shared `lib.rs` gives the client crate a `service()`, with its own cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and a deployment can change them in `services.json` without a rebuild. Credentials are layers:
 

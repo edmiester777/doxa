@@ -61,6 +61,7 @@ pub fn app(catalog: Catalog) -> Router {
         .routes(routes!(widget_label))
         .routes(routes!(upload_photo))
         .routes(routes!(upload_files))
+        .merge(widgets_api::meta_routes())
         .split_for_parts();
     router
         .layer(axum::middleware::from_fn(

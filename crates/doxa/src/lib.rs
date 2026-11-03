@@ -55,7 +55,9 @@ pub use doxa_auth as auth;
 pub use doxa_policy as policy;
 
 #[cfg(any(feature = "macros", feature = "client"))]
-pub use doxa_macros::{client, client_only, dto, prelude, server, server_only, service, Identity};
+pub use doxa_macros::{
+    client, client_only, client_pub, dto, prelude, server, server_only, service, Identity,
+};
 
 #[doc(hidden)]
 pub use serde as __serde;
@@ -66,8 +68,8 @@ pub mod server {
     /// Names a shared route file needs when compiled as the server.
     pub mod prelude {
         pub use crate::{
-            asset, capability, client, client_only, delete, dto, get, operation, patch, post, put,
-            server, server_only, Actions, ApiError, Attachment, Identity, IntoParams,
+            asset, capability, client, client_only, client_pub, delete, dto, get, operation, patch,
+            post, put, server, server_only, Actions, ApiError, Attachment, Identity, IntoParams,
             PolicyResource, SseEvent, SseStream, ToSchema,
         };
         pub use axum::extract::{Extension, Form, Path, Query, State};
@@ -417,6 +419,22 @@ pub mod export_diagnostics {}
 /// }
 /// ```
 ///
+/// A return type under a name doxa doesn't know is an error at the route:
+///
+/// ```compile_fail
+/// doxa::client::__as_client! {
+///     #[get("/count")]
+///     pub async fn count() -> Counted<u32> { unreachable!() }
+/// }
+/// ```
+///
+/// ```
+/// doxa::client::__as_client! {
+///     #[get("/count", client = false)]
+///     pub async fn count() -> Counted<u32> { unreachable!() }
+/// }
+/// ```
+///
 /// An extractor only the server reads is marked `#[server]`, and the call leaves it out:
 ///
 /// ```
@@ -461,8 +479,8 @@ pub mod client {
         pub use doxa_client::route_key;
         pub use doxa_client::{Form, Granted, Json, Path, Query, SseStream, StatusCode};
         pub use doxa_macros::{
-            asset, capability, client, client_only, delete, dto, get, operation, patch, post, put,
-            server, server_only, Actions, ApiError, ClientIntoParams as IntoParams,
+            asset, capability, client, client_only, client_pub, delete, dto, get, operation, patch,
+            post, put, server, server_only, Actions, ApiError, ClientIntoParams as IntoParams,
             ClientToSchema as ToSchema, Identity, PolicyResource, SseEvent,
         };
         pub use serde::{Deserialize, Serialize};

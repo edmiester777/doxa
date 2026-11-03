@@ -53,6 +53,13 @@ async fn a_route_is_called_like_a_function() {
 }
 
 #[tokio::test]
+async fn a_route_in_a_private_server_module_is_public_to_the_client() {
+    install("viewer");
+    let version = widgets_client::meta::version().await.unwrap();
+    assert_eq!(*version, "0.0.0");
+}
+
+#[tokio::test]
 async fn query_arguments_and_lists() {
     install("viewer");
     let all = list_widgets(Filter::default()).await.unwrap();
