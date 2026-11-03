@@ -466,6 +466,29 @@ mod tests {
     }
 
     #[test]
+    fn a_header_parameter_is_an_argument_but_one_the_layers_send_is_not() {
+        let mut d = doc(serde_json::json!({}), serde_json::json!({}));
+        d["paths"]["/orders"]["post"]["parameters"] = serde_json::json!([
+            { "name": "Idempotency-Key", "in": "header", "required": false, "schema": { "type": "string" } },
+            { "name": "Authorization", "in": "header", "required": true, "schema": { "type": "string" } }
+        ]);
+        let out = client(d).unwrap();
+        assert!(
+            out.contains("pub async fn create_order (headers : CreateOrderHeaders ,"),
+            "{out}"
+        );
+        assert!(
+            out.contains("# [serde (rename = \"Idempotency-Key\")] # [serde (default , skip_serializing_if = \"Option::is_none\")] pub idempotency_key"),
+            "{out}"
+        );
+        assert!(
+            out.contains("impl :: doxa :: client :: ClientArg for CreateOrderHeaders"),
+            "{out}"
+        );
+        assert!(!out.contains("authorization"), "{out}");
+    }
+
+    #[test]
     fn a_variant_named_self_is_no_keyword() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Target" }),

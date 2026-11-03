@@ -167,6 +167,19 @@ impl Outgoing {
         self.headers.push((name.into(), value.into()));
     }
 
+    /// A request header per field of `value`, named as it serializes; absent fields send none.
+    pub fn header_fields(&mut self, value: &impl Serialize) -> Result<(), String> {
+        let Value::Object(map) = to_value(value)? else {
+            return Err("request headers must serialize as a struct".to_owned());
+        };
+        for (k, v) in map {
+            if let Some(s) = scalar(&v)? {
+                self.header(k, s);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn first_key(&self) -> Option<&Value> {
         self.keys.first()
     }
@@ -330,5 +343,31 @@ where
     type Value = T::Value;
     fn apply(value: T::Value, out: &mut Outgoing) -> Result<(), String> {
         T::apply(value, out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_present_field_is_a_header_by_its_wire_name() {
+        #[derive(Serialize)]
+        struct Headers {
+            #[serde(rename = "Idempotency-Key")]
+            key: Option<String>,
+            #[serde(rename = "X-Retry")]
+            retry: Option<u32>,
+        }
+        let mut out = Outgoing::new("/orders");
+        out.header_fields(&Headers {
+            key: Some("k1".into()),
+            retry: None,
+        })
+        .unwrap();
+        assert_eq!(
+            out.headers(),
+            [("Idempotency-Key".to_owned(), "k1".to_owned())]
+        );
     }
 }

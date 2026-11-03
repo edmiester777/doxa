@@ -15,7 +15,12 @@ use super::GenerateError;
 struct Guards {
     assets: BTreeMap<String, TokenStream>,
     keys: BTreeMap<String, TokenStream>,
+    /// How each header struct is sent, once per struct.
+    headers: BTreeMap<String, TokenStream>,
 }
+
+/// Headers the client's layers own, which a call never takes as an argument.
+const LAYER_HEADERS: &[&str] = &["authorization", "cookie", "content-type", "accept"];
 
 impl Guards {
     fn asset(&mut self, name: &str, key: &str, entity: &str) -> Ident {
@@ -160,9 +165,11 @@ pub(crate) fn render(spec: &Spec, types: &mut Types<'_>) -> Result<TokenStream, 
     }
     let assets = guards.assets.values();
     let keys = guards.keys.values();
+    let headers = guards.headers.values();
     Ok(quote! {
         #(#keys)*
         #(#assets)*
+        #(#headers)*
         #out
     })
 }
@@ -231,6 +238,35 @@ fn route(
     let guarded = !args.is_empty();
     if guarded && !meta.dry_run {
         args.push(quote!(#[server] __unchecked: ()));
+    }
+
+    // First, so the stub sees no unknown argument after the guard and keeps its dry run.
+    let headers: Vec<_> = op
+        .parameters
+        .iter()
+        .filter(|p| {
+            p.location == Location::Header
+                && !LAYER_HEADERS.contains(&p.name.to_ascii_lowercase().as_str())
+        })
+        .map(|p| {
+            (
+                p.name.clone(),
+                p.schema.clone().unwrap_or_default(),
+                p.required,
+            )
+        })
+        .collect();
+    if !headers.is_empty() {
+        let ty = types.query(&format!("{}Headers", pascal(&id)), headers, &at);
+        guards.headers.entry(ty.to_string()).or_insert_with(|| quote! {
+            impl ::doxa::client::ClientArg for #ty {
+                type Value = Self;
+                fn apply(value: Self, out: &mut ::doxa::client::Outgoing) -> ::core::result::Result<(), ::std::string::String> {
+                    out.header_fields(&value)
+                }
+            }
+        });
+        args.insert(0, quote!(headers: #ty));
     }
 
     let path_params: Vec<_> = op

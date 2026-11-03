@@ -287,7 +287,7 @@ impl<'a> Types<'a> {
         self.define(&name, schema, at)
     }
 
-    /// A struct of query parameters, named `name`.
+    /// A struct of query or header parameters, named `name`.
     pub fn query(
         &mut self,
         name: &str,
@@ -1139,7 +1139,7 @@ pub(crate) fn field_ident(name: &str) -> (Ident, bool) {
     let mut snake = String::new();
     for (i, c) in name.chars().enumerate() {
         if c.is_ascii_uppercase() {
-            if i > 0 {
+            if i > 0 && !snake.ends_with('_') {
                 snake.push('_');
             }
             snake.push(c.to_ascii_lowercase());
