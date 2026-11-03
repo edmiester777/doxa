@@ -3,7 +3,9 @@
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use syn::punctuated::Punctuated;
-use syn::{Attribute, Data, DeriveInput, Fields, Ident, Path, Token};
+use syn::{
+    Attribute, Data, DeriveInput, Fields, GenericArgument, Ident, Path, PathArguments, Token, Type,
+};
 
 /// A derive `#[dto]` adds unless the item already lists it or skips it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +197,82 @@ fn strip_fields(fields: &mut Fields) {
     }
 }
 
+/// `T` when `ty` is written `Option<T>`.
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    match args.args.iter().collect::<Vec<_>>().as_slice() {
+        [GenericArgument::Type(t)] => Some(t),
+        _ => None,
+    }
+}
+
+/// Turn `#[nullable]` and `#[omit_none]` into the serde and schema attributes they stand for.
+fn expand_markers(fields: &mut Fields, schema: bool) -> syn::Result<()> {
+    for field in fields.iter_mut() {
+        let mut marker = None;
+        let mut kept = Vec::with_capacity(field.attrs.len());
+        for attr in std::mem::take(&mut field.attrs) {
+            if attr.path().is_ident("nullable") || attr.path().is_ident("omit_none") {
+                attr.meta.require_path_only()?;
+                if marker.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "a field takes one of `#[nullable]` and `#[omit_none]`",
+                    ));
+                }
+                marker = Some(attr);
+            } else {
+                kept.push(attr);
+            }
+        }
+        field.attrs = kept;
+        let Some(marker) = marker else { continue };
+        if field.ident.is_none() {
+            return Err(syn::Error::new_spanned(
+                &marker,
+                "`#[nullable]` and `#[omit_none]` are for named fields",
+            ));
+        }
+        if marker.path().is_ident("nullable") {
+            if option_inner(&field.ty).and_then(option_inner).is_none() {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "`#[nullable]` needs an `Option<Option<T>>`: `None` absent, `Some(None)` null",
+                ));
+            }
+            field.attrs.push(syn::parse_quote!(#[serde(
+                default,
+                skip_serializing_if = "::core::option::Option::is_none",
+                with = "::doxa::wire::double_option"
+            )]));
+        } else {
+            if option_inner(&field.ty).is_none() {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "`#[omit_none]` needs an `Option<T>`, sent as absent when `None`",
+                ));
+            }
+            field.attrs.push(syn::parse_quote!(#[serde(
+                default,
+                skip_serializing_if = "::core::option::Option::is_none"
+            )]));
+            if schema {
+                field
+                    .attrs
+                    .push(syn::parse_quote!(#[schema(nullable = false)]));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The item with `#[dto]`'s derives added, and in the client half its server-only ones removed.
 pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let args = Args::parse(args)?;
@@ -233,6 +311,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     }
 
+    let lists_schema = listed.iter().any(|l| l == Stock::ToSchema.name());
     // `SseEvent` writes its own `ToSchema`, a discriminated `oneOf`.
     if listed.iter().any(|l| l == "SseEvent") {
         listed.push(Stock::ToSchema.name().to_owned());
@@ -246,7 +325,18 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         .any(|d| matches!(d, Stock::Serialize | Stock::Deserialize));
     let serde_crate = (adds_serde && !has_serde_crate(&attrs))
         .then(|| quote!(#[serde(crate = "::doxa::__serde")]));
+    let schema = !client && (lists_schema || added.contains(&Stock::ToSchema));
     let added: Vec<TokenStream> = added.into_iter().map(Stock::path).collect();
+
+    match &mut input.data {
+        Data::Struct(s) => expand_markers(&mut s.fields, schema)?,
+        Data::Enum(e) => {
+            for variant in &mut e.variants {
+                expand_markers(&mut variant.fields, schema)?;
+            }
+        }
+        Data::Union(_) => {}
+    }
 
     if client {
         match &mut input.data {

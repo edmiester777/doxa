@@ -836,6 +836,53 @@ pub fn service(input: TokenStream) -> TokenStream {
 /// #[dto(skip(Debug))]
 /// pub struct Rename { pub name: String }
 /// ```
+///
+/// `#[nullable]` on an `Option<Option<T>>` tells absent (`None`) from `null` (`Some(None)`);
+/// `#[omit_none]` on an `Option<T>` leaves `None` out rather than sending `null`:
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch {
+///     #[nullable] pub note: Option<Option<String>>,
+///     #[omit_none] pub name: Option<String>,
+/// }
+///
+/// let p: Patch = serde_json::from_str(r#"{"note":null}"#).unwrap();
+/// assert_eq!(p, Patch { note: Some(None), name: None });
+/// assert_eq!(serde_json::to_string(&Patch { note: None, name: None }).unwrap(), "{}");
+/// ```
+///
+/// Each needs its shape:
+///
+/// ```compile_fail
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[nullable] pub note: Option<String> }
+/// ```
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[nullable] pub note: Option<Option<String>> }
+/// ```
+///
+/// ```compile_fail
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[omit_none] pub name: String }
+/// ```
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[omit_none] pub name: Option<String> }
+/// ```
 #[proc_macro_attribute]
 pub fn dto(args: TokenStream, item: TokenStream) -> TokenStream {
     dto::expand(args.into(), item.into())

@@ -188,6 +188,91 @@ mod tests {
     }
 
     #[test]
+    fn required_and_nullable_choose_the_fields_type() {
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Patch" }),
+            serde_json::json!({
+                "Patch": {
+                    "type": "object",
+                    "required": ["id", "parent"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "parent": { "type": ["string", "null"] },
+                        "name": { "type": "string" },
+                        "note": { "type": ["string", "null"] },
+                        "line": { "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/Line" }] }
+                    }
+                },
+                "Line": { "type": "object", "properties": { "n": { "type": "integer" } } }
+            }),
+        ))
+        .unwrap();
+        let opt = ":: core :: option :: Option";
+        let double = "with = \"::doxa::wire::double_option\"";
+        assert!(out.contains("pub id : :: std :: string :: String"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "pub parent : {opt} < :: std :: string :: String >"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("pub name : {opt} < :: std :: string :: String >")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "{double})] pub note : {opt} < {opt} < :: std :: string :: String > >"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("{double})] pub line : {opt} < {opt} < Line > >")),
+            "{out}"
+        );
+        assert_eq!(out.matches(double).count(), 2, "{out}");
+    }
+
+    #[test]
+    fn a_nullable_component_is_an_option_of_its_branch() {
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Wrap" }),
+            serde_json::json!({
+                "Wrap": {
+                    "type": "object",
+                    "required": ["line"],
+                    "properties": { "line": { "$ref": "#/components/schemas/MaybeLine" } }
+                },
+                "MaybeLine": { "oneOf": [{ "$ref": "#/components/schemas/Line" }, { "type": "null" }] },
+                "Line": { "type": "object", "properties": { "n": { "type": "integer" } } }
+            }),
+        ))
+        .unwrap();
+        assert!(
+            out.contains("pub line : :: core :: option :: Option < Line >"),
+            "{out}"
+        );
+        assert!(!out.contains("MaybeLine"), "{out}");
+    }
+
+    #[test]
+    fn a_query_parameter_is_never_null() {
+        let mut d = doc(serde_json::json!({}), serde_json::json!({}));
+        d["paths"]["/orders"]["post"]["parameters"] = serde_json::json!([{
+            "name": "contains", "in": "query", "required": false,
+            "schema": { "type": ["string", "null"] }
+        }]);
+        let out = client(d).unwrap();
+        assert!(
+            out.contains(
+                "pub contains : :: core :: option :: Option < :: std :: string :: String >"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("double_option"), "{out}");
+    }
+
+    #[test]
     fn a_mapped_schema_is_used_as_written() {
         let out = ClientSpec::from_server(
             serde_json::from_value(doc(

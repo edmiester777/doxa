@@ -13,6 +13,29 @@ pub use serde_json::Value as __Value;
 mod valid;
 pub use valid::Validates;
 
+/// `#[serde(with)]` for `Option<Option<T>>`: absent is `None`, `null` is `Some(None)`.
+pub mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Writes the inner option; pair with `skip_serializing_if = "Option::is_none"`.
+    pub fn serialize<T: Serialize, S: Serializer>(
+        value: &Option<Option<T>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(inner) => inner.serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// A present field, `null` or not; pair with `default` so an absent one is `None`.
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(d).map(Some)
+    }
+}
+
 /// Header a `<Can>` probe sends; the guard answers `204` instead of running the handler.
 pub const DRY_RUN_HEADER: &str = "x-doxa-dry-run";
 /// Value the server echoes on [`DRY_RUN_HEADER`] when the probe was allowed.

@@ -103,6 +103,10 @@ impl<'a> Types<'a> {
         if let [only] = schema.all_of.as_slice() {
             return self.ty(only, at);
         }
+        if let Some(inner) = or_null(schema) {
+            let inner = self.ty(inner, at)?;
+            return Ok(quote!(::core::option::Option<#inner>));
+        }
         let (ty, nullable) = match &schema.ty {
             Some(t) => t.split(),
             None => (None, false),
@@ -197,7 +201,10 @@ impl<'a> Types<'a> {
                 .filter(|(_, _, req)| *req)
                 .map(|(n, _, _)| n.clone())
                 .collect(),
-            properties: params.into_iter().map(|(n, s, _)| (n, s)).collect(),
+            properties: params
+                .into_iter()
+                .map(|(n, s, _)| (n, non_null(s)))
+                .collect(),
             ..Schema::default()
         };
         self.define(name, &schema, at)
@@ -278,45 +285,63 @@ impl<'a> Types<'a> {
         })
     }
 
+    /// Whether [`Types::ty`] wraps `schema`'s type in `Option` because it allows `null`.
+    fn nullable(&self, schema: &Schema) -> bool {
+        if let Some(name) = schema.ref_name() {
+            return !self.map.schemas.contains_key(name)
+                && self
+                    .spec
+                    .components
+                    .schemas
+                    .get(name)
+                    .is_some_and(|c| !nameable(c) && self.nullable(c));
+        }
+        if let [only] = schema.all_of.as_slice() {
+            return self.nullable(only);
+        }
+        or_null(schema).is_some() || schema.ty.as_ref().is_some_and(|t| t.split().1)
+    }
+
+    /// Each property by `required` and `nullable`; absent and nullable is `Option<Option<T>>`.
     fn fields(&mut self, schema: &Schema, at: &At<'_>) -> Result<Vec<Field>, GenerateError> {
         let mut out = Vec::new();
         for (name, prop) in &schema.properties {
             let required = schema.required.contains(name);
+            let nullable = self.nullable(prop);
             let ty = self.ty(prop, &at.child(format!("{}{}", at.hint, pascal(name))))?;
             let (ident, renamed) = field_ident(name);
             let rename = renamed.then(|| quote!(#[serde(rename = #name)]));
             let docs = doc(prop.description.as_deref());
-            let optional = !required && !ty.to_string().starts_with(":: core :: option :: Option");
-            let (ty, default) = if optional {
-                (
+            let (ty, default) = match (required, nullable) {
+                (true, _) => (ty, quote!()),
+                (false, false) => (
                     quote!(::core::option::Option<#ty>),
                     quote!(#[serde(default, skip_serializing_if = "Option::is_none")]),
-                )
-            } else {
-                (ty, quote!())
+                ),
+                (false, true) => (
+                    quote!(::core::option::Option<#ty>),
+                    quote!(#[serde(
+                        default,
+                        skip_serializing_if = "Option::is_none",
+                        with = "::doxa::wire::double_option"
+                    )]),
+                ),
             };
-            let wrapped = optional || ty.to_string().starts_with(":: core :: option :: Option");
+            let layers = usize::from(!required) + usize::from(nullable);
+            let some = quote!(::core::option::Option::Some);
             let rules = constraints(prop, name);
-            let check = if wrapped {
-                quote! {
-                    if let ::core::option::Option::Some(v) = &self.#ident {
-                        let at = __join(path, #name);
-                        #rules
-                        __Constraints::check_into(v, &at, out);
-                    }
-                }
-            } else {
-                quote! {
-                    {
-                        let v = &self.#ident;
-                        let at = __join(path, #name);
-                        #rules
-                        __Constraints::check_into(v, &at, out);
-                    }
-                }
+            let body = quote! {
+                let at = __join(path, #name);
+                #rules
+                __Constraints::check_into(v, &at, out);
+            };
+            let check = match layers {
+                0 => quote!({ let v = &self.#ident; #body }),
+                1 => quote!(if let #some(v) = &self.#ident { #body }),
+                _ => quote!(if let #some(#some(v)) = &self.#ident { #body }),
             };
             out.push(Field {
-                optional: wrapped,
+                optional: layers > 0,
                 decl: quote!(#docs #rename #default pub #ident: #ty),
                 bare: quote!(#docs #rename #default #ident: #ty),
                 check,
@@ -626,7 +651,36 @@ fn prelude(mapped: &[TokenStream]) -> TokenStream {
 
 /// Whether a component gets a type of its own rather than being written inline.
 fn nameable(schema: &Schema) -> bool {
-    !schema.properties.is_empty() || !schema.one_of.is_empty() || !schema.values.is_empty()
+    or_null(schema).is_none()
+        && (!schema.properties.is_empty() || !schema.one_of.is_empty() || !schema.values.is_empty())
+}
+
+/// `schema` without `null`, which a query string can't carry.
+fn non_null(schema: Schema) -> Schema {
+    if let Some(inner) = or_null(&schema) {
+        return inner.clone();
+    }
+    let ty = match schema.ty {
+        Some(super::spec::Types::Many(ts)) => Some(super::spec::Types::Many(
+            ts.into_iter().filter(|t| t != "null").collect(),
+        )),
+        ty => ty,
+    };
+    Schema { ty, ..schema }
+}
+
+/// `X` in `oneOf: [{type: null}, X]`, as utoipa writes a nullable reference.
+fn or_null(schema: &Schema) -> Option<&Schema> {
+    let is_null = |s: &Schema| {
+        s.reference.is_none()
+            && s.one_of.is_empty()
+            && s.ty.as_ref().map(super::spec::Types::split) == Some((None, true))
+    };
+    match schema.one_of.as_slice() {
+        [a, b] if is_null(a) && !is_null(b) => Some(b),
+        [a, b] if is_null(b) && !is_null(a) => Some(a),
+        _ => None,
+    }
 }
 
 fn integer(schema: &Schema) -> TokenStream {
