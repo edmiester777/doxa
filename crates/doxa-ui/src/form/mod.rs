@@ -94,18 +94,43 @@ impl<R, S> Clone for At<R, S> {
 impl<R, S> Copy for At<R, S> {}
 
 impl<R: 'static, S: 'static> At<R, S> {
+    fn at<V: 'static>(self, lens: u32) -> At<R, V> {
+        At {
+            form: self.form,
+            lens,
+            _s: PhantomData,
+        }
+    }
+
+    /// The part `seg` of this, interned under `key`, while `get` finds it.
+    fn part<V: 'static>(
+        self,
+        key: &str,
+        seg: &'static str,
+        get: impl for<'a> Fn(&'a S) -> Option<&'a V> + 'static,
+        get_mut: impl for<'a> Fn(&'a mut S) -> Option<&'a mut V> + 'static,
+    ) -> At<R, V> {
+        let id = self.form.0.with(|s| {
+            let parent = s.lens::<S>(self.lens);
+            let mut lenses = s.lenses.borrow_mut();
+            let key = format!("{}{key}", lenses.key(self.lens));
+            lenses.intern(key, || parent.part(seg, get, get_mut))
+        });
+        self.at(id)
+    }
+
     fn child<V: 'static>(
         self,
         name: &'static str,
         get: fn(&S) -> &V,
         get_mut: fn(&mut S) -> &mut V,
-    ) -> u32 {
-        self.form.0.with(|s| {
-            let parent = s.lens::<S>(self.lens);
-            let mut lenses = s.lenses.borrow_mut();
-            let key = format!("{}.{name}", lenses.key(self.lens));
-            lenses.intern(key, || parent.field(name, get, get_mut))
-        })
+    ) -> At<R, V> {
+        self.part(
+            &format!(".{name}"),
+            name,
+            move |s| Some(get(s)),
+            move |s| Some(get_mut(s)),
+        )
     }
 
     /// The field `name`.
@@ -115,7 +140,7 @@ impl<R: 'static, S: 'static> At<R, S> {
         get: fn(&S) -> &V,
         get_mut: fn(&mut S) -> &mut V,
     ) -> Field<R, V> {
-        Field::at(self.form, self.child(name, get, get_mut))
+        self.child(name, get, get_mut).value()
     }
 
     /// The fields of `name`, a struct that derives `Form` too.
@@ -125,11 +150,7 @@ impl<R: 'static, S: 'static> At<R, S> {
         get: fn(&S) -> &N,
         get_mut: fn(&mut S) -> &mut N,
     ) -> N::Fields<R> {
-        N::project(At {
-            form: self.form,
-            lens: self.child(name, get, get_mut),
-            _s: PhantomData,
-        })
+        N::project(self.child(name, get, get_mut))
     }
 
     /// The rows of `name`, a list of structs that derive `Form`.
@@ -139,7 +160,53 @@ impl<R: 'static, S: 'static> At<R, S> {
         get: fn(&S) -> &Vec<E>,
         get_mut: fn(&mut S) -> &mut Vec<E>,
     ) -> FieldList<R, E> {
-        FieldList::at(self.form, self.child(name, get, get_mut))
+        self.child(name, get, get_mut).rows()
+    }
+
+    /// This, as one field.
+    pub fn value(self) -> Field<R, S> {
+        Field::at(self.form, self.lens)
+    }
+
+    /// Which variant this enum is, by name; setting another switches to its default.
+    pub fn variant(
+        self,
+        get: fn(&S) -> &'static String,
+        set: fn(&mut S, String),
+    ) -> Field<R, String> {
+        let id = self.form.0.with(|s| {
+            let lens = s.lens::<S>(self.lens);
+            let mut lenses = s.lenses.borrow_mut();
+            let key = format!("{}#variant", lenses.key(self.lens));
+            lenses.intern(key, || lens.variant(get, set))
+        });
+        Field::at(self.form, id)
+    }
+
+    /// The part `seg` of variant `variant`, found by `get` while it is the one held.
+    pub fn case<V: 'static>(
+        self,
+        variant: &'static str,
+        seg: &'static str,
+        get: fn(&S) -> Option<&V>,
+        get_mut: fn(&mut S) -> Option<&mut V>,
+    ) -> At<R, V> {
+        self.part(&format!("::{variant}.{seg}"), seg, get, get_mut)
+    }
+
+    /// Whether this is now as `f` says, such as which variant it holds.
+    pub fn is(self, f: fn(&S) -> bool) -> bool {
+        self.form.0.with(|s| {
+            let lens = s.lens::<S>(self.lens);
+            (lens.get)(&s.value, &s.rows.borrow()).is_some_and(f)
+        })
+    }
+}
+
+impl<R: 'static, E: 'static> At<R, Vec<E>> {
+    /// This list's rows.
+    pub fn rows(self) -> FieldList<R, E> {
+        FieldList::at(self.form, self.lens)
     }
 }
 

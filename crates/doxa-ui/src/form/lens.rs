@@ -56,6 +56,7 @@ impl Rows {
 
 type Get<R, V> = Rc<dyn for<'a> Fn(&'a R, &Rows) -> Option<&'a V>>;
 type GetMut<R, V> = Rc<dyn for<'a> Fn(&'a mut R, &Rows) -> Option<&'a mut V>>;
+type Put<R, V> = Rc<dyn Fn(&mut R, &Rows, V)>;
 
 fn getter<R, V>(f: impl for<'a> Fn(&'a R, &Rows) -> Option<&'a V> + 'static) -> Get<R, V> {
     Rc::new(f)
@@ -74,31 +75,68 @@ pub(crate) struct Lens<R, V> {
     pub(crate) path: Path,
     pub(crate) get: Get<R, V>,
     pub(crate) get_mut: GetMut<R, V>,
+    pub(crate) put: Put<R, V>,
 }
 
-impl<R: 'static> Lens<R, R> {
-    pub(crate) fn root() -> Self {
+impl<R: 'static, V: 'static> Lens<R, V> {
+    fn new(path: Path, get: Get<R, V>, get_mut: GetMut<R, V>) -> Self {
+        let m = get_mut.clone();
+        let put = Rc::new(move |r: &mut R, rows: &Rows, v| {
+            if let Some(at) = m(r, rows) {
+                *at = v;
+            }
+        });
         Lens {
-            path: Rc::new(|_| Some(String::new())),
-            get: getter(|r, _| Some(r)),
-            get_mut: setter(|r, _| Some(r)),
+            path,
+            get,
+            get_mut,
+            put,
         }
     }
 }
 
+impl<R: 'static> Lens<R, R> {
+    pub(crate) fn root() -> Self {
+        Lens::new(
+            Rc::new(|_| Some(String::new())),
+            getter(|r, _| Some(r)),
+            setter(|r, _| Some(r)),
+        )
+    }
+}
+
 impl<R: 'static, S: 'static> Lens<R, S> {
-    /// The field `name` of what this lens reaches.
-    pub(crate) fn field<V: 'static>(
+    /// The part `seg` of what this lens reaches, while `get` finds it there.
+    pub(crate) fn part<V: 'static>(
         self: &Rc<Self>,
-        name: &'static str,
-        get: fn(&S) -> &V,
-        get_mut: fn(&mut S) -> &mut V,
+        seg: &'static str,
+        get: impl for<'a> Fn(&'a S) -> Option<&'a V> + 'static,
+        get_mut: impl for<'a> Fn(&'a mut S) -> Option<&'a mut V> + 'static,
     ) -> Lens<R, V> {
         let (p, g, m) = (self.path.clone(), self.get.clone(), self.get_mut.clone());
+        Lens::new(
+            Rc::new(move |rows| p(rows).map(|p| join(&p, seg))),
+            getter(move |r, rows| g(r, rows).and_then(&get)),
+            setter(move |r, rows| m(r, rows).and_then(&get_mut)),
+        )
+    }
+
+    /// Which variant of the enum this lens reaches, named as `get` names it and changed by `set`.
+    pub(crate) fn variant(
+        self: &Rc<Self>,
+        get: fn(&S) -> &'static String,
+        set: fn(&mut S, String),
+    ) -> Lens<R, String> {
+        let (g, m) = (self.get.clone(), self.get_mut.clone());
         Lens {
-            path: Rc::new(move |rows| p(rows).map(|p| join(&p, name))),
+            path: self.path.clone(),
             get: getter(move |r, rows| g(r, rows).map(get)),
-            get_mut: setter(move |r, rows| m(r, rows).map(get_mut)),
+            get_mut: setter(|_, _| None),
+            put: Rc::new(move |r, rows, v| {
+                if let Some(s) = m(r, rows) {
+                    set(s, v);
+                }
+            }),
         }
     }
 }
@@ -107,21 +145,22 @@ impl<R: 'static, E: 'static> Lens<R, Vec<E>> {
     /// The row keyed `key` of the list this lens reaches, which is lens `list`.
     pub(crate) fn row(self: &Rc<Self>, list: u32, key: RowKey) -> Lens<R, E> {
         let (p, g, m) = (self.path.clone(), self.get.clone(), self.get_mut.clone());
-        Lens {
-            path: Rc::new(move |rows| Some(format!("{}[{}]", p(rows)?, rows.index(list, key)?))),
-            get: getter(move |r, rows| g(r, rows)?.get(rows.index(list, key)?)),
-            get_mut: setter(move |r, rows| {
+        Lens::new(
+            Rc::new(move |rows| Some(format!("{}[{}]", p(rows)?, rows.index(list, key)?))),
+            getter(move |r, rows| g(r, rows)?.get(rows.index(list, key)?)),
+            setter(move |r, rows| {
                 let i = rows.index(list, key)?;
                 m(r, rows)?.get_mut(i)
             }),
-        }
+        )
     }
 }
 
-fn join(prefix: &str, name: &str) -> String {
+fn join(prefix: &str, seg: &str) -> String {
     match prefix {
-        "" => name.to_owned(),
-        p => format!("{p}.{name}"),
+        _ if seg.starts_with('[') => format!("{prefix}{seg}"),
+        "" => seg.to_owned(),
+        p => format!("{p}.{seg}"),
     }
 }
 

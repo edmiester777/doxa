@@ -325,3 +325,113 @@ fn a_reorder_keeps_each_rows_key_and_moves_the_servers_errors_with_it() {
     assert_eq!(rows[0].1.op.path(), "steps[0].op");
     assert_eq!(form.errors().get("steps[0].op"), Some("unknown op"));
 }
+
+#[derive(Clone, Default, PartialEq, Debug, garde::Validate, Form)]
+pub struct Basic {
+    #[garde(length(min = 1))]
+    pub user: String,
+}
+
+#[derive(Clone, PartialEq, Debug, garde::Validate, Form)]
+pub enum Auth {
+    Open,
+    Basic(
+        #[garde(dive)]
+        #[form(nested)]
+        Basic,
+    ),
+    Token {
+        #[garde(length(min = 8))]
+        token: String,
+        #[garde(skip)]
+        header: bool,
+    },
+    Note(#[garde(skip)] String),
+}
+
+#[derive(Clone, PartialEq, Debug, garde::Validate, Form)]
+pub struct Source {
+    #[garde(skip)]
+    pub name: String,
+    #[garde(dive)]
+    #[form(nested)]
+    pub auth: Auth,
+}
+
+thread_local! {
+    static SOURCE: RefCell<Option<Form<Source>>> = const { RefCell::new(None) };
+}
+
+#[component]
+fn SourceForm() -> View {
+    let form = form(Source {
+        name: "s".into(),
+        auth: Auth::Basic(Basic { user: "ann".into() }),
+    })
+    .rules(|s: &Source| garde::Validate::validate(s).map_err(FieldErrors::from));
+    SOURCE.with(|r| *r.borrow_mut() = Some(form));
+    let auth = form.fields().auth;
+    view! {
+        <select id="kind" bind:value={auth.variant}>
+            {AuthFields::<Source>::VARIANTS.iter().map(|v| view! {
+                <option value={*v}>{*v}</option>
+            }).collect::<View>()}
+        </select>
+        {auth.basic().map(|b| view! { <input id="user" bind:value={b.user}/> })}
+        {auth.token().map(|t| view! { <input id="token" bind:value={t.token}/> })}
+    }
+}
+
+#[test]
+fn an_enum_field_switches_variant_and_binds_the_chosen_ones_fields() {
+    let dom = MemDom::new();
+    App::new(|| view! { <SourceForm/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    settle();
+    let form = SOURCE.with(|r| r.borrow().expect("mounted"));
+    let auth = form.fields().auth;
+    assert_eq!(auth.variant.get(), "Basic");
+    assert!(dom.find("id", "token").is_none());
+    let user = auth.basic().unwrap().user;
+    assert_eq!(user.path(), "auth[0].user");
+
+    dom.input(dom.find("id", "user").unwrap(), "");
+    settle();
+    assert_eq!(
+        form.errors().get("auth[0].user"),
+        Some("length is lower than 1")
+    );
+
+    dom.input(dom.find("id", "kind").unwrap(), "Token");
+    settle();
+    assert!(dom.find("id", "user").is_none());
+    assert!(auth.basic().is_none());
+    assert_eq!(
+        form.value().auth,
+        Auth::Token {
+            token: String::new(),
+            header: false
+        },
+        "a new variant starts at its default"
+    );
+    let token = auth.token().unwrap().token;
+    assert_eq!(token.path(), "auth.token");
+    assert_eq!(
+        form.errors().get("auth.token"),
+        Some("length is lower than 8")
+    );
+    dom.input(dom.find("id", "token").unwrap(), "secret-token");
+    settle();
+    assert!(form.valid());
+
+    auth.variant.set("Nope".into());
+    assert_eq!(
+        auth.variant.get(),
+        "Token",
+        "an unknown name changes nothing"
+    );
+    auth.variant.set("Note".into());
+    assert_eq!(auth.note().unwrap().get(), "");
+    assert!(auth.variant.dirty());
+}

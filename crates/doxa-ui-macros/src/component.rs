@@ -361,7 +361,7 @@ pub(crate) fn lazy_mod(name: &Ident) -> Ident {
 }
 
 /// `ReportsPage` → `reports_page`, the split module's name.
-fn snake(name: &str) -> String {
+pub(crate) fn snake(name: &str) -> String {
     let mut out = String::new();
     for (i, c) in name.chars().enumerate() {
         if c.is_uppercase() && i > 0 {

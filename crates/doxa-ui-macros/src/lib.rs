@@ -93,7 +93,8 @@ pub fn icons(args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// One `Field` per struct field, for `form(value).fields()`; `#[form(nested)]` for a struct
-/// that derives `Form` too, `#[form(list)]` for a `Vec` of them.
+/// that derives `Form` too, `#[form(list)]` for a `Vec` of them. On an enum: a `variant` field
+/// and a method per variant, `Some` while it is chosen; its payloads must be `Default`.
 #[proc_macro_derive(Form, attributes(form))]
 pub fn derive_form(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::DeriveInput);

@@ -53,7 +53,8 @@ pub use class::ClassPart;
 pub use component::{Component, ComponentProps, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
 pub use dom::{Event, Listen, NodeRef, Phase, Rect};
-/// One [`Field`] per struct field, named by its path in the rules' errors.
+/// One [`Field`] per struct field, named by its path in the rules' errors; on an enum, one
+/// per variant's field, plus the variant itself.
 #[cfg(feature = "forms")]
 pub use doxa_ui_macros::Form;
 pub use error::{Result, Thrown};

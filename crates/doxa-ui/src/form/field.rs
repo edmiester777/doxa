@@ -46,9 +46,9 @@ where
     ) -> Self {
         let lens = form.0.with(|s| {
             let root = s.lens::<T>(0);
-            s.lenses
-                .borrow_mut()
-                .intern(format!(".{path}"), || root.field(path, get, get_mut))
+            s.lenses.borrow_mut().intern(format!(".{path}"), || {
+                root.part(path, move |r| Some(get(r)), move |r| Some(get_mut(r)))
+            })
         });
         Field::at(form, lens)
     }
@@ -82,9 +82,7 @@ where
         };
         self.form.0.update(|s| {
             let rows = s.rows.borrow();
-            if let Some(at) = (lens.get_mut)(&mut s.value, &rows) {
-                *at = value;
-            }
+            (lens.put)(&mut s.value, &rows, value);
             drop(rows);
             s.raw.retain(|(p, _)| *p != id);
             s.server.0.retain(|e| !under(&e.path, &path));
