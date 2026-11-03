@@ -183,6 +183,7 @@ fn route(
     let at = At {
         operation: &id,
         hint: pascal(&id),
+        owner: None,
     };
     if let Some(identity) = &meta.identity {
         types.identity(identity);
@@ -378,9 +379,6 @@ fn response(
 
 impl At<'_> {
     fn child_hint(&self, suffix: &str) -> At<'_> {
-        At {
-            operation: self.operation,
-            hint: format!("{}{}", self.hint, pascal(suffix)),
-        }
+        self.child(format!("{}{}", self.hint, pascal(suffix)))
     }
 }

@@ -14,9 +14,12 @@ use super::{GenerateError, TypeMap};
 pub(crate) struct At<'a> {
     pub operation: &'a str,
     pub hint: String,
+    /// The component the schema sits in, which is what a `.types(…)` mapping can replace.
+    pub owner: Option<String>,
 }
 
 impl At<'_> {
+    /// The component `schema` has no Rust type.
     fn unsupported(&self, schema: &str, reason: impl Into<String>) -> GenerateError {
         GenerateError::Unsupported {
             schema: schema.to_owned(),
@@ -25,10 +28,24 @@ impl At<'_> {
         }
     }
 
-    fn child(&self, hint: String) -> At<'_> {
+    /// The schema being read has no Rust type; an inline one is reported as its component.
+    fn here(&self, reason: impl Into<String>) -> GenerateError {
+        let reason = reason.into();
+        match &self.owner {
+            Some(owner) if pascal(owner) != self.hint => self.unsupported(
+                owner,
+                format!("has an inline `{}` that {reason}", self.hint),
+            ),
+            Some(owner) => self.unsupported(owner, reason),
+            None => self.unsupported(&self.hint, reason),
+        }
+    }
+
+    pub(crate) fn child(&self, hint: String) -> At<'_> {
         At {
             operation: self.operation,
             hint,
+            owner: self.owner.clone(),
         }
     }
 }
@@ -52,6 +69,7 @@ struct Pending {
     name: String,
     schema: Schema,
     operation: String,
+    owner: Option<String>,
 }
 
 pub(crate) struct Types<'a> {
@@ -205,6 +223,9 @@ impl<'a> Types<'a> {
                     || schema.all_of.len() > 1 =>
             {
                 match self.component_like(schema) {
+                    Some(name) if self.map.schemas.contains_key(&name) => {
+                        parse_path(&self.map.schemas[&name])?
+                    }
                     Some(name) => {
                         let component = self.spec.components.schemas[&name].clone();
                         self.define(&name, &component, at)
@@ -220,7 +241,7 @@ impl<'a> Types<'a> {
                 _ if ty.is_none() && nullable => quote!(()),
                 _ => quote!(::doxa::wire::__Value),
             },
-            Some(other) => return Err(at.unsupported(&at.hint, format!("has type `{other}`"))),
+            Some(other) => return Err(at.here(format!("has type `{other}`"))),
         };
         Ok(if nullable {
             quote!(::core::option::Option<#inner>)
@@ -246,6 +267,7 @@ impl<'a> Types<'a> {
                 name: name.to_owned(),
                 schema: schema.clone(),
                 operation: at.operation.to_owned(),
+                owner: at.owner.clone(),
             });
         }
         if std::mem::take(&mut self.box_next) {
@@ -292,9 +314,14 @@ impl<'a> Types<'a> {
     pub fn render(&mut self) -> Result<TokenStream, GenerateError> {
         let mut out = TokenStream::new();
         while let Some(p) = self.queue.pop() {
+            let owner = match self.spec.components.schemas.contains_key(&p.name) {
+                true => Some(p.name.clone()),
+                false => p.owner.clone(),
+            };
             let at = At {
                 operation: &p.operation,
                 hint: pascal(&p.name),
+                owner,
             };
             match self.render_one(&p.name, &p.schema, &at) {
                 Ok(item) => out.extend(item),
@@ -320,7 +347,7 @@ impl<'a> Types<'a> {
         self.current = Some(schema.clone());
         let docs = doc(schema.description.as_deref());
         if !schema.values.is_empty() {
-            return string_enum(&ident, &docs, schema, name, at);
+            return string_enum(&ident, &docs, schema, at);
         }
         if !schema.one_of.is_empty() {
             return match &schema.discriminator {
@@ -328,7 +355,7 @@ impl<'a> Types<'a> {
                 None => match self.inferred_tag(schema, at)? {
                     Some(tag) => self.tagged(&ident, &docs, schema, &tag, at),
                     None if self.externally_tagged(schema) => {
-                        self.external(&ident, &docs, schema, name, at)
+                        self.external(&ident, &docs, schema, at)
                     }
                     None => self.untagged(&ident, &docs, schema, at),
                 },
@@ -488,10 +515,7 @@ impl<'a> Types<'a> {
             return Ok(());
         } else if let Some(t) = resolved.ty.as_ref().and_then(|t| t.split().0) {
             if t != "object" {
-                return Err(at.unsupported(
-                    &at.hint,
-                    format!("is an `allOf` with a member of type `{t}`"),
-                ));
+                return Err(at.here(format!("is an `allOf` with a member of type `{t}`")));
             }
         }
         for (k, v) in &resolved.properties {
@@ -574,12 +598,23 @@ impl<'a> Types<'a> {
             ),
             None => (None, b.clone()),
         };
+        let mapped = name
+            .as_deref()
+            .is_some_and(|n| self.map.schemas.contains_key(n));
         if resolved.all_of.len() < 2 {
             return Ok(Branch {
                 name,
                 object: resolved,
                 flattened: Vec::new(),
-                newtype: None,
+                newtype: mapped.then(|| b.clone()),
+            });
+        }
+        if mapped {
+            return Ok(Branch {
+                name,
+                object: self.merge(&resolved, at)?.object,
+                flattened: Vec::new(),
+                newtype: Some(b.clone()),
             });
         }
         let merged = self.merge(&resolved, at)?;
@@ -639,10 +674,12 @@ impl<'a> Types<'a> {
                     _ => None,
                 })
                 .ok_or_else(|| {
-                    at.unsupported(
-                        name.as_deref().unwrap_or(&at.hint),
-                        format!("is a `oneOf` branch whose `{tag}` isn't a string constant"),
-                    )
+                    let reason =
+                        format!("is a `oneOf` branch whose `{tag}` isn't a string constant");
+                    match name {
+                        Some(n) => at.unsupported(n, reason),
+                        None => at.here(reason),
+                    }
                 })?;
             let variant = Ident::new(&pascal(&value), Span::call_site());
             let hint = format!("{}{}", at.hint, pascal(&value));
@@ -693,25 +730,23 @@ impl<'a> Types<'a> {
         ident: &Ident,
         docs: &TokenStream,
         schema: &Schema,
-        name: &str,
         at: &At<'_>,
     ) -> Result<TokenStream, GenerateError> {
         let mut variants = Vec::new();
-        for branch in &schema.one_of {
-            let branch = match branch.ref_name() {
-                Some(n) => self
-                    .spec
-                    .components
-                    .schemas
-                    .get(n)
-                    .cloned()
-                    .unwrap_or_default(),
-                None => branch.clone(),
-            };
+        // A mapped branch is a whole object, which only an untagged variant, after the rest, reads.
+        let mut mapped = Vec::new();
+        for raw in &schema.one_of {
+            if let Some(n) = raw.ref_name().filter(|n| self.map.schemas.contains_key(*n)) {
+                let variant = Ident::new(&pascal(n), Span::call_site());
+                let ty = parse_path(&self.map.schemas[n])?;
+                mapped.push(quote!(#[serde(untagged)] #variant(#ty)));
+                continue;
+            }
+            let branch = self.resolve(raw);
             if !branch.values.is_empty() {
                 for v in &branch.values {
                     let Scalar::Str(v) = v else {
-                        return Err(at.unsupported(name, "has a non-string enum value"));
+                        return Err(at.here("has a non-string enum value"));
                     };
                     let variant = Ident::new(&pascal(v), Span::call_site());
                     variants.push(quote!(#[serde(rename = #v)] #variant));
@@ -719,15 +754,13 @@ impl<'a> Types<'a> {
                 continue;
             }
             let [(key, payload)] = branch.properties.iter().collect::<Vec<_>>()[..] else {
-                return Err(at.unsupported(
-                    name,
-                    "is a `oneOf` that is neither tagged nor one key per branch",
-                ));
+                return Err(at.here("is a `oneOf` that is neither tagged nor one key per branch"));
             };
             let variant = Ident::new(&pascal(key), Span::call_site());
             let ty = self.held(payload, &at.child(format!("{}{}", at.hint, pascal(key))))?;
             variants.push(quote!(#[serde(rename = #key)] #variant(#ty)));
         }
+        variants.extend(mapped);
         Ok(enum_items(ident, docs, quote!(), &variants))
     }
 
@@ -748,7 +781,14 @@ impl<'a> Types<'a> {
     /// Whether every branch is string constants or an object of one key, as serde writes an
     /// externally tagged enum.
     fn externally_tagged(&self, schema: &Schema) -> bool {
-        schema.one_of.iter().map(|b| self.resolve(b)).all(|b| {
+        schema.one_of.iter().all(|raw| {
+            if raw
+                .ref_name()
+                .is_some_and(|n| self.map.schemas.contains_key(n))
+            {
+                return true;
+            }
+            let b = self.resolve(raw);
             if !b.values.is_empty() {
                 return b.values.iter().all(|v| matches!(v, Scalar::Str(_)));
             }
@@ -892,13 +932,12 @@ fn string_enum(
     ident: &Ident,
     docs: &TokenStream,
     schema: &Schema,
-    name: &str,
     at: &At<'_>,
 ) -> Result<TokenStream, GenerateError> {
     let mut variants = Vec::new();
     for v in &schema.values {
         let Scalar::Str(v) = v else {
-            return Err(at.unsupported(name, "has a non-string enum value"));
+            return Err(at.here("has a non-string enum value"));
         };
         let variant = Ident::new(&pascal(v), Span::call_site());
         variants.push(quote!(#[serde(rename = #v)] #variant));

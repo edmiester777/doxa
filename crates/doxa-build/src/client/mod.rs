@@ -394,6 +394,78 @@ mod tests {
     }
 
     #[test]
+    fn a_mapped_branch_or_inline_copy_is_the_mapped_type() {
+        let branch = |kind: &str| {
+            serde_json::json!({ "type": "object", "required": ["kind"], "properties": {
+                "kind": { "type": "string", "enum": [kind] }
+            } })
+        };
+        let page =
+            serde_json::json!({ "type": "object", "properties": { "n": { "type": "integer" } } });
+        let out = ClientSpec::from_server(
+            openapi_from_json(
+                &doc(
+                    serde_json::json!({ "$ref": "#/components/schemas/Order" }),
+                    serde_json::json!({
+                        "Order": { "type": "object", "required": ["by", "pick", "page"], "properties": {
+                            "by": { "$ref": "#/components/schemas/Source" },
+                            "pick": { "$ref": "#/components/schemas/Pick" },
+                            "page": page
+                        } },
+                        "Source": { "oneOf": [
+                            { "$ref": "#/components/schemas/Http" },
+                            branch("file")
+                        ] },
+                        "Http": branch("http"),
+                        "Pick": { "oneOf": [
+                            { "type": "object", "required": ["one"], "properties": { "one": { "type": "string" } } },
+                            { "$ref": "#/components/schemas/Custom" }
+                        ] },
+                        "Custom": { "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": "string" } } },
+                        "Page": page
+                    }),
+                )
+                .to_string(),
+            )
+            .unwrap(),
+        )
+        .types(|t| {
+            t.schema("Http", "my::Http")
+                .schema("Custom", "my::Custom")
+                .schema("Page", "my::Page")
+        })
+        .render()
+        .unwrap();
+        assert!(
+            out.contains("# [serde (rename = \"http\")] Http (my :: Http)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("# [serde (untagged)] Custom (my :: Custom)"),
+            "{out}"
+        );
+        assert!(out.contains("pub page : my :: Page"), "{out}");
+        assert!(!out.contains("struct Http"), "{out}");
+    }
+
+    #[test]
+    fn an_inline_schema_without_a_type_names_its_component_to_map() {
+        let err = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Order" }),
+            serde_json::json!({ "Order": { "type": "object", "properties": {
+                "size": { "type": "string", "enum": ["small", 2] }
+            } } }),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("schema `Order`, used by `create_order`, has an inline `OrderSize` that"),
+            "{err}"
+        );
+        assert!(err.contains("t.schema(\"Order\""), "{err}");
+    }
+
+    #[test]
     fn a_variant_named_self_is_no_keyword() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Target" }),
