@@ -47,6 +47,7 @@ pub(crate) struct Types<'a> {
     named: BTreeSet<String>,
     identities: BTreeMap<String, IdentityMeta>,
     mapped: BTreeSet<String>,
+    errors: Vec<GenerateError>,
 }
 
 impl<'a> Types<'a> {
@@ -66,7 +67,23 @@ impl<'a> Types<'a> {
                 .chain(map.schemas.values())
                 .cloned()
                 .collect(),
+            errors: Vec::new(),
         })
+    }
+
+    /// Note an error and carry on, so one run names every schema that needs a mapping.
+    pub fn record(&mut self, error: GenerateError) {
+        self.errors.push(error);
+    }
+
+    /// Every error recorded, as one.
+    pub fn finish(&mut self) -> Result<(), GenerateError> {
+        let mut errors = std::mem::take(&mut self.errors);
+        match errors.len() {
+            0 => Ok(()),
+            1 => Err(errors.remove(0)),
+            _ => Err(GenerateError::Many(errors)),
+        }
     }
 
     /// Mark the component `schema` as an entity the client cache stores by identity.
@@ -218,7 +235,10 @@ impl<'a> Types<'a> {
                 operation: &p.operation,
                 hint: pascal(&p.name),
             };
-            out.extend(self.render_one(&p.name, &p.schema, &at)?);
+            match self.render_one(&p.name, &p.schema, &at) {
+                Ok(item) => out.extend(item),
+                Err(e) => self.record(e),
+            }
         }
         let mapped = self
             .mapped

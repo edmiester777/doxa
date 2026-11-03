@@ -60,6 +60,9 @@ pub enum GenerateError {
         /// What about it isn't supported.
         reason: String,
     },
+    /// Several schemas have no Rust type, each named.
+    #[error("{}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))]
+    Many(Vec<GenerateError>),
     /// A path given to [`TypeMap`] isn't a Rust type.
     #[error("`{0}` given to `.types(…)` isn't a Rust type path")]
     BadPath(String),
@@ -120,6 +123,7 @@ impl ClientSpec {
         let mut types = types::Types::new(spec, &self.types)?;
         let routes: TokenStream = routes::render(spec, &mut types)?;
         let defs = types.render()?;
+        types.finish()?;
         Ok(quote::quote! {
             #defs
             #routes
@@ -197,6 +201,34 @@ mod tests {
             "{err}"
         );
         assert!(err.contains(".types(|t| t.schema(\"Either\""), "{err}");
+    }
+
+    #[test]
+    fn every_schema_without_a_rust_type_is_named_in_one_run() {
+        let missing = |name: &str| {
+            serde_json::json!({ "type": "object", "properties": {
+                "amount": { "$ref": format!("#/components/schemas/{name}") }
+            } })
+        };
+        let err = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Order" }),
+            serde_json::json!({
+                "Order": { "type": "object", "properties": {
+                    "first": { "$ref": "#/components/schemas/First" },
+                    "second": { "$ref": "#/components/schemas/Second" }
+                } },
+                "First": missing("Money"),
+                "Second": missing("Currency")
+            }),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, GenerateError::Many(e) if e.len() == 2),
+            "{err}"
+        );
+        let err = err.to_string();
+        assert!(err.contains("schema `Money`"), "{err}");
+        assert!(err.contains("schema `Currency`"), "{err}");
     }
 
     #[test]

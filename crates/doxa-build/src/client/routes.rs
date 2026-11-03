@@ -121,14 +121,20 @@ pub(crate) fn render(spec: &Spec, types: &mut Types<'_>) -> Result<TokenStream, 
                 continue;
             }
             let default = Meta::default();
-            let route = route(
+            let route = match route(
                 path,
                 method,
                 op,
                 meta.unwrap_or(&default),
                 types,
                 &mut guards,
-            )?;
+            ) {
+                Ok(route) => route,
+                Err(e) => {
+                    types.record(e);
+                    continue;
+                }
+            };
             let module = op.tags.first().map(|t| field_ident(t).0.to_string());
             modules.entry(module).or_default().push(route);
         }
