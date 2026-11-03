@@ -6,7 +6,7 @@ use std::rc::Rc;
 use doxa::client::{Fetch, FieldError, FieldErrors, NoError};
 use doxa::ui::dom::{MemDom, MemEvent};
 use doxa::ui::prelude::*;
-use doxa::ui::{form, Form};
+use doxa::ui::{form, Form, RowKey};
 
 #[derive(
     Clone, Default, PartialEq, Debug, serde::Serialize, serde::Deserialize, garde::Validate, Form,
@@ -195,4 +195,133 @@ async fn valid_answers_422_with_each_failing_field() {
     assert_eq!(paths, ["name", "quantity"]);
     let (status, _) = send(r#"{"name":"bolts","quantity":3}"#).await;
     assert_eq!(status, 200);
+}
+
+#[derive(Clone, Default, PartialEq, Debug, garde::Validate, Form)]
+pub struct Condition {
+    #[garde(length(min = 1))]
+    pub column: String,
+}
+
+#[derive(Clone, Default, PartialEq, Debug, garde::Validate, Form)]
+pub struct Step {
+    #[garde(length(min = 1))]
+    pub op: String,
+}
+
+#[derive(Clone, Default, PartialEq, Debug, garde::Validate, Form)]
+pub struct Rule {
+    #[garde(skip)]
+    pub name: String,
+    #[garde(dive)]
+    #[form(nested)]
+    pub when: Condition,
+    #[garde(dive)]
+    #[form(list)]
+    pub steps: Vec<Step>,
+}
+
+fn rule_rules(r: &Rule) -> Result<(), FieldErrors> {
+    garde::Validate::validate(r).map_err(FieldErrors::from)
+}
+
+thread_local! {
+    static RULE: RefCell<Option<Form<Rule>>> = const { RefCell::new(None) };
+}
+
+#[component]
+fn RuleForm() -> View {
+    let form = form(Rule {
+        name: "r".into(),
+        when: Condition::default(),
+        steps: vec![Step { op: "a".into() }, Step { op: String::new() }],
+    })
+    .rules(rule_rules);
+    RULE.with(|r| *r.borrow_mut() = Some(form));
+    let f = form.fields();
+    let steps = f.steps;
+    view! {
+        <input id="column" bind:value={f.when.column}/>
+        <p id="column-path">{f.when.column.path()}</p>
+        <ul>
+            {f.steps.rows().into_iter().map(|(key, step)| view! {
+                <li key={key}>
+                    <input class="op" bind:value={step.op}/>
+                    <span class="err">{step.op.error().unwrap_or_default()}</span>
+                    <button class="drop" on:click={move |_| steps.remove(key)}>"×"</button>
+                </li>
+            }).collect::<View>()}
+        </ul>
+        <button id="add" on:click={move |_| steps.push(Step::default())}>"Add"</button>
+    }
+}
+
+fn rule_form() -> Form<Rule> {
+    RULE.with(|r| r.borrow().expect("mounted"))
+}
+
+#[test]
+fn nested_and_list_fields_carry_their_paths() {
+    let dom = MemDom::new();
+    App::new(|| view! { <RuleForm/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    settle();
+    let id = |s: &str| dom.find("id", s).unwrap();
+    assert_eq!(dom.text(id("column-path")), "when.column");
+
+    dom.input(id("column"), "region");
+    settle();
+    assert_eq!(rule_form().value().when.column, "region");
+
+    let form = rule_form();
+    let rows = form.fields().steps.rows();
+    assert_eq!(rows[1].1.op.path(), "steps[1].op");
+    assert_eq!(
+        form.errors().get("steps[1].op"),
+        Some("length is lower than 1")
+    );
+
+    dom.click(id("add"));
+    settle();
+    assert_eq!(rule_form().value().steps.len(), 3);
+    let rows = rule_form().fields().steps.rows();
+    assert_eq!(rows[2].1.op.path(), "steps[2].op");
+}
+
+#[test]
+fn a_reorder_keeps_each_rows_key_and_moves_the_servers_errors_with_it() {
+    let dom = MemDom::new();
+    App::new(|| view! { <RuleForm/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    settle();
+    let form = rule_form();
+    let steps = form.fields().steps;
+    let keys: Vec<RowKey> = steps.rows().iter().map(|(k, _)| *k).collect();
+
+    form.set_server_errors(FieldErrors(vec![FieldError {
+        path: "steps[0].op".into(),
+        message: "unknown op".into(),
+    }]));
+    steps.move_to(keys[0], 1);
+    settle();
+
+    let after: Vec<RowKey> = steps.rows().iter().map(|(k, _)| *k).collect();
+    assert_eq!(after, [keys[1], keys[0]], "keys travel with their rows");
+    assert_eq!(form.value().steps[1].op, "a");
+    assert_eq!(form.errors().get("steps[1].op"), Some("unknown op"));
+    assert_eq!(
+        form.errors().get("steps[0].op"),
+        Some("length is lower than 1")
+    );
+
+    // Removing the row drops its error, and the other row's path follows.
+    steps.remove(keys[1]);
+    settle();
+    let rows = steps.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, keys[0]);
+    assert_eq!(rows[0].1.op.path(), "steps[0].op");
+    assert_eq!(form.errors().get("steps[0].op"), Some("unknown op"));
 }

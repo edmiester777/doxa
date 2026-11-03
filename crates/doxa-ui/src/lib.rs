@@ -45,7 +45,10 @@ pub use dom::{Event, Listen, NodeRef, Phase, Rect};
 pub use doxa_ui_macros::Form;
 pub use error::{Result, Thrown};
 #[cfg(feature = "forms")]
-pub use form::{field_errors, form, Field, Form, FormFields, Submit};
+#[doc(hidden)]
+pub use form::At;
+#[cfg(feature = "forms")]
+pub use form::{field_errors, form, Field, FieldList, Form, FormFields, RowKey, Submit};
 pub use head::title;
 pub use hooks::{
     action, context, effect, memo, node_ref, provide, state, try_context, Action, Deps, ElementRef,

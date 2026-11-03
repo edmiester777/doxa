@@ -53,8 +53,9 @@ pub fn react(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// One `Field` per struct field, for `form(value).fields()`.
-#[proc_macro_derive(Form)]
+/// One `Field` per struct field, for `form(value).fields()`; `#[form(nested)]` for a struct
+/// that derives `Form` too, `#[form(list)]` for a `Vec` of them.
+#[proc_macro_derive(Form, attributes(form))]
 pub fn derive_form(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::DeriveInput);
     form::expand(input)

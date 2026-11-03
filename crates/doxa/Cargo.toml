@@ -86,7 +86,7 @@ client-router = ["client", "doxa-client/router"]
 ui = ["client", "dep:doxa-ui"]
 # `#[react]`: React components inside `view!`.
 react = ["ui", "doxa-ui/react"]
-# `form()` and `#[derive(Form)]`: garde-checked forms with field-level errors.
+# `form()` and `#[derive(Form)]`: forms checked by a route's rules, with field-level errors.
 forms = ["ui", "doxa-ui/forms"]
 # `#[component(export)]`: components a foreign React host mounts, from `doxa build --lib`.
 export = ["ui", "doxa-ui/export"]

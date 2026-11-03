@@ -1,27 +1,61 @@
 //! `form(value)`: a value edited field by field and checked by the route's own rules, with a
 //! server's `422` mapped onto the same fields.
 
-use std::cell::OnceCell;
+mod field;
+mod lens;
+mod list;
+
+use std::cell::{OnceCell, RefCell};
+use std::marker::PhantomData;
 use std::rc::Rc;
-use std::str::FromStr;
 
 use doxa_client::FieldErrors;
 
 use crate::hooks::{action, state, Action, State};
-use crate::view::{BindChecked, BindSelected, BindValue};
 use crate::{Event, Result, Thrown};
+
+pub use field::Field;
+pub use lens::RowKey;
+pub use list::FieldList;
+
+use lens::{Lens, Lenses, Rows};
 
 struct FormState<T> {
     value: T,
     initial: T,
-    /// Text typed into a field that didn't parse, by path.
-    raw: Vec<(&'static str, String)>,
-    touched: Vec<&'static str>,
+    /// Text typed into a field that didn't parse, by lens.
+    raw: Vec<(u32, String)>,
+    touched: Vec<u32>,
     /// Set once, by [`Form::rules`].
     check: OnceCell<Rules<T>>,
     /// The server's last `422`, cleared field by field as they change.
     server: FieldErrors,
     submitted: bool,
+    // Handed out while rendering, so kept behind cells that change nothing a render reads.
+    lenses: RefCell<Lenses>,
+    rows: RefCell<Rows>,
+}
+
+type Rules<T> = Rc<dyn Fn(&T) -> Result<(), FieldErrors>>;
+
+impl<T: 'static> FormState<T> {
+    /// What the rules say about the value now.
+    fn verdict(&self) -> FieldErrors {
+        match self.check.get() {
+            Some(check) => check(&self.value).err().unwrap_or_default(),
+            None => FieldErrors::default(),
+        }
+    }
+
+    fn lens<V: 'static>(&self, id: u32) -> Rc<Lens<T, V>> {
+        self.lenses.borrow().get(id)
+    }
+
+    /// The path of lens `id` as the rules name it, or `None` once its row is gone.
+    fn path(&self, id: u32) -> Option<String> {
+        let path = self.lenses.borrow().path(id);
+        path(&self.rows.borrow())
+    }
 }
 
 /// A form over a `T`; `Copy`, like [`State`].
@@ -35,23 +69,77 @@ impl<T> Clone for Form<T> {
 
 impl<T> Copy for Form<T> {}
 
-/// What `#[derive(Form)]` implements: one [`Field`] per struct field.
+/// What `#[derive(Form)]` implements: a struct of fields for any form that holds a `Self`.
 pub trait FormFields: Sized + 'static {
-    /// The struct of fields.
-    type Fields;
+    /// One [`Field`], nested fields or [`FieldList`] per struct field, in a form over `R`.
+    type Fields<R: 'static>: Copy;
     #[doc(hidden)]
-    fn fields(form: Form<Self>) -> Self::Fields;
+    fn project<R: 'static>(at: At<R, Self>) -> Self::Fields<R>;
 }
 
-type Rules<T> = Rc<dyn Fn(&T) -> Result<(), FieldErrors>>;
+/// Where a `S` sits in a form over `R`; what `#[derive(Form)]` builds its fields from.
+#[doc(hidden)]
+pub struct At<R: 'static, S: 'static> {
+    form: Form<R>,
+    lens: u32,
+    _s: PhantomData<fn() -> S>,
+}
 
-impl<T> FormState<T> {
-    /// What the rules say about the value now.
-    fn verdict(&self) -> FieldErrors {
-        match self.check.get() {
-            Some(check) => check(&self.value).err().unwrap_or_default(),
-            None => FieldErrors::default(),
-        }
+impl<R, S> Clone for At<R, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R, S> Copy for At<R, S> {}
+
+impl<R: 'static, S: 'static> At<R, S> {
+    fn child<V: 'static>(
+        self,
+        name: &'static str,
+        get: fn(&S) -> &V,
+        get_mut: fn(&mut S) -> &mut V,
+    ) -> u32 {
+        self.form.0.with(|s| {
+            let parent = s.lens::<S>(self.lens);
+            let mut lenses = s.lenses.borrow_mut();
+            let key = format!("{}.{name}", lenses.key(self.lens));
+            lenses.intern(key, || parent.field(name, get, get_mut))
+        })
+    }
+
+    /// The field `name`.
+    pub fn field<V: 'static>(
+        self,
+        name: &'static str,
+        get: fn(&S) -> &V,
+        get_mut: fn(&mut S) -> &mut V,
+    ) -> Field<R, V> {
+        Field::at(self.form, self.child(name, get, get_mut))
+    }
+
+    /// The fields of `name`, a struct that derives `Form` too.
+    pub fn nested<N: FormFields>(
+        self,
+        name: &'static str,
+        get: fn(&S) -> &N,
+        get_mut: fn(&mut S) -> &mut N,
+    ) -> N::Fields<R> {
+        N::project(At {
+            form: self.form,
+            lens: self.child(name, get, get_mut),
+            _s: PhantomData,
+        })
+    }
+
+    /// The rows of `name`, a list of structs that derive `Form`.
+    pub fn list<E: FormFields>(
+        self,
+        name: &'static str,
+        get: fn(&S) -> &Vec<E>,
+        get_mut: fn(&mut S) -> &mut Vec<E>,
+    ) -> FieldList<R, E> {
+        FieldList::at(self.form, self.child(name, get, get_mut))
     }
 }
 
@@ -61,6 +149,8 @@ pub fn form<T>(initial: T) -> Form<T>
 where
     T: Clone + PartialEq + 'static,
 {
+    let mut lenses = Lenses::default();
+    lenses.intern(String::new(), Lens::<T, T>::root);
     Form(state(FormState {
         value: initial.clone(),
         initial,
@@ -69,6 +159,8 @@ where
         check: OnceCell::new(),
         server: FieldErrors::default(),
         submitted: false,
+        lenses: RefCell::new(lenses),
+        rows: RefCell::new(Rows::default()),
     }))
 }
 
@@ -147,11 +239,15 @@ where
     }
 
     /// The fields `#[derive(Form)]` generates, each bindable with `bind:value`.
-    pub fn fields(&self) -> T::Fields
+    pub fn fields(&self) -> T::Fields<T>
     where
         T: FormFields,
     {
-        T::fields(*self)
+        T::project(At {
+            form: *self,
+            lens: 0,
+            _s: PhantomData,
+        })
     }
 
     /// Submitting it: the rules run first, then `f`; a `422` from `f` lands on the fields.
@@ -237,165 +333,5 @@ impl<T: 'static, R: Clone + 'static> Submit<T, R> {
     /// What the last successful send returned.
     pub fn value(&self) -> Option<R> {
         self.run.value()
-    }
-}
-
-/// One field of a [`Form`]: its value, whether it was touched, and its error. `Copy`.
-pub struct Field<T: 'static, V: 'static> {
-    form: Form<T>,
-    path: &'static str,
-    get: fn(&T) -> &V,
-    get_mut: fn(&mut T) -> &mut V,
-}
-
-impl<T, V> Clone for Field<T, V> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T, V> Copy for Field<T, V> {}
-
-impl<T, V> Field<T, V>
-where
-    T: Clone + PartialEq + 'static,
-    V: Clone + PartialEq + 'static,
-{
-    /// The field at path `path`, for a type that can't `#[derive(Form)]`, such as one
-    /// from a crate shared with the server: `Field::new(form, "name", |r| &r.name, |r| &mut r.name)`.
-    pub fn new(
-        form: Form<T>,
-        path: &'static str,
-        get: fn(&T) -> &V,
-        get_mut: fn(&mut T) -> &mut V,
-    ) -> Self {
-        Field {
-            form,
-            path,
-            get,
-            get_mut,
-        }
-    }
-
-    /// Its path, as the rules name it.
-    pub fn path(&self) -> &'static str {
-        self.path
-    }
-
-    /// Its value.
-    pub fn get(&self) -> V {
-        self.form.0.with(|s| (self.get)(&s.value).clone())
-    }
-
-    /// Change it, re-checking the rules and clearing the server's error for it.
-    pub fn set(&self, value: V) {
-        let (path, get_mut) = (self.path, self.get_mut);
-        self.form.0.update(|s| {
-            *get_mut(&mut s.value) = value;
-            s.raw.retain(|(p, _)| *p != path);
-            s.server.0.retain(|e| !under(&e.path, path));
-        });
-    }
-
-    /// Whether it differs from where it started.
-    pub fn dirty(&self) -> bool {
-        self.form
-            .0
-            .with(|s| (self.get)(&s.value) != (self.get)(&s.initial))
-    }
-
-    /// Whether the user has left it, or the form was submitted.
-    pub fn touched(&self) -> bool {
-        self.form
-            .0
-            .with(|s| s.submitted || s.touched.contains(&self.path))
-    }
-
-    /// Mark it touched, as leaving it does.
-    pub fn touch(&self) {
-        let path = self.path;
-        if !self.form.0.with(|s| s.touched.contains(&path)) {
-            self.form.0.update(|s| s.touched.push(path));
-        }
-    }
-
-    /// Its first error, once [`touched`](Self::touched): unparseable text, a rule, or the server's.
-    pub fn error(&self) -> Option<String> {
-        if !self.touched() {
-            return None;
-        }
-        self.form.0.with(|s| {
-            if s.raw.iter().any(|(p, _)| *p == self.path) {
-                return Some("isn't a valid value".to_owned());
-            }
-            s.verdict()
-                .0
-                .iter()
-                .chain(&s.server.0)
-                .find(|e| under(&e.path, self.path))
-                .map(|e| e.message.clone())
-        })
-    }
-}
-
-impl<T, V> BindValue for Field<T, V>
-where
-    T: Clone + PartialEq + 'static,
-    V: Clone + PartialEq + FromStr + ToString + 'static,
-{
-    fn current(&self) -> String {
-        let raw = self.form.0.with(|s| {
-            s.raw
-                .iter()
-                .find(|(p, _)| *p == self.path)
-                .map(|(_, t)| t.clone())
-        });
-        raw.unwrap_or_else(|| self.get().to_string())
-    }
-
-    fn input(&self, text: String) {
-        match text.parse::<V>() {
-            Ok(v) => self.set(v),
-            // Keep what was typed, so the input doesn't snap back, and report it.
-            Err(_) => {
-                let path = self.path;
-                self.form.0.update(|s| {
-                    s.raw.retain(|(p, _)| *p != path);
-                    s.raw.push((path, text));
-                })
-            }
-        }
-    }
-
-    fn blur(&self) {
-        self.touch();
-    }
-}
-
-impl<T> BindChecked for Field<T, bool>
-where
-    T: Clone + PartialEq + 'static,
-{
-    fn checked(&self) -> bool {
-        self.get()
-    }
-
-    fn set_checked(&self, on: bool) {
-        self.set(on);
-        self.touch();
-    }
-}
-
-impl<T> BindSelected for Field<T, Vec<String>>
-where
-    T: Clone + PartialEq + 'static,
-{
-    fn selected(&self) -> Vec<String> {
-        self.get()
-    }
-
-    fn set_selected(&self, values: Vec<String>) {
-        self.set(values);
-        self.touch();
     }
 }
