@@ -232,6 +232,47 @@ mod tests {
     }
 
     #[test]
+    fn an_all_of_merges_its_objects_and_flattens_its_enums() {
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Settings" }),
+            serde_json::json!({
+                "Settings": { "allOf": [
+                    { "$ref": "#/components/schemas/Sampling" },
+                    { "type": "object", "required": ["model"], "properties": { "model": { "type": "string" } } },
+                    { "oneOf": [
+                        { "type": "object", "required": ["Fast"], "properties": { "Fast": { "type": "integer" } } },
+                        { "type": "object", "required": ["Slow"], "properties": { "Slow": { "type": "integer" } } }
+                    ] }
+                ] },
+                "Sampling": {
+                    "type": "object",
+                    "description": "How tokens are picked.",
+                    "properties": { "top_k": { "type": "integer" } }
+                }
+            }),
+        ))
+        .unwrap();
+        assert!(
+            out.contains("# [doc = \" How tokens are picked.\"] # [derive"),
+            "{out}"
+        );
+        assert!(out.contains("pub struct Settings"), "{out}");
+        assert!(
+            out.contains("pub model : :: std :: string :: String"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pub top_k : :: core :: option :: Option < i64 >"),
+            "{out}"
+        );
+        assert!(
+            out.contains("# [serde (flatten)] pub kind : SettingsKind"),
+            "{out}"
+        );
+        assert!(out.contains("pub enum SettingsKind"), "{out}");
+    }
+
+    #[test]
     fn required_and_nullable_choose_the_fields_type() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Patch" }),

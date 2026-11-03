@@ -33,6 +33,12 @@ impl At<'_> {
     }
 }
 
+/// An `allOf`'s members as one object, and the ones serde flattens whole.
+struct Merged {
+    object: Schema,
+    flattened: Vec<Schema>,
+}
+
 /// A type the client defines, from a component or an inline schema.
 struct Pending {
     name: String,
@@ -146,7 +152,11 @@ impl<'a> Types<'a> {
                 };
                 quote!(::std::vec::Vec<#items>)
             }
-            Some("object") | None if !schema.properties.is_empty() || !schema.one_of.is_empty() => {
+            Some("object") | None
+                if !schema.properties.is_empty()
+                    || !schema.one_of.is_empty()
+                    || schema.all_of.len() > 1 =>
+            {
                 match self.component_like(schema) {
                     Some(name) => {
                         let component = self.spec.components.schemas[&name].clone();
@@ -266,7 +276,11 @@ impl<'a> Types<'a> {
                 None => self.external(&ident, &docs, schema, name, at),
             };
         }
-        let fields = self.fields(schema, at)?;
+        let docs = match (&schema.description, schema.all_of.is_empty()) {
+            (None, false) => doc(self.merge(schema, at)?.object.description.as_deref()),
+            _ => docs,
+        };
+        let fields = self.object_fields(schema, at)?;
         let default = fields
             .iter()
             .all(|f| f.optional)
@@ -320,6 +334,112 @@ impl<'a> Types<'a> {
             return self.nullable(only);
         }
         or_null(schema).is_some() || schema.ty.as_ref().is_some_and(|t| t.split().1)
+    }
+
+    /// The fields of an object, with an `allOf`'s members merged in or flattened.
+    fn object_fields(&mut self, schema: &Schema, at: &At<'_>) -> Result<Vec<Field>, GenerateError> {
+        if schema.all_of.len() < 2 {
+            return self.fields(schema, at);
+        }
+        let merged = self.merge(schema, at)?;
+        let mut out = self.fields(&merged.object, at)?;
+        let mut kinds = 0;
+        for member in &merged.flattened {
+            let (name, hint) = match member.ref_name() {
+                Some(n) => (n.to_owned(), pascal(n)),
+                None => {
+                    kinds += 1;
+                    let n = if kinds == 1 {
+                        "kind".to_owned()
+                    } else {
+                        format!("kind{kinds}")
+                    };
+                    let hint = format!("{}{}", at.hint, pascal(&n));
+                    (n, hint)
+                }
+            };
+            let ident = field_ident(&name).0;
+            let ty = self.ty(member, &at.child(hint))?;
+            out.push(Field {
+                optional: false,
+                decl: quote!(#[serde(flatten)] pub #ident: #ty),
+                bare: quote!(#[serde(flatten)] #ident: #ty),
+                check: quote!(__Constraints::check_into(&self.#ident, path, out);),
+            });
+        }
+        Ok(out)
+    }
+
+    /// An `allOf` as one object: the members' properties, and the members serde flattens
+    /// whole (an enum, a map, a mapped type).
+    fn merge(&self, schema: &Schema, at: &At<'_>) -> Result<Merged, GenerateError> {
+        let mut out = Merged {
+            object: Schema {
+                description: schema.description.clone(),
+                properties: schema.properties.clone(),
+                required: schema.required.clone(),
+                ..Schema::default()
+            },
+            flattened: Vec::new(),
+        };
+        for member in &schema.all_of {
+            self.merge_member(member, &mut out, at)?;
+        }
+        Ok(out)
+    }
+
+    fn merge_member(
+        &self,
+        member: &Schema,
+        out: &mut Merged,
+        at: &At<'_>,
+    ) -> Result<(), GenerateError> {
+        let resolved = match member.ref_name() {
+            Some(n) if self.map.schemas.contains_key(n) => {
+                out.flattened.push(member.clone());
+                return Ok(());
+            }
+            Some(n) => self
+                .spec
+                .components
+                .schemas
+                .get(n)
+                .ok_or_else(|| at.unsupported(n, "isn't in the document's components"))?,
+            None => member,
+        };
+        if !resolved.all_of.is_empty() {
+            for m in &resolved.all_of {
+                self.merge_member(m, out, at)?;
+            }
+        } else if !resolved.one_of.is_empty()
+            || (resolved.properties.is_empty()
+                && matches!(resolved.additional_properties, Some(Additional::Schema(_))))
+        {
+            out.flattened.push(member.clone());
+            return Ok(());
+        } else if let Some(t) = resolved.ty.as_ref().and_then(|t| t.split().0) {
+            if t != "object" {
+                return Err(at.unsupported(
+                    &at.hint,
+                    format!("is an `allOf` with a member of type `{t}`"),
+                ));
+            }
+        }
+        for (k, v) in &resolved.properties {
+            out.object
+                .properties
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        for r in &resolved.required {
+            if !out.object.required.contains(r) {
+                out.object.required.push(r.clone());
+            }
+        }
+        if out.object.description.is_none() {
+            out.object.description = resolved.description.clone();
+        }
+        Ok(())
     }
 
     /// Each property by `required` and `nullable`; absent and nullable is `Option<Option<T>>`.
@@ -672,7 +792,10 @@ fn prelude(mapped: &[TokenStream]) -> TokenStream {
 /// Whether a component gets a type of its own rather than being written inline.
 fn nameable(schema: &Schema) -> bool {
     or_null(schema).is_none()
-        && (!schema.properties.is_empty() || !schema.one_of.is_empty() || !schema.values.is_empty())
+        && (!schema.properties.is_empty()
+            || !schema.one_of.is_empty()
+            || !schema.values.is_empty()
+            || schema.all_of.len() > 1)
 }
 
 /// `schema` without `null`, which a query string can't carry.
