@@ -1025,7 +1025,7 @@ pub(crate) fn parse_path(path: &str) -> Result<TokenStream, GenerateError> {
 }
 
 /// `WidgetEvent_Renamed`, `name_taken` and `listWidgets` as `WidgetEventRenamed`, `NameTaken`
-/// and `ListWidgets`.
+/// and `ListWidgets`; `self` as `Self_`, since `Self` is a keyword.
 pub(crate) fn pascal(name: &str) -> String {
     let mut out = String::new();
     for part in name
@@ -1041,6 +1041,7 @@ pub(crate) fn pascal(name: &str) -> String {
     match out.chars().next() {
         Some(c) if c.is_ascii_digit() => format!("V{out}"),
         None => "Unnamed".into(),
+        _ if out == "Self" => "Self_".into(),
         _ => out,
     }
 }

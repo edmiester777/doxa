@@ -363,6 +363,19 @@ mod tests {
     }
 
     #[test]
+    fn a_variant_named_self_is_no_keyword() {
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Target" }),
+            serde_json::json!({ "Target": { "type": "string", "enum": ["self_", "other"] } }),
+        ))
+        .unwrap();
+        assert!(
+            out.contains("# [serde (rename = \"self_\")] Self_ ,"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn required_and_nullable_choose_the_fields_type() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Patch" }),
