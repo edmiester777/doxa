@@ -273,6 +273,46 @@ mod tests {
     }
 
     #[test]
+    fn a_tagged_branch_of_another_type_and_the_tag_is_a_newtype_variant() {
+        let tag = |v: &str| {
+            serde_json::json!({ "type": "object", "required": ["type"], "properties": {
+                "type": { "type": "string", "enum": [v] }
+            } })
+        };
+        let out = client(doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Event" }),
+            serde_json::json!({
+                "Event": {
+                    "oneOf": [
+                        { "$ref": "#/components/schemas/Event_Started" },
+                        { "$ref": "#/components/schemas/Event_Failed" }
+                    ],
+                    "discriminator": { "propertyName": "type" }
+                },
+                "Event_Started": { "allOf": [{ "$ref": "#/components/schemas/Started" }, tag("started")] },
+                "Event_Failed": { "allOf": [
+                    { "type": "object", "required": ["reason"], "properties": { "reason": { "type": "string" } } },
+                    tag("failed")
+                ] },
+                "Started": { "type": "object", "properties": { "run": { "type": "string" } } }
+            }),
+        ))
+        .unwrap();
+        assert!(out.contains("# [serde (tag = \"type\")]"), "{out}");
+        assert!(
+            out.contains("# [serde (rename = \"started\")] Started (Started)"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "# [serde (rename = \"failed\")] Failed { reason : :: std :: string :: String , }"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("pub struct Started"), "{out}");
+    }
+
+    #[test]
     fn required_and_nullable_choose_the_fields_type() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Patch" }),

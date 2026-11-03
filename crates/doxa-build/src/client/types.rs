@@ -39,6 +39,14 @@ struct Merged {
     flattened: Vec<Schema>,
 }
 
+/// A tagged `oneOf`'s branch: its fields, or the type its variant wraps.
+struct Branch {
+    name: Option<String>,
+    object: Schema,
+    flattened: Vec<Schema>,
+    newtype: Option<Schema>,
+}
+
 /// A type the client defines, from a component or an inline schema.
 struct Pending {
     name: String,
@@ -343,8 +351,19 @@ impl<'a> Types<'a> {
         }
         let merged = self.merge(schema, at)?;
         let mut out = self.fields(&merged.object, at)?;
+        out.extend(self.flattened_fields(&merged.flattened, at)?);
+        Ok(out)
+    }
+
+    /// A `#[serde(flatten)]` field for each of `members`.
+    fn flattened_fields(
+        &mut self,
+        members: &[Schema],
+        at: &At<'_>,
+    ) -> Result<Vec<Field>, GenerateError> {
+        let mut out = Vec::new();
         let mut kinds = 0;
-        for member in &merged.flattened {
+        for member in members {
             let (name, hint) = match member.ref_name() {
                 Some(n) => (n.to_owned(), pascal(n)),
                 None => {
@@ -490,6 +509,47 @@ impl<'a> Types<'a> {
         Ok(out)
     }
 
+    /// One branch of a tagged `oneOf`, its `allOf` merged. A branch that is another type plus
+    /// the tag, as serde writes a newtype variant, keeps that type.
+    fn branch(&self, b: &Schema, tag: &str, at: &At<'_>) -> Result<Branch, GenerateError> {
+        let (name, resolved) = match b.ref_name() {
+            Some(n) => (
+                Some(n.to_owned()),
+                self.spec
+                    .components
+                    .schemas
+                    .get(n)
+                    .cloned()
+                    .ok_or_else(|| at.unsupported(n, "isn't in the document's components"))?,
+            ),
+            None => (None, b.clone()),
+        };
+        if resolved.all_of.len() < 2 {
+            return Ok(Branch {
+                name,
+                object: resolved,
+                flattened: Vec::new(),
+                newtype: None,
+            });
+        }
+        let merged = self.merge(&resolved, at)?;
+        let (refs, inline): (Vec<&Schema>, Vec<&Schema>) =
+            resolved.all_of.iter().partition(|m| m.ref_name().is_some());
+        let tag_only = inline.iter().all(|m| {
+            m.all_of.is_empty() && m.one_of.is_empty() && m.properties.keys().all(|k| k == tag)
+        });
+        let newtype = match refs.as_slice() {
+            [r] if tag_only => Some((*r).clone()),
+            _ => None,
+        };
+        Ok(Branch {
+            name,
+            object: merged.object,
+            flattened: merged.flattened,
+            newtype,
+        })
+    }
+
     /// `oneOf` with a discriminator: the tag, and the rest inline or under one content key.
     fn tagged(
         &mut self,
@@ -499,31 +559,27 @@ impl<'a> Types<'a> {
         tag: &str,
         at: &At<'_>,
     ) -> Result<TokenStream, GenerateError> {
-        let branches: Vec<(Option<String>, Schema)> = schema
+        let branches: Vec<Branch> = schema
             .one_of
             .iter()
-            .map(|b| match b.ref_name() {
-                Some(n) => self
-                    .spec
-                    .components
-                    .schemas
-                    .get(n)
-                    .cloned()
-                    .map(|s| (Some(n.to_owned()), s))
-                    .ok_or_else(|| at.unsupported(n, "isn't in the document's components")),
-                None => Ok((None, b.clone())),
-            })
+            .map(|b| self.branch(b, tag, at))
             .collect::<Result<_, _>>()?;
         let others: BTreeSet<&String> = branches
             .iter()
-            .flat_map(|(_, b)| b.properties.keys().filter(|k| *k != tag))
+            .flat_map(|b| b.object.properties.keys().filter(|k| *k != tag))
             .collect();
         let content = match others.iter().collect::<Vec<_>>().as_slice() {
             [only] => Some((**only).clone()),
             _ => None,
         };
         let mut variants = Vec::new();
-        for (name, branch) in &branches {
+        for Branch {
+            name,
+            object: branch,
+            flattened,
+            newtype,
+        } in &branches
+        {
             let value = branch
                 .properties
                 .get(tag)
@@ -553,14 +609,20 @@ impl<'a> Types<'a> {
                         quote!((#ty))
                     }
                 },
+                None if newtype.is_some() => {
+                    let ty = self.ty(newtype.as_ref().expect("checked"), &at.child(hint))?;
+                    quote!((#ty))
+                }
                 None => {
                     let mut rest = branch.clone();
                     rest.properties.remove(tag);
                     rest.required.retain(|r| r != tag);
-                    if rest.properties.is_empty() {
+                    if rest.properties.is_empty() && flattened.is_empty() {
                         quote!()
                     } else {
-                        let fields = self.fields(&rest, &at.child(hint))?;
+                        let at = at.child(hint);
+                        let mut fields = self.fields(&rest, &at)?;
+                        fields.extend(self.flattened_fields(flattened, &at)?);
                         let decls = fields.iter().map(|f| &f.bare);
                         quote!({ #(#decls,)* })
                     }
