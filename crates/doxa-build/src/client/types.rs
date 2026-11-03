@@ -72,9 +72,17 @@ struct Pending {
     owner: Option<String>,
 }
 
+/// What generated types derive beyond their wire shape.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Options {
+    pub exhaustive: bool,
+    pub forms: bool,
+}
+
 pub(crate) struct Types<'a> {
     spec: &'a Spec,
     map: &'a TypeMap,
+    options: Options,
     queue: Vec<Pending>,
     named: BTreeSet<String>,
     identities: BTreeMap<String, IdentityMeta>,
@@ -86,13 +94,14 @@ pub(crate) struct Types<'a> {
 }
 
 impl<'a> Types<'a> {
-    pub fn new(spec: &'a Spec, map: &'a TypeMap) -> Result<Self, GenerateError> {
+    pub fn new(spec: &'a Spec, map: &'a TypeMap, options: Options) -> Result<Self, GenerateError> {
         for path in map.formats.values().chain(map.schemas.values()) {
             parse_path(path)?;
         }
         Ok(Types {
             spec,
             map,
+            options,
             queue: Vec::new(),
             named: BTreeSet::new(),
             identities: BTreeMap::new(),
@@ -412,7 +421,7 @@ impl<'a> Types<'a> {
         self.current = Some(schema.clone());
         let docs = doc(schema.description.as_deref());
         if !schema.values.is_empty() {
-            return string_enum(&ident, &docs, schema, at);
+            return self.string_enum(&ident, &docs, schema, at);
         }
         if !schema.one_of.is_empty() {
             return match &schema.discriminator {
@@ -435,6 +444,10 @@ impl<'a> Types<'a> {
             .iter()
             .all(|f| f.optional)
             .then(|| quote!(#[derive(::core::default::Default)]));
+        let default = match self.options.forms {
+            true => quote!(#default #[derive(::doxa::ui::Form)]),
+            false => default.unwrap_or_default(),
+        };
         let checks = fields.iter().map(|f| f.check.clone());
         let decls = fields.iter().map(|f| f.decl.clone());
         let identity = match self.identities.get(name) {
@@ -638,14 +651,60 @@ impl<'a> Types<'a> {
                 1 => quote!(if let #some(v) = &self.#ident { #body }),
                 _ => quote!(if let #some(#some(v)) = &self.#ident { #body }),
             };
+            let shape = match self.options.forms && layers == 0 {
+                true => self.form_shape(prop),
+                false => quote!(),
+            };
             out.push(Field {
                 optional: layers > 0,
-                decl: quote!(#docs #rename #default pub #ident: #ty),
+                decl: quote!(#docs #rename #default #shape pub #ident: #ty),
                 bare: quote!(#docs #rename #default #ident: #ty),
                 check,
             });
         }
         Ok(out)
+    }
+
+    /// `#[form(nested)]` for a field of a generated struct, `#[form(list)]` for a `Vec` of one.
+    fn form_shape(&self, prop: &Schema) -> TokenStream {
+        let boxed = self
+            .current
+            .as_ref()
+            .is_some_and(|c| self.reaches(prop, c, &mut BTreeSet::new()));
+        if boxed {
+            return quote!();
+        }
+        if self.is_struct(prop) {
+            return quote!(#[form(nested)]);
+        }
+        let array = prop.ty.as_ref().map(super::spec::Types::split) == Some((Some("array"), false));
+        match &prop.items {
+            Some(items) if array && self.is_struct(items) => quote!(#[form(list)]),
+            _ => quote!(),
+        }
+    }
+
+    /// Whether `s` is generated as a struct, which derives `Form` too.
+    fn is_struct(&self, s: &Schema) -> bool {
+        if let Some(n) = s.ref_name() {
+            return !self.map.schemas.contains_key(n)
+                && self
+                    .spec
+                    .components
+                    .schemas
+                    .get(n)
+                    .is_some_and(|c| nameable(c) && c.one_of.is_empty() && c.values.is_empty());
+        }
+        if let [only] = s.all_of.as_slice() {
+            return self.is_struct(only);
+        }
+        or_null(s).is_none()
+            && (!s.properties.is_empty() || s.all_of.len() > 1)
+            && s.one_of.is_empty()
+            && s.values.is_empty()
+            && !self
+                .component_like(s)
+                .is_some_and(|n| self.map.schemas.contains_key(&n))
     }
 
     /// One branch of a tagged `oneOf`, its `allOf` merged. A branch that is another type plus
@@ -786,7 +845,7 @@ impl<'a> Types<'a> {
             Some(c) => quote!(#[serde(tag = #tag, content = #c)]),
             None => quote!(#[serde(tag = #tag)]),
         };
-        Ok(enum_items(ident, docs, repr, &variants))
+        Ok(self.enum_items(ident, docs, repr, &variants))
     }
 
     /// `oneOf` without one, as serde writes an externally tagged enum.
@@ -826,7 +885,7 @@ impl<'a> Types<'a> {
             variants.push(quote!(#[serde(rename = #key)] #variant(#ty)));
         }
         variants.extend(mapped);
-        Ok(enum_items(ident, docs, quote!(), &variants))
+        Ok(self.enum_items(ident, docs, quote!(), &variants))
     }
 
     /// `b`, through its `$ref`.
@@ -934,12 +993,7 @@ impl<'a> Types<'a> {
             let ty = self.held(branch, &at.child(format!("{}{name}", at.hint)))?;
             variants.push(quote!(#variant(#ty)));
         }
-        Ok(enum_items(
-            ident,
-            docs,
-            quote!(#[serde(untagged)]),
-            &variants,
-        ))
+        Ok(self.enum_items(ident, docs, quote!(#[serde(untagged)]), &variants))
     }
 }
 
@@ -970,44 +1024,49 @@ impl quote::ToTokens for Derives {
     }
 }
 
-fn enum_items(
-    ident: &Ident,
-    docs: &TokenStream,
-    repr: TokenStream,
-    variants: &[TokenStream],
-) -> TokenStream {
-    quote! {
-        #docs
-        #DERIVES
-        #repr
-        #[non_exhaustive]
-        pub enum #ident { #(#variants,)* }
+impl Types<'_> {
+    fn enum_items(
+        &self,
+        ident: &Ident,
+        docs: &TokenStream,
+        repr: TokenStream,
+        variants: &[TokenStream],
+    ) -> TokenStream {
+        let open = (!self.options.exhaustive).then(|| quote!(#[non_exhaustive]));
+        quote! {
+            #docs
+            #DERIVES
+            #repr
+            #open
+            pub enum #ident { #(#variants,)* }
 
-        impl ::core::fmt::Display for #ident {
-            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                ::core::fmt::Debug::fmt(self, f)
+            impl ::core::fmt::Display for #ident {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    ::core::fmt::Debug::fmt(self, f)
+                }
             }
+
+            impl __Constraints for #ident {}
         }
-
-        impl __Constraints for #ident {}
     }
-}
 
-fn string_enum(
-    ident: &Ident,
-    docs: &TokenStream,
-    schema: &Schema,
-    at: &At<'_>,
-) -> Result<TokenStream, GenerateError> {
-    let mut variants = Vec::new();
-    for v in &schema.values {
-        let Scalar::Str(v) = v else {
-            return Err(at.here("has a non-string enum value"));
-        };
-        let variant = Ident::new(&pascal(v), Span::call_site());
-        variants.push(quote!(#[serde(rename = #v)] #variant));
+    fn string_enum(
+        &self,
+        ident: &Ident,
+        docs: &TokenStream,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> Result<TokenStream, GenerateError> {
+        let mut variants = Vec::new();
+        for v in &schema.values {
+            let Scalar::Str(v) = v else {
+                return Err(at.here("has a non-string enum value"));
+            };
+            let variant = Ident::new(&pascal(v), Span::call_site());
+            variants.push(quote!(#[serde(rename = #v)] #variant));
+        }
+        Ok(self.enum_items(ident, docs, quote!(), &variants))
     }
-    Ok(enum_items(ident, docs, quote!(), &variants))
 }
 
 /// The checks on one field whose value is `v` at path `at`, as garde words them.

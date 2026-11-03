@@ -94,6 +94,7 @@ pub fn openapi_from_json(json: &str) -> Result<utoipa::openapi::OpenApi, Generat
 pub struct ClientSpec {
     spec: Result<spec::Spec, String>,
     types: TypeMap,
+    options: types::Options,
 }
 
 impl ClientSpec {
@@ -105,6 +106,7 @@ impl ClientSpec {
         ClientSpec {
             spec: parsed,
             types: TypeMap::default(),
+            options: types::Options::default(),
         }
     }
 
@@ -114,13 +116,27 @@ impl ClientSpec {
         self
     }
 
+    /// Leave enums open to exhaustive `match`, so a variant the server adds fails to compile
+    /// rather than reaching a `_` arm.
+    pub fn exhaustive(mut self) -> Self {
+        self.options.exhaustive = true;
+        self
+    }
+
+    /// Derive `doxa::ui::Form` on every struct, so a request binds to a form field by field.
+    /// The client crate needs doxa's `forms` feature.
+    pub fn forms(mut self) -> Self {
+        self.options.forms = true;
+        self
+    }
+
     /// The client's source, for `doxa::include_client!()` to include.
     pub fn render(&self) -> Result<String, GenerateError> {
         let spec = self
             .spec
             .as_ref()
             .map_err(|e| GenerateError::Unreadable(e.clone()))?;
-        let mut types = types::Types::new(spec, &self.types)?;
+        let mut types = types::Types::new(spec, &self.types, self.options)?;
         let routes: TokenStream = routes::render(spec, &mut types)?;
         let defs = types.render()?;
         types.finish()?;
@@ -527,6 +543,42 @@ mod tests {
             out.contains("pub enum CreateOrderError { # [serde (rename = \"Forbidden\")] Forbidden (:: std :: string :: String) , # [serde (rename = \"NotFound\")] NotFound"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn exhaustive_and_forms_are_opt_in() {
+        let d = doc(
+            serde_json::json!({ "$ref": "#/components/schemas/Order" }),
+            serde_json::json!({
+                "Order": { "type": "object", "required": ["size", "lines", "ship"], "properties": {
+                    "size": { "type": "string", "enum": ["s", "m"] },
+                    "lines": { "type": "array", "items": { "$ref": "#/components/schemas/Line" } },
+                    "ship": { "$ref": "#/components/schemas/Line" },
+                    "note": { "$ref": "#/components/schemas/Line" }
+                } },
+                "Line": { "type": "object", "properties": { "n": { "type": "integer" } } }
+            }),
+        );
+        let plain = client(d.clone()).unwrap();
+        assert!(
+            plain.contains("# [non_exhaustive] pub enum OrderSize"),
+            "{plain}"
+        );
+        assert!(!plain.contains("ui :: Form"), "{plain}");
+
+        let out = ClientSpec::from_server(openapi_from_json(&d.to_string()).unwrap())
+            .exhaustive()
+            .forms()
+            .render()
+            .unwrap();
+        assert!(!out.contains("non_exhaustive"), "{out}");
+        assert!(
+            out.contains("# [derive (:: doxa :: ui :: Form)] pub struct Order"),
+            "{out}"
+        );
+        assert!(out.contains("# [form (list)] pub lines"), "{out}");
+        assert!(out.contains("# [form (nested)] pub ship"), "{out}");
+        assert!(!out.contains("# [form (nested)] pub note"), "{out}");
     }
 
     #[test]

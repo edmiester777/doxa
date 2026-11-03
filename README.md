@@ -904,7 +904,7 @@ doxa::service!();
 doxa::include_client!();
 ```
 
-A document that isn't a dependency, such as a saved `openapi.json`, goes through `doxa_build::openapi_from_json(&text)?` first. Its calls are made by the same stub, so they cache, invalidate, probe with `::can` and stream as a shared-source client's do. The route macros stamp what OpenAPI can't say (entities, keys, dry runs, streams, error types) as `x-doxa`.
+A document that isn't a dependency, such as a saved `openapi.json`, goes through `doxa_build::openapi_from_json(&text)?` first. `.exhaustive()` drops `#[non_exhaustive]` from its enums, and `.forms()` derives `Form` on its structs (doxa feature `forms`). Its calls are made by the same stub, so they cache, invalidate, probe with `::can` and stream as a shared-source client's do. The route macros stamp what OpenAPI can't say (entities, keys, dry runs, streams, error types) as `x-doxa`.
 
 Each client crate's routes go to its own server. `doxa::service!();` in the shared `lib.rs` gives the client crate a `service()`, with its own cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and a deployment can change them in `services.json` without a rebuild. Credentials are layers:
 
