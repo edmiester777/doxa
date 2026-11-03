@@ -21,6 +21,13 @@ enum Kind {
 
 type Listener = Rc<dyn Fn(Event)>;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum Peek {
+    Element(String),
+    Text(String),
+    Other,
+}
+
 struct MemNode {
     kind: Kind,
     parent: Option<NodeId>,
@@ -350,6 +357,25 @@ impl MemDom {
                 ..MemEvent::default()
             },
         )
+    }
+
+    /// What `node` is, for `testing::Screen`'s queries.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn peek(&self, node: NodeId) -> Peek {
+        match self.nodes.borrow().get(&node).map(|n| &n.kind) {
+            Some(Kind::Element { tag, .. }) => Peek::Element(tag.clone()),
+            Some(Kind::Text(t)) => Peek::Text(t.clone()),
+            _ => Peek::Other,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn children(&self, node: NodeId) -> Vec<NodeId> {
+        self.nodes
+            .borrow()
+            .get(&node)
+            .map(|n| n.children.clone())
+            .unwrap_or_default()
     }
 
     fn watch(&self, w: Watch) -> u32 {

@@ -35,6 +35,8 @@ mod reconcile;
 mod router;
 mod runtime;
 mod story;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod testing;
 mod theme;
 mod view;
 

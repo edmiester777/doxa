@@ -138,6 +138,11 @@ impl Manual {
     pub fn now(&self) -> Duration {
         self.0.borrow().now
     }
+
+    /// When the earliest pending timer is due, if any is.
+    pub fn next_deadline(&self) -> Option<Duration> {
+        self.0.borrow().timers.keys().next().map(|k| k.0)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

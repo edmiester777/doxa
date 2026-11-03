@@ -224,6 +224,100 @@ async fn a_class_toggle_patches_only_its_own_class() {
     );
 }
 
+#[tokio::test]
+async fn a_user_clicks_through_the_list_by_role_and_text_with_a_fake_island() {
+    use doxa::ui::prelude::view;
+    use doxa::ui::testing::{fake, Role, Screen};
+    use widgets_web::Count;
+
+    serve("viewer");
+    fake::<Count>(|p| {
+        let total = p.prop::<usize>("total").unwrap_or_default();
+        let p = p.clone();
+        view! {
+            <button on:click={move |_| p.fire("onPick", false)}>
+                {format!("{total} widgets")}
+            </button>
+        }
+    });
+    let screen = Screen::app(widgets_web::app());
+
+    screen.role(Role::Button).name("3 widgets").click().await;
+    screen.find_text("1").await.expect("the pick reached Rust");
+    screen.role(Role::Link).name("gear").click().await;
+    screen
+        .role(Role::Heading)
+        .name("gear")
+        .find()
+        .await
+        .expect("the widget's page");
+}
+
+#[tokio::test]
+async fn a_labelled_field_takes_typing_and_a_missing_one_says_what_it_looked_for() {
+    use doxa::ui::prelude::{state, view};
+    use doxa::ui::testing::{Role, Screen, ScreenError};
+
+    let screen = Screen::mount(|| {
+        let title = state(String::new());
+        view! {
+            <label for="title">"Title"</label>
+            <input id="title" prop:value={title.get()} on:input={move |e| title.set(e.value())}/>
+            <p>{format!("Saved {}", title.get())}</p>
+        }
+    });
+    screen.label("Title").type_text("Q3").await;
+    screen.label("Title").type_text(" report").await;
+    screen
+        .find_text("Saved Q3 report")
+        .await
+        .expect("both typed");
+
+    let missing = screen.role(Role::Button).name("Save").get().unwrap_err();
+    assert!(matches!(missing, ScreenError::NotFound { .. }));
+    let message = missing.to_string();
+    assert!(message.contains(r#"a button named "Save""#), "{message}");
+    assert!(
+        message.contains("<label for=\"title\">Title</label>"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn find_moves_the_clock_to_a_pending_timer_but_not_past_its_timeout() {
+    use doxa::ui::prelude::{effect, sleep, state, view};
+    use doxa::ui::testing::Screen;
+    use std::time::Duration;
+
+    let screen = Screen::mount(|| {
+        let shown = state(false);
+        effect((), async move |_| {
+            sleep(Duration::from_millis(300)).await;
+            shown.set(true);
+            Ok(())
+        });
+        view! { <p>{if shown.get() { "Saved" } else { "Saving" }}</p> }
+    });
+    screen
+        .find_text("Saved")
+        .await
+        .expect("after the 300ms timer");
+
+    let slow = Screen::mount(|| {
+        let shown = state(false);
+        effect((), async move |_| {
+            sleep(Duration::from_secs(5)).await;
+            shown.set(true);
+            Ok(())
+        });
+        view! { <p>{if shown.get() { "Saved" } else { "Saving" }}</p> }
+    });
+    assert!(
+        slow.find_text("Saved").await.is_err(),
+        "five seconds is past the timeout"
+    );
+}
+
 /// Stands in for React: records each island's props and keeps its event handlers.
 #[derive(Clone, Default)]
 struct FakeReact(Rc<std::cell::RefCell<Vec<(String, Vec<(&'static str, EventFn)>)>>>);

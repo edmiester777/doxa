@@ -8,6 +8,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 pub use mem::MemDom;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use mem::Peek;
 #[cfg(target_arch = "wasm32")]
 pub use web::WebDom;
 
