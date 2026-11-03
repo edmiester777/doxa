@@ -213,3 +213,44 @@ fn the_deepest_title_wins_and_unmounting_restores_the_one_below() {
     settle();
     assert_eq!(dom.document_title(), "Orders");
 }
+
+#[page("/orders/{id}")]
+fn OrderPage(id: String) -> View {
+    view! {
+        <Link to={HomePage::route()} active_class="on" data-nav="home">"home"</Link>
+        <Link to={OrdersPage::route()} class="tab" active_class="on" data-nav="orders">
+            "orders"
+        </Link>
+        <Link to={OrdersPage::route()} exact=true active_class="on" data-nav="exact">"exact"</Link>
+        <Link to={OrderPage::route(id)} aria-label="this" data-nav="self">"self"</Link>
+    }
+}
+
+#[test]
+fn a_link_marks_itself_current_under_its_page() {
+    let dom = mount(
+        Router::new()
+            .page::<HomePage>()
+            .page::<OrdersPage>()
+            .page::<OrderPage>(),
+    );
+    navigate("/orders/7?tab=x");
+    settle();
+    let link = |name| dom.find("data-nav", name).unwrap();
+    let current = |name| dom.attr(link(name), "aria-current");
+    assert_eq!(current("home"), None);
+    assert_eq!(dom.attr(link("home"), "class"), None);
+    assert_eq!(current("orders").as_deref(), Some("page"));
+    assert_eq!(dom.attr(link("orders"), "class").as_deref(), Some("tab on"));
+    assert_eq!(current("exact"), None, "exact needs the whole path");
+    assert_eq!(current("self").as_deref(), Some("page"));
+    assert_eq!(
+        dom.attr(link("self"), "aria-label").as_deref(),
+        Some("this")
+    );
+    assert!(doxa::ui::link_active(&OrdersPage::route(), false));
+    assert!(
+        !doxa::ui::link_active(&"/ord".into(), false),
+        "only on a segment boundary"
+    );
+}

@@ -886,7 +886,26 @@ mod web {
     }
 }
 
+/// Whether the current location is at `to`, or under it unless `exact`; re-renders the
+/// caller when the location changes.
+pub fn link_active(to: &Route, exact: bool) -> bool {
+    let here = location();
+    let here = here
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let to =
+        to.0.split('?')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('/');
+    here == to
+        || (!exact && (to.is_empty() || here.strip_prefix(to).is_some_and(|r| r.starts_with('/'))))
+}
+
 /// A link to a page that navigates without reloading and prefetches the page's data on hover.
+/// While the location is at its page it carries `aria-current="page"` and `active_class`.
 pub struct Link;
 
 /// Props of [`Link`].
@@ -894,6 +913,9 @@ pub struct Link;
 pub struct LinkProps {
     to: Route,
     class: Option<String>,
+    active_class: Option<String>,
+    exact: bool,
+    rest: crate::Attrs,
     children: View,
 }
 
@@ -907,6 +929,9 @@ required!(
 pub struct LinkBuilder<T> {
     to: Option<Route>,
     class: Option<String>,
+    active_class: Option<String>,
+    exact: bool,
+    rest: crate::Attrs,
     children: View,
     _set: PhantomData<T>,
 }
@@ -917,9 +942,18 @@ impl Link {
         LinkBuilder {
             to: None,
             class: None,
+            active_class: None,
+            exact: false,
+            rest: crate::Attrs::default(),
             children: View::empty(),
             _set: PhantomData,
         }
+    }
+}
+
+impl<T> crate::attrs::RestAttrs for LinkBuilder<T> {
+    fn __rest(&mut self) -> &mut crate::Attrs {
+        &mut self.rest
     }
 }
 
@@ -929,6 +963,9 @@ impl<T> LinkBuilder<T> {
         LinkBuilder {
             to: Some(to.into()),
             class: self.class,
+            active_class: self.active_class,
+            exact: self.exact,
+            rest: self.rest,
             children: self.children,
             _set: PhantomData,
         }
@@ -937,6 +974,18 @@ impl<T> LinkBuilder<T> {
     /// CSS classes for the `<a>`.
     pub fn class(mut self, class: impl Into<String>) -> Self {
         self.class = Some(class.into());
+        self
+    }
+
+    /// Classes added while the location is at the link's page.
+    pub fn active_class(mut self, class: impl Into<String>) -> Self {
+        self.active_class = Some(class.into());
+        self
+    }
+
+    /// Active only at the page itself, not under it.
+    pub fn exact(mut self, exact: bool) -> Self {
+        self.exact = exact;
         self
     }
 
@@ -956,6 +1005,9 @@ impl<T> LinkBuilder<T> {
         LinkProps {
             to: self.to.expect("set"),
             class: self.class,
+            active_class: self.active_class,
+            exact: self.exact,
+            rest: self.rest,
             children: self.children,
         }
     }
@@ -968,9 +1020,19 @@ impl Component for Link {
     fn render(props: LinkProps) -> RenderFuture {
         let to = props.to.clone();
         let hover = props.to.0.clone();
+        let active = link_active(&props.to, props.exact);
+        let class = [
+            props.class.as_deref(),
+            props.active_class.as_deref().filter(|_| active),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
         let a = el("a")
             .url("href", props.to.clone())
-            .attr("class", props.class.clone())
+            .attr("class", (!class.is_empty()).then_some(class))
+            .attr("aria-current", active.then_some("page"))
             .on("click", move |e| {
                 // Modified and non-primary clicks open a new tab or window.
                 if e.button() != 0 || e.ctrl_key() || e.meta_key() || e.shift_key() || e.alt_key() {
@@ -984,6 +1046,7 @@ impl Component for Link {
                     r.prefetch(&hover);
                 }
             })
+            .spread(props.rest)
             .child(props.children);
         RenderFuture::ready(Ok(a.into_view()))
     }
