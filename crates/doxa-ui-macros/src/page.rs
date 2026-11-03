@@ -78,7 +78,15 @@ pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
     let mut fill = Vec::new();
     for p in &parsed.props {
         let (n, s) = (&p.name, p.name.to_string());
-        if in_path.contains(&s) {
+        if parsed.query.as_ref() == Some(n) {
+            if in_path.contains(&s) {
+                return Err(syn::Error::new(
+                    n.span(),
+                    format!("`{s}` is in the path, so it can't also be the `#[query]`"),
+                ));
+            }
+            fields.push(quote! { #n: segments.query_as()? });
+        } else if in_path.contains(&s) {
             fields.push(quote! { #n: segments.get(#s)?.parse().ok()? });
             route_params.push(quote! { #n: impl ::std::string::ToString });
             fill.push(quote! { (#s, &#n.to_string()) });

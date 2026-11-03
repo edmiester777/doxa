@@ -468,6 +468,37 @@ async fn an_unknown_path_shows_not_found() {
 }
 
 #[tokio::test]
+async fn a_typed_query_round_trips_through_a_link_and_set_query_as() {
+    let dom = mount("viewer");
+    navigate("/widgets/cog/runs?status=queued");
+    settle().await;
+    let filter = || dom.text(dom.find("class", "filter").unwrap());
+    assert_eq!(filter(), "Some(Queued) page 0");
+
+    let next = dom.find("href", "/widgets/cog/runs?status=queued&page=1");
+    dom.click(next.expect("a typed link"));
+    settle().await;
+    assert_eq!(
+        doxa::ui::location(),
+        "/widgets/cog/runs?status=queued&page=1"
+    );
+    assert_eq!(filter(), "Some(Queued) page 1");
+
+    dom.click(dom.find("class", "done").unwrap());
+    settle().await;
+    assert_eq!(doxa::ui::location(), "/widgets/cog/runs?status=done&page=1");
+    assert_eq!(filter(), "Some(Done) page 1");
+}
+
+#[tokio::test]
+async fn a_query_that_does_not_parse_shows_not_found() {
+    let dom = mount("viewer");
+    navigate("/widgets/cog/runs?status=lost");
+    settle().await;
+    assert!(dom.find("class", "missing").is_some());
+}
+
+#[tokio::test]
 async fn an_exported_component_renders_again_with_the_hosts_new_props() {
     use doxa::ui::Exported;
     use widgets_web::kit::{WidgetTitle, WidgetTitleProps};

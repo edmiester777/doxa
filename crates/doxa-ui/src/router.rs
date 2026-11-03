@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 use futures_util::future::LocalBoxFuture;
 use percent_encoding_lite::{decode, encode};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use crate::component::{required, Component, RenderFuture, Set, Unset};
 use crate::runtime::{self, Readers};
@@ -35,6 +37,7 @@ pub trait Page: Component {
 pub struct Segments {
     params: Vec<(String, String)>,
     query: Vec<(String, String)>,
+    raw_query: String,
 }
 
 impl Segments {
@@ -52,6 +55,11 @@ impl Segments {
             .iter()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// The whole query as one type, or `None` if it doesn't parse.
+    pub fn query_as<T: DeserializeOwned>(&self) -> Option<T> {
+        serde_urlencoded::from_str(&self.raw_query).ok()
     }
 }
 
@@ -89,6 +97,7 @@ fn match_template(template: &str, url: &str, prefix: bool) -> Option<Segments> {
     Some(Segments {
         params,
         query: parse_query(query),
+        raw_query: query.to_owned(),
     })
 }
 
@@ -123,12 +132,16 @@ impl Route {
         Route(url)
     }
 
-    /// Add a query parameter.
-    pub fn query(mut self, key: &str, value: &str) -> Route {
-        self.0.push(if self.0.contains('?') { '&' } else { '?' });
-        self.0.push_str(&encode(key));
-        self.0.push('=');
-        self.0.push_str(&encode(value));
+    /// Append `value`'s fields, or `&[("key", "value")]` pairs, to the query.
+    ///
+    /// Panics if `value` has a field a query string can't hold, such as a nested struct.
+    pub fn query(mut self, value: &impl Serialize) -> Route {
+        let encoded = serde_urlencoded::to_string(value)
+            .unwrap_or_else(|e| panic!("this value can't be a query string: {e}"));
+        if !encoded.is_empty() {
+            self.0.push(if self.0.contains('?') { '&' } else { '?' });
+            self.0.push_str(&encoded);
+        }
         self
     }
 
@@ -726,10 +739,25 @@ pub fn set_query(edit: impl FnOnce(&mut Query) -> &mut Query) {
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
     let mut q = Query(parse_query(query));
     edit(&mut q);
-    let route =
-        q.0.iter()
-            .fold(Route(path.to_owned()), |r, (k, v)| r.query(k, v));
-    navigate_with(route, Nav::replace().keep_scroll());
+    navigate_with(
+        Route(path.to_owned()).query(&q.0),
+        Nav::replace().keep_scroll(),
+    );
+}
+
+/// [`set_query`] for a page's `#[query]` type; a query that doesn't parse starts from `T::default()`.
+pub fn set_query_as<T>(edit: impl FnOnce(&mut T))
+where
+    T: Serialize + DeserializeOwned + Default,
+{
+    let url = current_url();
+    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+    let mut value: T = serde_urlencoded::from_str(query).unwrap_or_default();
+    edit(&mut value);
+    navigate_with(
+        Route(path.to_owned()).query(&value),
+        Nav::replace().keep_scroll(),
+    );
 }
 
 fn parse_query(query: &str) -> Vec<(String, String)> {
@@ -1031,5 +1059,37 @@ mod tests {
             "/widgets/a%20b"
         );
         assert_eq!(Route::fill("/", &[]).as_str(), "/");
+    }
+
+    #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Filter {
+        status: Option<String>,
+        #[serde(default)]
+        page: u32,
+    }
+
+    #[test]
+    fn a_typed_query_round_trips_through_a_route() {
+        let f = Filter {
+            status: Some("a b&c".into()),
+            page: 2,
+        };
+        let r = Route::fill("/runs", &[]).query(&f);
+        assert_eq!(r.as_str(), "/runs?status=a+b%26c&page=2");
+        assert_eq!(match_path("/runs", r.as_str()).unwrap().query_as(), Some(f));
+        assert_eq!(
+            Route::fill("/runs", &[]).query(&Filter::default()).as_str(),
+            "/runs?page=0"
+        );
+        assert_eq!(
+            match_path("/runs", "/runs?page=x")
+                .unwrap()
+                .query_as::<Filter>(),
+            None
+        );
+        assert_eq!(
+            Route::from("/a?x=1").query(&[("y", "2")]).as_str(),
+            "/a?x=1&y=2"
+        );
     }
 }

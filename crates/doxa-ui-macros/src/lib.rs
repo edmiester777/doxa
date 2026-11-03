@@ -28,7 +28,15 @@ pub fn component(args: TokenStream, item: TokenStream) -> TokenStream {
     let opts = parse_macro_input!(args as component::Options);
     let item = parse_macro_input!(item as ItemFn);
     match component::parse(item) {
-        Ok(parsed) => component::expand(opts, &parsed).into(),
+        Ok(parsed) => match &parsed.query {
+            Some(q) => syn::Error::new(
+                q.span(),
+                "only a `#[page]` reads the URL's query; pass the value as a prop",
+            )
+            .into_compile_error()
+            .into(),
+            None => component::expand(opts, &parsed).into(),
+        },
         Err(e) => e.into_compile_error().into(),
     }
 }

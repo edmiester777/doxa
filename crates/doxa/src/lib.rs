@@ -220,6 +220,24 @@ pub use doxa_ui::start;
 /// fn Items<T: 'static>() -> View { view! { <ul/> } }
 /// ```
 ///
+/// A page reads its whole query into one `#[query]` prop:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// use std::collections::HashMap;
+/// #[page("/items")]
+/// fn Items(#[query] q: HashMap<String, String>) -> View { view! { <ul/> } }
+/// ```
+///
+/// A component that isn't a page is "only a `#[page]` reads the URL's query":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// use std::collections::HashMap;
+/// #[component]
+/// fn Items(#[query] q: HashMap<String, String>) -> View { view! { <ul/> } }
+/// ```
+///
 /// An icon whose SVG file exists compiles:
 ///
 /// ```

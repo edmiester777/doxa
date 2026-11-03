@@ -17,6 +17,8 @@ pub(crate) struct Parsed {
     pub props: Vec<Prop>,
     /// The `#[attrs]` prop, collecting what the tag passes that isn't a prop.
     pub rest: Option<Ident>,
+    /// A page's `#[query]` prop, parsed from the whole query string.
+    pub query: Option<Ident>,
 }
 
 #[derive(Default)]
@@ -66,6 +68,7 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
     }
     let mut props = Vec::new();
     let mut rest = None;
+    let mut query = None;
     for arg in &mut item.sig.inputs {
         let FnArg::Typed(pt) = arg else {
             return Err(syn::Error::new(
@@ -104,6 +107,13 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
                     ));
                 }
                 default = Some(quote!(::core::default::Default::default()));
+            } else if attr.path().is_ident("query") {
+                if query.replace(name.clone()).is_some() {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        "a page takes one `#[query]` prop; it holds the whole query string",
+                    ));
+                }
             } else if attr.path().is_ident("prop") {
                 attr.parse_nested_meta(|m| {
                     if m.path.is_ident("default") {
@@ -137,7 +147,12 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
         });
     }
     no_spawn(&item.block)?;
-    Ok(Parsed { item, props, rest })
+    Ok(Parsed {
+        item,
+        props,
+        rest,
+        query,
+    })
 }
 
 /// A render runs again on every change, so a task it spawns would be spawned again each time.
@@ -198,7 +213,9 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     } else {
         quote!()
     };
-    let Parsed { item, props, rest } = parsed;
+    let Parsed {
+        item, props, rest, ..
+    } = parsed;
     let vis = &item.vis;
     let name = &item.sig.ident;
     let name_str = name.to_string();

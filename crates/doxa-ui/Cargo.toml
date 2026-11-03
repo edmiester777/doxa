@@ -18,6 +18,7 @@ doxa-ui-macros = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_urlencoded = "0.7"
 
 [features]
 # `#[react]`: React components rendered as portals of one shared root.

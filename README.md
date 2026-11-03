@@ -987,6 +987,21 @@ view! { <button>{Icon::Plus.size(16)}"Add"</button> {Lucide::Trash.class("muted"
 
 Only the listed variants are compiled in, and one with no file fails to compile. `doxa build` tells the macro where `node_modules` is; `dir = "./assets/icons"` reads SVGs under the crate.
 
+### 20. Typed query strings
+
+```rust
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunFilter { pub status: Option<RunStatus>, #[serde(default)] pub page: u32 }
+
+#[page("/widgets/{name}/runs")]
+fn RunsPage(name: String, #[query] filter: RunFilter) -> View { … }
+
+let next = RunsPage::route(&name).query(&RunFilter { page: 2, ..filter.clone() });
+set_query_as(|f: &mut RunFilter| f.page += 1);             // replaces the history entry
+```
+
+A query that doesn't parse renders the router's `not_found`, as a path parameter that doesn't parse does.
+
 ## Design
 
 - **Framework-neutral cores.** Auth, policy, and audit work without axum. Axum integration is feature-gated.

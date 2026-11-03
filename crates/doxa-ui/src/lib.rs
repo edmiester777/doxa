@@ -72,8 +72,8 @@ pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
 pub use portal::{Portal, PortalBuilder, PortalProps, PortalTarget};
 pub use router::{
     block_navigation, location, match_path, navigate, navigate_with, navigation, redirect,
-    set_query, Keep, Link, LinkBuilder, LinkProps, Nav, Navigation, Outlet, OutletBuilder,
-    OutletProps, Page, Prefetch, Query, Route, Router, Segments,
+    set_query, set_query_as, Keep, Link, LinkBuilder, LinkProps, Nav, Navigation, Outlet,
+    OutletBuilder, OutletProps, Page, Prefetch, Query, Route, Router, Segments,
 };
 pub use story::{IntoStory, StoryRoot};
 pub use theme::{set_theme, theme, Theme};
@@ -135,10 +135,11 @@ pub mod prelude {
     pub use crate::{
         action, classes, component, context, debounced, document_event, effect, interval,
         media_query, memo, navigate, navigate_with, navigation, node_ref, page, provide, redirect,
-        set_query, set_theme, sleep, state, stored, theme, title, try_context, view, window_event,
-        Action, App, Attrs, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event,
-        IconExt, IntoView, Keep, Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route,
-        Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
+        set_query, set_query_as, set_theme, sleep, state, stored, theme, title, try_context, view,
+        window_event, Action, App, Attrs, Callback, Can, Catch, DangerousHtml, Directive,
+        ElementRef, Event, IconExt, IntoView, Keep, Link, Nav, NodeRef, Outlet, Page, Plugin,
+        Portal, Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme,
+        Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }
