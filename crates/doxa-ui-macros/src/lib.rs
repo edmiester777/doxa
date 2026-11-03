@@ -8,6 +8,7 @@ mod binding;
 mod component;
 mod export;
 mod form;
+mod icons;
 mod npm;
 mod page;
 mod react;
@@ -56,11 +57,29 @@ pub fn npm(args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// A React component used as a doxa one: `#[react(module = "…", export = "…", lazy?)]` on its props.
+/// On an enum, each variant is the export of its name, given `props = …` (default `IconProps`).
 #[proc_macro_attribute]
 pub fn react(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as react::Args);
-    let item = parse_macro_input!(item as syn::ItemStruct);
-    react::expand(args, item)
+    match parse_macro_input!(item as syn::Item) {
+        syn::Item::Struct(s) => react::expand(args, s),
+        syn::Item::Enum(e) => icons::expand_react(args, e),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "`#[react]` goes on a props struct, or on an enum of components that share props",
+        )),
+    }
+    .unwrap_or_else(syn::Error::into_compile_error)
+    .into()
+}
+
+/// An enum of icons from SVG files: `#[icons(npm = "lucide-static", dir = "icons", case = "kebab")]`,
+/// or `#[icons(dir = "./assets/icons")]` under the crate; `#[icons(file = "…")]` renames a variant's file.
+#[proc_macro_attribute]
+pub fn icons(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args as icons::Args);
+    let item = parse_macro_input!(item as syn::ItemEnum);
+    icons::expand_icons(args, item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

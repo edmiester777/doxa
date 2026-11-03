@@ -66,6 +66,15 @@ impl Data {
         self.props.insert(name.to_owned(), v);
     }
 
+    /// Every field of `value`, a struct, as a prop of its own.
+    pub fn spread<T: Serialize>(&mut self, value: &T) {
+        match serde_json::to_value(value) {
+            Ok(serde_json::Value::Object(fields)) => self.props.extend(fields),
+            Ok(other) => panic!("React props must serialize to an object, not {other}"),
+            Err(e) => panic!("React props don't serialize: {e}"),
+        }
+    }
+
     /// A `#[react(raw)]` array.
     pub fn raw(&mut self, name: &'static str, value: &impl RawArray) {
         self.raw.push((name, value.raw()));

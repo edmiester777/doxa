@@ -130,6 +130,40 @@ async fn the_react_count_gets_the_total_and_calls_back_into_rust() {
 }
 
 #[tokio::test]
+async fn svg_icons_render_without_react_and_react_icons_as_islands() {
+    let react = FakeReact::default();
+    doxa::ui::react::set_bridge(react.clone());
+    let dom = mount("viewer");
+    navigate("/icons");
+    settle().await;
+
+    let svg = dom.find("id", "svg").unwrap();
+    let html = dom.inner_html(svg);
+    assert!(html.contains(r#"<path d="M5 12h14">"#), "{html}");
+    let trash = dom
+        .find("class", "icon icon-trash-2 danger")
+        .expect("the class joined");
+    assert_eq!(dom.attr(trash, "width").as_deref(), Some("16"));
+    assert_eq!(dom.attr(trash, "stroke-width").as_deref(), Some("2"));
+    let plus = dom.find("class", "icon icon-plus").unwrap();
+    assert_eq!(dom.attr(plus, "width").as_deref(), Some("24"));
+
+    let mounted: Vec<String> = react.0.borrow().iter().map(|(p, _)| p.clone()).collect();
+    assert!(
+        mounted.contains(&r#"Drawn::Plus {"size":20}"#.to_owned()),
+        "{mounted:?}"
+    );
+    assert!(
+        mounted.contains(&"Drawn::Less {}".to_owned()),
+        "{mounted:?}"
+    );
+    assert!(
+        !html.contains("data-island"),
+        "the SVG icons aren't islands"
+    );
+}
+
+#[tokio::test]
 async fn the_shell_stays_mounted_across_pages() {
     let dom = mount("viewer");
     settle().await;

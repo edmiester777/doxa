@@ -18,6 +18,7 @@ mod form;
 mod head;
 mod hooks;
 mod hot;
+mod icon;
 #[cfg(feature = "npm")]
 mod npm;
 #[cfg(feature = "oidc")]
@@ -60,6 +61,7 @@ pub use hooks::{
     action, context, effect, memo, node_ref, provide, state, try_context, Action, Deps, ElementRef,
     Singleton, State,
 };
+pub use icon::{Icon, IconExt, IconProps, IconSet, IconStyle};
 pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
 pub use portal::{Portal, PortalBuilder, PortalProps, PortalTarget};
 pub use router::{
@@ -74,6 +76,8 @@ pub use view::{
     Element, IntoAttr, IntoProp, IntoView, Key, SafeUrl, View,
 };
 
+/// An enum of icons read from SVG files at compile time: `#[icons(npm = "lucide-static", dir = "icons")]`.
+pub use doxa_ui_macros::icons;
 #[cfg(feature = "npm")]
 pub use doxa_ui_macros::npm;
 /// A React component as a doxa one: `#[react(module = "…", export = "…")]` on its props struct.
@@ -92,6 +96,7 @@ pub use export::Exported;
 pub mod __private {
     #[cfg(all(feature = "export", target_arch = "wasm32"))]
     pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
+    pub use crate::icon::{svg_el, svg_root};
     pub use crate::view::FromChildren;
     #[cfg(target_arch = "wasm32")]
     pub use web_sys;
@@ -123,8 +128,8 @@ pub mod prelude {
         action, component, context, debounced, document_event, effect, interval, media_query, memo,
         navigate, navigate_with, navigation, node_ref, page, provide, redirect, set_query,
         set_theme, sleep, state, stored, theme, title, try_context, view, window_event, Action,
-        App, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event, IntoView, Keep,
-        Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route, Router, SafeUrl,
+        App, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event, IconExt, IntoView,
+        Keep, Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route, Router, SafeUrl,
         Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};

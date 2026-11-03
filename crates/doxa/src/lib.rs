@@ -161,6 +161,20 @@ pub use doxa_ui::start;
 ///     view! { <button>"tick"</button> }
 /// }
 /// ```
+///
+/// An icon whose SVG file exists compiles:
+///
+/// ```
+/// #[doxa::ui::icons(dir = "../../examples/widgets/web/assets/icons")]
+/// enum Glyph { Trash2 }
+/// ```
+///
+/// An icon with no file is "no icon `Trash3`: `…/trash-3.svg` doesn't exist":
+///
+/// ```compile_fail
+/// #[doxa::ui::icons(dir = "../../examples/widgets/web/assets/icons")]
+/// enum Glyph { Trash3 }
+/// ```
 #[cfg(feature = "ui")]
 #[doc(hidden)]
 pub mod ui_diagnostics {}

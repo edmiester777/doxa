@@ -4,6 +4,7 @@ use doxa::ui::prelude::*;
 use doxa::ui::{form, Field};
 use widgets_client::widgets::*;
 
+pub mod icons;
 pub mod kit;
 pub mod motion;
 pub mod stories;
@@ -22,6 +23,7 @@ pub fn app() -> App {
             r.page::<WidgetsPage>()
                 .page::<WidgetPage>()
                 .page::<words::WordsPage>()
+                .page::<icons::IconsPage>()
         })
         .not_found(|| view! { <p class="missing">"No such page"</p> });
     App::new(router).theme(LIGHT)

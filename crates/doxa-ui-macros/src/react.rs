@@ -9,16 +9,21 @@ use syn::{Fields, Ident, ItemStruct, LitStr, Type};
 use crate::component::{builder, Prop};
 
 pub(crate) struct Args {
-    module: LitStr,
-    export: LitStr,
-    lazy: bool,
+    pub module: LitStr,
+    /// Required on a struct; an enum's variants name their own exports.
+    pub export: Option<LitStr>,
+    pub lazy: bool,
     /// `handle = Api`: what React's `ref` points at.
-    handle: Option<Type>,
+    pub handle: Option<Type>,
+    /// `props = IconProps`: what each variant of an enum is given.
+    pub props: Option<Type>,
+    start: proc_macro2::Span,
 }
 
 impl syn::parse::Parse for Args {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let (mut module, mut export, mut lazy, mut handle) = (None, None, false, None);
+        let mut props = None;
         let start = input.span();
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
@@ -36,11 +41,15 @@ impl syn::parse::Parse for Args {
                     input.parse::<syn::Token![=]>()?;
                     handle = Some(input.parse::<Type>()?);
                 }
+                "props" => {
+                    input.parse::<syn::Token![=]>()?;
+                    props = Some(input.parse::<Type>()?);
+                }
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
-                        "unknown option `{other}`; expected `module`, `export`, `lazy` or `handle`"
+                        "unknown option `{other}`; expected `module`, `export`, `lazy`, `handle` or `props`"
                     ),
                     ))
                 }
@@ -49,34 +58,62 @@ impl syn::parse::Parse for Args {
                 input.parse::<syn::Token![,]>()?;
             }
         }
-        let missing = |what: &str| {
-            syn::Error::new(
-                start,
-                format!("`#[react]` needs `{what} = \"…\"`, e.g. `#[react(module = \"@monaco-editor/react\", export = \"default\")]`"),
-            )
-        };
-        let module = module.ok_or_else(|| missing("module"))?;
-        let export = export.ok_or_else(|| missing("export"))?;
-        let ident_like = |e: &str| {
-            e.chars()
-                .next()
-                .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
-                && e.chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-        };
-        if !export.value().split('.').all(ident_like) {
-            return Err(syn::Error::new(
-                export.span(),
-                "`export` is a JS name, `default`, or a dotted path like `Popover.Trigger`",
-            ));
+        let module = module.ok_or_else(|| missing(start, "module"))?;
+        if let Some(export) = &export {
+            check_export(export)?;
         }
         Ok(Args {
             module,
             export,
             lazy,
             handle,
+            props,
+            start,
         })
     }
+}
+
+fn missing(at: proc_macro2::Span, what: &str) -> syn::Error {
+    syn::Error::new(
+        at,
+        format!("`#[react]` needs `{what} = \"…\"`, e.g. `#[react(module = \"@monaco-editor/react\", export = \"default\")]`"),
+    )
+}
+
+/// A JS name, `default`, or a dotted path like `Popover.Trigger`.
+pub(crate) fn check_export(export: &LitStr) -> syn::Result<()> {
+    let ident_like = |e: &str| {
+        e.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+            && e.chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    };
+    if export.value().split('.').all(ident_like) {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            export.span(),
+            "`export` is a JS name, `default`, or a dotted path like `Popover.Trigger`",
+        ))
+    }
+}
+
+/// The `package.json` files a module's npm check read, after checking it is declared.
+pub(crate) fn tracked(module: &LitStr, spec: &str) -> syn::Result<Vec<String>> {
+    if spec.starts_with("doxa-island:") {
+        return Ok(Vec::new());
+    }
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR").map(std::path::PathBuf::from);
+    let Some(declared) = dir.as_deref().and_then(crate::npm::declared) else {
+        return Ok(Vec::new());
+    };
+    crate::npm::check(spec, &declared).map_err(|e| syn::Error::new(module.span(), e))?;
+    Ok(declared
+        .package_json
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect())
 }
 
 enum Role {
@@ -159,6 +196,15 @@ fn last_segment_is(ty: &Type, name: &str) -> bool {
 }
 
 pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStream> {
+    let Some(export) = &args.export else {
+        return Err(missing(args.start, "export"));
+    };
+    if let Some(props) = &args.props {
+        return Err(syn::Error::new(
+            props.span(),
+            "`props = …` is for an enum of components; a struct's fields are its props",
+        ));
+    }
     if !item.generics.params.is_empty() {
         return Err(syn::Error::new(
             item.generics.span(),
@@ -297,17 +343,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
     let name_str = name.to_string();
     let props_ty = format_ident!("{}Props", name);
     let module = specifier(&args.module)?;
-    let mut tracked = Vec::new();
-    if !module.starts_with("doxa-island:") {
-        let dir = std::env::var_os("CARGO_MANIFEST_DIR").map(std::path::PathBuf::from);
-        if let Some(declared) = dir.as_deref().and_then(crate::npm::declared) {
-            crate::npm::check(&module, &declared)
-                .map_err(|e| syn::Error::new(args.module.span(), e))?;
-            tracked = declared.package_json;
-        }
-    }
-    let tracked = tracked.iter().map(|p| p.to_string_lossy().into_owned());
-    let export = args.export.value();
+    let tracked = tracked(&args.module, &module)?;
+    let export = export.value();
     let lazy = args.lazy;
     let spec = format!(
         "doxa-react:{}:{export}:{module}",

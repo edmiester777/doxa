@@ -971,6 +971,22 @@ extern "js" {
 
 Arguments and returns cross through serde (feature `npm`); JS types declared with `type X;` and `JsValue` pass through untouched, and a `Promise` becomes a future.
 
+### 19. Icons
+
+```rust
+use doxa::ui::{icons, prelude::*};
+
+#[icons(npm = "lucide-static", dir = "icons")]        // icons/chevron-down.svg …, read at compile time
+pub enum Icon { ChevronDown, Plus, Trash2 }
+
+#[react(module = "lucide-react")]                     // each variant an island of its export
+pub enum Lucide { ChevronDown, Plus, #[react(export = "Trash2")] Trash }
+
+view! { <button>{Icon::Plus.size(16)}"Add"</button> {Lucide::Trash.class("muted")} }
+```
+
+Only the listed variants are compiled in, and one with no file fails to compile. `doxa build` tells the macro where `node_modules` is; `dir = "./assets/icons"` reads SVGs under the crate.
+
 ## Design
 
 - **Framework-neutral cores.** Auth, policy, and audit work without axum. Axum integration is feature-gated.
