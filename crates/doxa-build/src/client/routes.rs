@@ -343,11 +343,21 @@ fn route(
     }
 
     let ret = response(op, meta, types, &at)?;
-    let ret = match &meta.error {
-        Some(e) => {
-            let e = types.component(e, &at)?;
-            quote!(::core::result::Result<#ret, #e>)
+    let error = match &meta.error {
+        Some(e) => Some(types.component(e, &at)?),
+        None => {
+            let bodies: Vec<&super::spec::Schema> = op
+                .responses
+                .iter()
+                .filter(|(code, _)| !code.starts_with('2'))
+                .filter_map(|(_, r)| r.content.get("application/json"))
+                .filter_map(|m| m.schema.as_ref())
+                .collect();
+            types.error_of(&bodies, &format!("{}Error", pascal(&id)), &at)?
         }
+    };
+    let ret = match error {
+        Some(e) => quote!(::core::result::Result<#ret, #e>),
         None => ret,
     };
 

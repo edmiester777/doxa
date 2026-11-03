@@ -287,6 +287,71 @@ impl<'a> Types<'a> {
         self.define(&name, schema, at)
     }
 
+    /// The type of `error` in the bodies doxa answers a failure with (`{ message, status, code,
+    /// error }`): the smallest component enum with every variant they name, else its own `name`.
+    pub fn error_of(
+        &mut self,
+        bodies: &[&Schema],
+        name: &str,
+        at: &At<'_>,
+    ) -> Result<Option<TokenStream>, GenerateError> {
+        let mut branches: BTreeMap<String, Schema> = BTreeMap::new();
+        for body in bodies {
+            let body = self.resolve(body);
+            let body = match body.all_of.len() {
+                0 | 1 => body,
+                _ => self.merge(&body, at)?.object,
+            };
+            let props = &body.properties;
+            if !(props.contains_key("code") && props.contains_key("message")) {
+                continue;
+            }
+            let Some(error) = props.get("error") else {
+                continue;
+            };
+            for b in &self.resolve(error).one_of {
+                if let Some(key) = self.single_key(b) {
+                    branches.entry(key).or_insert_with(|| self.resolve(b));
+                }
+            }
+        }
+        if branches.is_empty() {
+            return Ok(None);
+        }
+        let keys: BTreeSet<String> = branches.keys().cloned().collect();
+        let component = self
+            .spec
+            .components
+            .schemas
+            .iter()
+            .filter_map(|(n, c)| {
+                let ks = c
+                    .one_of
+                    .iter()
+                    .map(|b| self.single_key(b))
+                    .collect::<Option<BTreeSet<String>>>()?;
+                ks.is_superset(&keys).then(|| (ks.len(), n.clone()))
+            })
+            .min();
+        if let Some((_, n)) = component {
+            return self.component(&n, at).map(Some);
+        }
+        let schema = Schema {
+            one_of: branches.into_values().collect(),
+            ..Schema::default()
+        };
+        Ok(Some(self.define(name, &schema, at)))
+    }
+
+    /// The one key of a branch serde writes as `{ "Variant": … }`.
+    fn single_key(&self, b: &Schema) -> Option<String> {
+        let b = self.resolve(b);
+        match b.properties.keys().collect::<Vec<_>>()[..] {
+            [k] if b.all_of.is_empty() && b.one_of.is_empty() => Some(k.clone()),
+            _ => None,
+        }
+    }
+
     /// A struct of query or header parameters, named `name`.
     pub fn query(
         &mut self,

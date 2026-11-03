@@ -489,6 +489,47 @@ mod tests {
     }
 
     #[test]
+    fn a_route_without_x_doxa_is_typed_by_the_errors_its_responses_document() {
+        let envelope = |code: &str, variant: &str| {
+            serde_json::json!({ "description": code, "content": { "application/json": { "schema": {
+                "type": "object", "required": ["message", "status", "code", "error"], "properties": {
+                    "code": { "type": "string", "enum": [code] },
+                    "message": { "type": "string" },
+                    "status": { "type": "integer", "enum": [400] },
+                    "error": { "oneOf": [{ "type": "object", "required": [variant], "properties": { variant: { "type": "string" } } }] }
+                } } } } })
+        };
+        let variant = |v: &str| serde_json::json!({ "type": "object", "required": [v], "properties": { v: { "type": "string" } } });
+        let mut d = doc(
+            serde_json::json!({}),
+            serde_json::json!({
+                "OrdersError": { "oneOf": [variant("NotFound"), variant("Forbidden"), variant("Conflict")] },
+                "Everything": { "oneOf": [variant("NotFound"), variant("Forbidden"), variant("Conflict"), variant("Gone")] }
+            }),
+        );
+        let op = &mut d["paths"]["/orders"]["post"];
+        op.as_object_mut().unwrap().remove("x-doxa");
+        op["responses"]["404"] = envelope("not_found", "NotFound");
+        op["responses"]["403"] = envelope("forbidden", "Forbidden");
+        let out = client(d.clone()).unwrap();
+        assert!(
+            out.contains("-> :: core :: result :: Result < StatusCode , OrdersError >"),
+            "{out}"
+        );
+
+        d["components"]["schemas"] = serde_json::json!({});
+        let out = client(d).unwrap();
+        assert!(
+            out.contains("-> :: core :: result :: Result < StatusCode , CreateOrderError >"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pub enum CreateOrderError { # [serde (rename = \"Forbidden\")] Forbidden (:: std :: string :: String) , # [serde (rename = \"NotFound\")] NotFound"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn a_variant_named_self_is_no_keyword() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/Target" }),
