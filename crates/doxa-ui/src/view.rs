@@ -46,6 +46,8 @@ pub struct Element {
     pub(crate) ns: Option<&'static str>,
     pub(crate) key: Option<Key>,
     pub(crate) attrs: Vec<(&'static str, Option<String>)>,
+    /// `class:name={on}`, kept apart from `class` so a toggle patches only its own class.
+    pub(crate) classes: Vec<(&'static str, bool)>,
     pub(crate) props: Vec<(&'static str, Prop)>,
     pub(crate) events: Vec<(&'static str, Listen, Handler)>,
     pub(crate) children: Vec<Node>,
@@ -66,6 +68,7 @@ pub fn el(tag: &'static str) -> Element {
         ns,
         key: None,
         attrs: Vec::new(),
+        classes: Vec::new(),
         props: Vec::new(),
         events: Vec::new(),
         children: Vec::new(),
@@ -79,6 +82,41 @@ impl Element {
     pub fn attr(mut self, name: &'static str, value: impl IntoAttr) -> Self {
         self.attrs.push((name, value.into_attr()));
         self
+    }
+
+    /// Add `class` when `on`, as `class:name={on}`.
+    pub fn class_toggle(mut self, class: &'static str, on: bool) -> Self {
+        self.classes.retain(|(c, _)| *c != class);
+        self.classes.push((class, on));
+        self
+    }
+
+    /// Its attributes with the toggled-on classes folded into `class`.
+    #[cfg(feature = "react")]
+    pub(crate) fn flat_attrs(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = self
+            .attrs
+            .iter()
+            .filter_map(|(k, v)| Some((*k, v.clone()?)))
+            .collect();
+        let on: Vec<&str> = self
+            .classes
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(c, _)| *c)
+            .collect();
+        if !on.is_empty() {
+            match out.iter_mut().find(|(k, _)| *k == "class") {
+                Some((_, v)) => {
+                    for c in on {
+                        v.push(' ');
+                        v.push_str(c);
+                    }
+                }
+                None => out.push(("class", on.join(" "))),
+            }
+        }
+        out
     }
 
     /// Set a URL attribute (`href`, `src`, `action`); only a [`SafeUrl`] is accepted.

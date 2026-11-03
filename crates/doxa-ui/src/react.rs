@@ -1043,11 +1043,7 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
         shells.push(Shell {
             prop,
             tag: e.tag,
-            attrs: e
-                .attrs
-                .iter()
-                .filter_map(|(k, v)| Some((*k, v.clone()?)))
-                .collect(),
+            attrs: e.flat_attrs(),
             events: e
                 .events
                 .iter()

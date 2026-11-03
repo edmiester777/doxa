@@ -950,7 +950,7 @@ fn start() {
 }
 ```
 
-A component can be generic, `fn Table<T: Clone + 'static>(rows: Vec<T>, …)`, and `<Table rows={runs}/>` infers `T`. An `#[attrs] rest: Attrs` prop collects every attribute, `on:` handler and `use:` directive the tag passes that isn't a prop, and `<button {..rest}>` spreads them; `rest.class()` reads the class to merge, and the element's own attributes win. The same pages render natively into an in-memory document for tests. [`examples/widgets`](examples/widgets) has the whole app: `api` (shared routes), `client` (their client half), `server`, and `web` (the pages, tested against the real router).
+A component can be generic, `fn Table<T: Clone + 'static>(rows: Vec<T>, …)`, and `<Table rows={runs}/>` infers `T`. An `#[attrs] rest: Attrs` prop collects every attribute, `on:` handler and `use:` directive the tag passes that isn't a prop, and `<button {..rest}>` spreads them; `rest.class()` reads the class to merge, and the element's own attributes win. `class:active={on}` toggles one class without touching the others, and `classes!["btn", (pending, "busy"), rest.class()]` joins the parts that are there. The same pages render natively into an in-memory document for tests. [`examples/widgets`](examples/widgets) has the whole app: `api` (shared routes), `client` (their client half), `server`, and `web` (the pages, tested against the real router).
 
 ### 18. Plain JS modules as Rust
 

@@ -41,6 +41,8 @@ pub trait Dom {
     fn set_attr(&self, node: NodeId, name: &str, value: &str);
     /// Remove an attribute.
     fn remove_attr(&self, node: NodeId, name: &str);
+    /// Add or remove one class, leaving the others.
+    fn toggle_class(&self, node: NodeId, class: &str, on: bool);
     /// Set one inline CSS property, or remove it with `None`.
     fn set_style(&self, node: NodeId, name: &str, value: Option<&str>);
     /// Set a DOM property.

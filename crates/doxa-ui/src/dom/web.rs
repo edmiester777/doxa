@@ -145,6 +145,12 @@ impl Dom for WebDom {
         }
     }
 
+    fn toggle_class(&self, node: NodeId, class: &str, on: bool) {
+        if let Some(el) = self.element(node) {
+            let _ = el.class_list().toggle_with_force(class, on);
+        }
+    }
+
     fn set_style(&self, node: NodeId, name: &str, value: Option<&str>) {
         let Some(el) = self
             .node(node)

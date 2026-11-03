@@ -137,6 +137,11 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                 let args = v.into_iter();
                 quote_spanned! { span => #out.directive(#name(#(#args)*)) }
             }
+            (n, v) if n.starts_with("class:") => {
+                let class = class_name(n, span)?;
+                let v = v.unwrap_or_else(|| quote!(true));
+                quote_spanned! { span => #out.class_toggle(#class, #v) }
+            }
             (n, Some(v)) if n.starts_with("prop:") => {
                 let prop = &n[5..];
                 quote_spanned! { span => #out.prop(#prop, #v) }
@@ -223,6 +228,11 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                 let args = v.into_iter();
                 out = quote_spanned! { span => #out.__directive(#name(#(#args)*)) };
             }
+            (n, v) if n.starts_with("class:") => {
+                let class = class_name(n, span)?;
+                let v = v.unwrap_or_else(|| quote!(true));
+                out = quote_spanned! { span => #out.__class(#class, #v) };
+            }
             (n, v) if n.starts_with("aria-") || n.starts_with("data-") => {
                 let v = v.unwrap_or_else(|| quote!(true));
                 out = quote_spanned! { span => #out.__attr(#n, #v) };
@@ -295,6 +305,18 @@ fn spread(b: &NodeBlock) -> syn::Result<TokenStream> {
         }
         _ => Err(refuse()),
     }
+}
+
+/// `class:is-active` as the class it toggles.
+fn class_name(name: &str, span: proc_macro2::Span) -> syn::Result<String> {
+    let class = &name["class:".len()..];
+    if class.is_empty() || class.contains(char::is_whitespace) {
+        return Err(syn::Error::new(
+            span,
+            "`class:` names one class: `class:active={is_active}`",
+        ));
+    }
+    Ok(class.to_owned())
 }
 
 /// `on:scroll.passive` as its event name and, with modifiers, its `Listen`.

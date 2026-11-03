@@ -11,6 +11,7 @@ use crate::view::{async_handler, Element, Handler, IntoAttr};
 #[derive(Clone, Default)]
 pub struct Attrs {
     attrs: Vec<(&'static str, Option<String>)>,
+    classes: Vec<(&'static str, bool)>,
     events: Vec<(&'static str, Listen, Handler)>,
     directives: Vec<Rc<dyn Proto>>,
 }
@@ -31,7 +32,10 @@ impl Attrs {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.attrs.is_empty() && self.events.is_empty() && self.directives.is_empty()
+        self.attrs.is_empty()
+            && self.classes.is_empty()
+            && self.events.is_empty()
+            && self.directives.is_empty()
     }
 
     fn set(&mut self, name: &'static str, value: impl IntoAttr) {
@@ -44,6 +48,7 @@ impl Attrs {
             self.attrs.retain(|(m, _)| *m != n);
             self.attrs.push((n, v));
         }
+        self.classes.extend(other.classes);
         self.events.extend(other.events);
         self.directives.extend(other.directives);
     }
@@ -56,6 +61,9 @@ impl Element {
             if !self.attrs.iter().any(|(n, _)| *n == name) {
                 self.attrs.push((name, value));
             }
+        }
+        for (class, on) in rest.classes {
+            self = self.class_toggle(class, on);
         }
         self.events.extend(rest.events);
         self.directives.extend(rest.directives);
@@ -72,6 +80,11 @@ macro_rules! html_attrs {
 
             fn __attr(mut self, name: &'static str, value: impl IntoAttr) -> Self {
                 self.__rest().set(name, value);
+                self
+            }
+
+            fn __class(mut self, class: &'static str, on: bool) -> Self {
+                self.__rest().classes.push((class, on));
                 self
             }
 

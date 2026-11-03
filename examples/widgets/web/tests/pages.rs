@@ -152,6 +152,7 @@ async fn a_tags_extra_attributes_handlers_and_directives_reach_the_element() {
         view! {
             <Button
                 class="ghost"
+                class:wide={true}
                 type="submit"
                 aria-label="Close"
                 data-row="7"
@@ -169,7 +170,7 @@ async fn a_tags_extra_attributes_handlers_and_directives_reach_the_element() {
     settle().await;
 
     let button = dom.find_tag("button").unwrap();
-    assert_eq!(dom.attr(button, "class").as_deref(), Some("btn ghost"));
+    assert_eq!(dom.attr(button, "class").as_deref(), Some("btn ghost wide"));
     assert_eq!(
         dom.attr(button, "type").as_deref(),
         Some("button"),
@@ -182,6 +183,42 @@ async fn a_tags_extra_attributes_handlers_and_directives_reach_the_element() {
     dom.click(button);
     settle().await;
     assert_eq!(dom.text(dom.find("class", "clicks").unwrap()), "1");
+}
+
+#[tokio::test]
+async fn a_class_toggle_patches_only_its_own_class() {
+    use doxa::ui::dom::Dom;
+    use doxa::ui::prelude::{state, view, App};
+
+    serve("viewer");
+    let dom = MemDom::new();
+    App::new(|| {
+        let on = state(false);
+        view! {
+            <a
+                class="tab"
+                class:active={on.get()}
+                class:idle={!on.get()}
+                on:click={move |_| on.toggle()}
+            >
+                "Tab"
+            </a>
+        }
+    })
+    .mount_on(Rc::new(dom.clone()), dom.body())
+    .keep();
+    settle().await;
+
+    let tab = dom.find_tag("a").unwrap();
+    assert_eq!(dom.attr(tab, "class").as_deref(), Some("tab idle"));
+    dom.toggle_class(tab, "focused", true);
+    dom.click(tab);
+    settle().await;
+    assert_eq!(
+        dom.attr(tab, "class").as_deref(),
+        Some("tab focused active"),
+        "the class set outside the render stays"
+    );
 }
 
 /// Stands in for React: records each island's props and keeps its event handlers.

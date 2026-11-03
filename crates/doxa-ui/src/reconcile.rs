@@ -38,6 +38,7 @@ pub(crate) struct MountedElement {
     tag: &'static str,
     key: Option<Key>,
     attrs: Vec<(&'static str, Option<String>)>,
+    classes: Vec<(&'static str, bool)>,
     props: Vec<(&'static str, Prop)>,
     events: Vec<(&'static str, Listen, Rc<RefCell<Handler>>)>,
     inner_html: Option<String>,
@@ -360,6 +361,11 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
             dom.set_attr(node, k, v);
         }
     }
+    for (c, on) in &e.classes {
+        if *on {
+            dom.toggle_class(node, c, true);
+        }
+    }
     for (k, v) in &e.props {
         dom.set_prop(node, k, v);
     }
@@ -395,6 +401,7 @@ fn mount_element(dom: &dyn Dom, owner: &Rc<Instance>, e: &Element) -> MountedEle
         tag: e.tag,
         key: e.key,
         attrs: e.attrs.clone(),
+        classes: e.classes.clone(),
         props: e.props.clone(),
         events,
         inner_html: e.inner_html.clone(),
@@ -476,9 +483,11 @@ fn patch(dom: &dyn Dom, owner: &Rc<Instance>, old: &mut Mounted, new: Node) {
 
 fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e: &Element) {
     let node = m.node;
+    let mut class_rewritten = false;
     for (k, v) in &e.attrs {
         let old = m.attrs.iter().find(|(ok, _)| ok == k).map(|(_, v)| v);
         if old != Some(v) {
+            class_rewritten |= *k == "class";
             match v {
                 Some(v) => dom.set_attr(node, k, v),
                 None => dom.remove_attr(node, k),
@@ -487,10 +496,29 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
     }
     for (k, _) in &m.attrs {
         if !e.attrs.iter().any(|(nk, _)| nk == k) {
+            class_rewritten |= *k == "class";
             dom.remove_attr(node, k);
         }
     }
     m.attrs = e.attrs.clone();
+
+    // Rewriting `class` drops every toggle, so the ones on go back.
+    for (c, on) in &e.classes {
+        let old = m.classes.iter().find(|(oc, _)| oc == c).map(|(_, on)| *on);
+        if class_rewritten {
+            if *on {
+                dom.toggle_class(node, c, true);
+            }
+        } else if old != Some(*on) {
+            dom.toggle_class(node, c, *on);
+        }
+    }
+    for (c, on) in &m.classes {
+        if *on && !class_rewritten && !e.classes.iter().any(|(nc, _)| nc == c) {
+            dom.toggle_class(node, c, false);
+        }
+    }
+    m.classes = e.classes.clone();
 
     for (k, v) in &e.props {
         let old = m.props.iter().find(|(ok, _)| ok == k).map(|(_, v)| v);

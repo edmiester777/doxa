@@ -458,6 +458,19 @@ impl Dom for MemDom {
         }
     }
 
+    fn toggle_class(&self, node: NodeId, class: &str, on: bool) {
+        let old = self.attr(node, "class").unwrap_or_default();
+        let mut list: Vec<&str> = old.split_whitespace().filter(|c| *c != class).collect();
+        if on {
+            list.push(class);
+        }
+        if list.is_empty() {
+            self.remove_attr(node, "class");
+        } else {
+            self.set_attr(node, "class", &list.join(" "));
+        }
+    }
+
     fn set_style(&self, node: NodeId, name: &str, value: Option<&str>) {
         let old = self.attr(node, "style").unwrap_or_default();
         let mut decls: Vec<(String, String)> = old

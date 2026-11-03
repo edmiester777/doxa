@@ -8,6 +8,7 @@ mod attrs;
 mod boundary;
 mod browser;
 mod can;
+mod class;
 mod component;
 mod directive;
 pub mod dom;
@@ -46,6 +47,7 @@ pub use browser::{
     BrowserError, Stored,
 };
 pub use can::{Can, CanBuilder, CanProps};
+pub use class::ClassPart;
 pub use component::{Component, ComponentProps, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
 pub use dom::{Event, Listen, NodeRef, Phase, Rect};
@@ -129,12 +131,12 @@ pub mod prelude {
     #[cfg(feature = "react")]
     pub use crate::react;
     pub use crate::{
-        action, component, context, debounced, document_event, effect, interval, media_query, memo,
-        navigate, navigate_with, navigation, node_ref, page, provide, redirect, set_query,
-        set_theme, sleep, state, stored, theme, title, try_context, view, window_event, Action,
-        App, Attrs, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event, IconExt,
-        IntoView, Keep, Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route, Router,
-        SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
+        action, classes, component, context, debounced, document_event, effect, interval,
+        media_query, memo, navigate, navigate_with, navigation, node_ref, page, provide, redirect,
+        set_query, set_theme, sleep, state, stored, theme, title, try_context, view, window_event,
+        Action, App, Attrs, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event,
+        IconExt, IntoView, Keep, Link, Nav, NodeRef, Outlet, Page, Plugin, Portal, Result, Route,
+        Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }
