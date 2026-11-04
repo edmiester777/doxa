@@ -22,6 +22,13 @@ pub trait Declared {
     type Error;
     /// The method, as one of [`verb`]'s markers.
     type Verb;
+    /// The entities it guards with `Grant<Many<E>>`.
+    const MANY: &'static [&'static str] = &[];
+}
+
+/// Whether `entity` is among `declared`.
+pub const fn declares(declared: &[&str], entity: &str) -> bool {
+    names_covered(&[entity], &[declared])
 }
 
 /// The HTTP methods as types, so a server can resolve a guard's action from a declaration.
@@ -45,6 +52,12 @@ pub enum NoError {}
 /// In a declaration, the guard that authorizes a call to this one `E`: the client passes
 /// `E`'s key, and the server's guard is an asset whose `entity` is `E`.
 pub struct Grant<E: ?Sized>(PhantomData<fn() -> E>);
+
+/// In a declaration, `Grant<Many<E>>`: the call lists `E`s the server's guard scopes.
+pub struct Many<E: ?Sized>(PhantomData<fn() -> E>);
+
+/// In a declaration, `Grant<Cap<M>>`: the call needs the capability `M` names.
+pub struct Cap<M: ?Sized>(PhantomData<fn() -> M>);
 
 /// The declared entity a server asset guards, from `#[doxa::asset(entity = …)]`.
 #[diagnostic::on_unimplemented(

@@ -225,3 +225,7 @@ required-features = ["full"]
 [[test]]
 name = "dry_run"
 required-features = ["full"]
+
+[[test]]
+name = "touches"
+required-features = ["client"]

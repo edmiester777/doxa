@@ -702,7 +702,7 @@ pub mod api {
         };
         #[cfg(target_arch = "wasm32")]
         pub use doxa_macros::{ClientIntoParams as IntoParams, ClientToSchema as ToSchema};
-        pub use doxa_wire::contract::Grant;
+        pub use doxa_wire::contract::{Cap, Grant, Many};
         pub use serde::{Deserialize, Serialize};
     }
 }

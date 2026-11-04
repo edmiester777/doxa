@@ -1005,6 +1005,8 @@ let o: Order = orders_api::get_order(OrderKey { id: 7 }).await?;
 
 `#[implements]` mounts the handler at the declared method and path, and fails to compile when it takes or answers other than the declaration does; server-only extractors go anywhere. `Grant<Order>` is held to an asset whose `entity =` names `Order`, with the same key. The declaration's docs, tags and operation id become the operation's.
 
+A route's entities are what the client caches its answer under and what its other calls invalidate: the entity its guard names (`Grant<Order>`, `Grant<Many<Order>>`), the entity it answers (`Order`, `Vec<Order>` or `Option<Order>`), and `touches = [Customer]` for any other it changes. So `place_order` answering `Json<Order>` refreshes `list_orders(_: Grant<Many<Order>>, …)`. A handler guarding with `Granted<Many<OrderById>>` where the declaration doesn't state `Grant<Many<Order>>` doesn't compile, since its clients couldn't dry-run or refresh it.
+
 A handler may fail with its own error when it converts into the declared one, and answers the declared one. The conversion goes beside the error, compiled for the server only, with the server's dependency under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`:
 
 ```rust

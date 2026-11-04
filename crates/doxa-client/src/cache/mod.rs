@@ -26,6 +26,27 @@ pub trait Observer {
 
 thread_local! {
     static OBSERVER: RefCell<Option<Rc<dyn Observer>>> = const { RefCell::new(None) };
+    static ANSWERED: RefCell<HashMap<usize, &'static str>> = RefCell::new(HashMap::new());
+}
+
+/// Record that `route` answers `entity`, which a stub finds only at run time.
+pub(crate) fn answers(route: &'static RouteSpec, entity: &'static str) {
+    ANSWERED.with(|a| {
+        a.borrow_mut()
+            .insert(route as *const RouteSpec as usize, entity)
+    });
+}
+
+/// Every entity `route` is about: its guards, `touches`, and the entity it answers.
+pub(crate) fn about(route: &'static RouteSpec) -> Vec<&'static str> {
+    let mut out = route.entities.to_vec();
+    let answered = ANSWERED.with(|a| {
+        a.borrow()
+            .get(&(route as *const RouteSpec as usize))
+            .copied()
+    });
+    out.extend(answered.filter(|e| !out.contains(e)));
+    out
 }
 
 /// Make `observer` the one subsequent reads are recorded against; returns the previous one.
@@ -48,7 +69,7 @@ where
 {
     let key = doxa_wire::key_value(&key.into_arg());
     service(W::PACKAGE).cache.invalidate_where(|e| {
-        e.route.entities.contains(&W::ENTITY_TYPE) && (e.key.is_none() || e.key == key)
+        about(e.route).contains(&W::ENTITY_TYPE) && (e.key.is_none() || e.key == key)
     });
 }
 
@@ -407,7 +428,7 @@ impl Cache {
 
     /// Mark stale every query about any of `entities`, and tell their readers.
     pub fn invalidate(&self, entities: &[&str]) {
-        self.invalidate_where(|e| e.route.entities.iter().any(|t| entities.contains(t)));
+        self.invalidate_where(|e| about(e.route).iter().any(|t| entities.contains(t)));
     }
 
     fn invalidate_where(&self, hit: impl Fn(&Entry) -> bool) {

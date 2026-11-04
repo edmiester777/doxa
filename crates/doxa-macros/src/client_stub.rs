@@ -79,6 +79,8 @@ pub struct Route<'a> {
     pub method: &'a str,
     pub path: &'a LitStr,
     pub operation_id: Option<&'a LitStr>,
+    /// Entities a call changes beyond its guards and answer.
+    pub touches: &'a [syn::Path],
 }
 
 /// Server-only extractors a handler body could authorize with, where no guard sees it.
@@ -132,6 +134,7 @@ fn dry_run(item_fn: &ItemFn, args: &[Arg]) -> bool {
 pub fn server_meta(
     method: &str,
     declared: Option<&TokenStream>,
+    touches: &[syn::Path],
     item_fn: &ItemFn,
     path: &syn::Ident,
 ) -> TokenStream {
@@ -142,10 +145,16 @@ pub fn server_meta(
             FnArg::Receiver(_) => None,
         })
     };
-    let entities: Vec<TokenStream> = typed()
+    let mut entities: Vec<TokenStream> = typed()
         .filter_map(grant::guarded_asset)
         .map(|asset| quote!((&::doxa::__private::EntityOf::<#asset>::new()).entity()))
+        .chain(
+            touches
+                .iter()
+                .map(|t| quote!(Some(<#t as ::doxa::wire::Keyed>::ENTITY_TYPE))),
+        )
         .collect();
+    entities.push(answered(&item_fn.sig.output));
     let key = match typed().find_map(grant::instance_asset) {
         Some(asset) => quote! {
             ::doxa::__private::serde_json::json!({
@@ -211,6 +220,10 @@ pub fn server_meta(
         }},
         None => quote!(::doxa::__private::serde_json::Value::Null),
     };
+    let declared_entities = match declared {
+        Some(r) => quote!(<#r as ::doxa::wire::contract::Declared>::SPEC.entities.iter().copied()),
+        None => quote!(::core::iter::empty()),
+    };
     quote! {
         impl ::doxa::__private::ClientMeta for #path {
             fn meta() -> ::doxa::__private::serde_json::Value {
@@ -222,7 +235,12 @@ pub fn server_meta(
                 #[allow(unused_imports)]
                 use ::doxa::__private::{EntityKnown as _, EntityUnknown as _};
                 let found: &[::core::option::Option<&'static str>] = &[#(#entities),*];
-                let entities: ::std::vec::Vec<&str> = found.iter().flatten().copied().collect();
+                let mut entities: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
+                for e in found.iter().flatten().copied().chain(#declared_entities) {
+                    if !entities.contains(&e) {
+                        entities.push(e);
+                    }
+                }
                 ::doxa::__private::serde_json::json!({
                     "entities": entities,
                     "key": key,
@@ -235,6 +253,42 @@ pub fn server_meta(
                 })
             }
         }
+    }
+}
+
+/// `X` in `Granted<Form<X>>`, for the guard form `form`.
+fn guard_of<'a>(ty: &'a Type, form: &str) -> Option<&'a Type> {
+    if last_ident(ty).as_deref() != Some("Granted") {
+        return None;
+    }
+    let subject = first_type_arg(ty)?;
+    (last_ident(subject).as_deref() == Some(form))
+        .then(|| first_type_arg(subject))
+        .flatten()
+}
+
+fn typed(item_fn: &ItemFn) -> impl Iterator<Item = &Type> {
+    item_fn.sig.inputs.iter().filter_map(|arg| match arg {
+        FnArg::Typed(pt) => Some(&*pt.ty),
+        FnArg::Receiver(_) => None,
+    })
+}
+
+/// The entity a route answering `output` is about, found by autoref where it's called.
+fn answered(output: &ReturnType) -> TokenStream {
+    let body = match output {
+        ReturnType::Type(_, ty) => find_named(ty, "Json").and_then(first_type_arg),
+        ReturnType::Default => None,
+    };
+    match body {
+        Some(t) => quote! {{
+            #[allow(unused_imports)]
+            use ::doxa::wire::{
+                AnswersList as _, AnswersMaybe as _, AnswersNothing as _, AnswersOne as _,
+            };
+            (&&&::doxa::wire::AnswerOf::<#t>::new()).answered()
+        }},
+        None => quote!(::core::option::Option::None),
     }
 }
 
@@ -333,6 +387,7 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Re
         .collect();
     let docs = docs.join("\n");
     let verb = format_ident!("{}", capitalize(route.method));
+    let many: Vec<&Type> = typed(item_fn).filter_map(|t| guard_of(t, "Many")).collect();
     Ok(quote! {
         /// This route, as the server that implements it is held to it.
         pub struct Route;
@@ -341,6 +396,7 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Re
             const SPEC: &'static ::doxa::wire::RouteSpec = &ROUTE;
             const DOCS: &'static str = #docs;
             const TAGS: &'static [&'static str] = &[#(#tags),*];
+            const MANY: &'static [&'static str] = &[#(<#many as ::doxa::wire::Keyed>::ENTITY_TYPE),*];
             type Args = (#(#args,)*);
             type Ok = #ok;
             type Error = #error;
@@ -396,6 +452,25 @@ pub fn implemented(item_fn: &ItemFn, r: &TokenStream) -> TokenStream {
     let error = error.map(|err| {
         quote!(::doxa::client::contract::fails::<#err, <#r as ::doxa::wire::contract::Declared>::Error>();)
     });
+    let declaration = r.to_string().replace(' ', "");
+    let declaration = declaration.trim_end_matches("::Route");
+    let drift = typed(item_fn).filter_map(|t| guard_of(t, "Many")).map(|asset| {
+        let message = format!(
+            "`{}` guards a list of `{}`, which `{declaration}` doesn't declare: add \
+             `_: Grant<Many<…>>` to it so clients can dry-run and refresh it",
+            item_fn.sig.ident,
+            type_text(asset),
+        );
+        quote! {
+            const _: () = ::core::assert!(
+                ::doxa::wire::contract::declares(
+                    <#r as ::doxa::wire::contract::Declared>::MANY,
+                    <<#asset as ::doxa::wire::contract::OfEntity>::Entity as ::doxa::wire::Keyed>::ENTITY_TYPE,
+                ),
+                #message,
+            );
+        }
+    });
     quote! {
         const _: fn() = || {
             ::doxa::client::contract::takes::<
@@ -405,6 +480,7 @@ pub fn implemented(item_fn: &ItemFn, r: &TokenStream) -> TokenStream {
             #ok
             #error
         };
+        #(#drift)*
     }
 }
 
@@ -425,7 +501,14 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
             FnArg::Receiver(_) => None,
         })
         .map(|asset| quote!(<#asset as ::doxa::wire::Keyed>::ENTITY_TYPE))
+        .chain(
+            route
+                .touches
+                .iter()
+                .map(|t| quote!(<#t as ::doxa::wire::Keyed>::ENTITY_TYPE)),
+        )
         .collect();
+    let answered = answered(&item_fn.sig.output);
 
     let keys: Vec<TokenStream> = item_fn
         .sig
@@ -604,6 +687,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
             #[allow(unused_imports)]
             use ::doxa::client::__private::{IsEntity as _, NotEntity as _};
             ::doxa::client::Call::new(&#name::ROUTE)
+                .answers(#answered)
                 .entity((&::doxa::client::__private::EntityOf::<#ret>::new()).entity())
                 #(#pushes)*
         }
@@ -839,6 +923,7 @@ mod tests {
                 method,
                 path: &path,
                 operation_id: None,
+                touches: &[],
             },
             &item,
             TokenStream::new(),
@@ -1062,6 +1147,7 @@ mod tests {
             method: "get",
             path: &path,
             operation_id: None,
+            touches: &[],
         };
         let err = expand(&route, &item, TokenStream::new())
             .unwrap_err()

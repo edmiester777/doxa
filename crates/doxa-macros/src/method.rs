@@ -29,16 +29,19 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
     let path_lit = parsed_args.path;
     let (mount, extra) = take_mount_arg(parsed_args.extra)?;
     let (client, extra) = take_client_arg(extra)?;
+    let (touches, extra) = take_touches(extra)?;
     let mut item_fn = match routed(item)? {
         Routed::Handler(f) => f,
-        Routed::Declaration(f) => return declaration(method, &path_lit, &extra, client, &f),
+        Routed::Declaration(f) => {
+            return declaration(method, &path_lit, &extra, client, &touches, &f)
+        }
     };
 
     if doxa_macro_support::is_client() {
-        return client_half(method, &path_lit, &extra, client, &item_fn);
+        return client_half(method, &path_lit, &extra, client, &touches, &item_fn);
     }
     strip_server_params(&mut item_fn);
-    let meta = client_meta(method, client, &item_fn);
+    let meta = client_meta(method, client, &touches, &item_fn);
 
     // Rewrite `Granted<T>` arguments before inference runs, so the
     // signature the doc probes see is the one that actually compiles.
@@ -63,21 +66,29 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let parsed = parse_operation_args(args)?;
     let (mount, extra) = take_mount_arg(parsed.extra)?;
     let (client, extra) = take_client_arg(extra)?;
+    let (touches, extra) = take_touches(extra)?;
     let parsed = OperationArgs { extra, ..parsed };
     let mut item_fn = match routed(item)? {
         Routed::Handler(f) => f,
         Routed::Declaration(f) => {
             let method = parsed.method.to_string();
-            return declaration(&method, &parsed.path, &parsed.extra, client, &f);
+            return declaration(&method, &parsed.path, &parsed.extra, client, &touches, &f);
         }
     };
 
     if doxa_macro_support::is_client() {
         let method = parsed.method.to_string();
-        return client_half(&method, &parsed.path, &parsed.extra, client, &item_fn);
+        return client_half(
+            &method,
+            &parsed.path,
+            &parsed.extra,
+            client,
+            &touches,
+            &item_fn,
+        );
     }
     strip_server_params(&mut item_fn);
-    let meta = client_meta(&parsed.method.to_string(), client, &item_fn);
+    let meta = client_meta(&parsed.method.to_string(), client, &touches, &item_fn);
 
     let path_names = sig::parse_path_names(&parsed.path.value());
     let sites = grant::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
@@ -147,6 +158,7 @@ fn declaration(
     path: &LitStr,
     extra: &[Meta],
     client: bool,
+    touches: &[syn::Path],
     item_fn: &ItemFn,
 ) -> Result<TokenStream> {
     if !client {
@@ -184,8 +196,8 @@ fn declaration(
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "a declaration takes `operation_id`, `tag` and `tags(…)`; the rest of the \
-                     operation is documented by the server that implements it",
+                    "a declaration takes `operation_id`, `tag`, `tags(…)` and `touches = […]`; \
+                     the rest of the operation is documented by the server that implements it",
                 ))
             }
         }
@@ -195,6 +207,7 @@ fn declaration(
         method,
         path,
         operation_id,
+        touches,
     };
     let declared = client_stub::declared(&route, &item_fn, &tags)?;
     client_stub::expand(&route, &item_fn, declared)
@@ -219,7 +232,7 @@ pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenSt
     );
     let checks = client_stub::implemented(&item_fn, &r);
     fail_as_declared(&mut item_fn, &r);
-    let meta = client_stub::server_meta("", Some(&r), &item_fn, &path);
+    let meta = client_stub::server_meta("", Some(&r), &[], &item_fn, &path);
     let sites = grant::rewrite_for(&mut item_fn, &grant::RouteIs::Declared(&r))?;
     let operation = declared_operation(&item_fn, &r, &path);
     let mount = mount.then(|| app::mount(&item_fn, Some(&r)));
@@ -399,13 +412,13 @@ fn operation_id(m: &Meta) -> Option<&LitStr> {
 }
 
 /// The `x-doxa` stamp for this route's operation; `{"client": false}` when it has no client half.
-fn client_meta(method: &str, client: bool, item_fn: &ItemFn) -> TokenStream {
+fn client_meta(method: &str, client: bool, touches: &[syn::Path], item_fn: &ItemFn) -> TokenStream {
     let path = syn::Ident::new(
         &format!("__path_{}", item_fn.sig.ident),
         item_fn.sig.ident.span(),
     );
     if client {
-        return client_stub::server_meta(method, None, item_fn, &path);
+        return client_stub::server_meta(method, None, touches, item_fn, &path);
     }
     quote! {
         impl ::doxa::__private::ClientMeta for #path {
@@ -438,7 +451,10 @@ pub fn expand_as_client(input: TokenStream) -> Result<TokenStream> {
         let method = attr.path().segments.last().unwrap().ident.to_string();
         let args = parse_method_args(attr.meta.require_list()?.tokens.clone())?;
         let (client, extra) = take_client_arg(args.extra)?;
-        out.extend(client_half(&method, &args.path, &extra, client, &item_fn)?);
+        let (touches, extra) = take_touches(extra)?;
+        out.extend(client_half(
+            &method, &args.path, &extra, client, &touches, &item_fn,
+        )?);
     }
     Ok(out)
 }
@@ -467,6 +483,7 @@ fn client_half(
     path: &LitStr,
     extra: &[Meta],
     client: bool,
+    touches: &[syn::Path],
     item_fn: &ItemFn,
 ) -> Result<TokenStream> {
     if !client {
@@ -478,10 +495,46 @@ fn client_half(
             method,
             path,
             operation_id,
+            touches,
         },
         item_fn,
         TokenStream::new(),
     )
+}
+
+/// Pull `touches = [Entity, …]` out of the arguments: entities a call changes beyond its guards
+/// and answer.
+fn take_touches(extra: Vec<Meta>) -> Result<(Vec<syn::Path>, Vec<Meta>)> {
+    let mut touches = Vec::new();
+    let mut rest = Vec::with_capacity(extra.len());
+    for meta in extra {
+        let Meta::NameValue(nv) = &meta else {
+            rest.push(meta);
+            continue;
+        };
+        if !nv.path.is_ident("touches") {
+            rest.push(meta);
+            continue;
+        }
+        let syn::Expr::Array(list) = &nv.value else {
+            return Err(syn::Error::new_spanned(
+                &nv.value,
+                "expected `touches = [Entity, …]`",
+            ));
+        };
+        for e in &list.elems {
+            match e {
+                syn::Expr::Path(p) => touches.push(p.path.clone()),
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "`touches` names `#[entity]` types",
+                    ))
+                }
+            }
+        }
+    }
+    Ok((touches, rest))
 }
 
 /// Pull `client = false` out of the arguments; it is doxa's, not utoipa's.

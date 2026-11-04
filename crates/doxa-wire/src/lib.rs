@@ -5,6 +5,8 @@
 
 #![deny(missing_docs)]
 
+use std::marker::PhantomData;
+
 use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
@@ -265,6 +267,76 @@ pub trait Identity {
 #[doc(hidden)]
 pub fn key_value(key: &impl Serialize) -> Option<serde_json::Value> {
     serde_json::to_value(key).ok()
+}
+
+/// `(&&&AnswerOf::<T>::new()).answered()`: the entity a route answering `T` is about, when
+/// `T` is a [`Keyed`] entity or a `Vec` or `Option` of one.
+#[doc(hidden)]
+pub struct AnswerOf<T: ?Sized>(PhantomData<fn() -> T>);
+
+impl<T: ?Sized> AnswerOf<T> {
+    /// The probe.
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: ?Sized> Default for AnswerOf<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: ?Sized> Clone for AnswerOf<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: ?Sized> Copy for AnswerOf<T> {}
+
+#[doc(hidden)]
+pub trait AnswersOne {
+    fn answered(self) -> Option<&'static str>;
+}
+
+impl<T: Keyed + ?Sized> AnswersOne for &&&AnswerOf<T> {
+    fn answered(self) -> Option<&'static str> {
+        Some(T::ENTITY_TYPE)
+    }
+}
+
+#[doc(hidden)]
+pub trait AnswersList {
+    fn answered(self) -> Option<&'static str>;
+}
+
+impl<T: Keyed> AnswersList for &&AnswerOf<Vec<T>> {
+    fn answered(self) -> Option<&'static str> {
+        Some(T::ENTITY_TYPE)
+    }
+}
+
+#[doc(hidden)]
+pub trait AnswersMaybe {
+    fn answered(self) -> Option<&'static str>;
+}
+
+impl<T: Keyed> AnswersMaybe for &AnswerOf<Option<T>> {
+    fn answered(self) -> Option<&'static str> {
+        Some(T::ENTITY_TYPE)
+    }
+}
+
+#[doc(hidden)]
+pub trait AnswersNothing {
+    fn answered(self) -> Option<&'static str>;
+}
+
+impl<T: ?Sized> AnswersNothing for AnswerOf<T> {
+    fn answered(self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// A value whose instance route takes `K`, so the cache can answer that route from the value.

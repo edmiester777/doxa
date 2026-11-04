@@ -60,6 +60,16 @@ impl<R> Call<R> {
         }
     }
 
+    /// The entity this route answers, when its stub finds one; GETs are cached under it and
+    /// other methods invalidate it.
+    #[doc(hidden)]
+    pub fn answers(self, entity: Option<&'static str>) -> Self {
+        if let Some(entity) = entity {
+            crate::cache::answers(self.route, entity);
+        }
+        self
+    }
+
     /// How the cache files this route's response by identity; set by the stub.
     #[doc(hidden)]
     pub fn entity(mut self, entity: Option<Entity>) -> Self {
@@ -355,7 +365,7 @@ async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
         return Err(Fetch::from_status(response.status, &body));
     }
     let extra = invalidates(&response);
-    let mut entities: Vec<&str> = call.route.entities.to_vec();
+    let mut entities: Vec<&str> = crate::cache::about(call.route);
     entities.extend(extra.iter().map(String::as_str));
     client.cache.invalidate(&entities);
     let request = call.request(url, "text/event-stream");
@@ -531,7 +541,7 @@ async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Er
             if let (Some(settle), Some(stored)) = (call.settle, &stored) {
                 settle(&client, &**stored, key.as_ref());
             }
-            let mut entities: Vec<&str> = call.route.entities.to_vec();
+            let mut entities: Vec<&str> = crate::cache::about(call.route);
             entities.extend(extra.iter().map(String::as_str));
             client.cache.invalidate(&entities);
             // Filed after the invalidation, so the next read of this instance needs no request.

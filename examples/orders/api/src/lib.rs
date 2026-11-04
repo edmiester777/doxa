@@ -71,7 +71,7 @@ pub async fn cancel_order(order: Grant<Order>) -> Result<StatusCode, OrderError>
 
 /// Every order, narrowed by `filter`.
 #[get("/api/orders")]
-pub async fn list_orders(filter: Query<OrderFilter>) -> Json<Vec<Order>>;
+pub async fn list_orders(_: Grant<Many<Order>>, filter: Query<OrderFilter>) -> Json<Vec<Order>>;
 
 /// Place an order.
 #[post("/api/orders")]

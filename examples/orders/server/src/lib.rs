@@ -248,7 +248,7 @@ pub fn seeded() -> Store {
 /// }
 /// ```
 ///
-/// One that doesn't is "the handler fails with `Lost`, which doesn't convert into the declaration's `OrderError`":
+/// One that doesn't is "the trait bound `OrderError: From<Lost>` is not satisfied":
 ///
 /// ```compile_fail
 /// # #[derive(Clone, doxa::State)] struct NoState;
@@ -260,3 +260,30 @@ pub fn seeded() -> Store {
 /// ```
 #[doc(hidden)]
 pub mod error_diagnostics {}
+
+/// A handler's guards are its declaration's:
+///
+/// ```
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// use doxa::auth::{Granted, Many};
+/// use orders_server::OrderById;
+/// #[doxa::implements(orders_api::get_order, mount = false)]
+/// async fn get(order: Granted<OrderById>) -> Result<axum::Json<orders_api::Order>, orders_api::OrderError> {
+///     unimplemented!()
+/// }
+/// ```
+///
+/// A list guard the declaration doesn't state is "`get` guards a list of `OrderById`, which
+/// `orders_api::get_order` doesn't declare":
+///
+/// ```compile_fail
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// use doxa::auth::{Granted, Many};
+/// use orders_server::OrderById;
+/// #[doxa::implements(orders_api::get_order, mount = false)]
+/// async fn get(_: Granted<Many<OrderById>>, order: Granted<OrderById>) -> Result<axum::Json<orders_api::Order>, orders_api::OrderError> {
+///     unimplemented!()
+/// }
+/// ```
+#[doc(hidden)]
+pub mod guard_diagnostics {}

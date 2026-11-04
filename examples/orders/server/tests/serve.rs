@@ -1,10 +1,11 @@
 //! `orders-api`'s calls, sent through `orders-server`'s router in-process.
 
 use std::cell::RefCell;
+use std::time::Duration;
 
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
-use doxa::client::{Fetch, Permission};
+use doxa::client::{CacheConfig, Fetch, Permission};
 use orders_api::*;
 
 thread_local! {
@@ -107,4 +108,23 @@ fn the_document_names_each_route_by_its_declaration() {
     let op = api.paths.paths["/api/orders/{id}"].delete.as_ref().unwrap();
     assert_eq!(op.operation_id.as_deref(), Some("cancel_order"));
     assert_eq!(op.summary.as_deref(), Some("Cancel an order."));
+}
+
+#[tokio::test]
+async fn placing_an_order_refreshes_the_cached_list() {
+    install("clerk");
+    let s = orders_api::service();
+    s.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
+    assert_eq!(list_orders(OrderFilter::default()).await.unwrap().len(), 2);
+    place_order(NewOrder {
+        item: "cog".into(),
+        quantity: 1,
+    })
+    .await
+    .unwrap();
+    let before = s.requests_sent();
+    list_orders(OrderFilter::default()).await.unwrap();
+    doxa::client::task::run_until_stalled();
+    assert!(s.requests_sent() > before);
+    assert_eq!(list_orders(OrderFilter::default()).await.unwrap().len(), 3);
 }
