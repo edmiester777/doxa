@@ -4,9 +4,24 @@ doxa::prelude!();
 
 route_key!(pub OrderKey { id: u32 });
 
+/// What a caller may do with orders.
+#[derive(Debug, Clone, Copy, Actions)]
+#[actions(resource = "Order", prefix = "orders")]
+pub enum OrderAction {
+    /// View orders.
+    #[action(verb = get)]
+    Read,
+    /// Cancel orders.
+    #[action(verb = delete)]
+    Cancel,
+    /// Place orders.
+    #[action(verb = post)]
+    Place,
+}
+
 /// An order.
 #[dto]
-#[entity(key = OrderKey)]
+#[entity(key = OrderKey, actions = OrderAction)]
 pub struct Order {
     pub id: u32,
     pub item: String,
@@ -75,7 +90,10 @@ pub async fn list_orders(_: Grant<Many<Order>>, filter: Query<OrderFilter>) -> J
 
 /// Place an order.
 #[post("/api/orders")]
-pub async fn place_order(order: Valid<Json<NewOrder>>) -> Result<Json<Order>, OrderError>;
+pub async fn place_order(
+    _: Grant<Cap<order_action::Place>>,
+    order: Valid<Json<NewOrder>>,
+) -> Result<Json<Order>, OrderError>;
 
 /// Orders as they're placed and cancelled.
 #[get("/api/orders/events")]

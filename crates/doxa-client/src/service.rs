@@ -1,10 +1,10 @@
 //! One service per client crate: its base URL, layers, cache, streams and session.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
-use futures_util::future::LocalBoxFuture;
+use futures_util::future::{FutureExt, LocalBoxFuture, Shared};
 
 use crate::cache::{Cache, CacheConfig};
 use crate::fetch::Fetch;
@@ -32,7 +32,11 @@ pub struct Service {
     session: Cell<u64>,
     on_session: RefCell<Vec<Rc<dyn Fn()>>>,
     streams: RefCell<HashMap<String, Weak<Hub>>>,
+    capabilities: RefCell<Option<Held>>,
 }
+
+/// The names of the capabilities the caller holds; `None` when the server couldn't say.
+type Held = Shared<LocalBoxFuture<'static, Option<Rc<HashSet<String>>>>>;
 
 type AnySession = Rc<dyn Fn(&'static str)>;
 
@@ -75,7 +79,52 @@ impl Service {
             session: Cell::new(0),
             on_session: RefCell::new(Vec::new()),
             streams: RefCell::default(),
+            capabilities: RefCell::default(),
         }
+    }
+
+    /// The caller's capabilities, asked of the server once per session.
+    pub(crate) fn capabilities(self: &Rc<Self>) -> Held {
+        if let Some(held) = &*self.capabilities.borrow() {
+            return held.clone();
+        }
+        let me = self.clone();
+        let held = async move {
+            loop {
+                me.cache.count_request();
+                let session = me.session();
+                let request = Request {
+                    method: doxa_wire::Method::Get,
+                    url: doxa_wire::CAPABILITIES_PATH.into(),
+                    headers: vec![("accept".into(), "application/json".into())],
+                    body: None,
+                    credentials: false,
+                };
+                let resp = me.send(request).await.ok()?;
+                if !me.observe_session(&resp, session) {
+                    continue;
+                }
+                return match resp.status {
+                    200 => {
+                        serde_json::from_slice::<HashSet<String>>(&resp.body.bytes().await.ok()?)
+                            .ok()
+                            .map(Rc::new)
+                    }
+                    401 | 403 => Some(Rc::default()),
+                    _ => None,
+                };
+            }
+        }
+        .boxed_local()
+        .shared();
+        *self.capabilities.borrow_mut() = Some(held.clone());
+        held
+    }
+
+    /// Whether the caller holds the capability `name`; `None` when the server couldn't say.
+    pub(crate) async fn holds(self: &Rc<Self>, name: &str) -> Option<bool> {
+        let held = self.capabilities().await?;
+        Some(held.contains(name))
     }
 
     /// The client crate this service is for.
@@ -194,6 +243,7 @@ impl Service {
     fn reset(&self) {
         self.session.set(self.session.get() + 1);
         self.cache.clear();
+        self.capabilities.borrow_mut().take();
         let hubs: Vec<_> = self.streams.borrow_mut().drain().collect();
         for hub in hubs.iter().filter_map(|(_, h)| h.upgrade()) {
             hub.close();

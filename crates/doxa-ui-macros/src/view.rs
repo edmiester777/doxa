@@ -191,7 +191,7 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
     };
     let is_can = path.path.segments.last().is_some_and(|s| s.ident == "Can");
     let mut out = quote_spanned! { path.span() => #path::props() };
-    let (mut key, mut route, mut args) = (None, None, None);
+    let (mut key, mut route, mut args, mut cap) = (None, None, None, None);
     for attr in e.attributes() {
         if let NodeAttribute::Block(b) = attr {
             let s = spread(b)?;
@@ -205,6 +205,7 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
         match (name.as_str(), v) {
             ("key", Some(v)) => key = Some(v),
             ("route", Some(v)) if is_can => route = Some(v),
+            ("cap", Some(v)) if is_can => cap = Some(v),
             ("args", Some(_)) if is_can => args = expr(a).cloned(),
             // An `#[attrs]` prop collects these; a component without one refuses them.
             (n, Some(v)) if n.starts_with("on:") => {
@@ -251,11 +252,19 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
             }
         }
     }
-    if is_can {
+    if let (true, Some(cap)) = (is_can, &cap) {
+        if route.is_some() {
+            return Err(syn::Error::new(
+                path.span(),
+                "`<Can>` asks a route or a capability: drop `route` or `cap`",
+            ));
+        }
+        out = quote! { #out.probe(::doxa::client::Probe::capability(#cap)) };
+    } else if is_can {
         let Some(route) = route else {
             return Err(syn::Error::new(
                 path.span(),
-                "`<Can>` needs `route={the_route_fn}`",
+                "`<Can>` needs `route={the_route_fn}` or `cap={a_capability}`",
             ));
         };
         let args = match args {

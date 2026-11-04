@@ -7,13 +7,16 @@ use syn::{Item, LitStr, Type};
 pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let mut key: Option<Type> = None;
     let mut name: Option<LitStr> = None;
+    let mut actions: Option<Type> = None;
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("key") {
             key = Some(meta.value()?.parse()?);
         } else if meta.path.is_ident("name") {
             name = Some(meta.value()?.parse()?);
+        } else if meta.path.is_ident("actions") {
+            actions = Some(meta.value()?.parse()?);
         } else {
-            return Err(meta.error("unknown `entity` option; expected `key` or `name`"));
+            return Err(meta.error("unknown `entity` option; expected `key`, `name` or `actions`"));
         }
         Ok(())
     });
@@ -35,7 +38,20 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             "an entity is named by a key: add `key = …`, a `route_key!` struct",
         )
     })?;
-    let name = name.unwrap_or_else(|| LitStr::new(&ident.to_string(), ident.span()));
+    let name = match (name, actions) {
+        (Some(_), Some(actions)) => {
+            return Err(syn::Error::new_spanned(
+                actions,
+                "`actions` names the entity already: drop `name`",
+            ))
+        }
+        (Some(name), None) => quote!(#name),
+        (None, Some(actions)) => quote!(<#actions as ::doxa::wire::Vocabulary>::ENTITY_TYPE),
+        (None, None) => {
+            let name = LitStr::new(&ident.to_string(), ident.span());
+            quote!(#name)
+        }
+    };
     Ok(quote! {
         #item
 
@@ -73,6 +89,30 @@ mod tests {
         )
         .unwrap();
         assert!(named.to_string().contains("\"Purchase\""), "{named}");
+    }
+
+    #[test]
+    fn a_vocabulary_names_the_entity() {
+        let out = expand(
+            quote!(key = OrderKey, actions = OrderAction),
+            quote!(
+                pub struct Order;
+            ),
+        )
+        .unwrap();
+        assert!(
+            out.to_string()
+                .contains("< OrderAction as :: doxa :: wire :: Vocabulary > :: ENTITY_TYPE"),
+            "{out}"
+        );
+        let both = expand(
+            quote!(key = OrderKey, name = "Order", actions = OrderAction),
+            quote!(
+                pub struct Order;
+            ),
+        )
+        .unwrap_err();
+        assert!(both.to_string().contains("drop `name`"), "{both}");
     }
 
     #[test]

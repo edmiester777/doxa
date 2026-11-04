@@ -314,6 +314,15 @@ const GUARDS: &[&str] = &[
     "Scoped",
 ];
 
+/// Whether `ty` is an extractor that authorizes.
+pub(crate) fn is_guard(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else { return false };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|s| GUARDS.contains(&s.ident.to_string().as_str()))
+}
+
 /// The argument whose guard answers a `<Can>` dry run: the last guard, if it is a `Granted`.
 pub(crate) fn dry_run_gate(item_fn: &ItemFn) -> Option<usize> {
     let last = item_fn

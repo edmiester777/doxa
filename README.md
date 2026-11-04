@@ -1007,6 +1007,16 @@ let o: Order = orders_api::get_order(OrderKey { id: 7 }).await?;
 
 A route's entities are what the client caches its answer under and what its other calls invalidate: the entity its guard names (`Grant<Order>`, `Grant<Many<Order>>`), the entity it answers (`Order`, `Vec<Order>` or `Option<Order>`), and `touches = [Customer]` for any other it changes. So `place_order` answering `Json<Order>` refreshes `list_orders(_: Grant<Many<Order>>, …)`. A handler guarding with `Granted<Many<OrderById>>` where the declaration doesn't state `Grant<Many<Order>>` doesn't compile, since its clients couldn't dry-run or refresh it.
 
+A `#[derive(Actions)]` vocabulary in the API crate gives both halves its capability markers, and `#[entity(key = OrderKey, actions = OrderAction)]` takes the entity's name from it. A declaration guarded by a capability states it, and the handler's `Granted<Cap<…>>` must name the same one:
+
+```rust
+#[post("/api/orders")]
+pub async fn place_order(_: Grant<Cap<order_action::Place>>, order: Valid<Json<NewOrder>>)
+    -> Result<Json<Order>, OrderError>;
+```
+
+`GET /doxa/capabilities` answers the capabilities the caller holds, checked the way `Granted<Cap<…>>` checks them. It joins the `#[doxa::service]` at a crate root, and `doxa::app` stops when capabilities are declared and there is no such service. The client asks once per service per session: `has(order_action::Place).await`, `<Can cap={order_action::Place}>`, `router.guard(requires(order_action::Place, "/orders"))`, and `place_order::can()`, since a capability is the route's only guard, send no further requests.
+
 A handler may fail with its own error when it converts into the declared one, and answers the declared one. The conversion goes beside the error, compiled for the server only, with the server's dependency under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`:
 
 ```rust

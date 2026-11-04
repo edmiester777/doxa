@@ -2035,7 +2035,7 @@ pub async fn authorize<T: Chain>(
 /// Shared by every door so that a request reaching one without an
 /// [`AuthLayer`](crate::AuthLayer) above it fails the same way whichever
 /// door it was.
-fn caller_and_checker<C: FromAuthExtensions>(
+pub(crate) fn caller_and_checker<C: FromAuthExtensions>(
     extensions: &Extensions,
 ) -> Result<(C, Arc<dyn CapabilityChecker>), Denial> {
     let ctx = C::from_extensions(extensions).ok_or(Denial::Auth(AuthError::MissingCredentials))?;

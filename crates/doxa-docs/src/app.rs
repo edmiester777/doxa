@@ -54,6 +54,18 @@ pub struct Mount {
 
 inventory::collect!(Mount);
 
+/// A route of doxa's own, which joins the service at a crate root.
+pub struct Builtin {
+    /// Method and path, for the error naming it.
+    pub route: &'static str,
+    /// The route.
+    pub mount: Mount,
+    /// Whether this app serves it.
+    pub needed: fn() -> bool,
+}
+
+inventory::collect!(Builtin);
+
 /// One `#[doxa::service]`.
 pub struct Service {
     /// The struct's name.
@@ -169,6 +181,31 @@ impl Plan {
             }
         }
 
+        let roots: Vec<usize> = (0..services.len())
+            .filter(|&i| !services[i].module.contains("::"))
+            .collect();
+        for b in inventory::iter::<Builtin> {
+            if !(b.needed)() {
+                continue;
+            }
+            match roots.as_slice() {
+                [i] => owned[*i].push(&b.mount),
+                [] => problems.push(format!(
+                    "`{}` joins the service at a crate root, and there is none: add \
+                     `#[doxa::service] pub struct …;` to the crate root",
+                    b.route
+                )),
+                many => problems.push(format!(
+                    "`{}` joins the service at a crate root, and {} are: keep one",
+                    b.route,
+                    many.iter()
+                        .map(|&i| format!("`{}::{}`", services[i].module, services[i].name))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                )),
+            }
+        }
+
         problems.extend(unimplemented(&mounts));
         for (name, types) in crate::schemas::duplicate_schemas() {
             problems.push(format!(
@@ -228,8 +265,8 @@ fn within(module: &str, service: &str) -> bool {
 /// Every mounted handler under `state`, each wrapped in its service's layers.
 ///
 /// Panics, naming each problem, on a handler under no service, two services in one module, a
-/// declared route nothing implements, a schema name two types claim, or a state the handlers
-/// weren't written for.
+/// declared route nothing implements, a schema name two types claim, a route of doxa's own with
+/// no one service at a crate root to join, or a state the handlers weren't written for.
 pub fn app<S: Any>(state: &S) -> Routes {
     let plan = Plan::new();
     let mut app = Routes::default();

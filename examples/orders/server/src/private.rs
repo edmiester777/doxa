@@ -4,10 +4,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
-use doxa::auth::Granted;
+use doxa::auth::{Cap, Granted};
 use doxa::{implements, Valid};
 
-use orders_api::{NewOrder, Order, OrderError};
+use orders_api::{order_action, NewOrder, Order, OrderError};
 
 use crate::{Gone, OrderById, OrderRow, Store};
 
@@ -26,6 +26,7 @@ async fn cancel_order(
 
 #[implements(orders_api::place_order)]
 async fn place_order(
+    _: Granted<Cap<order_action::Place>>,
     State(store): State<Store>,
     Valid(Json(new)): Valid<Json<NewOrder>>,
 ) -> Result<Json<Order>, OrderError> {

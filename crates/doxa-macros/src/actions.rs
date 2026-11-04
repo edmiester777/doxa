@@ -14,7 +14,8 @@
 //!   `AuthorizeLoaded::authorize` and the asset's vocabulary is checked at
 //!   build time rather than at request time. Where the variant declares a
 //!   capability the marker carries that too, registering in the catalog
-//!   like any `#[capability]` and namable as `Granted<Cap<…>>`.
+//!   like any `#[capability]` and namable as `Granted<Cap<…>>`. The markers
+//!   exist in both halves; the client's name their capability.
 //! - One `Action` const per variant, registered so `doxa::auth::actions()`
 //!   can answer without a hand-maintained list.
 //! - `impl ActionTable for SourceAction`, holding the vocabulary
@@ -183,6 +184,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let module = Ident::new(&snake_case(&enum_name.to_string()), enum_name.span());
 
     let mut markers = Vec::new();
+    let mut shared_markers = Vec::new();
     let mut consts = Vec::new();
     let mut rows = Vec::new();
     let mut arms = Vec::new();
@@ -320,10 +322,24 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             None => format!("The `{action}` action."),
         };
 
-        markers.push(quote! {
+        let named = cap_name.as_ref().map(|cap| {
+            quote! {
+                impl ::doxa::wire::Capability for #ident {
+                    const NAME: &'static str = #cap;
+                    const ENTITY_TYPE: &'static str = #resource;
+                    const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+                }
+            }
+        });
+        shared_markers.push(quote! {
             #[doc = #marker_doc]
+            #[derive(Debug, Clone, Copy)]
             pub struct #ident;
 
+            #named
+        });
+
+        markers.push(quote! {
             impl ::doxa::auth::DeclaredAction for #ident {
                 type Table = super::#enum_name;
 
@@ -385,16 +401,16 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
          capability the marker carries that too — it registers in the \
          catalog and can be named as `Granted<Cap<{module}::…>>`."
     );
-    let markers = quote! {
+    let markers = doxa_macro_support::tag(doxa_macro_support::Side::Server, quote!(#(#markers)*));
+    let module = quote! {
         #[doc = #module_doc]
         #vis mod #module {
-            #(#markers)*
+            #(#shared_markers)*
+            #markers
         }
     };
 
     let server = quote! {
-        #markers
-
         #(#consts)*
 
         impl ::doxa::auth::ActionTable for #enum_name {
@@ -412,6 +428,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
     let server = doxa_macro_support::tag(doxa_macro_support::Side::Server, server);
     Ok(quote! {
+        #module
         #server
 
         impl ::doxa::wire::Vocabulary for #enum_name {

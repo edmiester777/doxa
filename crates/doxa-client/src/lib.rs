@@ -28,7 +28,7 @@ pub use arg::{Arg, ArgFor, Bytes, ClientArg, Foreign, Form, Granted, Json, Outgo
 pub use cache::{invalidate, invalidate_all, CacheConfig};
 pub use cached::Cached;
 pub use call::Call;
-pub use can::{Permission, Probe};
+pub use can::{has, Permission, Probe};
 pub use fetch::{Fetch, NoError};
 pub use layer::{layer_fn, layers, Layer, Next};
 pub use multipart::Multipart;

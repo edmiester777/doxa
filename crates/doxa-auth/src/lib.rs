@@ -38,6 +38,8 @@ pub mod config;
 pub mod context;
 pub mod provider;
 
+#[cfg(all(feature = "axum", feature = "catalog"))]
+mod capabilities;
 #[cfg(feature = "axum")]
 pub mod extractors;
 #[cfg(feature = "axum")]

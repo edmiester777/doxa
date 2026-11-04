@@ -296,8 +296,8 @@ pub mod __private {
     pub use inventory;
 
     pub use crate::app::{
-        crate_key, describe, mount, stacked, Key, Layers, Mount, Resolve, Service, StackDocs,
-        Stacked,
+        crate_key, describe, mount, stacked, Builtin, Key, Layers, Mount, Resolve, Service,
+        StackDocs, Stacked,
     };
 
     /// Named by `#[derive(Validator)]`'s extractor and doc impls.

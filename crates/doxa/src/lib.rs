@@ -698,7 +698,7 @@ pub mod api {
         };
         pub use doxa_macros::{
             capability, client, client_only, delete, dto, entity, get, patch, post, put, server,
-            server_only, ApiError, Identity, SseEvent,
+            server_only, Actions, ApiError, Identity, SseEvent,
         };
         #[cfg(target_arch = "wasm32")]
         pub use doxa_macros::{ClientIntoParams as IntoParams, ClientToSchema as ToSchema};

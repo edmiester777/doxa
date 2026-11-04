@@ -128,3 +128,36 @@ async fn placing_an_order_refreshes_the_cached_list() {
     assert!(s.requests_sent() > before);
     assert_eq!(list_orders(OrderFilter::default()).await.unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn the_capabilities_route_agrees_with_the_guard() {
+    for role in ["viewer", "clerk", "admin"] {
+        install(role);
+        let held = doxa::client::has(order_action::Place).await;
+        let placed = place_order(NewOrder {
+            item: "cog".into(),
+            quantity: 1,
+        })
+        .await;
+        assert_eq!(held, placed.is_ok(), "{role}: {placed:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_capability_only_route_answers_can_from_the_callers_capabilities() {
+    install("clerk");
+    let s = orders_api::service();
+    let before = s.requests_sent();
+    for _ in 0..5 {
+        assert_eq!(place_order::can().await, Permission::Allowed);
+    }
+    assert!(doxa::client::has(order_action::Place).await);
+    assert_eq!(
+        s.requests_sent() - before,
+        1,
+        "one request for the set, no dry runs"
+    );
+
+    install("viewer");
+    assert_eq!(place_order::can().await, Permission::Denied);
+}

@@ -24,6 +24,8 @@ pub trait Declared {
     type Verb;
     /// The entities it guards with `Grant<Many<E>>`.
     const MANY: &'static [&'static str] = &[];
+    /// The capabilities it guards with `Grant<Cap<M>>`.
+    const CAPS: &'static [&'static str] = &[];
 }
 
 /// Whether `entity` is among `declared`.

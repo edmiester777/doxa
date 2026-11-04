@@ -3,6 +3,10 @@
 mod private;
 mod public;
 
+/// What the caller may do, at `GET /doxa/capabilities`.
+#[doxa::service(layers = caller)]
+pub struct Orders;
+
 pub use private::OrdersPrivate;
 pub use public::OrdersPublic;
 
@@ -20,9 +24,9 @@ use doxa::auth::{CapabilityContext, FromState, GrantProfile};
 use doxa::policy::{
     AuthError, Capability, CapabilityChecker, Fetch, FetchByKey, FetchSubset, ResourceEntity,
 };
-use doxa::{asset, Actions, PolicyResource, Routes};
+use doxa::{asset, PolicyResource, Routes};
 
-use orders_api::{Order, OrderError, OrderKey};
+use orders_api::{Order, OrderAction, OrderError, OrderKey};
 
 /// An order as the server stores it.
 #[derive(Debug, Clone, serde::Serialize, PolicyResource)]
@@ -43,17 +47,6 @@ impl From<OrderRow> for Order {
             quantity: row.quantity,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Actions)]
-#[actions(resource = "Order", prefix = "orders")]
-pub enum OrderAction {
-    /// View orders.
-    #[action(verb = get)]
-    Read,
-    /// Cancel orders.
-    #[action(verb = delete)]
-    Cancel,
 }
 
 #[asset(
@@ -140,15 +133,18 @@ impl FromRef<AppState> for Store {
     }
 }
 
-/// `viewer` may read; `clerk` may also cancel.
+/// `viewer` may read; `clerk` may also cancel and place; `admin` may do anything.
 struct RoleChecker;
 
 #[async_trait]
 impl CapabilityChecker for RoleChecker {
     async fn check(&self, _: &str, roles: &[String], cap: &Capability) -> Result<bool, AuthError> {
+        if roles.iter().any(|r| r == "admin") {
+            return Ok(true);
+        }
         let clerk = roles.iter().any(|r| r == "clerk");
         Ok(match cap.name {
-            "orders.cancel" => clerk,
+            "orders.cancel" | "orders.place" => clerk,
             _ => clerk || roles.iter().any(|r| r == "viewer"),
         })
     }
@@ -287,3 +283,29 @@ pub mod error_diagnostics {}
 /// ```
 #[doc(hidden)]
 pub mod guard_diagnostics {}
+
+/// A handler's capability is its declaration's:
+///
+/// ```
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// use doxa::auth::{Cap, Granted};
+/// use orders_api::{order_action, NewOrder, Order, OrderError};
+/// #[doxa::implements(orders_api::place_order, mount = false)]
+/// async fn place(_: Granted<Cap<order_action::Place>>, _: doxa::Valid<axum::Json<NewOrder>>) -> Result<axum::Json<Order>, OrderError> {
+///     unimplemented!()
+/// }
+/// ```
+///
+/// Another one is "`place` and `orders_api::place_order` guard different capabilities":
+///
+/// ```compile_fail
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// use doxa::auth::{Cap, Granted};
+/// use orders_api::{order_action, NewOrder, Order, OrderError};
+/// #[doxa::implements(orders_api::place_order, mount = false)]
+/// async fn place(_: Granted<Cap<order_action::Cancel>>, _: doxa::Valid<axum::Json<NewOrder>>) -> Result<axum::Json<Order>, OrderError> {
+///     unimplemented!()
+/// }
+/// ```
+#[doc(hidden)]
+pub mod capability_diagnostics {}

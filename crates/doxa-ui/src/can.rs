@@ -3,9 +3,10 @@
 use std::marker::PhantomData;
 
 use doxa_client::{Permission, Probe};
+use doxa_wire::Capability;
 
 use crate::component::{required, Component, RenderFuture, Set, Unset};
-use crate::{IntoView, View};
+use crate::{IntoView, Route, View};
 
 /// Renders its children when a dry run of the route is allowed, `fallback` when
 /// it is denied, and `unknown` when the route can't say.
@@ -15,6 +16,7 @@ use crate::{IntoView, View};
 ///     <Can route={rename_widget} args={&key} fallback={"read only"}>
 ///         <button>"Rename"</button>
 ///     </Can>
+///     <Can cap={widget_action::Write}>"from the caller's capabilities, no dry run"</Can>
 /// }
 /// ```
 pub struct Can;
@@ -101,6 +103,17 @@ impl<P> CanBuilder<P> {
             children: self.children,
         }
     }
+}
+
+/// A router guard: `router().guard(requires(widget_action::Write, "/widgets"))` sends a
+/// caller without the capability to `to`.
+pub fn requires<M: Capability>(
+    cap: M,
+    to: impl Into<Route>,
+) -> impl AsyncFn(&str) -> Option<Route> + 'static {
+    let to = to.into();
+    let probe = Probe::capability(cap);
+    async move |_url: &str| (!probe.clone().await.allowed()).then(|| to.clone())
 }
 
 impl Component for Can {

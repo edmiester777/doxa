@@ -267,6 +267,18 @@ fn guard_of<'a>(ty: &'a Type, form: &str) -> Option<&'a Type> {
         .flatten()
 }
 
+/// `M` in each `Granted<Cap<M>>` argument.
+fn caps(item_fn: &ItemFn) -> Vec<&Type> {
+    typed(item_fn).filter_map(|t| guard_of(t, "Cap")).collect()
+}
+
+/// `M` when `Granted<Cap<M>>` is the route's one guard, so the caller's capabilities answer it.
+fn only_cap(item_fn: &ItemFn) -> Option<&Type> {
+    let mut guards = typed(item_fn).filter(|t| grant::is_guard(t));
+    let cap = guard_of(guards.next()?, "Cap")?;
+    guards.next().is_none().then_some(cap)
+}
+
 fn typed(item_fn: &ItemFn) -> impl Iterator<Item = &Type> {
     item_fn.sig.inputs.iter().filter_map(|arg| match arg {
         FnArg::Typed(pt) => Some(&*pt.ty),
@@ -388,6 +400,7 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Re
     let docs = docs.join("\n");
     let verb = format_ident!("{}", capitalize(route.method));
     let many: Vec<&Type> = typed(item_fn).filter_map(|t| guard_of(t, "Many")).collect();
+    let caps = caps(item_fn);
     Ok(quote! {
         /// This route, as the server that implements it is held to it.
         pub struct Route;
@@ -397,6 +410,7 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Re
             const DOCS: &'static str = #docs;
             const TAGS: &'static [&'static str] = &[#(#tags),*];
             const MANY: &'static [&'static str] = &[#(<#many as ::doxa::wire::Keyed>::ENTITY_TYPE),*];
+            const CAPS: &'static [&'static str] = &[#(<#caps as ::doxa::wire::Capability>::NAME),*];
             type Args = (#(#args,)*);
             type Ok = #ok;
             type Error = #error;
@@ -471,7 +485,26 @@ pub fn implemented(item_fn: &ItemFn, r: &TokenStream) -> TokenStream {
             );
         }
     });
+    let held: Vec<TokenStream> = caps(item_fn)
+        .into_iter()
+        .map(|m| quote!(<#m as ::doxa::policy::Capable>::CAPABILITY.name))
+        .collect();
+    let message = format!(
+        "`{}` and `{declaration}` guard different capabilities: name the same `Cap<…>` in the \
+         declaration's `Grant<Cap<…>>` and the handler's `Granted<Cap<…>>`",
+        item_fn.sig.ident,
+    );
+    let cap_drift = quote! {
+        const _: () = ::core::assert!(
+            ::doxa::wire::contract::same_names(
+                <#r as ::doxa::wire::contract::Declared>::CAPS,
+                &[#(#held),*],
+            ),
+            #message,
+        );
+    };
     quote! {
+        #cap_drift
         const _: fn() = || {
             ::doxa::client::contract::takes::<
                 (#(#args,)*),
@@ -501,6 +534,11 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
             FnArg::Receiver(_) => None,
         })
         .map(|asset| quote!(<#asset as ::doxa::wire::Keyed>::ENTITY_TYPE))
+        .chain(
+            caps(item_fn)
+                .into_iter()
+                .map(|m| quote!(<#m as ::doxa::wire::Capability>::ENTITY_TYPE)),
+        )
         .chain(
             route
                 .touches
@@ -609,6 +647,9 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
             _ => None,
         })
         .unzip();
+    let by_capability = only_cap(item_fn)
+        .filter(|_| dry_run)
+        .map(|m| quote!(.by_capability::<#m>()));
 
     let mut bad = None;
     let ret = match &item_fn.sig.output {
@@ -677,7 +718,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
 
             /// Whether this caller may call the route with these arguments, from a dry run.
             pub fn can(#(#probe_params),*) -> ::doxa::client::Probe {
-                ::doxa::client::Probe::new(&ROUTE) #(#probe_pushes)*
+                ::doxa::client::Probe::new(&ROUTE) #(#probe_pushes)* #by_capability
             }
         }
 

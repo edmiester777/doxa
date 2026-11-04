@@ -3,7 +3,7 @@
 use std::future::IntoFuture;
 use std::rc::Rc;
 
-use doxa_wire::RouteSpec;
+use doxa_wire::{Capability, RouteSpec};
 use futures_util::future::LocalBoxFuture;
 
 use crate::arg::{ArgFor, Outgoing};
@@ -29,23 +29,43 @@ impl Permission {
     }
 }
 
-/// A dry run of one route with one set of arguments. Await it for a [`Permission`].
+/// A dry run of one route with one set of arguments, or a question about one capability.
+/// Await it for a [`Permission`].
 #[must_use = "a probe does nothing until it is awaited"]
 #[derive(Clone)]
 pub struct Probe {
-    route: &'static RouteSpec,
+    route: Option<&'static RouteSpec>,
     out: Outgoing,
     error: bool,
+    /// `(package, name)` of the capability that answers it from the caller's set.
+    capability: Option<(&'static str, &'static str)>,
 }
 
 impl Probe {
     /// A dry run of `route`, generated as `route_name::can(…)`.
     pub fn new(route: &'static RouteSpec) -> Self {
         Self {
-            route,
+            route: Some(route),
             out: Outgoing::new(route.path),
             error: false,
+            capability: None,
         }
+    }
+
+    /// Whether the caller holds the capability `M`, as `<Can cap={…}>` asks.
+    pub fn capability<M: Capability>(_: M) -> Self {
+        Self {
+            route: None,
+            out: Outgoing::new(""),
+            error: false,
+            capability: Some((M::PACKAGE, M::NAME)),
+        }
+    }
+
+    /// Answer from the caller's capabilities: `M` is the route's one guard.
+    pub fn by_capability<M: Capability>(mut self) -> Self {
+        self.capability = Some((M::PACKAGE, M::NAME));
+        self
     }
 
     /// Add the argument for a parameter the route reads with extractor `X`.
@@ -55,20 +75,32 @@ impl Probe {
     }
 }
 
+/// Whether the caller holds the capability `M`; `false` when the server couldn't say.
+pub async fn has<M: Capability>(_: M) -> bool {
+    service(M::PACKAGE).holds(M::NAME).await == Some(true)
+}
+
 impl IntoFuture for Probe {
     type Output = Permission;
     type IntoFuture = LocalBoxFuture<'static, Permission>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            if self.error || !self.route.dry_run {
-                return Permission::Unknown;
+            if let Some((package, name)) = self.capability {
+                return match service(package).holds(name).await {
+                    Some(true) => Permission::Allowed,
+                    Some(false) => Permission::Denied,
+                    None => Permission::Unknown,
+                };
             }
+            let Some(route) = self.route.filter(|r| r.dry_run && !self.error) else {
+                return Permission::Unknown;
+            };
             let Ok(url) = self.out.url() else {
                 return Permission::Unknown;
             };
-            let client = service(self.route.package);
-            let key = format!("CAN {} {url}", self.route.method.as_str());
+            let client = service(route.package);
+            let key = format!("CAN {} {url}", route.method.as_str());
             let permission = loop {
                 if let Some(v) = client.cache.fresh(&key, now()) {
                     if let Some(p) = v.downcast_ref::<Permission>() {
@@ -77,7 +109,7 @@ impl IntoFuture for Probe {
                 }
                 client.cache.count_request();
                 let request = Request {
-                    method: self.route.method,
+                    method: route.method,
                     url: url.clone(),
                     headers: vec![(doxa_wire::DRY_RUN_HEADER.into(), "1".into())],
                     body: None,
@@ -99,7 +131,7 @@ impl IntoFuture for Probe {
             };
             client.cache.store(
                 key,
-                self.route,
+                route,
                 self.out.first_key().cloned(),
                 Rc::new(permission),
                 Meta {

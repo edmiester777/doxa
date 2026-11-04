@@ -49,6 +49,8 @@ pub const SESSION_HEADER: &str = "x-doxa-session";
 pub const INVALIDATE_HEADER: &str = "x-doxa-invalidate";
 /// Header every cookie-authenticated mutation must carry.
 pub const CSRF_HEADER: &str = "x-doxa-csrf";
+/// The route answering the names of the capabilities the caller holds, as a JSON array.
+pub const CAPABILITIES_PATH: &str = "/doxa/capabilities";
 /// Request headers a doxa client sends, which a cross-origin server must allow.
 pub const REQUEST_HEADERS: &[&str] = &[
     "accept",
@@ -229,6 +231,16 @@ impl KeyNames for () {
 pub trait Vocabulary {
     /// The entity type the vocabulary's actions are about.
     const ENTITY_TYPE: &'static str;
+}
+
+/// A capability marker from `#[derive(Actions)]`, as the client sees it.
+pub trait Capability {
+    /// The capability's name, as the server's catalog holds it.
+    const NAME: &'static str;
+    /// The entity type its vocabulary is about.
+    const ENTITY_TYPE: &'static str;
+    /// The client crate whose service asks about it.
+    const PACKAGE: &'static str;
 }
 
 /// A guarded asset as the client sees it: the key that names one, and what it is.

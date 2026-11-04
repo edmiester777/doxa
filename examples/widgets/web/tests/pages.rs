@@ -529,3 +529,50 @@ async fn an_exported_component_renders_again_with_the_hosts_new_props() {
         "unmounted with its handle"
     );
 }
+
+#[tokio::test]
+async fn twenty_cans_over_one_capability_send_one_request() {
+    use doxa::ui::prelude::{view, App};
+    use doxa::ui::{Can, View};
+    use widgets_client::widgets::widget_action;
+
+    for (role, shown) in [("editor", "E".repeat(20)), ("viewer", String::new())] {
+        serve(role);
+        let before = widgets_client::service().requests_sent();
+        let dom = MemDom::new();
+        App::new(|| {
+            let links: Vec<View> = (0..20)
+                .map(|_| {
+                    view! {
+                        <Can cap={widget_action::Update}>
+                            <i>"E"</i>
+                        </Can>
+                    }
+                })
+                .collect();
+            view! { <p>{links}</p> }
+        })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+        settle().await;
+        assert_eq!(dom.text(dom.body()), shown, "{role}");
+        let sent = widgets_client::service().requests_sent() - before;
+        assert_eq!(sent, 1, "{role}");
+    }
+}
+
+#[tokio::test]
+async fn requires_sends_a_caller_without_the_capability_elsewhere() {
+    use doxa::ui::{requires, Route};
+    use widgets_client::widgets::widget_action;
+
+    serve("editor");
+    let guard = requires(widget_action::Update, "/widgets");
+    assert_eq!(guard("/widgets/gear/edit").await, None);
+    serve("viewer");
+    let guard = requires(widget_action::Update, "/widgets");
+    assert_eq!(
+        guard("/widgets/gear/edit").await,
+        Some(Route::from("/widgets"))
+    );
+}

@@ -29,6 +29,12 @@ fn a_granted_declaration_answers_a_dry_run_and_invalidates_its_entity() {
 }
 
 #[test]
+fn a_capability_guarded_declaration_names_it_and_invalidates_its_resource() {
+    assert_eq!(<place_order::Route as Declared>::CAPS, ["orders.place"]);
+    assert_eq!(<place_order::Route as Declared>::SPEC.entities, ["Order"]);
+}
+
+#[test]
 fn a_declaration_carries_its_route_and_docs() {
     let spec = <place_order::Route as Declared>::SPEC;
     assert_eq!((spec.method, spec.path), (Method::Post, "/api/orders"));

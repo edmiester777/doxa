@@ -48,7 +48,7 @@ pub use browser::{
     interval, media_query, now, resize_observer, save, sleep, stored, window_event, Broadcast,
     BrowserError, Stored,
 };
-pub use can::{Can, CanBuilder, CanProps};
+pub use can::{requires, Can, CanBuilder, CanProps};
 pub use class::ClassPart;
 pub use component::{Component, ComponentProps, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
