@@ -356,6 +356,7 @@ pub mod __private {
     }
 
     pub use crate::error_responses::merge_response_maps;
+    pub use crate::valid::document_invalid;
 
     // Autoref-specialized dispatch scaffolding referenced by the
     // method macro's generated per-handler `IntoParams` impls. Not

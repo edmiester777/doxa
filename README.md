@@ -840,7 +840,7 @@ Wire types take `#[dto]`, which derives serde both ways, `ToSchema`, `Debug`, `P
 pub struct Rename { #[garde(length(min = 1))] pub name: String }
 ```
 
-A validating extractor runs the same rules in both halves. The server answers `422` with each failing field, and the call refuses with those fields before anything is sent. `doxa::Valid` (feature `garde`), `doxa::validator::Valid` (`validator`) and `doxa::serde_valid::Valid` (`serde-valid`) ship. An app's own wrapper implements `doxa::wire::Validates` and derives `doxa::Validator`:
+A validating extractor runs the same rules in both halves. The server answers `422` with each failing field, documented on the route beside any `422` of its own, and the call refuses with those fields before anything is sent. `doxa::Valid` (feature `garde`), `doxa::validator::Valid` (`validator`) and `doxa::serde_valid::Valid` (`serde-valid`) ship. An app's own wrapper implements `doxa::wire::Validates` and derives `doxa::Validator`:
 
 ```rust
 #[patch("/api/widgets/{name}")]

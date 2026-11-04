@@ -133,9 +133,14 @@ fn union_one_of(outer: &mut RefOr<Schema>, inner: RefOr<Schema>) {
         other => vec![other],
     };
 
-    match inner {
-        RefOr::T(Schema::OneOf(one_of)) => items.extend(one_of.items),
-        other => items.push(other),
+    let incoming = match inner {
+        RefOr::T(Schema::OneOf(one_of)) => one_of.items,
+        other => vec![other],
+    };
+    for item in incoming {
+        if !items.contains(&item) {
+            items.push(item);
+        }
     }
 
     let mut merged = OneOf::new();
