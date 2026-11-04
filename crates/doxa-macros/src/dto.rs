@@ -357,11 +357,23 @@ pub fn expand(args: TokenStream, item: TokenStream, client: bool) -> syn::Result
     }
     input.attrs = attrs;
 
+    let ident = &input.ident;
+    let named = (schema && input.generics.params.is_empty()).then(|| {
+        quote! {
+            ::doxa::__private::inventory::submit! {
+                ::doxa::__private::schemas::Named {
+                    name: <#ident as ::doxa::__private::utoipa::ToSchema>::name,
+                    ty: ::core::any::type_name::<#ident>,
+                }
+            }
+        }
+    });
     let derive = (!added.is_empty()).then(|| quote!(#[derive(#(#added),*)]));
     let mut out = TokenStream::new();
     derive.to_tokens(&mut out);
     serde_crate.to_tokens(&mut out);
     input.to_tokens(&mut out);
+    named.to_tokens(&mut out);
     Ok(out)
 }
 

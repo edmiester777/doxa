@@ -208,6 +208,7 @@ mod problem;
 mod proxy;
 mod router_ext;
 mod routes_macro;
+mod schemas;
 mod spa;
 mod sse;
 mod ui;
@@ -238,6 +239,7 @@ pub use problem::{ApiErrorBody, ProblemDetails};
 #[cfg(feature = "proxy")]
 pub use proxy::proxy;
 pub use router_ext::OpenApiRouterExt;
+pub use schemas::{assert_unique_schemas, duplicate_schemas};
 pub use spa::{Dist, EmbeddedFiles, MountSpaExt, Spa};
 pub use sse::{SseEventMeta, SseStream};
 
@@ -283,6 +285,10 @@ pub mod __private {
     /// What `#[doxa::implements]`, `doxa::serves!` and a declaration expand to.
     pub mod contract {
         pub use crate::contract::*;
+    }
+    /// What `#[dto]` registers its schema name with.
+    pub mod schemas {
+        pub use crate::schemas::Named;
     }
     pub use inventory;
 

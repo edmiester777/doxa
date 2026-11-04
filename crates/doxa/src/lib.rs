@@ -730,6 +730,12 @@ macro_rules! serves {
                 assert_serves(&$crate::__private::IntoSpec::into_spec($doc()));
             }
         )?
+
+        #[cfg(test)]
+        #[test]
+        fn no_two_types_share_a_schema_name() {
+            $crate::assert_unique_schemas();
+        }
     };
 }
 
