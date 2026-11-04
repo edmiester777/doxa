@@ -20,6 +20,9 @@ pub mod css;
 pub mod dist;
 #[cfg(feature = "pipeline")]
 mod error;
+/// The web crate's resolved dependency graph.
+#[cfg(feature = "pipeline")]
+pub mod graph;
 #[cfg(feature = "pipeline")]
 pub mod hot;
 #[cfg(feature = "pipeline")]

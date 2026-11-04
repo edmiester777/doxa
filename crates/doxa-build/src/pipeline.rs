@@ -10,6 +10,7 @@ use crate::bundle::{
 use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
 use crate::error::{run, Error, IoContext, Result};
+use crate::graph::Graph;
 use crate::{bindgen, css, hot, npm, split};
 
 /// How to build.
@@ -39,6 +40,8 @@ pub struct Pipeline {
     pub layout: Layout,
     pub(crate) opts: BuildOptions,
     pub(crate) npm: npm::Source,
+    /// `css_sources`, and the directory of each crate in the graph that uses doxa-ui.
+    pub(crate) tailwind_sources: Vec<String>,
     pub(crate) bundler: Box<dyn Bundler + Send>,
     /// Building an npm package: no Preflight, relative stylesheet urls.
     pub(crate) library: bool,
@@ -63,13 +66,23 @@ impl Pipeline {
         let workspace = Workspace::load(cwd)?;
         let web = workspace.web_crate(opts.package.as_deref())?;
         let layout = workspace.layout();
-        let npm = npm::Source::for_app(&web, &workspace.workspace_root, &layout);
+        let graph = Graph::load(cwd, &web.name)?;
+        let needed = graph.npm(&web.name, &web.config.npm)?;
+        let npm = npm::Source::for_app(&web, &workspace.workspace_root, &layout, &needed)?;
+        let mut tailwind_sources = web.config.css_sources.clone();
+        tailwind_sources.extend(
+            graph
+                .tailwind_sources()
+                .into_iter()
+                .map(|d| d.to_string_lossy().into_owned()),
+        );
         Ok(Self {
             workspace,
             web,
             layout,
             opts,
             npm,
+            tailwind_sources,
             bundler: Box::new(Esbuild::managed()?),
             library: false,
             wasm_file: None,
@@ -353,7 +366,7 @@ impl Pipeline {
             note(format!("building {entry}"));
             let inputs = css::Inputs {
                 web_dir: &self.web.dir,
-                sources: &cfg.css_sources,
+                sources: &self.tailwind_sources,
                 preprocess: &cfg.preprocess,
                 node_modules: self.npm.dir(),
                 library: self.library,

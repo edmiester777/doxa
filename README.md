@@ -938,6 +938,8 @@ extern "js" {
 
 Arguments and returns cross through serde (feature `npm`); JS types declared with `type X;` and `JsValue` pass through untouched, and a `Promise` becomes a future.
 
+A crate lists the packages it imports under `[package.metadata.doxa.npm]`, and `doxa build` installs those of every crate the web crate depends on, git dependencies included. The web crate's range wins, two others asking different ranges stop the build, and an app with its own `package.json` is told what it's missing. Tailwind scans each of those crates that uses doxa-ui.
+
 ### 19. Icons
 
 ```rust

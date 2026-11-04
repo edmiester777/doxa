@@ -88,23 +88,44 @@ const LOCKFILES: [&str; 4] = [
 ];
 
 impl Source {
-    /// The app's `package.json` beside the web crate or at the workspace root wins
-    /// over metadata.
-    pub fn for_app(web: &WebCrate, workspace_root: &Path, layout: &Layout) -> Source {
+    /// The app's `package.json` beside the web crate or at the workspace root, which must list
+    /// everything `needed` names; or else `needed`, the graph's merged
+    /// `[package.metadata.doxa.npm]`, written to one.
+    pub fn for_app(
+        web: &WebCrate,
+        workspace_root: &Path,
+        layout: &Layout,
+        needed: &BTreeMap<String, (String, String)>,
+    ) -> Result<Source> {
         for dir in [web.dir.as_path(), workspace_root] {
-            if dir.join("package.json").is_file() {
-                return Source::Own(dir.to_owned());
+            let path = dir.join("package.json");
+            if !path.is_file() {
+                continue;
             }
+            let text = std::fs::read_to_string(&path).at(&path)?;
+            let json: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| Error::config(format!("{}: {e}", path.display()), "fix the JSON"))?;
+            let missing = crate::graph::missing_from(&json, needed);
+            if !missing.is_empty() {
+                return Err(Error::config(
+                    format!("{} doesn't list {}", path.display(), missing.join(", ")),
+                    "add them to its dependencies, or remove it and doxa writes one",
+                ));
+            }
+            return Ok(Source::Own(dir.to_owned()));
         }
-        if web.config.npm.is_empty() {
+        Ok(if needed.is_empty() {
             Source::None
         } else {
             Source::Synced {
                 dir: layout.js(),
-                deps: web.config.npm.clone(),
+                deps: needed
+                    .iter()
+                    .map(|(k, (range, _))| (k.clone(), range.clone()))
+                    .collect(),
                 lock_dir: web.dir.clone(),
             }
-        }
+        })
     }
 
     /// The directory whose `node_modules` the bundler resolves from.
@@ -289,17 +310,32 @@ mod tests {
             config: DoxaConfig::default(),
         };
         std::fs::create_dir_all(&web.dir).unwrap();
-        assert_eq!(Source::for_app(&web, dir.path(), &layout), Source::None);
+        let none = BTreeMap::new();
+        assert_eq!(
+            Source::for_app(&web, dir.path(), &layout, &none).unwrap(),
+            Source::None
+        );
 
-        web.config.npm.insert("react".into(), "^19".into());
+        let react = BTreeMap::from([("react".to_owned(), ("^19".to_owned(), "kit".to_owned()))]);
         assert!(matches!(
-            Source::for_app(&web, dir.path(), &layout),
-            Source::Synced { dir: d, lock_dir, .. } if d == layout.js() && lock_dir == web.dir
+            Source::for_app(&web, dir.path(), &layout, &react).unwrap(),
+            Source::Synced { dir: d, lock_dir, deps } if d == layout.js() && lock_dir == web.dir && deps["react"] == "^19"
         ));
 
         std::fs::write(web.dir.join("package.json"), "{}").unwrap();
+        let err = Source::for_app(&web, dir.path(), &layout, &react).unwrap_err();
+        assert!(
+            err.to_string().contains("`react` (`^19`, for `kit`)"),
+            "{err}"
+        );
+        std::fs::write(
+            web.dir.join("package.json"),
+            r#"{"dependencies":{"react":"^19.1.0"}}"#,
+        )
+        .unwrap();
+        web.config.npm.clear();
         assert_eq!(
-            Source::for_app(&web, dir.path(), &layout),
+            Source::for_app(&web, dir.path(), &layout, &react).unwrap(),
             Source::Own(web.dir.clone())
         );
     }
