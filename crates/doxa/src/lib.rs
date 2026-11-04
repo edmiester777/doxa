@@ -78,6 +78,20 @@ pub use doxa_macros::{
 pub use serde as __serde;
 
 /// The server half: what `doxa::prelude!()` brings in where the crate is the server.
+///
+/// A server's route has a body:
+///
+/// ```
+/// #[doxa::get("/n")]
+/// pub async fn n() -> axum::Json<u32> { axum::Json(1) }
+/// ```
+///
+/// Without one it is a declaration, which only an API crate makes:
+///
+/// ```compile_fail
+/// #[doxa::get("/n")]
+/// pub async fn n() -> axum::Json<u32>;
+/// ```
 #[cfg(all(feature = "docs", feature = "macros", not(target_arch = "wasm32")))]
 pub mod server {
     /// Names a shared route file needs when compiled as the server.

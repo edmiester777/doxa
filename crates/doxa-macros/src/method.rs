@@ -25,10 +25,13 @@ use crate::{client_stub, grant, sig};
 /// Expand `#[get("/path", ...)]` and friends.
 pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed_args = parse_method_args(args)?;
-    let mut item_fn: ItemFn = parse2(item)?;
     let method_ident = syn::Ident::new(method, proc_macro2::Span::call_site());
     let path_lit = parsed_args.path;
     let (client, extra) = take_client_arg(parsed_args.extra)?;
+    let mut item_fn = match routed(item)? {
+        Routed::Handler(f) => f,
+        Routed::Declaration(f) => return declaration(method, &path_lit, &extra, client, &f),
+    };
 
     if doxa_macro_support::is_client() {
         return client_half(method, &path_lit, &extra, client, &item_fn);
@@ -55,9 +58,15 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
 /// the method is the first positional argument.
 pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed = parse_operation_args(args)?;
-    let mut item_fn: ItemFn = parse2(item)?;
     let (client, extra) = take_client_arg(parsed.extra)?;
     let parsed = OperationArgs { extra, ..parsed };
+    let mut item_fn = match routed(item)? {
+        Routed::Handler(f) => f,
+        Routed::Declaration(f) => {
+            let method = parsed.method.to_string();
+            return declaration(&method, &parsed.path, &parsed.extra, client, &f);
+        }
+    };
 
     if doxa_macro_support::is_client() {
         let method = parsed.method.to_string();
@@ -77,6 +86,96 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
         #utoipa_attr
         #item_fn
     })
+}
+
+/// A route attribute's item: a handler, or in an API crate a declaration ending in `;`.
+enum Routed {
+    Handler(ItemFn),
+    /// The signature, with an empty body standing in for the missing one.
+    Declaration(ItemFn),
+}
+
+fn routed(item: TokenStream) -> Result<Routed> {
+    let declares = matches!(
+        item.clone().into_iter().last(),
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ';'
+    );
+    let api = doxa_macro_support::is_api();
+    if !declares {
+        let item_fn: ItemFn = parse2(item)?;
+        if api {
+            return Err(syn::Error::new_spanned(
+                &item_fn.sig,
+                "an API crate declares routes rather than serving them: end the signature \
+                 with `;`, and serve it from the server with `#[doxa::implements(…)]`",
+            ));
+        }
+        return Ok(Routed::Handler(item_fn));
+    }
+    let parser = |input: syn::parse::ParseStream| -> Result<ItemFn> {
+        let attrs = input.call(syn::Attribute::parse_outer)?;
+        let vis: syn::Visibility = input.parse()?;
+        let sig: syn::Signature = input.parse()?;
+        input.parse::<Token![;]>()?;
+        Ok(ItemFn {
+            attrs,
+            vis,
+            sig,
+            block: Box::new(syn::parse_quote!({})),
+        })
+    };
+    let item_fn = parser.parse2(item)?;
+    if !api {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig,
+            "a route without a body is a declaration, which only an API crate makes: \
+             call `doxa_role::api()` from its `build.rs`",
+        ));
+    }
+    Ok(Routed::Declaration(item_fn))
+}
+
+/// A declared route: the call to it, and the `Route` marker a server implements it against.
+fn declaration(
+    method: &str,
+    path: &LitStr,
+    extra: &[Meta],
+    client: bool,
+    item_fn: &ItemFn,
+) -> Result<TokenStream> {
+    if !client {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig,
+            "a declared route is one clients call, so it can't take `client = false`",
+        ));
+    }
+    if let syn::Visibility::Inherited = item_fn.vis {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig,
+            "a declared route is part of the API: make it `pub`",
+        ));
+    }
+    let operation_id = extra.iter().find_map(operation_id);
+    let route = client_stub::Route {
+        method,
+        path,
+        operation_id,
+    };
+    let declared = client_stub::declared(&route, item_fn)?;
+    client_stub::expand(&route, item_fn, declared)
+}
+
+fn operation_id(m: &Meta) -> Option<&LitStr> {
+    match m {
+        Meta::NameValue(nv) if nv.path.is_ident("operation_id") => match &nv.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit),
+                ..
+            }) => Some(lit),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The `x-doxa` stamp for this route's operation; `{"client": false}` when it has no client half.
@@ -153,16 +252,7 @@ fn client_half(
     if !client {
         return Ok(TokenStream::new());
     }
-    let operation_id = extra.iter().find_map(|m| match m {
-        Meta::NameValue(nv) if nv.path.is_ident("operation_id") => match &nv.value {
-            syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(lit),
-                ..
-            }) => Some(lit),
-            _ => None,
-        },
-        _ => None,
-    });
+    let operation_id = extra.iter().find_map(operation_id);
     client_stub::expand(
         &client_stub::Route {
             method,
@@ -170,6 +260,7 @@ fn client_half(
             operation_id,
         },
         item_fn,
+        TokenStream::new(),
     )
 }
 

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 #[doc(hidden)]
 pub use serde_json::Value as __Value;
 
+pub mod contract;
 mod valid;
 pub use valid::Validates;
 

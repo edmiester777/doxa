@@ -47,3 +47,19 @@ pub enum OrderEvent {
     Placed { id: u32 },
     Cancelled { id: u32 },
 }
+
+/// One order.
+#[get("/api/orders/{id}")]
+pub async fn get_order(id: Path<u32>) -> Result<Json<Order>, OrderError>;
+
+/// Every order, narrowed by `filter`.
+#[get("/api/orders")]
+pub async fn list_orders(filter: Query<OrderFilter>) -> Json<Vec<Order>>;
+
+/// Place an order.
+#[post("/api/orders")]
+pub async fn place_order(order: Valid<Json<NewOrder>>) -> Result<Json<Order>, OrderError>;
+
+/// Orders as they're placed and cancelled.
+#[get("/api/orders/events")]
+pub async fn order_events() -> SseStream<OrderEvent>;

@@ -270,8 +270,73 @@ fn entity_type(ret: &Type) -> Option<&Type> {
     }
 }
 
-/// Emit the stub and its `ROUTE` module.
-pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
+/// The declared route's `Route` marker: what a server implementing it is held to.
+pub fn declared(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
+    let args: Vec<TokenStream> = args(item_fn)
+        .into_iter()
+        .filter_map(|a| match a {
+            Arg::Sent {
+                check: Some(check), ..
+            } => Some(check.wrapper),
+            Arg::Sent { ty, .. } => Some(ty),
+            Arg::Dropped | Arg::Server => None,
+        })
+        .collect();
+    let once = route.method != "get";
+    let (mut bad, mut unread) = (None, None);
+    let (ok, error) = match &item_fn.sig.output {
+        ReturnType::Default => (quote!(()), quote!(::doxa::wire::contract::NoError)),
+        ReturnType::Type(_, ty) => match (last_ident(ty).as_deref(), type_args(ty).as_slice()) {
+            (Some("Result" | "ApiResult"), [ok, err]) => {
+                (response_type(ok, once, &mut bad, &mut unread), quote!(#err))
+            }
+            _ => (
+                response_type(ty, once, &mut bad, &mut unread),
+                quote!(::doxa::wire::contract::NoError),
+            ),
+        },
+    };
+    if let Some(ty) = unread.or(bad) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "a declared route answers what the browser can decode, and `{}` isn't that\n\
+                 help: return `Json<…>`, `SseStream<…>`, `StatusCode`, `Attachment` or a `Result` of one",
+                type_text(ty)
+            ),
+        ));
+    }
+    let docs: Vec<String> = item_fn
+        .attrs
+        .iter()
+        .filter_map(|a| match &a.meta {
+            syn::Meta::NameValue(nv) if nv.path.is_ident("doc") => match &nv.value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) => Some(s.value().strip_prefix(' ').unwrap_or(&s.value()).to_owned()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let docs = docs.join("\n");
+    Ok(quote! {
+        /// This route, as the server that implements it is held to it.
+        pub struct Route;
+
+        impl ::doxa::wire::contract::Declared for Route {
+            const SPEC: &'static ::doxa::wire::RouteSpec = &ROUTE;
+            const DOCS: &'static str = #docs;
+            type Args = (#(#args,)*);
+            type Ok = #ok;
+            type Error = #error;
+        }
+    })
+}
+
+/// Emit the stub and its `ROUTE` module, with `extra` items inside the module.
+pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::Result<TokenStream> {
     let name = &item_fn.sig.ident;
     let docs = item_fn.attrs.iter().filter(|a| a.path().is_ident("doc"));
 
@@ -452,6 +517,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
             #coverage
             #refusal
             #check
+            #extra
 
             /// Whether this caller may call the route with these arguments, from a dry run.
             pub fn can(#(#probe_params),*) -> ::doxa::client::Probe {
@@ -702,6 +768,7 @@ mod tests {
                 operation_id: None,
             },
             &item,
+            TokenStream::new(),
         )
         .unwrap()
         .to_string()
@@ -923,7 +990,9 @@ mod tests {
             path: &path,
             operation_id: None,
         };
-        let err = expand(&route, &item).unwrap_err().to_string();
+        let err = expand(&route, &item, TokenStream::new())
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("doxa can't tell what `DoxaSseStream` returns in the browser"),
             "{err}"
