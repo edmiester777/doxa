@@ -1,5 +1,6 @@
 //! `doxa`: scaffold, build, and develop a doxa app.
 
+mod check;
 mod dev;
 mod gallery;
 mod new;
@@ -69,6 +70,15 @@ enum Command {
         #[arg(long)]
         locked: bool,
     },
+    /// Check an API crate builds for the browser, naming the dependency that doesn't.
+    Check {
+        /// Build the crate for wasm32-unknown-unknown.
+        #[arg(long, required = true)]
+        wire: bool,
+        /// The API crate.
+        #[arg(short, long)]
+        package: String,
+    },
     /// Format Rust sources, including view markup.
     Fmt {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
@@ -115,6 +125,7 @@ fn main() -> ExitCode {
         } => tokio::runtime::Runtime::new()
             .map_err(Into::into)
             .and_then(|rt| rt.block_on(gallery::run(package, port, locked))),
+        Command::Check { package, .. } => check::wire(&package),
         Command::Fmt { args } => return doxa_fmt::run(args),
     };
     match result {
@@ -186,6 +197,16 @@ mod tests {
             parse(&["doxa", "gallery"]),
             Command::Gallery { port: 3100, .. }
         ));
+    }
+
+    #[test]
+    fn check_needs_wire_and_a_package() {
+        assert!(matches!(
+            parse(&["doxa", "check", "--wire", "-p", "api"]),
+            Command::Check { wire: true, package } if package == "api"
+        ));
+        assert!(Cli::try_parse_from(["doxa", "check", "-p", "api"]).is_err());
+        assert!(Cli::try_parse_from(["doxa", "check", "--wire"]).is_err());
     }
 
     #[test]
