@@ -476,3 +476,38 @@ fn a_map_entry_is_a_field_named_by_its_key() {
     ops.touch();
     assert_eq!(ops.error().as_deref(), Some("length is lower than 1"));
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;
+
+#[derive(serde::Deserialize, garde::Validate, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct Page {
+    #[garde(range(min = 1))]
+    pub limit: u32,
+}
+
+#[doxa::get("/valid-page", client = false)]
+async fn valid_page(
+    doxa::Valid(axum::extract::Query(_)): doxa::Valid<axum::extract::Query<Page>>,
+) -> axum::Json<u32> {
+    axum::Json(0)
+}
+
+#[doxa::get("/plain-page", client = false)]
+async fn plain_page(axum::extract::Query(_): axum::extract::Query<Page>) -> axum::Json<u32> {
+    axum::Json(0)
+}
+
+#[test]
+fn a_validating_route_documents_its_422_and_a_plain_one_does_not() {
+    let (_, doc) = doxa::OpenApiRouter::<()>::new()
+        .routes(doxa::routes!(valid_page))
+        .routes(doxa::routes!(plain_page))
+        .split_for_parts();
+    let doc = serde_json::to_value(doc).unwrap();
+    let code = "/responses/422/content/application~1json/schema/properties/code/enum";
+    let of = |path: &str| doc["paths"][path]["get"].pointer(code).cloned();
+    assert_eq!(of("/valid-page"), Some(serde_json::json!(["invalid"])));
+    assert_eq!(of("/plain-page"), None);
+}

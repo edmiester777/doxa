@@ -113,8 +113,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
         impl<__E: ::doxa::DocQueryParams> ::doxa::DocQueryParams for #name<__E> {
             fn describe(op: &mut #op) {
-                __E::describe(op);
-                ::doxa::__private::document_invalid(op);
+                __E::describe(op)
             }
         }
 
@@ -138,7 +137,12 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
         impl<__E: ::doxa::DocRequestBody> ::doxa::DocRequestBody for #name<__E> {
             fn describe(op: &mut #op) {
-                __E::describe(op);
+                __E::describe(op)
+            }
+        }
+
+        impl<__E> ::doxa::DocOperationSecurity for #name<__E> {
+            fn describe(op: &mut #op) {
                 ::doxa::__private::document_invalid(op);
             }
         }
