@@ -1,4 +1,5 @@
-//! Marks a crate as the client or server half of a doxa app, from `build.rs`.
+//! Marks a crate as the client or server half of a doxa app, or an API both depend on, from
+//! `build.rs`.
 //!
 //! ```ignore
 //! // web/build.rs
@@ -14,6 +15,12 @@ pub const ROLE_ENV: &str = "DOXA_ROLE";
 pub fn client() {
     emit("client");
     println!("cargo::rustc-cfg=doxa_client");
+}
+
+/// Build this crate as an API contract both halves depend on: route declarations become
+/// calls everywhere, and what only a server needs compiles off wasm.
+pub fn api() {
+    emit("api");
 }
 
 /// Build this crate as the server half. The default; only needed to say so.

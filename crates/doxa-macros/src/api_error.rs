@@ -325,9 +325,9 @@ fn generate_into_response(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
 
     quote! {
         #[automatically_derived]
-        impl ::axum::response::IntoResponse for #enum_name {
-            fn into_response(self) -> ::axum::response::Response {
-                use ::axum::response::IntoResponse as _;
+        impl ::doxa::__private::axum::response::IntoResponse for #enum_name {
+            fn into_response(self) -> ::doxa::__private::axum::response::Response {
+                use ::doxa::__private::axum::response::IntoResponse as _;
 
                 // Capture the Display string before the borrow in the match.
                 let detail: ::std::string::String = ::std::string::ToString::to_string(&self);
@@ -376,9 +376,9 @@ fn generate_into_response(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
                     error: self,
                 };
 
-                let status = ::axum::http::StatusCode::from_u16(status_u16)
-                    .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-                let response = (status, ::axum::Json(body)).into_response();
+                let status = ::doxa::__private::axum::http::StatusCode::from_u16(status_u16)
+                    .unwrap_or(::doxa::__private::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                let response = (status, ::doxa::__private::axum::Json(body)).into_response();
 
                 // Attach outcome to response extensions (when audit is enabled).
                 #audit_inject
@@ -404,7 +404,7 @@ fn variant_error_schema(v: &ParsedVariant) -> TokenStream {
                 ::utoipa::openapi::ObjectBuilder::new()
                     .schema_type(::utoipa::openapi::schema::Type::String)
                     .enum_values(::std::option::Option::Some([
-                        ::serde_json::json!(#variant_name),
+                        ::doxa::__private::serde_json::json!(#variant_name),
                     ]))
             }
         }
@@ -437,15 +437,15 @@ fn variant_example_error(v: &ParsedVariant) -> TokenStream {
     let variant_name_lit = LitStr::new(&v.ident.to_string(), proc_macro2::Span::call_site());
     match &v.shape {
         VariantShape::Unit => {
-            quote! { ::serde_json::json!(#variant_name_lit) }
+            quote! { ::doxa::__private::serde_json::json!(#variant_name_lit) }
         }
         VariantShape::SingleField(_) => {
             let msg = format!("example {} message", v.ident);
             let msg_lit = LitStr::new(&msg, proc_macro2::Span::call_site());
-            quote! { ::serde_json::json!({ #variant_name_lit: #msg_lit }) }
+            quote! { ::doxa::__private::serde_json::json!({ #variant_name_lit: #msg_lit }) }
         }
         VariantShape::Other => {
-            quote! { ::serde_json::json!({ #variant_name_lit: {} }) }
+            quote! { ::doxa::__private::serde_json::json!({ #variant_name_lit: {} }) }
         }
     }
 }
@@ -497,7 +497,7 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
         // Code enum values for the `code` property.
         let code_enum_values = group.iter().map(|v| {
             let code_lit = LitStr::new(&v.code, proc_macro2::Span::call_site());
-            quote! { ::serde_json::json!(#code_lit) }
+            quote! { ::doxa::__private::serde_json::json!(#code_lit) }
         });
 
         // Per-variant error schemas for the `oneOf`.
@@ -523,7 +523,7 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
                 {
                     let example_value = ::utoipa::openapi::example::ExampleBuilder::new()
                         .summary(#summary_lit)
-                        .value(::std::option::Option::Some(::serde_json::json!({
+                        .value(::std::option::Option::Some(::doxa::__private::serde_json::json!({
                             "message": #variant_name_lit,
                             "status": #status_lit,
                             "code": #code_lit,
@@ -563,7 +563,7 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
                         ::utoipa::openapi::ObjectBuilder::new()
                             .schema_type(::utoipa::openapi::schema::Type::Integer)
                             .enum_values(::std::option::Option::Some([
-                                ::serde_json::json!(#status_lit),
+                                ::doxa::__private::serde_json::json!(#status_lit),
                             ])),
                     )
                     .required("status")

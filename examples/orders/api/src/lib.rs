@@ -1,0 +1,49 @@
+//! The orders API: what `orders-server` serves and its clients call.
+
+doxa::prelude!();
+doxa::service!();
+
+route_key!(pub OrderKey { id: u32 });
+
+/// An order.
+#[dto]
+pub struct Order {
+    pub id: u32,
+    pub item: String,
+    pub quantity: u32,
+}
+
+/// A new order; the server and the client check the same rules.
+#[dto]
+#[derive(garde::Validate)]
+pub struct NewOrder {
+    #[garde(length(min = 1))]
+    pub item: String,
+    #[garde(range(min = 1))]
+    pub quantity: u32,
+}
+
+/// Narrows a listing.
+#[dto(query)]
+#[derive(Default)]
+pub struct OrderFilter {
+    pub item: Option<String>,
+}
+
+/// What can go wrong with an order.
+#[dto]
+#[derive(thiserror::Error, ApiError)]
+pub enum OrderError {
+    #[error("no order {0}")]
+    #[api(status = 404, code = "not_found")]
+    NotFound(u32),
+}
+
+/// Something that happened to an order.
+#[dto]
+#[derive(SseEvent)]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
+pub enum OrderEvent {
+    Placed { id: u32 },
+    Cancelled { id: u32 },
+}

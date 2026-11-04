@@ -1,0 +1,16 @@
+[package]
+name = "orders-api"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+# The orders routes as declarations, built for the server and for its browser and native clients.
+[dependencies]
+doxa = { workspace = true, features = ["client", "garde"] }
+garde = { workspace = true, features = ["derive"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+utoipa = { workspace = true }
+
+[build-dependencies]
+doxa-role = { workspace = true }

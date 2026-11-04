@@ -273,11 +273,10 @@ fn expand_markers(fields: &mut Fields, schema: bool) -> syn::Result<()> {
     Ok(())
 }
 
-/// The item with `#[dto]`'s derives added, and in the client half its server-only ones removed.
-pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
+/// The item with `#[dto]`'s derives added, and for the `client` half its server-only ones removed.
+pub fn expand(args: TokenStream, item: TokenStream, client: bool) -> syn::Result<TokenStream> {
     let args = Args::parse(args)?;
     let mut input: DeriveInput = syn::parse2(item)?;
-    let client = doxa_macro_support::is_client();
 
     if args.query && !matches!(&input.data, Data::Struct(s) if matches!(s.fields, Fields::Named(_)))
     {

@@ -609,3 +609,34 @@ pub mod client {
         pub use serde::{Deserialize, Serialize};
     }
 }
+
+/// An API crate: route declarations both a server and its clients depend on, built by a
+/// `build.rs` that calls `doxa_role::api()`.
+#[cfg(all(feature = "client", feature = "macros"))]
+pub mod api {
+    /// Names an API crate's files use, on every target.
+    pub mod prelude {
+        #[cfg(feature = "garde")]
+        pub use crate::Valid;
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use crate::{IntoParams, ToSchema};
+        pub use doxa_client::route_key;
+        pub use doxa_client::{
+            Attachment, Bytes, Form, Json, Multipart, Path, Query, SseStream, StatusCode,
+        };
+        pub use doxa_macros::{
+            capability, client, client_only, delete, dto, get, patch, post, put, server,
+            server_only, ApiError, Identity, SseEvent,
+        };
+        #[cfg(target_arch = "wasm32")]
+        pub use doxa_macros::{ClientIntoParams as IntoParams, ClientToSchema as ToSchema};
+        pub use serde::{Deserialize, Serialize};
+    }
+}
+
+/// Items, unchanged; lets a macro put one `#[cfg]` on a run of them.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __doxa_items {
+    ($($item:tt)*) => { $($item)* };
+}

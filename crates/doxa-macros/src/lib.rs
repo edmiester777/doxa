@@ -185,6 +185,21 @@
 //! See the `doxa` crate-level docs for the broader design.
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TS2;
+
+/// The expansion this crate's role needs: one of the two, or both behind `target_arch`.
+fn by_role(
+    server: impl FnOnce() -> syn::Result<TS2>,
+    client: impl FnOnce() -> syn::Result<TS2>,
+) -> TokenStream {
+    use doxa_macro_support::Role;
+    let out = match Role::current() {
+        Role::Server => server(),
+        Role::Client => client(),
+        Role::Api => server().and_then(|s| client().map(|c| doxa_macro_support::split(s, c))),
+    };
+    out.unwrap_or_else(syn::Error::into_compile_error).into()
+}
 
 mod actions;
 mod api_error;
@@ -290,12 +305,7 @@ mod validator;
 /// an SDK-visible one.
 #[proc_macro_derive(ApiError, attributes(api, api_error, api_default))]
 pub fn derive_api_error(input: TokenStream) -> TokenStream {
-    if doxa_macro_support::is_client() {
-        return TokenStream::new();
-    }
-    api_error::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    by_role(|| api_error::expand(input.into()), || Ok(TS2::new()))
 }
 
 /// Derive [`SseEventMeta`](../doxa/trait.SseEventMeta.html) for an
@@ -331,12 +341,7 @@ pub fn derive_api_error(input: TokenStream) -> TokenStream {
 /// `utoipa::PartialSchema`; wrap `chrono`/`uuid` fields in a payload type).
 #[proc_macro_derive(SseEvent, attributes(sse))]
 pub fn derive_sse_event(input: TokenStream) -> TokenStream {
-    if doxa_macro_support::is_client() {
-        return TokenStream::new();
-    }
-    sse_event::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    by_role(|| sse_event::expand(input.into()), || Ok(TS2::new()))
 }
 
 /// Shortcut for `#[utoipa::path(get, path = "...")]`.
@@ -530,12 +535,7 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// used it.
 #[proc_macro_derive(PolicyResource, attributes(resource))]
 pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
-    if doxa_macro_support::is_client() {
-        return TokenStream::new();
-    }
-    policy_resource::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    by_role(|| policy_resource::expand(input.into()), || Ok(TS2::new()))
 }
 
 /// Declare an asset's action vocabulary — every action it permits, and
@@ -643,10 +643,11 @@ pub fn derive_actions(input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
-    if doxa_macro_support::is_client() {
-        return item;
-    }
-    capability::expand(args.into(), item.into()).into()
+    let item: TS2 = item.into();
+    by_role(
+        || Ok(capability::expand(args.into(), item.clone())),
+        || Ok(item.clone()),
+    )
 }
 
 /// One route's way into a resource: the `Granting` impl, written from the
@@ -756,14 +757,11 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// compile.
 #[proc_macro_attribute]
 pub fn asset(args: TokenStream, item: TokenStream) -> TokenStream {
-    let expand = if doxa_macro_support::is_client() {
-        asset::expand_client
-    } else {
-        asset::expand
-    };
-    expand(args.into(), item.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    let (args, item): (TS2, TS2) = (args.into(), item.into());
+    by_role(
+        || asset::expand(args.clone(), item.clone()),
+        || asset::expand_client(args.clone(), item.clone()),
+    )
 }
 
 /// Generic operation attribute for cases where the HTTP method must be
@@ -885,9 +883,11 @@ pub fn service(input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn dto(args: TokenStream, item: TokenStream) -> TokenStream {
-    dto::expand(args.into(), item.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    let (args, item): (TS2, TS2) = (args.into(), item.into());
+    by_role(
+        || dto::expand(args.clone(), item.clone(), false),
+        || dto::expand(args.clone(), item.clone(), true),
+    )
 }
 
 /// The function that builds this server's OpenAPI document, which a generated client crate's

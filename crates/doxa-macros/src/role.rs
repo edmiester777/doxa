@@ -16,10 +16,10 @@ pub fn prelude(input: TokenStream) -> syn::Result<TokenStream> {
             "`prelude!()` takes no arguments",
         ));
     }
-    let half = if doxa_macro_support::is_client() {
-        quote!(client)
-    } else {
-        quote!(server)
+    let half = match doxa_macro_support::Role::current() {
+        doxa_macro_support::Role::Client => quote!(client),
+        doxa_macro_support::Role::Api => quote!(api),
+        doxa_macro_support::Role::Server => quote!(server),
     };
     Ok(quote! {
         #[allow(unused_imports)]
@@ -27,7 +27,7 @@ pub fn prelude(input: TokenStream) -> syn::Result<TokenStream> {
     })
 }
 
-/// `service!()`: this client crate's `service()` and `PACKAGE`; nothing in the server half.
+/// `service!()`: this client or API crate's `service()` and `PACKAGE`; nothing in the server half.
 pub fn service(input: TokenStream) -> syn::Result<TokenStream> {
     if !input.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -35,7 +35,7 @@ pub fn service(input: TokenStream) -> syn::Result<TokenStream> {
             "`service!()` takes no arguments",
         ));
     }
-    if !doxa_macro_support::is_client() {
+    if !doxa_macro_support::is_client() && !doxa_macro_support::is_api() {
         return Ok(TokenStream::new());
     }
     Ok(quote! {

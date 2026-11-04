@@ -22,10 +22,6 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     if !one_field {
         return Err(shape_error());
     }
-    if doxa_macro_support::is_client() {
-        return Ok(TokenStream::new());
-    }
-
     let ax = quote!(::doxa::__private::axum);
     let body = |extractor: TokenStream| {
         quote! {
@@ -84,7 +80,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let query = parts(quote!(#ax::extract::Query));
     let op = quote!(::doxa::__private::utoipa::openapi::path::Operation);
 
-    Ok(quote! {
+    let server = quote! {
         #json
         #form
         #query
@@ -118,5 +114,9 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
                 __E::describe(op)
             }
         }
-    })
+    };
+    Ok(doxa_macro_support::tag(
+        doxa_macro_support::Side::Server,
+        server,
+    ))
 }
