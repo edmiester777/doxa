@@ -314,6 +314,9 @@ fn error_type(ret: &Type) -> Option<&Type> {
 
 /// The extractor an argument reads, seen through one wrapper such as `Valid<…>`.
 fn seen_extractor(ty: &Type) -> Option<(String, &Type)> {
+    if let Some(body) = optional_body(ty).or_else(|| first_type_arg(ty).and_then(optional_body)) {
+        return seen_extractor(body);
+    }
     let last = last_ident(ty)?;
     if ["Json", "Form", "Query", "Path", "Bytes", "Multipart"].contains(&last.as_str()) {
         return Some((last, ty));
@@ -798,6 +801,24 @@ const EXTRACTORS: &[&str] = &["Path", "Query", "Json", "Form"];
 
 /// `inner`, classified, seen through the wrapper `ty`; its value checked first unless it is a path.
 fn wrapped(inner: Arg, ty: &Type, extractor: &str, inner_ty: &Type) -> Arg {
+    let value = match (extractor, first_type_arg(inner_ty)) {
+        ("Path", _) | (_, None) => None,
+        (_, Some(v)) => Some(v.clone()),
+    };
+    wrapped_as(inner, ty, value)
+}
+
+/// `X` in `Option<X>`, where `X` is a body extractor.
+fn optional_body(ty: &Type) -> Option<&Type> {
+    if last_ident(ty).as_deref() != Some("Option") {
+        return None;
+    }
+    first_type_arg(ty)
+        .filter(|t| matches!(last_ident(t).as_deref(), Some("Json" | "Form" | "Bytes")))
+}
+
+/// `inner`, seen through the wrapper `ty` that checks `value` before it is sent.
+fn wrapped_as(inner: Arg, ty: &Type, value: Option<Type>) -> Arg {
     let Arg::Sent {
         name,
         ty: client_ty,
@@ -806,10 +827,6 @@ fn wrapped(inner: Arg, ty: &Type, extractor: &str, inner_ty: &Type) -> Arg {
     } = inner
     else {
         return inner;
-    };
-    let value = match (extractor, first_type_arg(inner_ty)) {
-        ("Path", _) | (_, None) => None,
-        (_, Some(v)) => Some(v.clone()),
     };
     let check = match (value, ty) {
         (Some(value), Type::Path(tp)) => {
@@ -844,9 +861,24 @@ fn classify(pat: &Pat, ty: &Type, index: usize) -> Arg {
     if SERVER_ONLY.contains(&last.as_str()) {
         return Arg::Dropped;
     }
+    if let Some(body) = optional_body(ty) {
+        return match classify(pat, body, index) {
+            Arg::Sent { name, ty, kind, .. } => Arg::Sent {
+                name,
+                ty: quote!(::core::option::Option<#ty>),
+                kind,
+                check: None,
+            },
+            other => other,
+        };
+    }
     if let Some(inner) = first_type_arg(ty).filter(|_| !EXTRACTORS.contains(&last.as_str())) {
         if let Some(extractor) = last_ident(inner).filter(|n| EXTRACTORS.contains(&n.as_str())) {
             return wrapped(classify(pat, inner, index), ty, &extractor, inner);
+        }
+        if let Some(value) = optional_body(inner).and_then(first_type_arg) {
+            let value: Type = syn::parse_quote!(::core::option::Option<#value>);
+            return wrapped_as(classify(pat, inner, index), ty, Some(value));
         }
     }
     match (last.as_str(), first_type_arg(ty)) {

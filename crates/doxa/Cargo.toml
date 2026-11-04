@@ -227,5 +227,9 @@ name = "dry_run"
 required-features = ["full"]
 
 [[test]]
+name = "optional_body"
+required-features = ["client-router", "garde"]
+
+[[test]]
 name = "touches"
 required-features = ["client"]

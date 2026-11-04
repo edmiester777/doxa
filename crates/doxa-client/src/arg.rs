@@ -336,6 +336,14 @@ impl ClientArg for Multipart {
     }
 }
 
+/// An optional body: `None` sends none.
+impl<X: ClientArg> ClientArg for Option<X> {
+    type Value = Option<X::Value>;
+    fn apply(value: Option<X::Value>, out: &mut Outgoing) -> Result<(), String> {
+        value.map_or(Ok(()), |v| X::apply(v, out))
+    }
+}
+
 impl<T> ClientArg for Foreign<T>
 where
     T: ClientArg,

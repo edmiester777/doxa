@@ -50,6 +50,8 @@ pub struct InferredAttrs {
     /// Inner type of the first `Json<T>` parameter, searched through
     /// recognized transparent wrappers.
     pub request_body: Option<Type>,
+    /// The `Json<T>` body is under an `Option`, so a request may leave it out.
+    pub optional_body: bool,
     /// Full argument types in declaration order. Emitted into the
     /// per-handler `IntoParams` dispatch struct for trait-based
     /// contribution.
@@ -107,6 +109,7 @@ pub fn infer(item_fn: &ItemFn) -> InferredAttrs {
         if inferred.request_body.is_none() {
             if let Some(body_ty) = find_json_inner(&pat_type.ty) {
                 inferred.request_body = Some(body_ty.clone());
+                inferred.optional_body = optional_json(&pat_type.ty);
             }
         }
 
@@ -278,6 +281,27 @@ fn wrapper_and_inner(ty: &Type) -> Option<(&'static str, &Type)> {
 /// Walk through single-generic wrappers (Valid, Authenticated, …) to
 /// find the inner type of the first `Json<T>` reached. Returns `None`
 /// if no `Json` is present in the type tree.
+/// Whether the `Json<T>` in `ty` is under an `Option`, so the body may be left out.
+fn optional_json(ty: &Type) -> bool {
+    let Type::Path(TypePath { path, .. }) = ty else {
+        return false;
+    };
+    let Some(last) = path.segments.last() else {
+        return false;
+    };
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    let Some(GenericArgument::Type(inner)) = args.args.first() else {
+        return false;
+    };
+    match last.ident.to_string().as_str() {
+        "Json" => false,
+        "Option" => matches!(wrapper_and_inner(inner), Some(("Json", _))),
+        _ => optional_json(inner),
+    }
+}
+
 fn find_json_inner(ty: &Type) -> Option<&Type> {
     // Direct Json<T>?
     if let Some(("Json", inner)) = wrapper_and_inner(ty) {
@@ -527,6 +551,15 @@ impl InferredAttrs {
         // resolves to the autoref-fallback no-op and the operation
         // is left unchanged.
         let arg_types_for_ops = self.arg_types.clone();
+        let optional_body = self.optional_body.then(|| {
+            quote! {
+                if let ::core::option::Option::Some(__body) = __op.request_body.as_mut() {
+                    __body.required = ::core::option::Option::Some(
+                        ::utoipa::openapi::Required::False,
+                    );
+                }
+            }
+        });
         pre_items.extend(quote! {
             impl ::doxa::ApidocHandlerOps for #path_struct_ident {
                 fn augment(
@@ -580,6 +613,7 @@ impl InferredAttrs {
                         )> = ::std::vec::Vec::new();
                         #response_body_ops_tt
                         drop(__schemas);
+                        #optional_body
                         ::doxa::__private::stamp_client_meta(
                             __op,
                             <Self as ::doxa::__private::ClientMeta>::meta(),

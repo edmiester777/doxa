@@ -75,6 +75,31 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             }
         }
     };
+    let optional_json = quote! {
+        impl<__S, __T> #ax::extract::FromRequest<__S> for #name<::core::option::Option<#ax::Json<__T>>>
+        where
+            __S: ::core::marker::Send + ::core::marker::Sync,
+            #ax::Json<__T>: #ax::extract::OptionalFromRequest<__S>,
+            Self: ::doxa::wire::Validates<Value = ::core::option::Option<__T>>,
+        {
+            type Rejection = ::doxa::ValidRejection<
+                <#ax::Json<__T> as #ax::extract::OptionalFromRequest<__S>>::Rejection,
+            >;
+
+            async fn from_request(
+                req: #ax::extract::Request,
+                state: &__S,
+            ) -> ::core::result::Result<Self, Self::Rejection> {
+                let inner = <#ax::Json<__T> as #ax::extract::OptionalFromRequest<__S>>::from_request(req, state)
+                    .await
+                    .map_err(::doxa::ValidRejection::Inner)?;
+                let value = inner.map(|j| j.0);
+                <Self as ::doxa::wire::Validates>::check(&value)
+                    .map_err(::doxa::ValidRejection::Invalid)?;
+                ::core::result::Result::Ok(#name(value.map(#ax::Json)))
+            }
+        }
+    };
     let json = body(quote!(#ax::Json));
     let form = body(quote!(#ax::extract::Form));
     let query = parts(quote!(#ax::extract::Query));
@@ -82,6 +107,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
     let server = quote! {
         #json
+        #optional_json
         #form
         #query
 

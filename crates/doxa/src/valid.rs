@@ -31,6 +31,17 @@ macro_rules! validates {
                     $check(value)
                 }
             }
+
+            /// An optional body: `None` isn't checked.
+            #[$cfg]
+            impl<$value: $bound> Validates for $wrapper<Option<$($x)::+<$value>>>
+            $($where)*
+            {
+                type Value = Option<$value>;
+                fn check(value: &Option<$value>) -> Result<(), FieldErrors> {
+                    value.as_ref().map_or(Ok(()), $check)
+                }
+            }
     };
 }
 
