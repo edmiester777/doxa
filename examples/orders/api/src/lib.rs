@@ -84,6 +84,10 @@ pub async fn get_order(order: Grant<Order>) -> Result<Json<Order>, OrderError>;
 #[delete("/api/orders/{id}")]
 pub async fn cancel_order(order: Grant<Order>) -> Result<StatusCode, OrderError>;
 
+/// Refund an order, if its payment allows; the guard alone can't say, so `<Can>` doesn't ask.
+#[post("/api/orders/{id}/refund", dry_run = false)]
+pub async fn refund_order(order: Grant<Order>) -> Result<StatusCode, OrderError>;
+
 /// Every order, narrowed by `filter`.
 #[get("/api/orders")]
 pub async fn list_orders(_: Grant<Many<Order>>, filter: Query<OrderFilter>) -> Json<Vec<Order>>;

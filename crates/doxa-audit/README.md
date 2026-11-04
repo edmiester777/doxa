@@ -157,7 +157,7 @@ their audit trail; drop the ones yours never uses.
 | `AuditEvent` | Complete audit event record |
 | `AuditEventType` | Trait for custom event-type enums |
 | `EventType` | Reference implementation (DataAccess, AdminCreate, AdminUpdate, etc.) |
-| `Outcome` | Allowed / Denied / Error |
+| `Outcome` | Allowed / Denied / Error / Probe (a dry run passed its guards; nothing was done) |
 | `AuditLayer` | Tower middleware for automatic audit emission |
 | `spawn_audit_writer` | Background persistence task (SeaORM-backed) |
 

@@ -146,6 +146,7 @@ where
                     doxa_docs::__private::ResponseAuditOutcome::Allowed => crate::Outcome::Allowed,
                     doxa_docs::__private::ResponseAuditOutcome::Denied => crate::Outcome::Denied,
                     doxa_docs::__private::ResponseAuditOutcome::Error => crate::Outcome::Error,
+                    doxa_docs::__private::ResponseAuditOutcome::Probe => crate::Outcome::Probe,
                 };
                 builder.set_outcome(outcome);
             }

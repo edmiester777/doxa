@@ -20,7 +20,6 @@ default = ["sea-orm"]
 sea-orm = ["dep:sea-orm", "dep:sea-orm-migration"]
 
 [dependencies]
-doxa-wire = { workspace = true }
 sea-orm = { workspace = true, optional = true }
 sea-orm-migration = { workspace = true, optional = true }
 axum = { workspace = true }

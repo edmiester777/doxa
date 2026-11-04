@@ -487,8 +487,6 @@ pub enum Refusal<E> {
     Source(Box<Response>),
     /// The loader failed with the consumer's own error type.
     Load(E),
-    /// A `<Can>` dry run that passed every guard; the handler does not run.
-    DryRun,
 }
 
 impl<E> From<AuthError> for Refusal<E> {
@@ -518,15 +516,6 @@ impl<E: IntoResponse> IntoResponse for Refusal<E> {
             Refusal::Auth(error) => error.into_response(),
             Refusal::Source(response) => *response,
             Refusal::Load(error) => error.into_response(),
-            Refusal::DryRun => (
-                axum::http::StatusCode::NO_CONTENT,
-                [
-                    (doxa_wire::DRY_RUN_HEADER, doxa_wire::DRY_RUN_OK),
-                    ("cache-control", "no-store"),
-                    ("vary", doxa_wire::DRY_RUN_HEADER),
-                ],
-            )
-                .into_response(),
         }
     }
 }
@@ -665,9 +654,6 @@ pub trait GrantSite: Send + Sync + 'static {
     ///
     /// [`ApiDocBuilder`]: https://docs.rs/doxa-docs
     const SCHEME: &'static str = "bearer";
-    /// Whether this is the route's last guard, which answers a `<Can>` dry run
-    /// with `204` instead of letting the handler run. Set by the route macro.
-    const LAST_GUARD: bool = false;
 }
 
 /// Site used by hand-written routes: the key out of the path, bearer. The
@@ -1962,11 +1948,6 @@ where
         // Same entry point a handler uses, so the refusal is recorded by
         // the same code either way.
         let loaded = authorize::<T>(key, source.state(), &parts.extensions).await?;
-        if <T::Site as GrantSite>::LAST_GUARD
-            && parts.headers.contains_key(doxa_wire::DRY_RUN_HEADER)
-        {
-            return Err(Refusal::DryRun);
-        }
         Ok(Granted(ctx, loaded))
     }
 }

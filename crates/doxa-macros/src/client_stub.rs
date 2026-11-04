@@ -81,6 +81,8 @@ pub struct Route<'a> {
     pub operation_id: Option<&'a LitStr>,
     /// Entities a call changes beyond its guards and answer.
     pub touches: &'a [syn::Path],
+    /// `false` when the route says `dry_run = false`: its guards don't tell the whole story.
+    pub dry_run: bool,
 }
 
 /// Server-only extractors a handler body could authorize with, where no guard sees it.
@@ -109,8 +111,8 @@ fn args(item_fn: &ItemFn) -> Vec<Arg> {
         .collect()
 }
 
-/// Only a `Granted` guard answers a dry run wherever the route is mounted; an
-/// unguarded route is answered only by `routes!`, so a probe of it stays Unknown.
+/// Whether a dry run's answer means anything: it needs a guard to have asked, and nothing a
+/// guard can't speak for.
 fn dry_run(item_fn: &ItemFn, args: &[Arg]) -> bool {
     let typed: Vec<usize> = item_fn
         .sig
@@ -120,7 +122,7 @@ fn dry_run(item_fn: &ItemFn, args: &[Arg]) -> bool {
         .filter(|(_, a)| matches!(a, FnArg::Typed(_)))
         .map(|(i, _)| i)
         .collect();
-    match grant::dry_run_gate(item_fn) {
+    match grant::last_guard(item_fn) {
         Some(gate) if !may_authorize(item_fn) => {
             let after = typed.iter().position(|i| *i == gate).map_or(0, |p| p + 1);
             !args[after..].iter().any(Arg::unknown)
@@ -135,10 +137,18 @@ pub fn server_meta(
     method: &str,
     declared: Option<&TokenStream>,
     touches: &[syn::Path],
+    answers_dry_run: bool,
     item_fn: &ItemFn,
     path: &syn::Ident,
 ) -> TokenStream {
-    let dry_run = dry_run(item_fn, &args(item_fn));
+    // A declared route's clients read its declaration, so the stamp can't promise more.
+    let dry_run = match declared {
+        Some(r) if answers_dry_run && dry_run(item_fn, &args(item_fn)) => {
+            quote!(<#r as ::doxa::wire::contract::Declared>::SPEC.dry_run)
+        }
+        None if answers_dry_run && dry_run(item_fn, &args(item_fn)) => quote!(true),
+        _ => quote!(false),
+    };
     let typed = || {
         item_fn.sig.inputs.iter().filter_map(|arg| match arg {
             FnArg::Typed(pt) => Some(&*pt.ty),
@@ -529,7 +539,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
     let docs = item_fn.attrs.iter().filter(|a| a.path().is_ident("doc"));
 
     let args = args(item_fn);
-    let dry_run = dry_run(item_fn, &args);
+    let dry_run = route.dry_run && dry_run(item_fn, &args);
 
     let entities: Vec<TokenStream> = item_fn
         .sig
@@ -1000,12 +1010,33 @@ mod tests {
                 path: &path,
                 operation_id: None,
                 touches: &[],
+                dry_run: true,
             },
             &item,
             TokenStream::new(),
         )
         .unwrap()
         .to_string()
+    }
+
+    #[test]
+    fn a_route_can_opt_out_of_dry_runs() {
+        let item: ItemFn = syn::parse2(quote! { async fn f(w: Granted<W>) {} }).unwrap();
+        let path = LitStr::new("/w/{name}", Span::call_site());
+        let out = expand(
+            &Route {
+                method: "post",
+                path: &path,
+                operation_id: None,
+                touches: &[],
+                dry_run: false,
+            },
+            &item,
+            TokenStream::new(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(out.contains("dry_run : false"), "{out}");
     }
 
     #[test]
@@ -1118,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_granted_guard_answers_a_dry_run() {
+    fn any_guard_answers_a_dry_run() {
         let open = stub(
             "post",
             "/notes",
@@ -1136,7 +1167,13 @@ mod tests {
             "/notes",
             quote! { async fn f(_: Require<NotesWrite>, Json(n): Json<Note>) {} },
         );
-        assert!(required.contains("dry_run : false"), "{required}");
+        assert!(required.contains("dry_run : true"), "{required}");
+        let both = stub(
+            "post",
+            "/w/{name}",
+            quote! { async fn f(w: Granted<W>, _: Require<NotesWrite>) {} },
+        );
+        assert!(both.contains("dry_run : true"), "{both}");
         let custom = stub("post", "/notes", quote! { async fn f(g: MyGuard) {} });
         assert!(custom.contains("dry_run : false"), "{custom}");
     }
@@ -1224,6 +1261,7 @@ mod tests {
             path: &path,
             operation_id: None,
             touches: &[],
+            dry_run: true,
         };
         let err = expand(&route, &item, TokenStream::new())
             .unwrap_err()

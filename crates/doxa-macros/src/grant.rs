@@ -323,21 +323,23 @@ pub(crate) fn is_guard(ty: &Type) -> bool {
         .is_some_and(|s| GUARDS.contains(&s.ident.to_string().as_str()))
 }
 
-/// The argument whose guard answers a `<Can>` dry run: the last guard, if it is a `Granted`.
-pub(crate) fn dry_run_gate(item_fn: &ItemFn) -> Option<usize> {
-    let last = item_fn
+/// The last argument that authorizes.
+pub(crate) fn last_guard(item_fn: &ItemFn) -> Option<usize> {
+    item_fn
         .sig
         .inputs
         .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, arg)| {
-            let FnArg::Typed(pt) = arg else { return None };
-            let Type::Path(tp) = &*pt.ty else { return None };
-            let name = tp.path.segments.last()?.ident.to_string();
-            GUARDS.contains(&name.as_str()).then_some((i, pt))
-        })?;
-    (granted_arity(&last.1.ty) == Some(1)).then_some(last.0)
+        .rposition(|arg| matches!(arg, FnArg::Typed(pt) if is_guard(&pt.ty)))
+}
+
+/// Stop a dry run once every guard has passed, so it never reaches the handler. Call this
+/// last: docs, mounting and client checks must not see the added argument.
+pub fn stop_dry_runs(item_fn: &mut ItemFn) {
+    let at = last_guard(item_fn).map_or(0, |i| i + 1);
+    item_fn
+        .sig
+        .inputs
+        .insert(at, syn::parse_quote!(_: ::doxa::__private::AnswerDryRun));
 }
 
 /// Binding name for marker naming; falls back to the position for
@@ -375,7 +377,6 @@ pub fn rewrite_for(item_fn: &mut ItemFn, route: &RouteIs<'_>) -> Result<TokenStr
     };
     let fn_ident = item_fn.sig.ident.clone();
     let verb = verb_trait(method);
-    let gate = dry_run_gate(item_fn);
     let mut items = TokenStream::new();
 
     for (index, arg) in item_fn.sig.inputs.iter_mut().enumerate() {
@@ -592,12 +593,6 @@ pub fn rewrite_for(item_fn: &mut ItemFn, route: &RouteIs<'_>) -> Result<TokenStr
             _ => None,
         };
 
-        let gate_const = if gate == Some(index) {
-            quote! { const LAST_GUARD: bool = true; }
-        } else {
-            quote! {}
-        };
-
         items.extend(quote! {
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
@@ -606,7 +601,6 @@ pub fn rewrite_for(item_fn: &mut ItemFn, route: &RouteIs<'_>) -> Result<TokenStr
             impl ::doxa::auth::GrantSite for #marker {
                 #scheme_const
                 #in_const
-                #gate_const
             }
 
             #route_check

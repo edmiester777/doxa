@@ -79,6 +79,15 @@ async fn a_query_and_a_validated_body_reach_the_handler() {
 }
 
 #[tokio::test]
+async fn a_route_that_opts_out_is_never_asked() {
+    install("clerk");
+    assert_eq!(
+        refund_order::can(OrderKey { id: 1 }).await,
+        Permission::Unknown
+    );
+}
+
+#[tokio::test]
 async fn the_servers_guard_answers_the_declarations_dry_run() {
     install("viewer");
     assert_eq!(

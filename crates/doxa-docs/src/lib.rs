@@ -197,6 +197,7 @@ mod cors;
 mod doc_params;
 mod doc_responses;
 mod doc_traits;
+mod dry_run;
 mod error_responses;
 mod etag;
 mod extractor;
@@ -295,6 +296,8 @@ pub mod __private {
     }
     pub use inventory;
 
+    pub use crate::dry_run::AnswerDryRun;
+
     pub use crate::app::{
         crate_key, describe, mount, stacked, Builtin, Key, Layers, Mount, Resolve, Service,
         StackDocs, Stacked,
@@ -316,17 +319,16 @@ pub mod __private {
     /// attribute map, so consumers need not depend on `serde_json`.
     pub use serde_json;
 
-    /// Audit outcome attached to response extensions by
-    /// `#[derive(ApiError)]`'s generated `IntoResponse` impl.
-    ///
-    /// Lives here so the macro can reference it without depending on
-    /// `doxa-audit`. The `AuditLayer` reads this from response
-    /// extensions and maps it to `doxa_audit::Outcome`.
+    /// Audit outcome a response carries in its extensions, which the
+    /// `AuditLayer` maps to `doxa_audit::Outcome`. Lives here so macros can
+    /// name it without depending on `doxa-audit`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ResponseAuditOutcome {
         Allowed,
         Denied,
         Error,
+        /// Set only by [`AnswerDryRun`]: the guards passed and nothing ran.
+        Probe,
     }
 
     /// Trait for error types that declare their audit outcome per variant.

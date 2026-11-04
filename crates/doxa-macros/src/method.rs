@@ -29,19 +29,22 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
     let path_lit = parsed_args.path;
     let (mount, extra) = take_mount_arg(parsed_args.extra)?;
     let (client, extra) = take_client_arg(extra)?;
+    let (answers, extra) = take_dry_run_arg(extra)?;
     let (touches, extra) = take_touches(extra)?;
     let mut item_fn = match routed(item)? {
         Routed::Handler(f) => f,
         Routed::Declaration(f) => {
-            return declaration(method, &path_lit, &extra, client, &touches, &f)
+            return declaration(method, &path_lit, &extra, client, answers, &touches, &f)
         }
     };
 
     if doxa_macro_support::is_client() {
-        return client_half(method, &path_lit, &extra, client, &touches, &item_fn);
+        return client_half(
+            method, &path_lit, &extra, client, answers, &touches, &item_fn,
+        );
     }
     strip_server_params(&mut item_fn);
-    let meta = client_meta(method, client, &touches, &item_fn);
+    let meta = client_meta(method, client, answers, &touches, &item_fn);
 
     // Rewrite `Granted<T>` arguments before inference runs, so the
     // signature the doc probes see is the one that actually compiles.
@@ -50,6 +53,7 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
 
     let utoipa_attr = build_utoipa_attr(&method_ident, &path_lit, &extra, &item_fn)?;
     let mount = mount.then(|| app::mount(&item_fn, None));
+    grant::stop_dry_runs(&mut item_fn);
 
     Ok(quote! {
         #meta
@@ -66,13 +70,22 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let parsed = parse_operation_args(args)?;
     let (mount, extra) = take_mount_arg(parsed.extra)?;
     let (client, extra) = take_client_arg(extra)?;
+    let (answers, extra) = take_dry_run_arg(extra)?;
     let (touches, extra) = take_touches(extra)?;
     let parsed = OperationArgs { extra, ..parsed };
     let mut item_fn = match routed(item)? {
         Routed::Handler(f) => f,
         Routed::Declaration(f) => {
             let method = parsed.method.to_string();
-            return declaration(&method, &parsed.path, &parsed.extra, client, &touches, &f);
+            return declaration(
+                &method,
+                &parsed.path,
+                &parsed.extra,
+                client,
+                answers,
+                &touches,
+                &f,
+            );
         }
     };
 
@@ -83,18 +96,26 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
             &parsed.path,
             &parsed.extra,
             client,
+            answers,
             &touches,
             &item_fn,
         );
     }
     strip_server_params(&mut item_fn);
-    let meta = client_meta(&parsed.method.to_string(), client, &touches, &item_fn);
+    let meta = client_meta(
+        &parsed.method.to_string(),
+        client,
+        answers,
+        &touches,
+        &item_fn,
+    );
 
     let path_names = sig::parse_path_names(&parsed.path.value());
     let sites = grant::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
 
     let utoipa_attr = build_utoipa_attr(&parsed.method, &parsed.path, &parsed.extra, &item_fn)?;
     let mount = mount.then(|| app::mount(&item_fn, None));
+    grant::stop_dry_runs(&mut item_fn);
 
     Ok(quote! {
         #meta
@@ -158,6 +179,7 @@ fn declaration(
     path: &LitStr,
     extra: &[Meta],
     client: bool,
+    answers_dry_run: bool,
     touches: &[syn::Path],
     item_fn: &ItemFn,
 ) -> Result<TokenStream> {
@@ -200,9 +222,9 @@ fn declaration(
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "a declaration takes `operation_id`, `tag`, `tags(…)`, `responses(…)` and \
-                     `touches = […]`; the rest of the operation is documented by the server that \
-                     implements it",
+                    "a declaration takes `operation_id`, `tag`, `tags(…)`, `responses(…)`, \
+                     `touches = […]` and `dry_run = false`; the rest of the operation is \
+                     documented by the server that implements it",
                 ))
             }
         }
@@ -213,6 +235,7 @@ fn declaration(
         path,
         operation_id,
         touches,
+        dry_run: answers_dry_run,
     };
     let declared = client_stub::declared(&route, &item_fn, &tags, &responses)?;
     client_stub::expand(&route, &item_fn, declared)
@@ -300,10 +323,11 @@ pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenSt
     );
     let checks = client_stub::implemented(&item_fn, &r);
     fail_as_declared(&mut item_fn, &r);
-    let meta = client_stub::server_meta("", Some(&r), &[], &item_fn, &path);
+    let meta = client_stub::server_meta("", Some(&r), &[], true, &item_fn, &path);
     let sites = grant::rewrite_for(&mut item_fn, &grant::RouteIs::Declared(&r))?;
     let operation = declared_operation(&item_fn, &r, &path);
     let mount = mount.then(|| app::mount(&item_fn, Some(&r)));
+    grant::stop_dry_runs(&mut item_fn);
     Ok(quote! {
         #meta
         #sites
@@ -481,13 +505,19 @@ fn operation_id(m: &Meta) -> Option<&LitStr> {
 }
 
 /// The `x-doxa` stamp for this route's operation; `{"client": false}` when it has no client half.
-fn client_meta(method: &str, client: bool, touches: &[syn::Path], item_fn: &ItemFn) -> TokenStream {
+fn client_meta(
+    method: &str,
+    client: bool,
+    answers_dry_run: bool,
+    touches: &[syn::Path],
+    item_fn: &ItemFn,
+) -> TokenStream {
     let path = syn::Ident::new(
         &format!("__path_{}", item_fn.sig.ident),
         item_fn.sig.ident.span(),
     );
     if client {
-        return client_stub::server_meta(method, None, touches, item_fn, &path);
+        return client_stub::server_meta(method, None, touches, answers_dry_run, item_fn, &path);
     }
     quote! {
         impl ::doxa::__private::ClientMeta for #path {
@@ -520,9 +550,10 @@ pub fn expand_as_client(input: TokenStream) -> Result<TokenStream> {
         let method = attr.path().segments.last().unwrap().ident.to_string();
         let args = parse_method_args(attr.meta.require_list()?.tokens.clone())?;
         let (client, extra) = take_client_arg(args.extra)?;
+        let (answers, extra) = take_dry_run_arg(extra)?;
         let (touches, extra) = take_touches(extra)?;
         out.extend(client_half(
-            &method, &args.path, &extra, client, &touches, &item_fn,
+            &method, &args.path, &extra, client, answers, &touches, &item_fn,
         )?);
     }
     Ok(out)
@@ -552,6 +583,7 @@ fn client_half(
     path: &LitStr,
     extra: &[Meta],
     client: bool,
+    answers_dry_run: bool,
     touches: &[syn::Path],
     item_fn: &ItemFn,
 ) -> Result<TokenStream> {
@@ -565,6 +597,7 @@ fn client_half(
             path,
             operation_id,
             touches,
+            dry_run: answers_dry_run,
         },
         item_fn,
         TokenStream::new(),
@@ -609,6 +642,12 @@ fn take_touches(extra: Vec<Meta>) -> Result<(Vec<syn::Path>, Vec<Meta>)> {
 /// Pull `client = false` out of the arguments; it is doxa's, not utoipa's.
 fn take_client_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
     let (flags, rest) = take_flags(extra, &["client"])?;
+    Ok((flags[0], rest))
+}
+
+/// Pull `dry_run = false` out of the arguments, which leaves `<Can>` answering `Unknown`.
+fn take_dry_run_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
+    let (flags, rest) = take_flags(extra, &["dry_run"])?;
     Ok((flags[0], rest))
 }
 

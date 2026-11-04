@@ -917,6 +917,8 @@ fn start() {
 }
 ```
 
+`<Can>` sends a dry run: the route's guards run, in any order, and the request stops before the handler. If a guard can't speak for the whole route, because the handler authorizes in its body or uses a custom guard, add `dry_run = false` to the route or declaration and `<Can>` shows its `unknown` view without asking.
+
 A component can be generic, `fn Table<T: Clone + 'static>(rows: Vec<T>, …)`, and `<Table rows={runs}/>` infers `T`. An `#[attrs] rest: Attrs` prop collects every attribute, `on:` handler and `use:` directive the tag passes that isn't a prop, and `<button {..rest}>` spreads them; `rest.class()` reads the class to merge, and the element's own attributes win. `class:active={on}` toggles one class without touching the others, and `classes!["btn", (pending, "busy"), rest.class()]` joins the parts that are there. With feature `tailwind`, `doxa::tailwind::cn!["px-4 py-2", rest.class()]` also drops each Tailwind class a later one overrides (`px-4` given `p-2`), by tailwind-merge's rules; `Merger::extend` adds theme scales and groups. The same pages render natively into an in-memory document for tests, and `doxa::ui::testing::Screen` finds what a user would: `screen.role(Role::Button).name("Save").click().await`, `screen.label("Title").type_text("Q3").await`, `screen.find_text("Saved").await?`, running tasks and due timers on the manual clock until a match shows. `testing::fake::<Popover>(|p| view! { … })` renders a stand-in where a React island would. [`examples/widgets`](examples/widgets) has the whole app: `api` (shared routes), `client` (their client half), `server`, and `web` (the pages, tested against the real router).
 
 ### 18. Plain JS modules as Rust

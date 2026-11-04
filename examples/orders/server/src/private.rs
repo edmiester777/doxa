@@ -24,6 +24,11 @@ async fn cancel_order(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[implements(orders_api::refund_order)]
+async fn refund_order(_: Granted<OrderById>) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 #[implements(orders_api::place_order)]
 async fn place_order(
     _: Granted<Cap<order_action::Place>>,
