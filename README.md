@@ -1003,7 +1003,7 @@ async fn get_order(order: Granted<OrderById>, State(db): State<Db>) -> Result<Js
 let o: Order = orders_api::get_order(OrderKey { id: 7 }).await?;
 ```
 
-`#[implements]` mounts the handler at the declared method and path, and fails to compile when it takes or answers other than the declaration does; server-only extractors go anywhere. `Grant<Order>` is held to an asset whose `entity =` names `Order`, with the same key. The declaration's docs, tags and operation id become the operation's, and `responses((status = 200, description = "Counted"), (status = 202, description = "Queued"))` lists its success statuses, each documented with the return type's body.
+`#[implements]` mounts the handler at the declared method and path, and fails to compile when it takes or answers other than the declaration does; server-only extractors go anywhere. Answers are compared by type through `doxa::Answer`, so `use doxa::SseStream as Events` is fine. `Grant<Order>` is held to an asset whose `entity =` names `Order`, with the same key. The declaration's docs, tags and operation id become the operation's, and `responses((status = 200, description = "Counted"), (status = 202, description = "Queued"))` lists its success statuses, each documented with the return type's body.
 
 An optional body, `Option<Json<T>>` or `Valid<Option<Json<T>>>`, is an `Option<T>` argument: `None` sends no body and isn't checked.
 

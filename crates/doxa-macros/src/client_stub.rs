@@ -458,22 +458,17 @@ pub fn implemented(item_fn: &ItemFn, r: &TokenStream) -> TokenStream {
             Arg::Dropped | Arg::Server => None,
         })
         .collect();
-    let (mut bad, mut unread) = (None, None);
-    let (ok, error) = match &item_fn.sig.output {
-        ReturnType::Default => (Some(quote!(())), None),
+    let error = match &item_fn.sig.output {
         ReturnType::Type(_, ty) => match (last_ident(ty).as_deref(), type_args(ty).as_slice()) {
-            (Some("Result" | "ApiResult"), [ok, err]) => (
-                Some(response_type(ok, false, &mut bad, &mut unread)),
-                Some(quote!(#err)),
-            ),
-            _ => (Some(response_type(ty, false, &mut bad, &mut unread)), None),
+            (Some("Result" | "ApiResult"), [_, err]) => Some(quote!(#err)),
+            _ => None,
         },
+        ReturnType::Default => None,
     };
-    let ok = ok
-        .filter(|_| bad.is_none() && unread.is_none())
-        .map(|ok| {
-            quote!(::doxa::client::contract::answers::<#ok, <#r as ::doxa::wire::contract::Declared>::Ok>();)
-        });
+    let handler = &item_fn.sig.ident;
+    let ok = quote! {
+        ::doxa::__answer::answers_as::<<#r as ::doxa::wire::contract::Declared>::Ok, _, _>(&#handler);
+    };
     let error = error.map(|err| {
         quote!(::doxa::client::contract::fails::<#err, <#r as ::doxa::wire::contract::Declared>::Error>();)
     });

@@ -309,3 +309,30 @@ pub mod guard_diagnostics {}
 /// ```
 #[doc(hidden)]
 pub mod capability_diagnostics {}
+
+/// A handler's answer is its declaration's by type, whatever it's imported as:
+///
+/// ```
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// use doxa::SseStream as Events;
+/// use futures::stream::{self, Stream};
+/// use orders_api::OrderEvent;
+/// #[doxa::implements(orders_api::order_events, mount = false)]
+/// async fn events() -> Events<OrderEvent, impl Stream<Item = Result<OrderEvent, std::convert::Infallible>>> {
+///     Events::new(stream::empty())
+/// }
+/// ```
+///
+/// Another answer is "the handler answers `doxa::client::Json<u32>`, and the declaration
+/// `doxa::client::SseStream<OrderEvent>`":
+///
+/// ```compile_fail
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// use axum::Json as Body;
+/// #[doxa::implements(orders_api::order_events, mount = false)]
+/// async fn events() -> Body<u32> {
+///     Body(0)
+/// }
+/// ```
+#[doc(hidden)]
+pub mod answer_diagnostics {}

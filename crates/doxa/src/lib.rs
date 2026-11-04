@@ -34,6 +34,16 @@ extern crate self as doxa;
 
 #[cfg(any(feature = "garde", feature = "validator", feature = "serde-valid"))]
 mod valid;
+
+#[cfg(all(feature = "docs", feature = "client", not(target_arch = "wasm32")))]
+mod answer;
+#[cfg(all(feature = "docs", feature = "client", not(target_arch = "wasm32")))]
+pub use answer::Answer;
+#[cfg(all(feature = "docs", feature = "client", not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub mod __answer {
+    pub use crate::answer::{answers_as, Answering};
+}
 #[cfg(feature = "serde-valid")]
 pub use valid::serde_valid;
 #[cfg(feature = "validator")]
