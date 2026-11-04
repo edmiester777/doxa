@@ -23,6 +23,7 @@ members = [
     "examples/widgets/spec-client",
     "examples/widgets/web",
     "examples/orders/api",
+    "examples/orders/server",
     "crates/doxa-fmt",
 ]
 

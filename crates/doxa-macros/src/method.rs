@@ -161,14 +161,160 @@ fn declaration(
             grant_as_granted(&mut pt.ty)?;
         }
     }
+    let mut tags = Vec::new();
+    for meta in extra {
+        match meta {
+            Meta::NameValue(nv) if nv.path.is_ident("operation_id") => {}
+            Meta::NameValue(nv) if nv.path.is_ident("tag") => match &nv.value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(lit),
+                    ..
+                }) => tags.push(lit.clone()),
+                other => return Err(syn::Error::new_spanned(other, "expected `tag = \"…\"`")),
+            },
+            Meta::List(_) if meta.path().is_ident("tags") => {
+                tags.extend(extract_tags_arg(std::slice::from_ref(meta))?.0);
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "a declaration takes `operation_id`, `tag` and `tags(…)`; the rest of the \
+                     operation is documented by the server that implements it",
+                ))
+            }
+        }
+    }
     let operation_id = extra.iter().find_map(operation_id);
     let route = client_stub::Route {
         method,
         path,
         operation_id,
     };
-    let declared = client_stub::declared(&route, &item_fn)?;
+    let declared = client_stub::declared(&route, &item_fn, &tags)?;
     client_stub::expand(&route, &item_fn, declared)
+}
+
+/// `#[doxa::implements(api::route)]`: the handler serving a declared route, at its method and
+/// path, held to its arguments and answers.
+pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
+    let declaration: syn::Path = parse2(args)?;
+    let mut item_fn: ItemFn = parse2(item)?;
+    if doxa_macro_support::is_client() || doxa_macro_support::is_api() {
+        return Err(syn::Error::new_spanned(
+            &item_fn.sig,
+            "a server implements a declared route; this crate is a client half or an API crate",
+        ));
+    }
+    let r = quote!(#declaration::Route);
+    strip_server_params(&mut item_fn);
+    let path = syn::Ident::new(
+        &format!("__path_{}", item_fn.sig.ident),
+        item_fn.sig.ident.span(),
+    );
+    let checks = client_stub::implemented(&item_fn, &r);
+    let meta = client_stub::server_meta("", Some(&r), &item_fn, &path);
+    let sites = grant::rewrite_for(&mut item_fn, &grant::RouteIs::Declared(&r))?;
+    let operation = declared_operation(&item_fn, &r, &path);
+    Ok(quote! {
+        #meta
+        #sites
+        #operation
+        #checks
+        // The guard's action is spelled through the declaration's verb.
+        #[allow(clippy::type_complexity)]
+        #item_fn
+    })
+}
+
+/// The handler's OpenAPI operation, written by `utoipa::path` on a stand-in with no
+/// arguments, at the declaration's method and path.
+fn declared_operation(item_fn: &ItemFn, r: &TokenStream, path: &syn::Ident) -> TokenStream {
+    let fn_ident = &item_fn.sig.ident;
+    let stand_in = syn::Ident::new(&format!("__doxa_op_{fn_ident}"), fn_ident.span());
+    let stand_in_path = syn::Ident::new(&format!("__path_{stand_in}"), fn_ident.span());
+    let mut inferred = sig::infer(item_fn);
+    if let Some(inner) = inferred.error_type.as_ref().and_then(fail_inner) {
+        inferred.error_type = Some(inner);
+    }
+    let spec = quote!(<#r as ::doxa::wire::contract::Declared>::SPEC);
+    let sig::InferredTokens {
+        pre_items,
+        attr_additions,
+    } = inferred.into_tokens(fn_ident, &[], Some(&quote!(#spec.path)), &[]);
+    let docs = item_fn.attrs.iter().filter(|a| a.path().is_ident("doc"));
+    let op_id = LitStr::new(&fn_ident.to_string(), fn_ident.span());
+    let dev = quote!(::utoipa::__dev);
+    quote! {
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #path;
+
+        #pre_items
+
+        #[::utoipa::path(get, path = "/", operation_id = #op_id #attr_additions)]
+        #(#docs)*
+        #[doc(hidden)]
+        #[allow(dead_code, non_snake_case)]
+        fn #stand_in() {}
+
+        impl #dev::PathConfig for #path {
+            fn path() -> ::std::string::String {
+                ::std::string::ToString::to_string(#spec.path)
+            }
+
+            fn methods() -> ::std::vec::Vec<::utoipa::openapi::path::HttpMethod> {
+                ::std::vec![::doxa::__private::contract::method(#spec.method)]
+            }
+
+            fn tags_and_operation() -> (
+                ::std::vec::Vec<&'static str>,
+                ::utoipa::openapi::path::Operation,
+            ) {
+                let mut tags = ::std::vec::Vec::new();
+                let mut op = <#stand_in_path as ::utoipa::Path>::operation();
+                ::doxa::__private::contract::document(
+                    &mut op,
+                    #spec,
+                    <#r as ::doxa::wire::contract::Declared>::DOCS,
+                );
+                tags.extend_from_slice(<#r as ::doxa::wire::contract::Declared>::TAGS);
+                (tags, op)
+            }
+        }
+
+        impl<'t> #dev::Tags<'t> for #path {
+            fn tags() -> ::std::vec::Vec<&'t str> {
+                <#stand_in_path as #dev::Tags<'t>>::tags()
+            }
+        }
+
+        impl #dev::SchemaReferences for #path {
+            fn schemas(
+                schemas: &mut ::std::vec::Vec<(
+                    ::std::string::String,
+                    ::utoipa::openapi::RefOr<::utoipa::openapi::schema::Schema>,
+                )>,
+            ) {
+                <#stand_in_path as #dev::SchemaReferences>::schemas(schemas)
+            }
+        }
+    }
+}
+
+/// `E` in `Fail<E>`, which `doxa::serves!` defines and documents as `E`.
+fn fail_inner(ty: &Type) -> Option<Type> {
+    let Type::Path(tp) = ty else { return None };
+    let last = tp.path.segments.last()?;
+    if last.ident != "Fail" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) if args.args.len() == 1 => Some(t.clone()),
+        _ => None,
+    }
 }
 
 /// `Grant<E>` as the client's `Granted<E>`: `E`'s key is the argument.
@@ -217,7 +363,7 @@ fn client_meta(method: &str, client: bool, item_fn: &ItemFn) -> TokenStream {
         item_fn.sig.ident.span(),
     );
     if client {
-        return client_stub::server_meta(method, item_fn, &path);
+        return client_stub::server_meta(method, None, item_fn, &path);
     }
     quote! {
         impl ::doxa::__private::ClientMeta for #path {
@@ -527,7 +673,7 @@ fn build_utoipa_attr(
     let sig::InferredTokens {
         pre_items,
         attr_additions,
-    } = inferred.into_tokens(&item_fn.sig.ident, &path_param_names, &user_keys);
+    } = inferred.into_tokens(&item_fn.sig.ident, &path_param_names, None, &user_keys);
 
     // Emit `tags = ["A", "B"]` if the caller supplied `tags(...)`
     // and didn't already supply `tag = "..."` via forwarded args.

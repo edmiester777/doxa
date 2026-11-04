@@ -1,0 +1,18 @@
+[package]
+name = "orders-server"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+orders-api = { path = "../api" }
+doxa = { workspace = true, features = ["full", "client", "garde"] }
+axum = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+utoipa = { workspace = true }
+
+[dev-dependencies]
+doxa = { workspace = true, features = ["client-router"] }
+tokio = { workspace = true }

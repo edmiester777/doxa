@@ -188,6 +188,7 @@
 mod attachment;
 mod builder;
 mod client_meta;
+mod contract;
 mod contribution;
 #[cfg(feature = "cors")]
 mod cors;
@@ -250,8 +251,8 @@ pub use valid::ValidRejection;
 // out of when the derives aren't needed.
 #[cfg(feature = "macros")]
 pub use doxa_macros::{
-    asset, capability, delete, get, operation, patch, post, put, spec, Actions, ApiError,
-    PolicyResource, SseEvent,
+    asset, capability, delete, get, implements, operation, patch, post, put, spec, Actions,
+    ApiError, PolicyResource, SseEvent,
 };
 
 // Re-export the underlying utoipa types so consumers depend on a single
@@ -278,6 +279,12 @@ pub type ApiResult<T, E> = Result<T, E>;
 #[doc(hidden)]
 pub mod __private {
     pub use tracing;
+
+    /// What `#[doxa::implements]`, `doxa::serves!` and a declaration expand to.
+    pub mod contract {
+        pub use crate::contract::*;
+    }
+    pub use inventory;
 
     /// Named by `#[derive(Validator)]`'s extractor and doc impls.
     pub use axum;

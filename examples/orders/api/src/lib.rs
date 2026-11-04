@@ -38,6 +38,9 @@ pub enum OrderError {
     #[error("no order {0}")]
     #[api(status = 404, code = "not_found")]
     NotFound(u32),
+    #[error("out of {0}")]
+    #[api(status = 409, code = "out_of_stock")]
+    OutOfStock(String),
 }
 
 /// Something that happened to an order.

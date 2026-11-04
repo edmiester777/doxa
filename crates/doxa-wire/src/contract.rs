@@ -12,12 +12,30 @@ pub trait Declared {
     const SPEC: &'static RouteSpec;
     /// The declaration's doc comment.
     const DOCS: &'static str;
+    /// The OpenAPI tags it gave itself.
+    const TAGS: &'static [&'static str];
     /// The arguments a client passes, as the client's extractor types, in order.
     type Args;
     /// What a call answers on success, as the client decodes it.
     type Ok;
     /// The route's error, or [`NoError`].
     type Error;
+    /// The method, as one of [`verb`]'s markers.
+    type Verb;
+}
+
+/// The HTTP methods as types, so a server can resolve a guard's action from a declaration.
+pub mod verb {
+    /// `GET`.
+    pub struct Get;
+    /// `POST`.
+    pub struct Post;
+    /// `PUT`.
+    pub struct Put;
+    /// `PATCH`.
+    pub struct Patch;
+    /// `DELETE`.
+    pub struct Delete;
 }
 
 /// The error of a declaration that returns no `Result`.
@@ -41,4 +59,65 @@ pub trait OfEntity {
 /// Whether two keys name the same route parameters, in any order.
 pub const fn same_names(a: &[&str], b: &[&str]) -> bool {
     names_covered(a, &[b]) && names_covered(b, &[a])
+}
+
+/// Whether a path template has any `{name}` parameter.
+pub const fn has_params(template: &str) -> bool {
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether every one of `names` is a `{name}` parameter of `template`.
+pub const fn params_include(template: &str, names: &[&str]) -> bool {
+    let mut n = 0;
+    while n < names.len() {
+        if !has_param(template.as_bytes(), names[n].as_bytes()) {
+            return false;
+        }
+        n += 1;
+    }
+    true
+}
+
+const fn has_param(t: &[u8], name: &[u8]) -> bool {
+    let mut i = 0;
+    while i < t.len() {
+        if t[i] == b'{' {
+            let mut j = i + 1;
+            if j < t.len() && t[j] == b'*' {
+                j += 1;
+            }
+            let mut k = 0;
+            while k < name.len() && j + k < t.len() && t[j + k] == name[k] {
+                k += 1;
+            }
+            if k == name.len() && j + k < t.len() && t[j + k] == b'}' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_template_includes_the_params_it_names() {
+        assert!(has_params("/orders/{id}"));
+        assert!(!has_params("/orders"));
+        assert!(params_include("/f/{fid}/o/{id}", &["id", "fid"]));
+        assert!(params_include("/files/{*rest}", &["rest"]));
+        assert!(!params_include("/f/{fid}/o/{id}", &["i"]));
+        assert!(!params_include("/f/{fid}", &["fids"]));
+    }
 }

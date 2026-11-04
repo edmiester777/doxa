@@ -381,6 +381,7 @@ impl InferredAttrs {
         self,
         fn_ident: &syn::Ident,
         path_param_names: &[String],
+        declared_path: Option<&TokenStream>,
         user_keys: &[&str],
     ) -> InferredTokens {
         let mut attr_additions = TokenStream::new();
@@ -638,6 +639,15 @@ impl InferredAttrs {
             if !self.arg_types.is_empty() {
                 let arg_types = &self.arg_types;
                 let names_lits: Vec<_> = path_param_names.iter().map(|s| s.as_str()).collect();
+                let path_names = match declared_path {
+                    Some(path) => quote! {
+                        let __names: ::std::vec::Vec<&'static str> =
+                            ::doxa::wire::path_names(#path).collect();
+                        #[allow(non_snake_case)]
+                        let __PATH_NAMES: &[&'static str] = &__names;
+                    },
+                    None => quote! { const __PATH_NAMES: &[&'static str] = &[#(#names_lits),*]; },
+                };
 
                 // Build the IntoParams body: one adhoc-dispatched
                 // `__collect()` call per arg per role, extending a
@@ -650,7 +660,7 @@ impl InferredAttrs {
                             _: impl ::core::ops::Fn()
                                 -> ::core::option::Option<::utoipa::openapi::path::ParameterIn>,
                         ) -> ::std::vec::Vec<::utoipa::openapi::path::Parameter> {
-                            const __PATH_NAMES: &[&'static str] = &[#(#names_lits),*];
+                            #path_names
                             let mut __out: ::std::vec::Vec<::utoipa::openapi::path::Parameter> =
                                 ::std::vec::Vec::new();
                             #(

@@ -97,9 +97,9 @@ pub mod server {
     /// Names a shared route file needs when compiled as the server.
     pub mod prelude {
         pub use crate::{
-            asset, capability, client, client_only, client_pub, delete, dto, get, operation, patch,
-            post, put, server, server_only, Actions, ApiError, Attachment, Identity, IntoParams,
-            PolicyResource, SseEvent, SseStream, ToSchema,
+            asset, capability, client, client_only, client_pub, delete, dto, entity, get,
+            implements, operation, patch, post, put, server, server_only, Actions, ApiError,
+            Attachment, Identity, IntoParams, PolicyResource, SseEvent, SseStream, ToSchema,
         };
         pub use axum::extract::{Extension, Form, Path, Query, State};
         pub use axum::http::StatusCode;
@@ -630,11 +630,11 @@ pub mod client {
 pub mod api {
     /// Names an API crate's files use, on every target.
     pub mod prelude {
+        pub use crate::__api_route_key as route_key;
         #[cfg(feature = "garde")]
         pub use crate::Valid;
         #[cfg(not(target_arch = "wasm32"))]
         pub use crate::{IntoParams, ToSchema};
-        pub use doxa_client::route_key;
         pub use doxa_client::{
             Attachment, Bytes, Form, Json, Multipart, Path, Query, SseStream, StatusCode,
         };
@@ -647,6 +647,103 @@ pub mod api {
         pub use doxa_wire::contract::Grant;
         pub use serde::{Deserialize, Serialize};
     }
+}
+
+/// The server of the routes these API crates declare: `doxa::serves!(orders_api);` at its
+/// crate root.
+///
+/// Defines `Fail<E>`, an error a handler can convert its own failures into with `?`, and
+/// `assert_serves(&openapi)`, which panics naming every declared route the document lacks.
+/// With `; doc = api_doc`, a test asserts it of `api_doc()`.
+#[cfg(all(
+    feature = "docs",
+    feature = "macros",
+    feature = "client",
+    not(target_arch = "wasm32")
+))]
+#[macro_export]
+macro_rules! serves {
+    ($($api:ident),+ $(,)?) => {
+        $crate::serves!(@emit [$($api),+] []);
+    };
+    ($($api:ident),+ ; doc = $doc:path) => {
+        $crate::serves!(@emit [$($api),+] [$doc]);
+    };
+    (@emit [$($api:ident),+] [$($doc:path)?]) => {
+        /// A declared route's error, which a handler's own failures convert into.
+        pub struct Fail<E>(pub E);
+
+        impl<E> ::core::convert::From<E> for Fail<E> {
+            fn from(error: E) -> Self {
+                Fail(error)
+            }
+        }
+
+        impl<E: ::core::fmt::Debug> ::core::fmt::Debug for Fail<E> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                ::core::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+
+        impl<E: $crate::__private::axum::response::IntoResponse>
+            $crate::__private::axum::response::IntoResponse for Fail<E>
+        {
+            fn into_response(self) -> $crate::__private::axum::response::Response {
+                self.0.into_response()
+            }
+        }
+
+        impl<E> $crate::client::contract::FailsWith<E> for Fail<E> {}
+
+        /// Panics naming every route the served API crates declare that `api` doesn't serve.
+        pub fn assert_serves(api: &$crate::OpenApi) {
+            $crate::__private::contract::assert_serves(api, &[$(::core::stringify!($api)),+]);
+        }
+
+        $(
+            #[cfg(test)]
+            #[test]
+            fn every_declared_route_is_served() {
+                assert_serves(&$crate::__private::IntoSpec::into_spec($doc()));
+            }
+        )?
+    };
+}
+
+/// `route_key!` in an API crate: the client's key, and the server guard's where doxa's `auth`
+/// feature is on.
+#[cfg(feature = "client")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __api_route_key {
+    (
+        $(#[$meta:meta])*
+        $vis:vis $name:ident { $($field:ident : $ty:ty),+ $(,)? }
+    ) => {
+        $crate::client::route_key!($(#[$meta])* $vis $name { $($field: $ty),+ });
+        $crate::__api_route_key_server!($name { $($field: $ty),+ });
+    };
+}
+
+#[cfg(all(feature = "auth", not(target_arch = "wasm32")))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __api_route_key_server {
+    ($name:ident { $($field:ident : $ty:ty),+ }) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        impl $crate::auth::granted::RouteKey for $name {
+            const SEGMENTS: &'static [$crate::auth::granted::ResourceIdType] =
+                &[$(<$ty as $crate::auth::granted::KeySegment>::KIND),+];
+            const NAMES: &'static [&'static str] = &[$(::core::stringify!($field)),+];
+        }
+    };
+}
+
+#[cfg(not(all(feature = "auth", not(target_arch = "wasm32"))))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __api_route_key_server {
+    ($($tokens:tt)*) => {};
 }
 
 /// Items, unchanged; lets a macro put one `#[cfg]` on a run of them.

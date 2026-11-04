@@ -129,7 +129,12 @@ fn dry_run(item_fn: &ItemFn, args: &[Arg]) -> bool {
 
 /// The server half's `x-doxa` stamp: what a client generated from the spec needs that
 /// OpenAPI can't say. `path` is the handler's utoipa path struct.
-pub fn server_meta(method: &str, item_fn: &ItemFn, path: &syn::Ident) -> TokenStream {
+pub fn server_meta(
+    method: &str,
+    declared: Option<&TokenStream>,
+    item_fn: &ItemFn,
+    path: &syn::Ident,
+) -> TokenStream {
     let dry_run = dry_run(item_fn, &args(item_fn));
     let typed = || {
         item_fn.sig.inputs.iter().filter_map(|arg| match arg {
@@ -157,6 +162,12 @@ pub fn server_meta(method: &str, item_fn: &ItemFn, path: &syn::Ident) -> TokenSt
         ReturnType::Type(_, ty) => Some(&**ty),
     };
     let stream = match ret.and_then(|t| find_named(t, "SseStream")) {
+        Some(_) if declared.is_some() => quote!((
+            match <#declared as ::doxa::wire::contract::Declared>::SPEC.method {
+                ::doxa::wire::Method::Get => "events",
+                _ => "once",
+            }
+        )),
         Some(_) if method == "get" => quote!("events"),
         Some(_) => quote!("once"),
         None => quote!(::doxa::__private::serde_json::Value::Null),
@@ -271,7 +282,7 @@ fn entity_type(ret: &Type) -> Option<&Type> {
 }
 
 /// The declared route's `Route` marker: what a server implementing it is held to.
-pub fn declared(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream> {
+pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Result<TokenStream> {
     let args: Vec<TokenStream> = args(item_fn)
         .into_iter()
         .filter_map(|a| match a {
@@ -321,6 +332,7 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream>
         })
         .collect();
     let docs = docs.join("\n");
+    let verb = format_ident!("{}", capitalize(route.method));
     Ok(quote! {
         /// This route, as the server that implements it is held to it.
         pub struct Route;
@@ -328,11 +340,72 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn) -> syn::Result<TokenStream>
         impl ::doxa::wire::contract::Declared for Route {
             const SPEC: &'static ::doxa::wire::RouteSpec = &ROUTE;
             const DOCS: &'static str = #docs;
+            const TAGS: &'static [&'static str] = &[#(#tags),*];
             type Args = (#(#args,)*);
             type Ok = #ok;
             type Error = #error;
+            type Verb = ::doxa::wire::contract::verb::#verb;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        ::doxa::__private::inventory::submit! {
+            ::doxa::__private::contract::Declared(&ROUTE)
         }
     })
+}
+
+/// What `#[doxa::implements(…)]` holds the handler to: its client arguments, success and
+/// error against those of the declaration `r` names.
+pub fn implemented(item_fn: &ItemFn, r: &TokenStream) -> TokenStream {
+    let guarded = |ty: TokenStream| quote!(<#ty as ::doxa::client::contract::Guarded>::Declared);
+    let args: Vec<TokenStream> = args(item_fn)
+        .into_iter()
+        .filter_map(|a| match a {
+            Arg::Sent {
+                kind: Kind::Foreign,
+                ..
+            } => None,
+            Arg::Sent {
+                kind: Kind::Guard,
+                ty,
+                ..
+            } => Some(guarded(ty)),
+            Arg::Sent {
+                check: Some(check), ..
+            } => Some(check.wrapper),
+            Arg::Sent { ty, .. } => Some(ty),
+            Arg::Dropped | Arg::Server => None,
+        })
+        .collect();
+    let (mut bad, mut unread) = (None, None);
+    let (ok, error) = match &item_fn.sig.output {
+        ReturnType::Default => (Some(quote!(())), None),
+        ReturnType::Type(_, ty) => match (last_ident(ty).as_deref(), type_args(ty).as_slice()) {
+            (Some("Result" | "ApiResult"), [ok, err]) => (
+                Some(response_type(ok, false, &mut bad, &mut unread)),
+                Some(quote!(#err)),
+            ),
+            _ => (Some(response_type(ty, false, &mut bad, &mut unread)), None),
+        },
+    };
+    let ok = ok
+        .filter(|_| bad.is_none() && unread.is_none())
+        .map(|ok| {
+            quote!(::doxa::client::contract::answers::<#ok, <#r as ::doxa::wire::contract::Declared>::Ok>();)
+        });
+    let error = error.map(|err| {
+        quote!(::doxa::client::contract::fails::<#err, <#r as ::doxa::wire::contract::Declared>::Error>();)
+    });
+    quote! {
+        const _: fn() = || {
+            ::doxa::client::contract::takes::<
+                (#(#args,)*),
+                <#r as ::doxa::wire::contract::Declared>::Args,
+            >();
+            #ok
+            #error
+        };
+    }
 }
 
 /// Emit the stub and its `ROUTE` module, with `extra` items inside the module.

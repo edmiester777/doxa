@@ -12,6 +12,7 @@ mod cached;
 mod call;
 mod can;
 pub mod clock;
+pub mod contract;
 mod fetch;
 pub mod layer;
 mod multipart;

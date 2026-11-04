@@ -933,6 +933,17 @@ pub fn spec(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// The handler serving a route an API crate declares: `#[implements(orders_api::get_order)]`.
+///
+/// Its method, path and docs are the declaration's; its client arguments, success and error
+/// must match the declaration's, and any server-only extractor may sit among them.
+#[proc_macro_attribute]
+pub fn implements(args: TokenStream, item: TokenStream) -> TokenStream {
+    method::expand_implements(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// A type a declared route's `Grant<…>` guards, named by `key`: `#[entity(key = OrderKey)]`.
 ///
 /// Its entity type is its name unless `name = "…"` says otherwise; a server asset guarding it
