@@ -7,6 +7,7 @@ route_key!(pub OrderKey { id: u32 });
 
 /// An order.
 #[dto]
+#[entity(key = OrderKey)]
 pub struct Order {
     pub id: u32,
     pub item: String,
@@ -50,7 +51,11 @@ pub enum OrderEvent {
 
 /// One order.
 #[get("/api/orders/{id}")]
-pub async fn get_order(id: Path<u32>) -> Result<Json<Order>, OrderError>;
+pub async fn get_order(order: Grant<Order>) -> Result<Json<Order>, OrderError>;
+
+/// Cancel an order.
+#[delete("/api/orders/{id}")]
+pub async fn cancel_order(order: Grant<Order>) -> Result<StatusCode, OrderError>;
 
 /// Every order, narrowed by `filter`.
 #[get("/api/orders")]

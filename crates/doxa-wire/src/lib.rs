@@ -299,7 +299,8 @@ pub const fn names_covered(needles: &[&str], haystacks: &[&[&str]]) -> bool {
     true
 }
 
-const fn str_eq(a: &str, b: &str) -> bool {
+/// `a == b`, in a `const`.
+pub const fn str_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;

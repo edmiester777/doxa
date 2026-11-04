@@ -71,7 +71,7 @@ pub use doxa_policy as policy;
 
 #[cfg(any(feature = "macros", feature = "client"))]
 pub use doxa_macros::{
-    client, client_only, client_pub, dto, prelude, server, server_only, service, Identity,
+    client, client_only, client_pub, dto, entity, prelude, server, server_only, service, Identity,
 };
 
 #[doc(hidden)]
@@ -639,11 +639,12 @@ pub mod api {
             Attachment, Bytes, Form, Json, Multipart, Path, Query, SseStream, StatusCode,
         };
         pub use doxa_macros::{
-            capability, client, client_only, delete, dto, get, patch, post, put, server,
+            capability, client, client_only, delete, dto, entity, get, patch, post, put, server,
             server_only, ApiError, Identity, SseEvent,
         };
         #[cfg(target_arch = "wasm32")]
         pub use doxa_macros::{ClientIntoParams as IntoParams, ClientToSchema as ToSchema};
+        pub use doxa_wire::contract::Grant;
         pub use serde::{Deserialize, Serialize};
     }
 }

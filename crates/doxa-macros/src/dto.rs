@@ -151,6 +151,7 @@ const CLIENT_ATTRS: &[&str] = &[
     "api_default",
     "sse",
     "identity",
+    "entity",
     "resource",
     "error",
     "source",

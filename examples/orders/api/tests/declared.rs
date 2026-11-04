@@ -1,4 +1,4 @@
-use doxa::client::{Json, Path, Query};
+use doxa::client::{Granted, Json, Query};
 use doxa::wire::contract::{Declared, NoError};
 use doxa::wire::Method;
 use orders_api::*;
@@ -9,7 +9,7 @@ fn same<A: Same<B>, B>() {}
 
 #[test]
 fn a_declaration_states_its_arguments_answer_and_error() {
-    same::<<get_order::Route as Declared>::Args, (Path<u32>,)>();
+    same::<<get_order::Route as Declared>::Args, (Granted<Order>,)>();
     same::<<get_order::Route as Declared>::Ok, Json<Order>>();
     same::<<get_order::Route as Declared>::Error, OrderError>();
 
@@ -18,6 +18,14 @@ fn a_declaration_states_its_arguments_answer_and_error() {
 
     same::<<place_order::Route as Declared>::Args, (doxa::Valid<Json<NewOrder>>,)>();
     same::<<order_events::Route as Declared>::Ok, doxa::client::SseStream<OrderEvent>>();
+}
+
+#[test]
+fn a_granted_declaration_answers_a_dry_run_and_invalidates_its_entity() {
+    let spec = <cancel_order::Route as Declared>::SPEC;
+    assert!(spec.dry_run);
+    assert_eq!(spec.entities, ["Order"]);
+    let _probe = cancel_order::can(OrderKey { id: 7 });
 }
 
 #[test]
@@ -30,6 +38,6 @@ fn a_declaration_carries_its_route_and_docs() {
 
 #[test]
 fn a_declaration_is_a_call_natively_too() {
-    let call = get_order(7u32);
+    let call = get_order(OrderKey { id: 7 });
     assert_eq!(call.url().unwrap(), "/api/orders/7");
 }

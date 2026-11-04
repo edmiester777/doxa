@@ -207,6 +207,7 @@ mod asset;
 mod capability;
 mod client_stub;
 mod dto;
+mod entity;
 mod grant;
 mod method;
 mod policy_resource;
@@ -928,6 +929,17 @@ pub fn spec(args: TokenStream, item: TokenStream) -> TokenStream {
         })
     };
     expand()
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A type a declared route's `Grant<…>` guards, named by `key`: `#[entity(key = OrderKey)]`.
+///
+/// Its entity type is its name unless `name = "…"` says otherwise; a server asset guarding it
+/// says `entity = …`, and both must agree on the name and the key's fields.
+#[proc_macro_attribute]
+pub fn entity(args: TokenStream, item: TokenStream) -> TokenStream {
+    entity::expand(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

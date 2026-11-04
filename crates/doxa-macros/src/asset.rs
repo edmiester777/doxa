@@ -113,6 +113,8 @@ struct Args {
     load_with: Option<Path>,
     /// `list = tenant`: emit a `Scoping` confined to the caller's tenant.
     list: Option<Ident>,
+    /// The API crate's `#[doxa::entity]` this asset guards.
+    entity: Option<Path>,
 }
 
 impl Parse for Args {
@@ -160,11 +162,13 @@ impl Parse for Args {
                 out.with = Some(input.parse()?);
             } else if key == "load_with" {
                 out.load_with = Some(input.parse()?);
+            } else if key == "entity" {
+                out.entity = Some(input.parse()?);
             } else {
                 return Err(syn::Error::new(
                     key.span(),
                     "unknown `asset` option; expected `profile`, `actions`, `row`, `key`, \
-                     `with`, `list`, `ctx`, `source`, `error` or `load_with`",
+                     `with`, `list`, `ctx`, `source`, `error`, `load_with` or `entity`",
                 ));
             }
 
@@ -433,6 +437,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             }
         },
     };
+    let of_entity = of_entity(name, args.entity.as_ref());
 
     Ok(quote! {
         #item
@@ -463,12 +468,77 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             const ENTITY_TYPE: &'static str = <#actions as ::doxa::wire::Vocabulary>::ENTITY_TYPE;
             const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
         }
+
+        #of_entity
     })
+}
+
+/// `entity = …`: the declared entity, held to this asset's entity type and key.
+fn of_entity(name: &Ident, entity: Option<&Path>) -> TokenStream {
+    let Some(entity) = entity else {
+        return TokenStream::new();
+    };
+    let named = format!(
+        "`{name}` guards a different entity type than `{}` declares; name the asset's \
+         vocabulary after it, or give the entity `name = \"…\"`",
+        quote!(#entity).to_string().replace(' ', "")
+    );
+    let keyed = format!(
+        "`{name}` is named by different route parameters than `{}`'s key",
+        quote!(#entity).to_string().replace(' ', "")
+    );
+    quote! {
+        impl ::doxa::wire::contract::OfEntity for #name {
+            type Entity = #entity;
+        }
+
+        const _: () = ::core::assert!(
+            ::doxa::wire::str_eq(
+                <#name as ::doxa::wire::Keyed>::ENTITY_TYPE,
+                <#entity as ::doxa::wire::Keyed>::ENTITY_TYPE,
+            ),
+            #named,
+        );
+        const _: () = ::core::assert!(
+            ::doxa::wire::contract::same_names(
+                <#name as ::doxa::auth::Granting>::KEY_NAMES,
+                <<#entity as ::doxa::wire::Keyed>::Key as ::doxa::wire::KeyNames>::NAMES,
+            ),
+            #keyed,
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_asset_names_the_entity_it_guards_and_is_held_to_its_name_and_key() {
+        let out = expand_ok(
+            quote!(
+                profile = AppGrants,
+                actions = OrderAction,
+                entity = orders_api::Order
+            ),
+            quote!(
+                pub struct OrderById;
+            ),
+        );
+        assert!(
+            out.contains("OfEntity for OrderById { type Entity = orders_api :: Order ; }"),
+            "{out}"
+        );
+        assert!(out.contains("str_eq"), "{out}");
+        assert!(out.contains("same_names"), "{out}");
+        let plain = expand_ok(
+            quote!(profile = AppGrants, actions = OrderAction),
+            quote!(
+                pub struct OrderById;
+            ),
+        );
+        assert!(!plain.contains("OfEntity"), "{plain}");
+    }
 
     fn expand_ok(args: TokenStream, item: TokenStream) -> String {
         expand(args, item).expect("expands").to_string()

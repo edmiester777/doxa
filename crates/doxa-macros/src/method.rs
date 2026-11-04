@@ -155,14 +155,46 @@ fn declaration(
             "a declared route is part of the API: make it `pub`",
         ));
     }
+    let mut item_fn = item_fn.clone();
+    for arg in &mut item_fn.sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            grant_as_granted(&mut pt.ty)?;
+        }
+    }
     let operation_id = extra.iter().find_map(operation_id);
     let route = client_stub::Route {
         method,
         path,
         operation_id,
     };
-    let declared = client_stub::declared(&route, item_fn)?;
-    client_stub::expand(&route, item_fn, declared)
+    let declared = client_stub::declared(&route, &item_fn)?;
+    client_stub::expand(&route, &item_fn, declared)
+}
+
+/// `Grant<E>` as the client's `Granted<E>`: `E`'s key is the argument.
+fn grant_as_granted(ty: &mut Type) -> Result<()> {
+    let Type::Path(tp) = ty else { return Ok(()) };
+    let Some(last) = tp.path.segments.last() else {
+        return Ok(());
+    };
+    if last.ident != "Grant" {
+        return Ok(());
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return Err(syn::Error::new_spanned(
+            &*tp,
+            "`Grant` names the entity: `Grant<Order>`",
+        ));
+    };
+    if args.args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            &*tp,
+            "`Grant` takes the entity alone; the server's guard names the action",
+        ));
+    }
+    let entity = &args.args[0];
+    *ty = syn::parse_quote!(::doxa::client::Granted<#entity>);
+    Ok(())
 }
 
 fn operation_id(m: &Meta) -> Option<&LitStr> {
