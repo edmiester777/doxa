@@ -178,9 +178,37 @@ mod web {
         }))))
     }
 
-    /// Base URLs by client crate, and a bearer token asked for per request.
+    thread_local! {
+        static INVALIDATED: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
+    }
+
+    /// Base URLs by client crate, a bearer token asked for per request, the host router's
+    /// `navigate(to, { replace })`, and `invalidated(entities)` told of each cache invalidation.
     #[wasm_bindgen(js_name = "__doxa_configure")]
-    pub fn configure(services: JsValue, token: Option<js_sys::Function>) {
+    pub fn configure(
+        services: JsValue,
+        token: Option<js_sys::Function>,
+        navigate: Option<js_sys::Function>,
+        invalidated: Option<js_sys::Function>,
+    ) {
+        if let Some(navigate) = navigate {
+            crate::router::navigate_through(move |to, replace| {
+                let options = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&options, &"replace".into(), &replace.into());
+                let _ = navigate.call2(&JsValue::NULL, &to.into(), &options);
+            });
+        }
+        if let Some(f) = invalidated {
+            let first = INVALIDATED.with(|i| i.borrow_mut().replace(f).is_none());
+            if first {
+                doxa_client::cache::on_invalidated(|entities| {
+                    let list: js_sys::Array = entities.iter().map(|e| JsValue::from(*e)).collect();
+                    if let Some(f) = INVALIDATED.with(|i| i.borrow().clone()) {
+                        let _ = f.call1(&JsValue::NULL, &list);
+                    }
+                });
+            }
+        }
         if !services.is_undefined() && !services.is_null() {
             if let Some(global) = js_sys::global().dyn_ref::<js_sys::Object>() {
                 let _ = js_sys::Reflect::set(global, &"__DOXA_SERVICES__".into(), &services);
@@ -191,5 +219,12 @@ mod web {
                 token.call0(&JsValue::NULL).ok()?.as_string()
             }));
         }
+    }
+
+    /// Mark stale every cached query about any of `entities`, after a host's own mutation.
+    #[wasm_bindgen(js_name = "__doxa_invalidate")]
+    pub fn invalidate(entities: Vec<String>) {
+        let entities: Vec<&str> = entities.iter().map(String::as_str).collect();
+        doxa_client::cache::invalidate_entities(&entities);
     }
 }

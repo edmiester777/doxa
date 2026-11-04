@@ -395,6 +395,30 @@ fn a_mutation_refetches_each_affected_query_once() {
 }
 
 #[test]
+fn a_host_hears_of_mutations_and_its_own_invalidations_stay_quiet() {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "cog"))
+        .json(200, &widget(1, "sprocket"))
+        .json(200, &widget(1, "sprocket"));
+    let client = serve(mock.clone());
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let log = heard.clone();
+    cache::on_invalidated(move |e| log.borrow_mut().push(e.join(",")));
+    wait(get("cog")).unwrap();
+    wait(rename("cog", "sprocket")).unwrap();
+    assert_eq!(*heard.borrow(), ["Widget"]);
+    cache::invalidate_entities(&["Widget"]);
+    assert_eq!(*heard.borrow(), ["Widget"]);
+    wait(get("sprocket")).unwrap();
+    task::run_until_stalled();
+    assert_eq!(
+        client.requests_sent(),
+        3,
+        "the host's invalidation refetched"
+    );
+}
+
+#[test]
 fn invalidating_one_key_leaves_other_instances_fresh() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))

@@ -8,7 +8,8 @@ export default defineConfig({
   // `file:` links the package from target/, where React isn't installed.
   resolve: { dedupe: ["react", "react-dom"] },
   server: {
-    proxy: { "/api": "http://127.0.0.1:3000" },
+    // The demo server reads the caller's role from `x-role` in place of a token.
+    proxy: { "/api": { target: "http://127.0.0.1:3000", headers: { "x-role": "editor" } } },
     fs: { allow: [".", "../../../target/doxa/lib"] },
   },
 });

@@ -72,9 +72,9 @@ pub use icon::{Icon, IconExt, IconProps, IconSet, IconStyle};
 pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
 pub use portal::{Portal, PortalBuilder, PortalProps, PortalTarget};
 pub use router::{
-    block_navigation, link_active, location, match_path, navigate, navigate_with, navigation,
-    redirect, set_query, set_query_as, Keep, Link, LinkBuilder, LinkProps, Nav, Navigation, Outlet,
-    OutletBuilder, OutletProps, Page, Prefetch, Query, Route, Router, Segments,
+    block_navigation, link_active, location, match_path, navigate, navigate_through, navigate_with,
+    navigation, redirect, set_query, set_query_as, Keep, Link, LinkBuilder, LinkProps, Nav,
+    Navigation, Outlet, OutletBuilder, OutletProps, Page, Prefetch, Query, Route, Router, Segments,
 };
 pub use story::{IntoStory, StoryRoot};
 pub use theme::{set_theme, theme, Theme};

@@ -27,6 +27,35 @@ pub trait Observer {
 thread_local! {
     static OBSERVER: RefCell<Option<Rc<dyn Observer>>> = const { RefCell::new(None) };
     static ANSWERED: RefCell<HashMap<usize, &'static str>> = RefCell::new(HashMap::new());
+    static REPORTED: RefCell<Vec<Reported>> = const { RefCell::new(Vec::new()) };
+}
+
+type Reported = Rc<dyn Fn(&[&str])>;
+
+/// Run `f` with the entity types each mutation, or [`invalidate`], marks stale; for a host
+/// keeping its own cache.
+pub fn on_invalidated(f: impl Fn(&[&str]) + 'static) {
+    REPORTED.with(|r| r.borrow_mut().push(Rc::new(f)));
+}
+
+pub(crate) fn report(entities: &[&str]) {
+    let mut unique: Vec<&str> = Vec::new();
+    for e in entities {
+        if !unique.contains(e) {
+            unique.push(e);
+        }
+    }
+    if unique.is_empty() {
+        return;
+    }
+    let all: Vec<_> = REPORTED.with(|r| r.borrow().clone());
+    all.iter().for_each(|f| f(&unique));
+}
+
+/// Mark stale every cached query, in every service, about any of `entities`; for a host's own
+/// mutations, so it isn't reported back to [`on_invalidated`].
+pub fn invalidate_entities(entities: &[&str]) {
+    crate::service::each(|s| s.cache.invalidate(entities));
 }
 
 /// Record that `route` answers `entity`, which a stub finds only at run time.
@@ -71,11 +100,13 @@ where
     service(W::PACKAGE).cache.invalidate_where(|e| {
         about(e.route).contains(&W::ENTITY_TYPE) && (e.key.is_none() || e.key == key)
     });
+    report(&[W::ENTITY_TYPE]);
 }
 
 /// Mark stale every cached query about the asset `W`.
 pub fn invalidate_all<W: Keyed>() {
     service(W::PACKAGE).cache.invalidate(&[W::ENTITY_TYPE]);
+    report(&[W::ENTITY_TYPE]);
 }
 
 /// Patch every cached `T` whose route key is `key`, in instances and lists, and

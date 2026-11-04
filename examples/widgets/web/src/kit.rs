@@ -3,7 +3,7 @@
 use doxa::ui::prelude::*;
 use widgets_client::widgets::*;
 
-use crate::Count;
+use crate::{Count, WidgetPage};
 
 /// The widgets whose names contain `contains`; `on_open` gets the name picked.
 #[component(export)]
@@ -26,9 +26,31 @@ pub async fn WidgetPicker(contains: Option<String>, on_open: Callback<String>) -
     })
 }
 
-/// A widget's name as a heading.
+/// A widget's name as a heading, linking to its page.
 #[component(export)]
 pub async fn WidgetTitle(name: String, #[prop(default = 1)] level: u8) -> Result<View> {
     let w = get_widget(&WidgetKey { name }).await?;
-    Ok(view! { <p class="title" data-level={level.to_string()}>{&w.name}</p> })
+    Ok(view! {
+        <p class="title" data-level={level.to_string()}>
+            <Link to={WidgetPage::route(&w.name)}>{&w.name}</Link>
+        </p>
+    })
+}
+
+/// Renames widget `name` to `to`.
+#[component(export)]
+pub fn RenameWidget(name: String, to: String) -> View {
+    let rename = action(async move |(name, to): (String, String)| {
+        rename_widget(&WidgetKey { name }, Rename { name: to }).await?;
+        Ok(())
+    });
+    view! {
+        <button
+            class="rename"
+            disabled={rename.pending()}
+            on:click={move |_| rename.run((name.clone(), to.clone()))}
+        >
+            "Rename"
+        </button>
+    }
 }

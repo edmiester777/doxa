@@ -118,14 +118,17 @@ pub fn index_js(
     }
     js.push_str(
         "    await m.default({ module_or_path: new URL(\"./app.wasm\", import.meta.url) });\n    \
-         m.__doxa_configure(options.services, options.token);\n    \
+         m.__doxa_configure(options.services, options.token, options.navigate, options.invalidated);\n    \
          return m;\n  });\n  return started;\n}\n\n",
     );
     js.push_str(
-        "/** Base URLs by client crate, and a bearer token; call before the first component mounts. */\n\
+        "/** Services, token, router and cache hooks; call before the first component mounts. */\n\
          export function configure(next = {}) {\n  \
          options = { ...options, ...next };\n  \
-         started?.then((m) => m.__doxa_configure(next.services, next.token));\n}\n\n",
+         started?.then((m) => m.__doxa_configure(next.services, next.token, next.navigate, next.invalidated));\n}\n\n\
+         /** Mark stale doxa's cached queries about these entity types. */\n\
+         export function invalidate(entities) {\n  \
+         started?.then((m) => m.__doxa_invalidate(entities));\n}\n\n",
     );
     js.push_str(&format!(
         "function wrap(name, mount) {{\n  \
@@ -182,8 +185,13 @@ pub fn index_dts(exports: &[Export]) -> String {
          /** Base URL by client crate; unlisted ones are the page's own origin. */\n  \
          services?: Record<string, string>;\n  \
          /** Sent as `Authorization: Bearer …` with every request. */\n  \
-         token?: () => string | null | undefined;\n}\n\n\
-         export declare function configure(options: ConfigureOptions): void;\n",
+         token?: () => string | null | undefined;\n  \
+         /** Called for each `<Link>` and `navigate()`, in place of history. */\n  \
+         navigate?: (to: string, options: { replace: boolean }) => void;\n  \
+         /** Told the entity types each doxa mutation made stale. */\n  \
+         invalidated?: (entities: string[]) => void;\n}\n\n\
+         export declare function configure(options: ConfigureOptions): void;\n\
+         export declare function invalidate(entities: string[]): void;\n",
     );
     for e in exports {
         ts.push_str(&format!("\nexport interface {}Props {{\n", e.component));
@@ -412,6 +420,8 @@ mod tests {
             "export declare function WidgetPicker(props: WidgetPickerProps): ReactElement;"
         ));
         assert!(ts.contains("export declare function configure(options: ConfigureOptions): void;"));
+        assert!(ts.contains("navigate?: (to: string, options: { replace: boolean }) => void;"));
+        assert!(ts.contains("export declare function invalidate(entities: string[]): void;"));
     }
 
     #[test]
@@ -427,6 +437,7 @@ mod tests {
             "export const WidgetPicker = wrap(\"WidgetPicker\", \"__doxa_export_WidgetPicker\");"
         ));
         assert!(js.contains("started ??= import(\"/s/glue.js\")"));
+        assert!(js.contains("m.__doxa_invalidate(entities)"));
         assert!(js.contains("libraryMode();"));
         assert!(js.contains("className: \"kit\""));
         assert!(js.contains("createElement(Portals, { root })"));

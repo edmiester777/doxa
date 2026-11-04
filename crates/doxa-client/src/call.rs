@@ -368,6 +368,7 @@ async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     let mut entities: Vec<&str> = crate::cache::about(call.route);
     entities.extend(extra.iter().map(String::as_str));
     client.cache.invalidate(&entities);
+    crate::cache::report(&entities);
     let request = call.request(url, "text/event-stream");
     let hub = Rc::new(Hub::new(request, client.clone(), response.body));
     client.own_stream(&hub);
@@ -544,6 +545,7 @@ async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Er
             let mut entities: Vec<&str> = crate::cache::about(call.route);
             entities.extend(extra.iter().map(String::as_str));
             client.cache.invalidate(&entities);
+            crate::cache::report(&entities);
             // Filed after the invalidation, so the next read of this instance needs no request.
             if let (Some(entity), Some(stored)) = (call.entity, stored) {
                 if call.route.method != Method::Delete {

@@ -477,6 +477,14 @@ thread_local! {
     static LOCATION: RefCell<LocationCell> = RefCell::new(LocationCell { url: initial_url(), readers: Readers::default() });
     static ROUTER: RefCell<Option<Router>> = const { RefCell::new(None) };
     static NAV: RefCell<NavCell> = RefCell::default();
+    static HOST: RefCell<Option<HostNavigate>> = const { RefCell::new(None) };
+}
+
+type HostNavigate = Rc<dyn Fn(&str, bool)>;
+
+/// Hand each [`navigate`] to `f(url, replace)` rather than history, for a host app's router.
+pub fn navigate_through(f: impl Fn(&str, bool) + 'static) {
+    HOST.with(|h| *h.borrow_mut() = Some(Rc::new(f)));
 }
 
 pub(crate) fn install(router: Router) {
@@ -582,6 +590,10 @@ fn go(url: String, mut nav: Nav, origin: Origin) {
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
 fn commit(url: String, nav: Nav, origin: Origin) {
+    if let (Origin::App, Some(host)) = (origin, HOST.with(|h| h.borrow().clone())) {
+        host(&url, nav.replace);
+        return set_location(url);
+    }
     #[cfg(target_arch = "wasm32")]
     match origin {
         Origin::App => web::write(&url, nav.replace),
@@ -1103,6 +1115,23 @@ mod percent_encoding_lite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_router_takes_each_navigation() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = seen.clone();
+        navigate_through(move |url, replace| log.borrow_mut().push((url.to_owned(), replace)));
+        navigate("/widgets/cog");
+        navigate_with("/widgets", Nav::replace());
+        assert_eq!(
+            *seen.borrow(),
+            [
+                ("/widgets/cog".to_owned(), false),
+                ("/widgets".to_owned(), true)
+            ]
+        );
+        assert_eq!(current_url(), "/widgets");
+    }
 
     #[test]
     fn a_template_matches_and_captures() {

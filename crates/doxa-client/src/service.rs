@@ -56,7 +56,6 @@ pub fn service(package: &'static str) -> Rc<Service> {
 }
 
 /// Run `f` on every service created so far.
-#[cfg_attr(not(feature = "oidc"), allow(dead_code))]
 pub(crate) fn each(f: impl Fn(&Service)) {
     let all: Vec<Rc<Service>> = SERVICES.with(|s| s.borrow().values().cloned().collect());
     all.iter().for_each(|s| f(s));
