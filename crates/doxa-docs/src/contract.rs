@@ -51,10 +51,46 @@ pub fn document(op: &mut Operation, spec: &RouteSpec, docs: &str) {
     if op.summary.is_some() || op.description.is_some() || docs.is_empty() {
         return;
     }
-    let (summary, rest) = docs.split_once('\n').unwrap_or((docs, ""));
+    let (summary, rest) = docs.split_once("\n\n").unwrap_or((docs, ""));
     op.summary = Some(summary.to_owned());
     let rest = rest.trim();
     if !rest.is_empty() {
         op.description = Some(rest.to_owned());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn documented(docs: &str) -> Operation {
+        const SPEC: RouteSpec = RouteSpec {
+            method: Method::Get,
+            path: "/",
+            operation_id: "route",
+            entities: &[],
+            dry_run: false,
+            package: "api",
+        };
+        let mut op = Operation::new();
+        document(&mut op, &SPEC, docs);
+        op
+    }
+
+    #[test]
+    fn the_summary_is_the_first_paragraph_however_it_wraps() {
+        let op = documented("Partially update.\nOnly what is sent changes.\n\nA detail.");
+        assert_eq!(
+            op.summary.as_deref(),
+            Some("Partially update.\nOnly what is sent changes.")
+        );
+        assert_eq!(op.description.as_deref(), Some("A detail."));
+    }
+
+    #[test]
+    fn one_paragraph_has_no_description() {
+        let op = documented("Fetch one.");
+        assert_eq!(op.summary.as_deref(), Some("Fetch one."));
+        assert_eq!(op.description, None);
     }
 }
