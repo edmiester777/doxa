@@ -165,7 +165,8 @@ async fn a_capability_only_route_answers_can_from_the_callers_capabilities() {
 #[tokio::test]
 async fn a_declared_202_answers_with_the_return_types_body() {
     install("viewer");
-    assert_eq!(*count_orders().await.unwrap(), 2);
+    let (status, count) = count_orders().await.unwrap();
+    assert_eq!((status, *count), (202, 2));
 }
 
 #[test]

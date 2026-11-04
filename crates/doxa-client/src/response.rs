@@ -146,10 +146,29 @@ where
     forward!();
 }
 
+/// The status the server chose, beside the body.
 impl<R: FromResponse> FromResponse for (StatusCode, R) {
-    type Output = R::Output;
+    type Output = (u16, R::Output);
     type Error = R::Error;
-    forward!();
+    const STREAMS: bool = R::STREAMS;
+    fn decode(
+        status: u16,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) -> Result<Self::Output, String> {
+        Ok((status, R::decode(status, headers, body)?))
+    }
+    fn stream(hub: Rc<Hub>) -> Self::Output {
+        (200, R::stream(hub))
+    }
+    fn store(value: &Self::Output) -> Option<Rc<dyn Any>> {
+        let body = R::store(&value.1)?;
+        Some(Rc::new((value.0, body)))
+    }
+    fn load(value: Rc<dyn Any>) -> Option<Self::Output> {
+        let (status, body) = value.downcast_ref::<(u16, Rc<dyn Any>)>()?.clone();
+        Some((status, R::load(body)?))
+    }
 }
 
 impl FromResponse for StatusCode {
@@ -295,5 +314,20 @@ impl FromResponse for Unsupported {
     }
     fn load(_: Rc<dyn Any>) -> Option<Unsupported> {
         None
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    type Counted = (StatusCode, crate::arg::Json<u32>);
+
+    #[test]
+    fn a_status_and_body_decode_and_cache_together() {
+        let out = Counted::decode(202, &[], b"7".to_vec()).unwrap();
+        assert_eq!((out.0, *out.1), (202, 7));
+        let back = Counted::load(Counted::store(&out).unwrap()).unwrap();
+        assert_eq!((back.0, *back.1), (202, 7));
     }
 }
