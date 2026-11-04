@@ -32,21 +32,3 @@ pub fn duplicate_schemas() -> Vec<(String, Vec<&'static str>)> {
         })
         .collect()
 }
-
-/// Panics naming every component name more than one linked `#[dto]` type claims.
-pub fn assert_unique_schemas() {
-    let dups = duplicate_schemas();
-    if dups.is_empty() {
-        return;
-    }
-    let list: Vec<String> = dups
-        .iter()
-        .map(|(name, types)| format!("  {name}: {}", types.join(", ")))
-        .collect();
-    panic!(
-        "{} schema name(s) belong to more than one type, and a document keeps only one:\n{}\n\
-         rename one with `#[schema(as = …)]`",
-        dups.len(),
-        list.join("\n")
-    );
-}

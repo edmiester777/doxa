@@ -218,6 +218,7 @@ pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenSt
         item_fn.sig.ident.span(),
     );
     let checks = client_stub::implemented(&item_fn, &r);
+    fail_as_declared(&mut item_fn, &r);
     let meta = client_stub::server_meta("", Some(&r), &item_fn, &path);
     let sites = grant::rewrite_for(&mut item_fn, &grant::RouteIs::Declared(&r))?;
     let operation = declared_operation(&item_fn, &r, &path);
@@ -261,10 +262,7 @@ fn declared_operation(item_fn: &ItemFn, r: &TokenStream, path: &syn::Ident) -> T
     let fn_ident = &item_fn.sig.ident;
     let stand_in = syn::Ident::new(&format!("__doxa_op_{fn_ident}"), fn_ident.span());
     let stand_in_path = syn::Ident::new(&format!("__path_{stand_in}"), fn_ident.span());
-    let mut inferred = sig::infer(item_fn);
-    if let Some(inner) = inferred.error_type.as_ref().and_then(fail_inner) {
-        inferred.error_type = Some(inner);
-    }
+    let inferred = sig::infer(item_fn);
     let spec = quote!(<#r as ::doxa::wire::contract::Declared>::SPEC);
     let sig::InferredTokens {
         pre_items,
@@ -330,20 +328,35 @@ fn declared_operation(item_fn: &ItemFn, r: &TokenStream, path: &syn::Ident) -> T
     }
 }
 
-/// `E` in `Fail<E>`, which `doxa::serves!` defines and documents as `E`.
-fn fail_inner(ty: &Type) -> Option<Type> {
-    let Type::Path(tp) = ty else { return None };
-    let last = tp.path.segments.last()?;
-    if last.ident != "Fail" {
-        return None;
+/// A handler failing with its own error answers the declared one it converts into.
+fn fail_as_declared(item_fn: &mut ItemFn, r: &TokenStream) {
+    let syn::ReturnType::Type(_, ty) = &item_fn.sig.output else {
+        return;
+    };
+    if item_fn.sig.asyncness.is_none() {
+        return;
+    }
+    let Type::Path(tp) = &**ty else { return };
+    let Some(last) = tp.path.segments.last() else {
+        return;
+    };
+    if last.ident != "Result" && last.ident != "ApiResult" {
+        return;
     }
     let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-        return None;
+        return;
     };
-    match args.args.first()? {
-        syn::GenericArgument::Type(t) if args.args.len() == 1 => Some(t.clone()),
-        _ => None,
-    }
+    let (Some(syn::GenericArgument::Type(ok)), 2) = (args.args.first(), args.args.len()) else {
+        return;
+    };
+    let own = ty.clone();
+    let declared: Type = syn::parse_quote!(::core::result::Result<#ok, <#r as ::doxa::wire::contract::Declared>::Error>);
+    item_fn.sig.output = syn::parse_quote!(-> #declared);
+    let body = &item_fn.block;
+    *item_fn.block = syn::parse_quote!({
+        let result: #own = async move #body.await;
+        result.map_err(::core::convert::Into::into)
+    });
 }
 
 /// `Grant<E>` as the client's `Granted<E>`: `E`'s key is the argument.

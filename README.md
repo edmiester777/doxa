@@ -987,13 +987,17 @@ pub struct Order { pub id: u32, pub item: String }
 pub async fn get_order(order: Grant<Order>) -> Result<Json<Order>, OrderError>;
 
 // orders-server/src/lib.rs
-doxa::serves!(orders_api; doc = api_doc);
+#[derive(Clone, FromRef, doxa::State)]
+pub struct AppState { db: Db }
+
+#[doxa::service]
+pub struct Orders;
 
 #[asset(row = OrderRow, key = OrderKey, profile = AppGrants, actions = OrderAction, entity = orders_api::Order)]
 pub struct OrderById;
 
 #[implements(orders_api::get_order)]
-async fn get_order(order: Granted<OrderById>, State(db): State<Db>) -> Result<Json<Order>, Fail<OrderError>> { … }
+async fn get_order(order: Granted<OrderById>, State(db): State<Db>) -> Result<Json<Order>, DbErr> { … }
 
 // the client: as with a shared route
 let o: Order = orders_api::get_order(OrderKey { id: 7 }).await?;
@@ -1001,7 +1005,16 @@ let o: Order = orders_api::get_order(OrderKey { id: 7 }).await?;
 
 `#[implements]` mounts the handler at the declared method and path, and fails to compile when it takes or answers other than the declaration does; server-only extractors go anywhere. `Grant<Order>` is held to an asset whose `entity =` names `Order`, with the same key. The declaration's docs, tags and operation id become the operation's.
 
-`serves!` defines `Fail<E>`, which a handler's own errors convert into by a `From<DbErr> for Fail<OrderError>` you write, and a test that fails naming each declared route the document lacks and each schema name two `#[dto]` types claim (`doxa::assert_unique_schemas()` checks that alone). `#[api(status = 500, internal)]` names the variant `doxa::Internal(msg)` converts into.
+A handler may fail with its own error when it converts into the declared one, and answers the declared one. The conversion goes beside the error, compiled for the server only, with the server's dependency under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`:
+
+```rust
+#[server]
+impl From<sea_orm::DbErr> for OrderError {
+    fn from(e: sea_orm::DbErr) -> Self { OrderError::Internal(e.to_string()) }
+}
+```
+
+`doxa::app(&state)` stops naming each route an API crate declares that no handler implements, once the server implements any route of that crate. `#[api(status = 500, internal)]` names the variant `doxa::Internal(msg)` converts into.
 
 A type whose definition needs a server crate, such as an ORM enum, keeps a wire copy in the API crate, and `#[doxa::mirror(orders_api::Status)]` on the server's converts both ways; a variant or field only one side has doesn't compile. `doxa check --wire -p orders-api` builds the API crate for wasm and names a dependency that stops it, with the path that pulls it in.
 

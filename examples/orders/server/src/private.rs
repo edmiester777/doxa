@@ -9,7 +9,7 @@ use doxa::{implements, Valid};
 
 use orders_api::{NewOrder, Order, OrderError};
 
-use crate::{Fail, OrderById, OrderRow, Store};
+use crate::{Gone, OrderById, OrderRow, Store};
 
 /// Changes, refused without a role.
 #[doxa::service(layers = crate::signed_in)]
@@ -19,7 +19,7 @@ pub struct OrdersPrivate;
 async fn cancel_order(
     order: Granted<OrderById>,
     State(store): State<Store>,
-) -> Result<StatusCode, Fail<OrderError>> {
+) -> Result<StatusCode, Gone> {
     store.remove(order.id)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -33,7 +33,8 @@ async fn place_order(
         return Err(OrderError::OutOfStock(new.item));
     }
     let mut orders = store.0.write().unwrap();
-    let id = orders.iter().map(|o| o.id).max().unwrap_or(0) + 1;
+    let next = orders.iter().map(|o| u64::from(o.id)).max().unwrap_or(0) + 1;
+    let id = u32::try_from(next)?;
     let row = OrderRow {
         id,
         item: new.item,

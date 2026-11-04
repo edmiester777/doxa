@@ -242,7 +242,7 @@ pub use problem::{ApiErrorBody, ProblemDetails};
 #[cfg(feature = "proxy")]
 pub use proxy::proxy;
 pub use router_ext::OpenApiRouterExt;
-pub use schemas::{assert_unique_schemas, duplicate_schemas};
+pub use schemas::duplicate_schemas;
 pub use spa::{Dist, EmbeddedFiles, MountSpaExt, Spa};
 pub use sse::{SseEventMeta, SseStream};
 
@@ -285,7 +285,7 @@ pub type ApiResult<T, E> = Result<T, E>;
 pub mod __private {
     pub use tracing;
 
-    /// What `#[doxa::implements]`, `doxa::serves!` and a declaration expand to.
+    /// What `#[doxa::implements]` and a declaration expand to.
     pub mod contract {
         pub use crate::contract::*;
     }

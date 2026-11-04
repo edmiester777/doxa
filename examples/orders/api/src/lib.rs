@@ -45,6 +45,13 @@ pub enum OrderError {
     Internal(String),
 }
 
+#[server]
+impl From<std::num::TryFromIntError> for OrderError {
+    fn from(e: std::num::TryFromIntError) -> Self {
+        OrderError::Internal(e.to_string())
+    }
+}
+
 /// Something that happened to an order.
 #[dto]
 #[derive(SseEvent)]

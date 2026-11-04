@@ -108,9 +108,3 @@ fn the_document_names_each_route_by_its_declaration() {
     assert_eq!(op.operation_id.as_deref(), Some("cancel_order"));
     assert_eq!(op.summary.as_deref(), Some("Cancel an order."));
 }
-
-#[test]
-#[should_panic(expected = "this server doesn't serve 5 declared route(s)")]
-fn a_document_missing_declared_routes_names_them() {
-    orders_server::assert_serves(&doxa::OpenApi::default());
-}

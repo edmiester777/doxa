@@ -16,13 +16,13 @@ pub trait Answers<T> {}
 impl<T> Answers<T> for T {}
 impl<E> Answers<SseOnce<E>> for SseStream<E> {}
 
-/// A handler's error, against its declaration's.
+/// A handler's error, which it answers as the declaration's.
 #[diagnostic::on_unimplemented(
-    message = "the handler fails with `{Self}`, and the declaration with `{E}`",
-    note = "return the declared error, or `Fail<…>` of it from `doxa::serves!`"
+    message = "the handler fails with `{Self}`, which doesn't convert into the declaration's `{E}`",
+    note = "add `impl From<{Self}> for {E}`, in the server or beside the error with `#[server]`"
 )]
 pub trait FailsWith<E> {}
-impl<E> FailsWith<E> for E {}
+impl<A: Into<E>, E> FailsWith<E> for A {}
 
 #[doc(hidden)]
 pub fn takes<A: Takes<B>, B>() {}

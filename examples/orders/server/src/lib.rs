@@ -24,8 +24,6 @@ use doxa::{asset, Actions, PolicyResource, Routes};
 
 use orders_api::{Order, OrderError, OrderKey};
 
-doxa::serves!(orders_api; doc = api_doc);
-
 /// An order as the server stores it.
 #[derive(Debug, Clone, serde::Serialize, PolicyResource)]
 #[resource(entity_type = "Order")]
@@ -75,9 +73,9 @@ pub struct Store(Arc<RwLock<Vec<OrderRow>>>);
 /// A store that has lost an order it was asked for.
 pub struct Gone(u32);
 
-impl From<Gone> for Fail<OrderError> {
+impl From<Gone> for OrderError {
     fn from(Gone(id): Gone) -> Self {
-        Fail(OrderError::NotFound(id))
+        OrderError::NotFound(id)
     }
 }
 
@@ -235,3 +233,30 @@ pub fn seeded() -> Store {
         },
     ])
 }
+
+/// A handler's own error converts into the declared one:
+///
+/// ```
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// struct Lost;
+/// impl From<Lost> for orders_api::OrderError {
+///     fn from(_: Lost) -> Self { orders_api::OrderError::NotFound(0) }
+/// }
+/// #[doxa::implements(orders_api::cancel_order, mount = false)]
+/// async fn cancel(_: doxa::auth::Granted<orders_server::OrderById>) -> Result<axum::http::StatusCode, Lost> {
+///     Err(Lost)
+/// }
+/// ```
+///
+/// One that doesn't is "the handler fails with `Lost`, which doesn't convert into the declaration's `OrderError`":
+///
+/// ```compile_fail
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// struct Lost;
+/// #[doxa::implements(orders_api::cancel_order, mount = false)]
+/// async fn cancel(_: doxa::auth::Granted<orders_server::OrderById>) -> Result<axum::http::StatusCode, Lost> {
+///     Err(Lost)
+/// }
+/// ```
+#[doc(hidden)]
+pub mod error_diagnostics {}
