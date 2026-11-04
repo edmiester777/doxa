@@ -52,6 +52,8 @@ pub struct InferredAttrs {
     pub request_body: Option<Type>,
     /// The `Json<T>` body is under an `Option`, so a request may leave it out.
     pub optional_body: bool,
+    /// A declaration's `responses(…)`, as an expression of `&[(u16, &str)]`, applied last.
+    pub declared_responses: Option<TokenStream>,
     /// Full argument types in declaration order. Emitted into the
     /// per-handler `IntoParams` dispatch struct for trait-based
     /// contribution.
@@ -550,6 +552,10 @@ impl InferredAttrs {
         // argument implements `DocOperationSecurity`, every probe
         // resolves to the autoref-fallback no-op and the operation
         // is left unchanged.
+        let declared_responses = self
+            .declared_responses
+            .as_ref()
+            .map(|r| quote!(::doxa::__private::contract::respond(__op, #r);));
         let arg_types_for_ops = self.arg_types.clone();
         let optional_body = self.optional_body.then(|| {
             quote! {
@@ -614,6 +620,7 @@ impl InferredAttrs {
                         #response_body_ops_tt
                         drop(__schemas);
                         #optional_body
+                        #declared_responses
                         ::doxa::__private::stamp_client_meta(
                             __op,
                             <Self as ::doxa::__private::ClientMeta>::meta(),

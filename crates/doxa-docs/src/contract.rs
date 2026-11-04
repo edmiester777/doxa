@@ -2,6 +2,7 @@
 
 use doxa_wire::{Method, RouteSpec};
 use utoipa::openapi::path::{HttpMethod, Operation};
+use utoipa::openapi::{RefOr, Response};
 
 /// One declared route, registered where its API crate is linked.
 pub struct Declared(pub &'static RouteSpec);
@@ -16,6 +17,31 @@ pub fn method(m: Method) -> HttpMethod {
         Method::Put => HttpMethod::Put,
         Method::Patch => HttpMethod::Patch,
         Method::Delete => HttpMethod::Delete,
+    }
+}
+
+/// The declaration's success statuses in place of the inferred ones, each with the inferred
+/// body; a `204` has none.
+pub fn respond(op: &mut Operation, responses: &[(u16, &str)]) {
+    if responses.is_empty() {
+        return;
+    }
+    let all = &mut op.responses.responses;
+    let body = all
+        .iter()
+        .find(|(status, _)| status.starts_with('2'))
+        .and_then(|(_, r)| match r {
+            RefOr::T(r) => Some(r.clone()),
+            RefOr::Ref(_) => None,
+        });
+    all.retain(|status, _| !status.starts_with('2'));
+    for (status, description) in responses {
+        let mut response = body.clone().unwrap_or_else(|| Response::new(*description));
+        response.description = (*description).to_owned();
+        if *status == 204 {
+            response.content.clear();
+        }
+        all.insert(status.to_string(), RefOr::T(response));
     }
 }
 

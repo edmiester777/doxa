@@ -26,6 +26,8 @@ pub trait Declared {
     const MANY: &'static [&'static str] = &[];
     /// The capabilities it guards with `Grant<Cap<M>>`.
     const CAPS: &'static [&'static str] = &[];
+    /// Its `responses(…)`: the success statuses it answers, each with the return type's body.
+    const RESPONSES: &'static [(u16, &'static str)] = &[];
 }
 
 /// Whether `entity` is among `declared`.

@@ -98,3 +98,13 @@ pub async fn place_order(
 /// Orders as they're placed and cancelled.
 #[get("/api/orders/events")]
 pub async fn order_events() -> SseStream<OrderEvent>;
+
+/// Count every order: at once while there are few, or queued once there are many.
+#[post(
+    "/api/orders/count",
+    responses(
+        (status = 200, description = "Counted"),
+        (status = 202, description = "Queued; this is the count so far"),
+    )
+)]
+pub async fn count_orders() -> (StatusCode, Json<usize>);

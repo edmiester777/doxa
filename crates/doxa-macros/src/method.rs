@@ -180,6 +180,7 @@ fn declaration(
         }
     }
     let mut tags = Vec::new();
+    let mut responses = Vec::new();
     for meta in extra {
         match meta {
             Meta::NameValue(nv) if nv.path.is_ident("operation_id") => {}
@@ -193,11 +194,15 @@ fn declaration(
             Meta::List(_) if meta.path().is_ident("tags") => {
                 tags.extend(extract_tags_arg(std::slice::from_ref(meta))?.0);
             }
+            Meta::List(list) if list.path.is_ident("responses") => {
+                responses.extend(declared_responses(list)?);
+            }
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "a declaration takes `operation_id`, `tag`, `tags(…)` and `touches = […]`; \
-                     the rest of the operation is documented by the server that implements it",
+                    "a declaration takes `operation_id`, `tag`, `tags(…)`, `responses(…)` and \
+                     `touches = […]`; the rest of the operation is documented by the server that \
+                     implements it",
                 ))
             }
         }
@@ -209,8 +214,71 @@ fn declaration(
         operation_id,
         touches,
     };
-    let declared = client_stub::declared(&route, &item_fn, &tags)?;
+    let declared = client_stub::declared(&route, &item_fn, &tags, &responses)?;
     client_stub::expand(&route, &item_fn, declared)
+}
+
+/// `responses((status = 202, description = "…"), …)`: success statuses, each with the body
+/// the return type answers.
+fn declared_responses(list: &syn::MetaList) -> Result<Vec<(u16, LitStr)>> {
+    let groups = list
+        .parse_args_with(syn::punctuated::Punctuated::<syn::Expr, Token![,]>::parse_terminated)?;
+    let mut out = Vec::new();
+    for group in groups {
+        let (mut status, mut description) = (None, None);
+        let pairs: Vec<&syn::Expr> = match &group {
+            syn::Expr::Tuple(t) => t.elems.iter().collect(),
+            syn::Expr::Paren(p) => vec![&*p.expr],
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "expected `(status = 202, description = \"…\")`",
+                ))
+            }
+        };
+        for pair in pairs {
+            let syn::Expr::Assign(a) = pair else {
+                return Err(syn::Error::new_spanned(pair, "expected `name = value`"));
+            };
+            let key = a.left.to_token_stream().to_string();
+            if key != "status" && key != "description" {
+                return Err(syn::Error::new_spanned(
+                    pair,
+                    "a declared response takes `status` and `description`; its body is the \
+                     route's return type",
+                ));
+            }
+            let syn::Expr::Lit(syn::ExprLit { lit, .. }) = &*a.right else {
+                return Err(syn::Error::new_spanned(&a.right, "expected a literal"));
+            };
+            match (key.as_str(), lit) {
+                ("status", syn::Lit::Int(i)) => {
+                    status = Some((i.base10_parse::<u16>()?, i.clone()))
+                }
+                ("description", syn::Lit::Str(s)) => description = Some(s.clone()),
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        lit,
+                        "expected a status number or a string",
+                    ))
+                }
+            }
+        }
+        let Some((status, lit)) = status else {
+            return Err(syn::Error::new_spanned(&group, "add `status = …`"));
+        };
+        if !(200..300).contains(&status) {
+            return Err(syn::Error::new_spanned(
+                lit,
+                "a declared response is a success; an error's status is its \
+                 `#[api(status = …)]`",
+            ));
+        }
+        let description = description
+            .ok_or_else(|| syn::Error::new_spanned(&group, "add `description = \"…\"`"))?;
+        out.push((status, description));
+    }
+    Ok(out)
 }
 
 /// `#[doxa::implements(api::route)]`: the handler serving a declared route, at its method and
@@ -275,7 +343,8 @@ fn declared_operation(item_fn: &ItemFn, r: &TokenStream, path: &syn::Ident) -> T
     let fn_ident = &item_fn.sig.ident;
     let stand_in = syn::Ident::new(&format!("__doxa_op_{fn_ident}"), fn_ident.span());
     let stand_in_path = syn::Ident::new(&format!("__path_{stand_in}"), fn_ident.span());
-    let inferred = sig::infer(item_fn);
+    let mut inferred = sig::infer(item_fn);
+    inferred.declared_responses = Some(quote!(<#r as ::doxa::wire::contract::Declared>::RESPONSES));
     let spec = quote!(<#r as ::doxa::wire::contract::Declared>::SPEC);
     let sig::InferredTokens {
         pre_items,
@@ -879,5 +948,42 @@ fn merge_explicit_headers(inferred: &mut Vec<Type>, explicit: Vec<Type>) {
             seen.push(key);
             inferred.push(ty);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(tokens: TokenStream) -> Result<Vec<(u16, String)>> {
+        let list: syn::MetaList = syn::parse2(quote!(responses(#tokens)))?;
+        Ok(declared_responses(&list)?
+            .into_iter()
+            .map(|(s, d)| (s, d.value()))
+            .collect())
+    }
+
+    #[test]
+    fn declared_responses_are_success_statuses_with_descriptions() {
+        let out = parse(quote!(
+            (status = 200, description = "Done"),
+            (description = "Queued", status = 202)
+        ))
+        .unwrap();
+        assert_eq!(out, [(200, "Done".into()), (202, "Queued".into())]);
+    }
+
+    #[test]
+    fn a_declared_response_is_a_success_without_a_body() {
+        let err = parse(quote!((status = 404, description = "Gone"))).unwrap_err();
+        assert!(err.to_string().contains("`#[api(status = …)]`"), "{err}");
+        let err = parse(quote!((status = 200, description = "Done", body = Foo))).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("its body is the route's return type"),
+            "{err}"
+        );
+        let err = parse(quote!((status = 200))).unwrap_err();
+        assert!(err.to_string().contains("add `description"), "{err}");
     }
 }

@@ -351,7 +351,12 @@ fn entity_type(ret: &Type) -> Option<&Type> {
 }
 
 /// The declared route's `Route` marker: what a server implementing it is held to.
-pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Result<TokenStream> {
+pub fn declared(
+    route: &Route<'_>,
+    item_fn: &ItemFn,
+    tags: &[LitStr],
+    responses: &[(u16, LitStr)],
+) -> syn::Result<TokenStream> {
     let args: Vec<TokenStream> = args(item_fn)
         .into_iter()
         .filter_map(|a| match a {
@@ -404,6 +409,8 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Re
     let verb = format_ident!("{}", capitalize(route.method));
     let many: Vec<&Type> = typed(item_fn).filter_map(|t| guard_of(t, "Many")).collect();
     let caps = caps(item_fn);
+    let (statuses, descriptions): (Vec<u16>, Vec<&LitStr>) =
+        responses.iter().map(|(s, d)| (*s, d)).unzip();
     Ok(quote! {
         /// This route, as the server that implements it is held to it.
         pub struct Route;
@@ -414,6 +421,7 @@ pub fn declared(route: &Route<'_>, item_fn: &ItemFn, tags: &[LitStr]) -> syn::Re
             const TAGS: &'static [&'static str] = &[#(#tags),*];
             const MANY: &'static [&'static str] = &[#(<#many as ::doxa::wire::Keyed>::ENTITY_TYPE),*];
             const CAPS: &'static [&'static str] = &[#(<#caps as ::doxa::wire::Capability>::NAME),*];
+            const RESPONSES: &'static [(u16, &'static str)] = &[#((#statuses, #descriptions)),*];
             type Args = (#(#args,)*);
             type Ok = #ok;
             type Error = #error;

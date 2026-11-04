@@ -1003,7 +1003,9 @@ async fn get_order(order: Granted<OrderById>, State(db): State<Db>) -> Result<Js
 let o: Order = orders_api::get_order(OrderKey { id: 7 }).await?;
 ```
 
-`#[implements]` mounts the handler at the declared method and path, and fails to compile when it takes or answers other than the declaration does; server-only extractors go anywhere. `Grant<Order>` is held to an asset whose `entity =` names `Order`, with the same key. The declaration's docs, tags and operation id become the operation's.
+`#[implements]` mounts the handler at the declared method and path, and fails to compile when it takes or answers other than the declaration does; server-only extractors go anywhere. `Grant<Order>` is held to an asset whose `entity =` names `Order`, with the same key. The declaration's docs, tags and operation id become the operation's, and `responses((status = 200, description = "Counted"), (status = 202, description = "Queued"))` lists its success statuses, each documented with the return type's body.
+
+An optional body, `Option<Json<T>>` or `Valid<Option<Json<T>>>`, is an `Option<T>` argument: `None` sends no body and isn't checked.
 
 A route's entities are what the client caches its answer under and what its other calls invalidate: the entity its guard names (`Grant<Order>`, `Grant<Many<Order>>`), the entity it answers (`Order`, `Vec<Order>` or `Option<Order>`), and `touches = [Customer]` for any other it changes. So `place_order` answering `Json<Order>` refreshes `list_orders(_: Grant<Many<Order>>, …)`. A handler guarding with `Granted<Many<OrderById>>` where the declaration doesn't state `Grant<Many<Order>>` doesn't compile, since its clients couldn't dry-run or refresh it.
 

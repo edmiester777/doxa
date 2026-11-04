@@ -115,6 +115,13 @@ where
     }
 }
 
+/// The status is chosen at run time; the body is `B`'s.
+impl<B: DocResponseBody> DocResponseBody for (axum::http::StatusCode, B) {
+    fn describe(op: &mut Operation, schemas: &mut Vec<(String, RefOr<Schema>)>) {
+        B::describe(op, schemas)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

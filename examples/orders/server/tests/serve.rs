@@ -161,3 +161,34 @@ async fn a_capability_only_route_answers_can_from_the_callers_capabilities() {
     install("viewer");
     assert_eq!(place_order::can().await, Permission::Denied);
 }
+
+#[tokio::test]
+async fn a_declared_202_answers_with_the_return_types_body() {
+    install("viewer");
+    assert_eq!(*count_orders().await.unwrap(), 2);
+}
+
+#[test]
+fn a_declarations_responses_reach_the_document() {
+    let api = doxa::__private::IntoSpec::into_spec(orders_server::api_doc());
+    let op = api.paths.paths["/api/orders/count"].post.as_ref().unwrap();
+    let mut statuses: Vec<_> = op.responses.responses.keys().cloned().collect();
+    statuses.sort();
+    assert!(
+        statuses.starts_with(&["200".to_owned(), "202".to_owned()]),
+        "{statuses:?}"
+    );
+    for (status, description) in [
+        ("200", "Counted"),
+        ("202", "Queued; this is the count so far"),
+    ] {
+        let utoipa::openapi::RefOr::T(r) = &op.responses.responses[status] else {
+            panic!("{status} is a ref");
+        };
+        assert_eq!(r.description, description);
+        assert!(
+            r.content.contains_key("application/json"),
+            "{status} has the body"
+        );
+    }
+}

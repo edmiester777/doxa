@@ -3,6 +3,7 @@
 use std::convert::Infallible;
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use futures::stream::{self, Stream};
 
@@ -46,4 +47,15 @@ async fn order_events() -> SseStream<OrderEvent, impl Stream<Item = Result<Order
         Ok(OrderEvent::Placed { id: 1 }),
         Ok(OrderEvent::Cancelled { id: 1 }),
     ]))
+}
+
+#[implements(orders_api::count_orders)]
+async fn count_orders(State(store): State<Store>) -> (StatusCode, Json<usize>) {
+    let count = store.0.read().unwrap().len();
+    let status = if count > 1 {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(count))
 }
