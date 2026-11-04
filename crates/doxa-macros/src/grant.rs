@@ -335,6 +335,12 @@ pub(crate) fn last_guard(item_fn: &ItemFn) -> Option<usize> {
 /// Stop a dry run once every guard has passed, so it never reaches the handler. Call this
 /// last: docs, mounting and client checks must not see the added argument.
 pub fn stop_dry_runs(item_fn: &mut ItemFn) {
+    // Seven written arguments are within clippy's default limit; only the added one crosses it.
+    if item_fn.sig.inputs.len() == 7 {
+        item_fn
+            .attrs
+            .push(syn::parse_quote!(#[allow(clippy::too_many_arguments)]));
+    }
     let at = last_guard(item_fn).map_or(0, |i| i + 1);
     item_fn
         .sig
@@ -646,6 +652,25 @@ mod tests {
             )),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    fn lint_allowed_with(written: usize) -> bool {
+        let args = (0..written).map(|i| format_ident!("a{i}"));
+        let mut item_fn: ItemFn = syn::parse_quote!(async fn handler(#(#args: u8),*) {});
+        stop_dry_runs(&mut item_fn);
+        assert_eq!(item_fn.sig.inputs.len(), written + 1);
+        item_fn.attrs.iter().any(|attr| {
+            quote::ToTokens::to_token_stream(attr)
+                .to_string()
+                .contains("too_many_arguments")
+        })
+    }
+
+    #[test]
+    fn only_the_added_argument_crossing_the_limit_is_allowed() {
+        assert!(!lint_allowed_with(6));
+        assert!(lint_allowed_with(7));
+        assert!(!lint_allowed_with(8));
     }
 
     #[test]
