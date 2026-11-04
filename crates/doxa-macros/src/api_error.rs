@@ -51,12 +51,14 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let into_responses = generate_into_responses(&enum_name, &variants);
     let audit_outcome = generate_audit_outcome(&enum_name, &variants);
     let api_metadata = generate_api_metadata(&enum_name, &variants);
+    let internal = generate_from_internal(&enum_name, &variants)?;
 
     Ok(quote! {
         #into_response
         #into_responses
         #audit_outcome
         #api_metadata
+        #internal
     })
 }
 
@@ -73,6 +75,8 @@ struct ParsedVariant {
     /// outcome are read off the nested value instead of literals, and
     /// the nested type's responses merge into this enum's.
     transparent: bool,
+    /// Declared via `#[api(internal)]`: the variant `doxa::Internal` converts into.
+    internal: bool,
 }
 
 impl ParsedVariant {
@@ -135,6 +139,25 @@ fn parse_variant(variant: &Variant) -> Result<ParsedVariant> {
             ));
         }
     }
+    if args.internal {
+        if args.transparent {
+            return Err(Error::new_spanned(
+                attr,
+                "`#[api(internal)]` and `#[api(transparent)]` can't share a variant",
+            ));
+        }
+        let holds_message = match &variant.fields {
+            Fields::Unit => true,
+            Fields::Unnamed(f) => f.unnamed.len() == 1,
+            Fields::Named(_) => false,
+        };
+        if !holds_message {
+            return Err(Error::new_spanned(
+                variant,
+                "`#[api(internal)]` goes on a unit variant or one holding the message, `Internal(String)`",
+            ));
+        }
+    }
 
     // Transparent variants carry no status of their own; the placeholder
     // is never emitted, because every site that would use it delegates.
@@ -156,6 +179,7 @@ fn parse_variant(variant: &Variant) -> Result<ParsedVariant> {
         code: args.code,
         outcome: args.outcome,
         transparent: args.transparent,
+        internal: args.internal,
     })
 }
 
@@ -177,10 +201,14 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
     let mut code: Option<String> = None;
     let mut outcome: Option<String> = None;
     let mut transparent = false;
+    let mut internal = false;
 
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("transparent") {
             transparent = true;
+            Ok(())
+        } else if meta.path.is_ident("internal") {
+            internal = true;
             Ok(())
         } else if meta.path.is_ident("status") {
             let value: Expr = meta.value()?.parse()?;
@@ -204,8 +232,9 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
             outcome = Some(s);
             Ok(())
         } else {
-            Err(meta
-                .error("unknown api key — supported: `status`, `code`, `outcome`, `transparent`"))
+            Err(meta.error(
+                "unknown api key — supported: `status`, `code`, `outcome`, `transparent`, `internal`",
+            ))
         }
     })?;
 
@@ -217,6 +246,7 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
         code_is_explicit,
         outcome,
         transparent,
+        internal,
     })
 }
 
@@ -229,6 +259,34 @@ struct ApiAttrArgs {
     code_is_explicit: bool,
     outcome: Option<String>,
     transparent: bool,
+    internal: bool,
+}
+
+/// `From<doxa::Internal>` for the one `#[api(internal)]` variant, if any.
+fn generate_from_internal(enum_name: &Ident, variants: &[ParsedVariant]) -> Result<TokenStream> {
+    let mut internal = variants.iter().filter(|v| v.internal);
+    let Some(v) = internal.next() else {
+        return Ok(TokenStream::new());
+    };
+    if let Some(again) = internal.next() {
+        return Err(Error::new_spanned(
+            &again.ident,
+            "only one variant can be `#[api(internal)]`",
+        ));
+    }
+    let ident = &v.ident;
+    let build = match v.shape {
+        VariantShape::Unit => quote!(Self::#ident),
+        _ => quote!(Self::#ident(::core::convert::From::from(internal.0))),
+    };
+    Ok(quote! {
+        impl ::core::convert::From<::doxa::Internal> for #enum_name {
+            #[allow(unused_variables)]
+            fn from(internal: ::doxa::Internal) -> Self {
+                #build
+            }
+        }
+    })
 }
 
 /// Convert a `PascalCase` identifier to `snake_case`. Used as the

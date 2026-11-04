@@ -41,6 +41,9 @@ pub enum OrderError {
     #[error("out of {0}")]
     #[api(status = 409, code = "out_of_stock")]
     OutOfStock(String),
+    #[error("{0}")]
+    #[api(status = 500, internal)]
+    Internal(String),
 }
 
 /// Something that happened to an order.

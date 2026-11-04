@@ -304,6 +304,32 @@ mod validator;
 /// rather than `{"error": {"Fault": {"RateLimited": …}}}` — so
 /// consolidating shared modes stays a non-breaking refactor rather than
 /// an SDK-visible one.
+///
+/// `#[api(internal)]` marks the one variant `doxa::Internal` converts into:
+///
+/// ```
+/// # use doxa::{ApiError, ToSchema};
+/// #[derive(Debug, thiserror::Error, serde::Serialize, ToSchema, ApiError)]
+/// pub enum E {
+///     #[error("{0}")]
+///     #[api(status = 500, internal)]
+///     Internal(String),
+/// }
+/// let _: E = doxa::Internal("db down".into()).into();
+/// ```
+///
+/// ```compile_fail
+/// # use doxa::{ApiError, ToSchema};
+/// #[derive(Debug, thiserror::Error, serde::Serialize, ToSchema, ApiError)]
+/// pub enum E {
+///     #[error("{0}")]
+///     #[api(status = 500, internal)]
+///     Internal(String),
+///     #[error("again")]
+///     #[api(status = 503, internal)]
+///     Again,
+/// }
+/// ```
 #[proc_macro_derive(ApiError, attributes(api, api_error, api_default))]
 pub fn derive_api_error(input: TokenStream) -> TokenStream {
     by_role(|| api_error::expand(input.into()), || Ok(TS2::new()))

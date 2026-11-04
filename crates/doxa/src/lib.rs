@@ -77,6 +77,10 @@ pub use doxa_macros::{
 #[doc(hidden)]
 pub use serde as __serde;
 
+/// A failure the client sees only as a message; `#[api(internal)]` names the variant it becomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Internal(pub String);
+
 /// The server half: what `doxa::prelude!()` brings in where the crate is the server.
 ///
 /// A server's route has a body:
