@@ -210,6 +210,7 @@ mod dto;
 mod entity;
 mod grant;
 mod method;
+mod mirror;
 mod policy_resource;
 mod role;
 mod sig;
@@ -977,6 +978,16 @@ pub fn implements(args: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn entity(args: TokenStream, item: TokenStream) -> TokenStream {
     entity::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `From` both ways between this type and its wire copy: `#[mirror(api::OnError)]`.
+///
+/// Every field converts through `Into`; a field or variant only one side has doesn't compile.
+#[proc_macro_attribute]
+pub fn mirror(args: TokenStream, item: TokenStream) -> TokenStream {
+    mirror::expand(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

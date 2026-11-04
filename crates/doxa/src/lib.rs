@@ -71,8 +71,27 @@ pub use doxa_policy as policy;
 
 #[cfg(any(feature = "macros", feature = "client"))]
 pub use doxa_macros::{
-    client, client_only, client_pub, dto, entity, prelude, server, server_only, service, Identity,
+    client, client_only, client_pub, dto, entity, mirror, prelude, server, server_only, service,
+    Identity,
 };
+
+/// A mirrored type and its wire copy must agree on every variant:
+///
+/// ```
+/// mod api { pub enum OnError { Skip, Retry(u32) } }
+/// #[doxa::mirror(api::OnError)]
+/// enum OnError { Skip, Retry(u32) }
+/// let _: OnError = api::OnError::Retry(2).into();
+/// ```
+///
+/// ```compile_fail
+/// mod api { pub enum OnError { Skip, Retry(u32), Halt } }
+/// #[doxa::mirror(api::OnError)]
+/// enum OnError { Skip, Retry(u32) }
+/// ```
+#[cfg(any(feature = "macros", feature = "client"))]
+#[doc(hidden)]
+pub mod mirror_diagnostics {}
 
 #[doc(hidden)]
 pub use serde as __serde;
