@@ -2,7 +2,7 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Fields, Item, Path};
+use syn::{Fields, GenericArgument, Item, Path, PathArguments, Type};
 
 pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let there: Path = syn::parse2(args)?;
@@ -63,25 +63,65 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
 ///
 /// Neither pattern has `..` and no arm is a catch-all, so what only one side has is an error.
 fn arms(here: &TokenStream, there: &TokenStream, fields: &Fields) -> (TokenStream, TokenStream) {
-    let into = quote!(::core::convert::Into::into);
     match fields {
         Fields::Unit => (quote!(#here => #there,), quote!(#there => #here,)),
         Fields::Unnamed(f) => {
             let b: Vec<_> = (0..f.unnamed.len())
                 .map(|i| format_ident!("f{i}"))
                 .collect();
+            let v: Vec<_> = f
+                .unnamed
+                .iter()
+                .zip(&b)
+                .map(|(f, b)| converted(&f.ty, quote!(#b)))
+                .collect();
             (
-                quote!(#here(#(#b),*) => #there(#(#into(#b)),*),),
-                quote!(#there(#(#b),*) => #here(#(#into(#b)),*),),
+                quote!(#here(#(#b),*) => #there(#(#v),*),),
+                quote!(#there(#(#b),*) => #here(#(#v),*),),
             )
         }
         Fields::Named(f) => {
             let n: Vec<_> = f.named.iter().map(|f| f.ident.clone()).collect();
+            let v: Vec<_> = f
+                .named
+                .iter()
+                .zip(&n)
+                .map(|(f, n)| converted(&f.ty, quote!(#n)))
+                .collect();
             (
-                quote!(#here { #(#n),* } => #there { #(#n: #into(#n)),* },),
-                quote!(#there { #(#n),* } => #here { #(#n: #into(#n)),* },),
+                quote!(#here { #(#n),* } => #there { #(#n: #v),* },),
+                quote!(#there { #(#n),* } => #here { #(#n: #v),* },),
             )
         }
+    }
+}
+
+/// `value` of type `ty` as the other side's copy, through any `Option` and `Vec` around it.
+fn converted(ty: &Type, value: TokenStream) -> TokenStream {
+    match wrapped(ty) {
+        Some(("Option", inner)) => {
+            let item = converted(inner, quote!(item));
+            quote!(#value.map(|item| #item))
+        }
+        Some(("Vec", inner)) => {
+            let item = converted(inner, quote!(item));
+            quote!(#value.into_iter().map(|item| #item).collect())
+        }
+        _ => quote!(::core::convert::Into::into(#value)),
+    }
+}
+
+/// `("Option", T)` for `Option<T>` and `("Vec", T)` for `Vec<T>`, by last path segment.
+fn wrapped(ty: &Type) -> Option<(&'static str, &Type)> {
+    let Type::Path(path) = ty else { return None };
+    let last = path.path.segments.last()?;
+    let name = ["Option", "Vec"].into_iter().find(|n| last.ident == n)?;
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    match args.args.first()? {
+        GenericArgument::Type(inner) => Some((name, inner)),
+        _ => None,
     }
 }
 
@@ -106,6 +146,34 @@ mod tests {
         assert!(out.contains("From < api :: OnError > for OnError"), "{out}");
         assert!(out.contains("api :: OnError :: Retry (f0)"), "{out}");
         assert!(!out.contains("_ =>"), "{out}");
+    }
+
+    #[test]
+    fn a_field_converts_inside_its_option_and_vec() {
+        let out = expand(
+            quote!(api::Run),
+            quote!(
+                pub struct Run {
+                    kind: Option<Kind>,
+                    steps: Vec<Option<Step>>,
+                    name: String,
+                }
+            ),
+        )
+        .unwrap()
+        .to_string();
+        assert!(
+            out.contains("kind : kind . map (| item | :: core :: convert :: Into :: into (item))"),
+            "{out}"
+        );
+        assert!(
+            out.contains("steps : steps . into_iter () . map (| item | item . map"),
+            "{out}"
+        );
+        assert!(
+            out.contains("name : :: core :: convert :: Into :: into (name)"),
+            "{out}"
+        );
     }
 
     #[test]
