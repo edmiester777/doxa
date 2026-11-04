@@ -83,6 +83,24 @@ pub struct Route<'a> {
     pub touches: &'a [syn::Path],
     /// `false` when the route says `dry_run = false`: its guards don't tell the whole story.
     pub dry_run: bool,
+    /// `false` when the route says `invalidates = false`: it reads, whatever its method.
+    pub invalidates: bool,
+}
+
+/// A route's boolean arguments, each `true` unless it says otherwise.
+#[derive(Clone, Copy)]
+pub struct Flags {
+    pub dry_run: bool,
+    pub invalidates: bool,
+}
+
+impl Default for Flags {
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            invalidates: true,
+        }
+    }
 }
 
 /// Server-only extractors a handler body could authorize with, where no guard sees it.
@@ -137,16 +155,23 @@ pub fn server_meta(
     method: &str,
     declared: Option<&TokenStream>,
     touches: &[syn::Path],
-    answers_dry_run: bool,
+    flags: Flags,
     item_fn: &ItemFn,
     path: &syn::Ident,
 ) -> TokenStream {
+    let invalidates = match declared {
+        Some(r) => quote!(<#r as ::doxa::wire::contract::Declared>::SPEC.invalidates),
+        None => {
+            let invalidates = flags.invalidates;
+            quote!(#invalidates)
+        }
+    };
     // A declared route's clients read its declaration, so the stamp can't promise more.
     let dry_run = match declared {
-        Some(r) if answers_dry_run && dry_run(item_fn, &args(item_fn)) => {
+        Some(r) if flags.dry_run && dry_run(item_fn, &args(item_fn)) => {
             quote!(<#r as ::doxa::wire::contract::Declared>::SPEC.dry_run)
         }
-        None if answers_dry_run && dry_run(item_fn, &args(item_fn)) => quote!(true),
+        None if flags.dry_run && dry_run(item_fn, &args(item_fn)) => quote!(true),
         _ => quote!(false),
     };
     let typed = || {
@@ -255,6 +280,7 @@ pub fn server_meta(
                     "entities": entities,
                     "key": key,
                     "dry_run": #dry_run,
+                    "invalidates": #invalidates,
                     "stream": #stream,
                     "identity": identity,
                     "error": error,
@@ -540,6 +566,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
 
     let args = args(item_fn);
     let dry_run = route.dry_run && dry_run(item_fn, &args);
+    let invalidates = route.invalidates;
 
     let entities: Vec<TokenStream> = item_fn
         .sig
@@ -725,6 +752,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
                 operation_id: #op_id,
                 entities: &[#(#entities),*],
                 dry_run: #dry_run,
+                invalidates: #invalidates,
                 package: ::core::env!("CARGO_PKG_NAME"),
             };
             #coverage
@@ -1011,6 +1039,7 @@ mod tests {
                 operation_id: None,
                 touches: &[],
                 dry_run: true,
+                invalidates: true,
             },
             &item,
             TokenStream::new(),
@@ -1030,6 +1059,7 @@ mod tests {
                 operation_id: None,
                 touches: &[],
                 dry_run: false,
+                invalidates: true,
             },
             &item,
             TokenStream::new(),
@@ -1262,6 +1292,7 @@ mod tests {
             operation_id: None,
             touches: &[],
             dry_run: true,
+            invalidates: true,
         };
         let err = expand(&route, &item, TokenStream::new())
             .unwrap_err()

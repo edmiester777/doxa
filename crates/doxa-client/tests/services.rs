@@ -29,6 +29,7 @@ const fn route(package: &'static str, method: Method, path: &'static str) -> Rou
         operation_id: path,
         entities: &["Order"],
         dry_run: false,
+        invalidates: true,
         package,
     }
 }

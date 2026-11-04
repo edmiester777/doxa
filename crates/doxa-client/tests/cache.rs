@@ -53,6 +53,7 @@ const fn route(method: Method, path: &'static str) -> RouteSpec {
         operation_id: path,
         entities: &["Widget"],
         dry_run: true,
+        invalidates: true,
         package: "",
     }
 }
@@ -61,6 +62,10 @@ static GET: RouteSpec = route(Method::Get, "/w/{name}");
 static LIST: RouteSpec = route(Method::Get, "/w");
 static RENAME: RouteSpec = route(Method::Patch, "/w/{name}");
 static EVENTS: RouteSpec = route(Method::Get, "/w/{name}/events");
+static SEARCH: RouteSpec = RouteSpec {
+    invalidates: false,
+    ..route(Method::Post, "/w/search")
+};
 
 #[derive(Default, Serialize)]
 struct Filter {}
@@ -392,6 +397,24 @@ fn a_mutation_refetches_each_affected_query_once() {
         .map(|w| w.name.clone())
         .collect();
     assert_eq!(names, ["sprocket", "gear"]);
+}
+
+#[test]
+fn a_post_that_only_reads_leaves_cached_answers_fresh_and_is_sent_each_time() {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "cog"))
+        .json(200, &widget(1, "cog"))
+        .json(200, &widget(1, "cog"));
+    let client = serve(mock.clone());
+    let search = || Call::<Json<Widget>>::new(&SEARCH);
+    task::block_on(async {
+        get("cog").await.unwrap();
+        search().await.unwrap();
+        search().await.unwrap();
+        get("cog").await.unwrap();
+    });
+    task::run_until_stalled();
+    assert_eq!(client.requests_sent(), 3);
 }
 
 #[test]

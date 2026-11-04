@@ -196,6 +196,7 @@ static ME: RouteSpec = RouteSpec {
     operation_id: "me",
     entities: &[],
     dry_run: false,
+    invalidates: true,
     package: "app",
 };
 

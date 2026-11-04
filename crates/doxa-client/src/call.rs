@@ -365,7 +365,7 @@ async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
         return Err(Fetch::from_status(response.status, &body));
     }
     let extra = invalidates(&response);
-    let mut entities: Vec<&str> = crate::cache::about(call.route);
+    let mut entities: Vec<&str> = affected(call.route);
     entities.extend(extra.iter().map(String::as_str));
     client.cache.invalidate(&entities);
     crate::cache::report(&entities);
@@ -524,6 +524,14 @@ fn revalidate<R: FromResponse>(
     });
 }
 
+/// The entities a successful call to `route` marks stale, before any the response names.
+fn affected(route: &'static RouteSpec) -> Vec<&'static str> {
+    match route.invalidates {
+        true => crate::cache::about(route),
+        false => Vec::new(),
+    }
+}
+
 async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
@@ -542,7 +550,7 @@ async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Er
             if let (Some(settle), Some(stored)) = (call.settle, &stored) {
                 settle(&client, &**stored, key.as_ref());
             }
-            let mut entities: Vec<&str> = crate::cache::about(call.route);
+            let mut entities: Vec<&str> = affected(call.route);
             entities.extend(extra.iter().map(String::as_str));
             client.cache.invalidate(&entities);
             crate::cache::report(&entities);

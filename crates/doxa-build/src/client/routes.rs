@@ -125,7 +125,10 @@ pub(crate) fn render(spec: &Spec, types: &mut Types<'_>) -> Result<TokenStream, 
             if meta.is_some_and(|m| !m.client) {
                 continue;
             }
-            let default = Meta::default();
+            let default = Meta {
+                invalidates: true,
+                ..Meta::default()
+            };
             let route = match route(
                 path,
                 method,
@@ -368,9 +371,10 @@ fn route(
         .map(|l| format!(" {l}"));
     let method = format_ident!("{method}");
     let op_id = (name != id.as_str()).then(|| quote!(, operation_id = #id));
+    let invalidates = (!meta.invalidates).then(|| quote!(, invalidates = false));
     Ok(quote! {
         #(#[doc = #docs])*
-        #[#method(#path #op_id)]
+        #[#method(#path #op_id #invalidates)]
         pub async fn #name(#(#args),*) -> #ret { ::core::unreachable!() }
     })
 }

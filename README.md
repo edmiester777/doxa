@@ -1011,7 +1011,7 @@ let o: Order = orders_api::get_order(OrderKey { id: 7 }).await?;
 
 An optional body, `Option<Json<T>>` or `Valid<Option<Json<T>>>`, is an `Option<T>` argument: `None` sends no body and isn't checked.
 
-A route's entities are what the client caches its answer under and what its other calls invalidate: the entity its guard names (`Grant<Order>`, `Grant<Many<Order>>`), the entity it answers (`Order`, `Vec<Order>` or `Option<Order>`), and `touches = [Customer]` for any other it changes. So `place_order` answering `Json<Order>` refreshes `list_orders(_: Grant<Many<Order>>, …)`. A handler guarding with `Granted<Many<OrderById>>` where the declaration doesn't state `Grant<Many<Order>>` doesn't compile, since its clients couldn't dry-run or refresh it.
+A route's entities are what the client caches its answer under and what its other calls invalidate: the entity its guard names (`Grant<Order>`, `Grant<Many<Order>>`), the entity it answers (`Order`, `Vec<Order>` or `Option<Order>`), and `touches = [Customer]` for any other it changes. A route that only reads under a method other than `GET` says `invalidates = false`: each call is sent and cached answers stay fresh. So `place_order` answering `Json<Order>` refreshes `list_orders(_: Grant<Many<Order>>, …)`. A handler guarding with `Granted<Many<OrderById>>` where the declaration doesn't state `Grant<Many<Order>>` doesn't compile, since its clients couldn't dry-run or refresh it.
 
 A `#[derive(Actions)]` vocabulary in the API crate gives both halves its capability markers, and `#[entity(key = OrderKey, actions = OrderAction)]` takes the entity's name from it. A declaration guarded by a capability states it, and the handler's `Granted<Cap<…>>` must name the same one:
 

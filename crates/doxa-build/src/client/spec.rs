@@ -104,6 +104,8 @@ pub(crate) struct Meta {
     pub key: Option<KeyMeta>,
     #[serde(default)]
     pub dry_run: bool,
+    #[serde(default = "yes")]
+    pub invalidates: bool,
     pub stream: Option<String>,
     pub identity: Option<IdentityMeta>,
     pub error: Option<String>,

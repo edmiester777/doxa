@@ -184,6 +184,19 @@ mod tests {
     }
 
     #[test]
+    fn a_route_that_only_reads_stays_that_way_in_the_client() {
+        let mut spec = doc(
+            serde_json::json!({ "type": "string" }),
+            serde_json::json!({}),
+        );
+        let out = client(spec.clone()).unwrap();
+        assert!(!out.contains("invalidates = false"), "{out}");
+        spec["paths"]["/orders"]["post"]["x-doxa"]["invalidates"] = false.into();
+        let out = client(spec).unwrap();
+        assert!(out.contains("invalidates = false"), "{out}");
+    }
+
+    #[test]
     fn a_body_is_checked_against_its_schemas_constraints() {
         let out = client(doc(
             serde_json::json!({ "$ref": "#/components/schemas/NewOrder" }),

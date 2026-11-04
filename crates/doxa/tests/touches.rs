@@ -14,9 +14,21 @@ doxa::client::__as_client! {
     pub async fn sweep() -> StatusCode { unreachable!() }
 }
 
+doxa::client::__as_client! {
+    #[post("/things/search", touches = [Thing], invalidates = false)]
+    pub async fn search() -> StatusCode { unreachable!() }
+}
+
 #[test]
 fn touched_entities_are_the_routes() {
     assert_eq!(sweep::ROUTE.entities, ["Thing"]);
+}
+
+#[test]
+fn a_route_invalidates_unless_it_says_it_only_reads() {
+    assert!(sweep::ROUTE.invalidates);
+    assert!(!search::ROUTE.invalidates);
+    assert_eq!(search::ROUTE.entities, ["Thing"]);
 }
 
 #[test]

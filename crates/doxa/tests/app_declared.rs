@@ -11,6 +11,7 @@ const fn route(method: Method, path: &'static str, operation_id: &'static str) -
         operation_id,
         entities: &[],
         dry_run: false,
+        invalidates: true,
         package: "shop-api",
     }
 }

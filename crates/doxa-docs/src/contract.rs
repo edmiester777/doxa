@@ -70,6 +70,7 @@ mod tests {
             operation_id: "route",
             entities: &[],
             dry_run: false,
+            invalidates: true,
             package: "api",
         };
         let mut op = Operation::new();

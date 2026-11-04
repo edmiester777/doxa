@@ -21,6 +21,7 @@ const fn route(method: Method, path: &'static str) -> RouteSpec {
         operation_id: path,
         entities: &[],
         dry_run: true,
+        invalidates: true,
         package: "",
     }
 }

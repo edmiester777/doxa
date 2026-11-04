@@ -198,6 +198,8 @@ pub struct RouteSpec {
     pub entities: &'static [&'static str],
     /// Whether the route answers a `<Can>` dry run.
     pub dry_run: bool,
+    /// Whether a successful call marks its entities stale; `false` for a route that only reads.
+    pub invalidates: bool,
     /// The client crate the route was compiled into, which names its service.
     pub package: &'static str,
 }

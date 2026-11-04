@@ -416,6 +416,7 @@ mod probes {
         operation_id: "guarded",
         entities: &[],
         dry_run: true,
+        invalidates: true,
         package: "",
     };
     pub static OTHER: RouteSpec = RouteSpec {
@@ -424,6 +425,7 @@ mod probes {
         operation_id: "other",
         entities: &[],
         dry_run: true,
+        invalidates: true,
         package: "",
     };
     pub static OPAQUE: RouteSpec = RouteSpec {
@@ -432,6 +434,7 @@ mod probes {
         operation_id: "opaque",
         entities: &[],
         dry_run: false,
+        invalidates: true,
         package: "",
     };
 

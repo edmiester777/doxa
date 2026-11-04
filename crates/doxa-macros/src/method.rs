@@ -20,6 +20,7 @@ use syn::{
     parse::Parser, parse2, punctuated::Punctuated, ItemFn, LitStr, Meta, Result, Token, Type,
 };
 
+use crate::client_stub::Flags;
 use crate::{app, client_stub, grant, sig};
 
 /// Expand `#[get("/path", ...)]` and friends.
@@ -29,22 +30,20 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
     let path_lit = parsed_args.path;
     let (mount, extra) = take_mount_arg(parsed_args.extra)?;
     let (client, extra) = take_client_arg(extra)?;
-    let (answers, extra) = take_dry_run_arg(extra)?;
+    let (flags, extra) = take_route_flags(extra)?;
     let (touches, extra) = take_touches(extra)?;
     let mut item_fn = match routed(item)? {
         Routed::Handler(f) => f,
         Routed::Declaration(f) => {
-            return declaration(method, &path_lit, &extra, client, answers, &touches, &f)
+            return declaration(method, &path_lit, &extra, client, flags, &touches, &f)
         }
     };
 
     if doxa_macro_support::is_client() {
-        return client_half(
-            method, &path_lit, &extra, client, answers, &touches, &item_fn,
-        );
+        return client_half(method, &path_lit, &extra, client, flags, &touches, &item_fn);
     }
     strip_server_params(&mut item_fn);
-    let meta = client_meta(method, client, answers, &touches, &item_fn);
+    let meta = client_meta(method, client, flags, &touches, &item_fn);
 
     // Rewrite `Granted<T>` arguments before inference runs, so the
     // signature the doc probes see is the one that actually compiles.
@@ -70,7 +69,7 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let parsed = parse_operation_args(args)?;
     let (mount, extra) = take_mount_arg(parsed.extra)?;
     let (client, extra) = take_client_arg(extra)?;
-    let (answers, extra) = take_dry_run_arg(extra)?;
+    let (flags, extra) = take_route_flags(extra)?;
     let (touches, extra) = take_touches(extra)?;
     let parsed = OperationArgs { extra, ..parsed };
     let mut item_fn = match routed(item)? {
@@ -82,7 +81,7 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
                 &parsed.path,
                 &parsed.extra,
                 client,
-                answers,
+                flags,
                 &touches,
                 &f,
             );
@@ -96,7 +95,7 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
             &parsed.path,
             &parsed.extra,
             client,
-            answers,
+            flags,
             &touches,
             &item_fn,
         );
@@ -105,7 +104,7 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let meta = client_meta(
         &parsed.method.to_string(),
         client,
-        answers,
+        flags,
         &touches,
         &item_fn,
     );
@@ -179,7 +178,7 @@ fn declaration(
     path: &LitStr,
     extra: &[Meta],
     client: bool,
-    answers_dry_run: bool,
+    flags: Flags,
     touches: &[syn::Path],
     item_fn: &ItemFn,
 ) -> Result<TokenStream> {
@@ -223,7 +222,7 @@ fn declaration(
                 return Err(syn::Error::new_spanned(
                     other,
                     "a declaration takes `operation_id`, `tag`, `tags(…)`, `responses(…)`, \
-                     `touches = […]` and `dry_run = false`; the rest of the operation is \
+                     `touches = […]`, `dry_run = false` and `invalidates = false`; the rest of the operation is \
                      documented by the server that implements it",
                 ))
             }
@@ -235,7 +234,8 @@ fn declaration(
         path,
         operation_id,
         touches,
-        dry_run: answers_dry_run,
+        dry_run: flags.dry_run,
+        invalidates: flags.invalidates,
     };
     let declared = client_stub::declared(&route, &item_fn, &tags, &responses)?;
     client_stub::expand(&route, &item_fn, declared)
@@ -323,7 +323,7 @@ pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenSt
     );
     let checks = client_stub::implemented(&item_fn, &r);
     fail_as_declared(&mut item_fn, &r);
-    let meta = client_stub::server_meta("", Some(&r), &[], true, &item_fn, &path);
+    let meta = client_stub::server_meta("", Some(&r), &[], Flags::default(), &item_fn, &path);
     let sites = grant::rewrite_for(&mut item_fn, &grant::RouteIs::Declared(&r))?;
     let operation = declared_operation(&item_fn, &r, &path);
     let mount = mount.then(|| app::mount(&item_fn, Some(&r)));
@@ -508,7 +508,7 @@ fn operation_id(m: &Meta) -> Option<&LitStr> {
 fn client_meta(
     method: &str,
     client: bool,
-    answers_dry_run: bool,
+    flags: Flags,
     touches: &[syn::Path],
     item_fn: &ItemFn,
 ) -> TokenStream {
@@ -517,7 +517,7 @@ fn client_meta(
         item_fn.sig.ident.span(),
     );
     if client {
-        return client_stub::server_meta(method, None, touches, answers_dry_run, item_fn, &path);
+        return client_stub::server_meta(method, None, touches, flags, item_fn, &path);
     }
     quote! {
         impl ::doxa::__private::ClientMeta for #path {
@@ -550,10 +550,10 @@ pub fn expand_as_client(input: TokenStream) -> Result<TokenStream> {
         let method = attr.path().segments.last().unwrap().ident.to_string();
         let args = parse_method_args(attr.meta.require_list()?.tokens.clone())?;
         let (client, extra) = take_client_arg(args.extra)?;
-        let (answers, extra) = take_dry_run_arg(extra)?;
+        let (flags, extra) = take_route_flags(extra)?;
         let (touches, extra) = take_touches(extra)?;
         out.extend(client_half(
-            &method, &args.path, &extra, client, answers, &touches, &item_fn,
+            &method, &args.path, &extra, client, flags, &touches, &item_fn,
         )?);
     }
     Ok(out)
@@ -583,7 +583,7 @@ fn client_half(
     path: &LitStr,
     extra: &[Meta],
     client: bool,
-    answers_dry_run: bool,
+    flags: Flags,
     touches: &[syn::Path],
     item_fn: &ItemFn,
 ) -> Result<TokenStream> {
@@ -597,7 +597,8 @@ fn client_half(
             path,
             operation_id,
             touches,
-            dry_run: answers_dry_run,
+            dry_run: flags.dry_run,
+            invalidates: flags.invalidates,
         },
         item_fn,
         TokenStream::new(),
@@ -645,10 +646,17 @@ fn take_client_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
     Ok((flags[0], rest))
 }
 
-/// Pull `dry_run = false` out of the arguments, which leaves `<Can>` answering `Unknown`.
-fn take_dry_run_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
-    let (flags, rest) = take_flags(extra, &["dry_run"])?;
-    Ok((flags[0], rest))
+/// Pull `dry_run = false`, which leaves `<Can>` answering `Unknown`, and `invalidates = false`,
+/// for a route that only reads, out of the arguments.
+fn take_route_flags(extra: Vec<Meta>) -> Result<(Flags, Vec<Meta>)> {
+    let (flags, rest) = take_flags(extra, &["dry_run", "invalidates"])?;
+    Ok((
+        Flags {
+            dry_run: flags[0],
+            invalidates: flags[1],
+        },
+        rest,
+    ))
 }
 
 /// Pull `mount = false` out of the arguments, which leaves the handler to be routed by hand.
