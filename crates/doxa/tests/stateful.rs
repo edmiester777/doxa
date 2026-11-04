@@ -34,7 +34,7 @@ use doxa::{get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 /// What the router carries. The loader wants only the handle, so the
 /// asset names `Store` and reaches it through `FromRef` — the ordinary
 /// axum arrangement, and the one the capability form has to coexist with.
-#[derive(Clone)]
+#[derive(Clone, doxa::State)]
 struct AppState {
     store: Store,
 }

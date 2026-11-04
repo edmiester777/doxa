@@ -181,7 +181,7 @@ async fn loose(widget: Granted<One<WidgetUnconfined>>) -> String {
 
 // ---- harness ----------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, doxa::State)]
 struct AppState {
     catalog: Catalog,
 }

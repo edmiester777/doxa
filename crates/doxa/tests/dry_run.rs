@@ -9,6 +9,9 @@ use doxa::policy::{Capability, CapabilityCheck, Capable, ResourceId};
 use doxa::{get, post, routes, OpenApiRouter};
 use tower::ServiceExt;
 
+#[derive(Clone, doxa::State)]
+struct NoState;
+
 static RAN: AtomicUsize = AtomicUsize::new(0);
 
 pub const NOTES_READ: Capability = Capability {

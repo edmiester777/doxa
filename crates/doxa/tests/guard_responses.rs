@@ -94,3 +94,6 @@ fn unguarded_handler_gains_no_error_responses() {
         "a handler with no guard should not advertise auth failures, got {statuses:?}",
     );
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

@@ -110,3 +110,6 @@ fn operation_attribute_works_with_explicit_method() {
         "operation_form"
     );
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

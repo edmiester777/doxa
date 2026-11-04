@@ -257,3 +257,10 @@ async fn a_denial_without_any_audit_wiring_still_refuses() {
         .expect("request");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;
+
+impl axum::extract::FromRef<NoState> for () {
+    fn from_ref(_: &NoState) {}
+}

@@ -170,3 +170,6 @@ async fn headers_macro_arg_dedupes_against_signature_extractor() {
         "X-Api-Key listed in both signature and headers(...) — should dedupe to one entry"
     );
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

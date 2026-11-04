@@ -24,7 +24,17 @@
 //! to thread a raw token through each call site to satisfy a header
 //! their client already set centrally.
 
-use doxa::{LayerContribution, ResponseContribution, SecurityContribution};
+use doxa::{DocumentedLayer, LayerContribution, ResponseContribution, SecurityContribution};
+
+/// [`auth_contribution`] under the `"bearer"` scheme, for `#[doxa::layers(docs = [AuthDocs])]`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AuthDocs;
+
+impl DocumentedLayer for AuthDocs {
+    fn contribution(&self) -> LayerContribution {
+        auth_contribution("bearer")
+    }
+}
 
 /// Full OpenAPI contribution made by [`crate::AuthLayer`]: a security
 /// requirement naming the scheme `scheme_name`, and the 401 the pipeline

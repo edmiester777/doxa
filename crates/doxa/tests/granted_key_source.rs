@@ -355,3 +355,10 @@ async fn a_renamed_key_is_documented_under_its_own_name() {
     assert_eq!(params.len(), 1);
     assert_eq!(params[0].name, "slug");
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;
+
+impl axum::extract::FromRef<NoState> for () {
+    fn from_ref(_: &NoState) {}
+}

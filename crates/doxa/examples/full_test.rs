@@ -338,7 +338,7 @@ async fn create_widget(
 /// Stream progress updates for a widget operation.
 /// (Not mounted on the router — demonstrates the SseStream type.)
 #[allow(dead_code)]
-#[get("/widgets/{id}/progress", tag = "Widgets")]
+#[get("/widgets/{id}/progress", tag = "Widgets", mount = false)]
 async fn widget_progress(
     Path(id): Path<u32>,
 ) -> SseStream<WidgetProgress, impl futures_core::Stream<Item = Result<WidgetProgress, Infallible>>>
@@ -447,3 +447,6 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

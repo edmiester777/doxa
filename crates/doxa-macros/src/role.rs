@@ -16,36 +16,28 @@ pub fn prelude(input: TokenStream) -> syn::Result<TokenStream> {
             "`prelude!()` takes no arguments",
         ));
     }
-    let half = match doxa_macro_support::Role::current() {
-        doxa_macro_support::Role::Client => quote!(client),
-        doxa_macro_support::Role::Api => quote!(api),
-        doxa_macro_support::Role::Server => quote!(server),
+    let (half, service) = match doxa_macro_support::Role::current() {
+        doxa_macro_support::Role::Client => (quote!(client), true),
+        doxa_macro_support::Role::Api => (quote!(api), true),
+        doxa_macro_support::Role::Server => (quote!(server), false),
     };
+    let service = service.then(|| {
+        quote! {
+            /// The package name this crate's routes and entities carry, which names its service.
+            #[allow(dead_code)]
+            pub const PACKAGE: &str = ::core::env!("CARGO_PKG_NAME");
+
+            /// This crate's service: its server's base URL, layers, cache and session.
+            #[allow(dead_code)]
+            pub fn service() -> ::std::rc::Rc<::doxa::client::Service> {
+                ::doxa::client::service(PACKAGE)
+            }
+        }
+    });
     Ok(quote! {
         #[allow(unused_imports)]
         use ::doxa::#half::prelude::*;
-    })
-}
-
-/// `service!()`: this client or API crate's `service()` and `PACKAGE`; nothing in the server half.
-pub fn service(input: TokenStream) -> syn::Result<TokenStream> {
-    if !input.is_empty() {
-        return Err(syn::Error::new_spanned(
-            input,
-            "`service!()` takes no arguments",
-        ));
-    }
-    if !doxa_macro_support::is_client() && !doxa_macro_support::is_api() {
-        return Ok(TokenStream::new());
-    }
-    Ok(quote! {
-        /// The package name this crate's routes and entities carry, which names its service.
-        pub const PACKAGE: &str = ::core::env!("CARGO_PKG_NAME");
-
-        /// This crate's service: its server's base URL, layers, cache and session.
-        pub fn service() -> ::std::rc::Rc<::doxa::client::Service> {
-            ::doxa::client::service(PACKAGE)
-        }
+        #service
     })
 }
 

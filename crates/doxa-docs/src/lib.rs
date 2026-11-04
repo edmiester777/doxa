@@ -45,6 +45,7 @@
 //! use futures_core::Stream;
 //! use serde::{Deserialize, Serialize};
 //! use std::convert::Infallible;
+//! # #[derive(Clone, doxa::State)] struct NoState;
 //!
 //! // ----- Typed error envelope ----------------------------------------------
 //! //
@@ -185,6 +186,7 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod app;
 mod attachment;
 mod builder;
 mod client_meta;
@@ -214,6 +216,7 @@ mod sse;
 mod ui;
 mod valid;
 
+pub use app::{app, spec, Routes};
 pub use attachment::Attachment;
 pub use builder::{ApiDoc, ApiDocBuilder, BuildError, SseSpecVersion};
 pub use contribution::{
@@ -253,8 +256,8 @@ pub use valid::ValidRejection;
 // out of when the derives aren't needed.
 #[cfg(feature = "macros")]
 pub use doxa_macros::{
-    asset, capability, delete, get, implements, operation, patch, post, put, spec, Actions,
-    ApiError, PolicyResource, SseEvent,
+    asset, capability, delete, get, implements, layers, operation, patch, post, put, spec, Actions,
+    ApiError, PolicyResource, SseEvent, State,
 };
 
 // Re-export the underlying utoipa types so consumers depend on a single
@@ -291,6 +294,11 @@ pub mod __private {
         pub use crate::schemas::Named;
     }
     pub use inventory;
+
+    pub use crate::app::{
+        crate_key, describe, mount, stacked, Key, Layers, Mount, Resolve, Service, StackDocs,
+        Stacked,
+    };
 
     /// Named by `#[derive(Validator)]`'s extractor and doc impls.
     pub use axum;

@@ -1,11 +1,8 @@
-use doxa::{dist, routes, MountSpaExt, OpenApiRouter, Spa};
-use {{crate}}_api::greeting::*;
+use doxa::{dist, MountSpaExt, Spa};
 
 #[tokio::main]
 async fn main() {
-    let (router, _api) = OpenApiRouter::<()>::new()
-        .routes(routes!(greeting))
-        .split_for_parts();
+    let (router, _api) = doxa::app(&{{crate}}_api::NoState).split_for_parts();
     let app = router.mount_spa(Spa::auto(dist!()));
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());

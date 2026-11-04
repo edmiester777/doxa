@@ -211,7 +211,7 @@ async fn visible(scope: Scoped<WidgetByName, widget_action::Read>) -> String {
 
 // ---- harness ----------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, doxa::State)]
 struct AppState {
     catalog: Catalog,
 }

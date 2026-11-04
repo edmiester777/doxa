@@ -70,6 +70,7 @@
 //! use futures_core::Stream;
 //! use serde::{Deserialize, Serialize};
 //! use std::convert::Infallible;
+//! # #[derive(Clone, doxa::State)] struct NoState;
 //!
 //! // -- ApiError: multi-variant-per-status grouping --------------------------
 //! #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
@@ -203,6 +204,7 @@ fn by_role(
 
 mod actions;
 mod api_error;
+mod app;
 mod asset;
 mod capability;
 mod client_stub;
@@ -389,6 +391,7 @@ pub fn derive_sse_event(input: TokenStream) -> TokenStream {
 ///
 /// ```no_run
 /// use doxa::get;
+/// # #[derive(Clone, doxa::State)] struct NoState;
 ///
 /// // Single tag (forwarded to utoipa as-is):
 /// #[get("/api/v1/models", tag = "Models")]
@@ -817,14 +820,37 @@ pub fn prelude(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// This client crate's `service()`, for its base URL, layers and cache.
+/// A server's handlers in this module and below, wrapped in one layer stack.
 ///
 /// ```ignore
-/// doxa::service!();
+/// #[doxa::service(layers = admin)]
+/// pub struct WidgetsAdmin;
 /// ```
-#[proc_macro]
-pub fn service(input: TokenStream) -> TokenStream {
-    role::service(input.into())
+#[proc_macro_attribute]
+pub fn service(args: TokenStream, item: TokenStream) -> TokenStream {
+    app::service(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A layer stack services share: `fn(Routes, &State) -> Routes`, documented by `docs`.
+///
+/// ```ignore
+/// #[doxa::layers(docs = [doxa::auth::AuthDocs])]
+/// pub fn protected(routes: Routes, state: &AppState) -> Routes { routes.layer(auth(state)) }
+/// ```
+#[proc_macro_attribute]
+pub fn layers(args: TokenStream, item: TokenStream) -> TokenStream {
+    app::layers(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The state this crate's handlers are mounted under; a crate has one.
+#[proc_macro_derive(State)]
+pub fn derive_state(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    app::derive_state(input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

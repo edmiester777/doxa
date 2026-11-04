@@ -48,7 +48,10 @@ fn a_name_two_types_claim_is_reported_with_both() {
 }
 
 #[test]
-#[should_panic(expected = "1 schema name(s) belong to more than one type")]
-fn asserting_unique_names_panics_on_the_clash() {
-    doxa::assert_unique_schemas();
+#[should_panic(
+    expected = "the schema name `Relation` belongs to schema_names::query::Relation and \
+                schema_names::secrets::Relation"
+)]
+fn the_app_stops_on_the_clash() {
+    doxa::spec();
 }

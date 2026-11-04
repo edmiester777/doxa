@@ -105,6 +105,7 @@ pub struct Internal(pub String);
 /// A server's route has a body:
 ///
 /// ```
+/// # #[derive(Clone, doxa::State)] struct NoState;
 /// #[doxa::get("/n")]
 /// pub async fn n() -> axum::Json<u32> { axum::Json(1) }
 /// ```
@@ -112,8 +113,42 @@ pub struct Internal(pub String);
 /// Without one it is a declaration, which only an API crate makes:
 ///
 /// ```compile_fail
+/// # #[derive(Clone, doxa::State)] struct NoState;
 /// #[doxa::get("/n")]
 /// pub async fn n() -> axum::Json<u32>;
+/// ```
+///
+/// A route mounts under the crate's state, so a crate with routes derives one:
+///
+/// ```compile_fail
+/// #[doxa::get("/n")]
+/// pub async fn n() -> axum::Json<u32> { axum::Json(1) }
+/// ```
+///
+/// Or the route is mounted by hand:
+///
+/// ```
+/// #[doxa::get("/n", mount = false)]
+/// pub async fn n() -> axum::Json<u32> { axum::Json(1) }
+/// ```
+///
+/// A service's layers are a `#[doxa::layers]` stack:
+///
+/// ```
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// #[doxa::layers]
+/// fn open(routes: doxa::Routes, _: &NoState) -> doxa::Routes { routes }
+/// #[doxa::service(layers = open)]
+/// pub struct Public;
+/// ```
+///
+/// A plain function is refused:
+///
+/// ```compile_fail
+/// # #[derive(Clone, doxa::State)] struct NoState;
+/// fn open(routes: doxa::Routes, _: &NoState) -> doxa::Routes { routes }
+/// #[doxa::service(layers = open)]
+/// pub struct Public;
 /// ```
 #[cfg(all(feature = "docs", feature = "macros", not(target_arch = "wasm32")))]
 pub mod server {
@@ -613,7 +648,7 @@ pub mod client_diagnostics {}
 /// The client a crate's `build.rs` generated with `doxa_build::ClientSpec`.
 ///
 /// ```ignore
-/// doxa::service!();
+/// doxa::prelude!();
 /// doxa::include_client!();
 /// ```
 #[cfg(feature = "client")]

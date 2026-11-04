@@ -4,8 +4,16 @@
 
 ```rust
 use axum::{extract::Path, Json};
-use doxa::{get, routes, ApiDocBuilder, ApiError, MountDocsExt, MountOpts, OpenApiRouter, ToSchema};
+use doxa::{get, ApiDocBuilder, ApiError, MountDocsExt, MountOpts, ToSchema};
 use serde::Serialize;
+
+// The state every route is mounted under; this server has none
+#[derive(Clone, doxa::State)]
+struct NoState;
+
+// Every route in this module and below
+#[doxa::service]
+struct Api;
 
 // Derive once → typed HTTP errors + OpenAPI responses + audit outcomes
 #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
@@ -41,10 +49,8 @@ async fn get_widget(
 
 #[tokio::main]
 async fn main() {
-    // Build router — routes! collects schemas automatically
-    let (router, api) = OpenApiRouter::new()
-        .routes(routes!(get_widget))
-        .split_for_parts();
+    // Every route mounts itself; no route lists
+    let (router, api) = doxa::app(&NoState).split_for_parts();
 
     // One-liner: Scalar UI at /docs, JSON spec at /openapi.json
     let app = router.mount_docs(
@@ -70,11 +76,16 @@ async fn delete_widget(_: Require<WidgetsAdmin>) -> StatusCode { /* ... */ }
 // attributes, and hands it to the handler already authorized
 async fn get_widget(widget: Granted<Widget>) -> Json<Widget> { /* ... */ }
 
-// Append-only audit — non-blocking, auto-emits after each response
-let audited = OpenApiRouter::new()
-    .routes(routes!(list_widgets, delete_widget))
-    .layer_documented(AuthLayer::new(auth_state))  // auth + OpenAPI metadata
-    .layer(AuditLayer::new(audit_logger));          // audit trail
+// Auth and append-only audit for every route in a module
+#[doxa::layers(docs = [doxa::auth::AuthDocs])]
+fn protected(routes: Routes, state: &AppState) -> Routes {
+    routes
+        .layer(AuthLayer::new(state.auth.clone()))
+        .layer(AuditLayer::new(state.audit.clone()))
+}
+
+#[doxa::service(layers = protected)]
+pub struct Widgets;
 
 // Secrets that never leak into logs
 let key: ProtectedString = load_secret();
@@ -155,8 +166,14 @@ Each crate also works standalone if you prefer fine-grained control over your de
 
 ```rust
 use axum::{extract::Path, Json};
-use doxa::{get, ApiError, ApiDocBuilder, MountDocsExt, MountOpts, OpenApiRouter, ToSchema};
+use doxa::{get, ApiError, ApiDocBuilder, MountDocsExt, MountOpts, ToSchema};
 use serde::Serialize;
+
+#[derive(Clone, doxa::State)]
+struct NoState;
+
+#[doxa::service]
+struct Api;
 
 #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
 enum WidgetError {
@@ -176,8 +193,7 @@ async fn get_widget(Path(id): Path<u32>) -> Result<Json<Widget>, WidgetError> {
 
 #[tokio::main]
 async fn main() {
-    let api = OpenApiRouter::new().routes(doxa::routes!(get_widget));
-    let (router, openapi) = api.split_for_parts();
+    let (router, openapi) = doxa::app(&NoState).split_for_parts();
     let docs = ApiDocBuilder::new().title("Widgets API").version("0.1.0").merge(openapi).build();
     let app = router.mount_docs(docs, MountOpts::default());
 
@@ -285,83 +301,54 @@ async fn whoami(Auth(ctx): Auth<MySession, MyClaims>) -> String {
 
 JWKS fetch and caching, JWT signature verification, RFC 7662 introspection fallback. Works with Keycloak, Auth0, Cognito, Okta, Azure AD, or any RFC-compliant IdP. Drop the `axum` feature to use the pipeline standalone.
 
-### 6. Auth layer + documented middleware
+### 6. Services and layer stacks
 
-`AuthLayer` is a tower layer that runs the full auth pipeline (validate → resolve claims → evaluate policy) on every request. Apply it with `layer_documented` and the OpenAPI spec is annotated automatically — bearer security requirement and 401 response — no manual wiring. The credential is documented as a security scheme and never as an `Authorization` header parameter: OpenAPI reserves that name, and the requirement carries the scheme's type and the operation's scopes besides.
-
-```rust
-use doxa::auth::{AuthLayer, AuthState, Claims, OidcClaims};
-use doxa::OpenApiRouterExt; // provides layer_documented
-
-// Build auth state once at startup
-let auth_state = Arc::new(AuthState {
-    validator: Arc::new(jwks_validator),
-    resolver: Arc::new(claim_resolver),
-    policy: Box::new(policy_router),
-    audit: Some(audit_logger),
-});
-
-// Apply to routes — layer_documented applies the middleware AND
-// injects the layer's OpenAPI contribution (headers, security,
-// responses) onto every operation it covers.
-let api = OpenApiRouter::new()
-    .routes(routes!(list_widgets, get_widget))
-    .layer_documented(AuthLayer::new(auth_state));
-```
-
-`layer_documented` is the key idea: any layer implementing `DocumentedLayer` contributes its OpenAPI metadata alongside its runtime behavior. Routes added *before* the call get the annotation; routes merged *after* don't. This lets you protect `/api/v1/*` behind auth while leaving `/health` unauthenticated — and the spec reflects both.
+A route attribute mounts its handler, and a `#[doxa::service]` owns every handler in its module and the modules below it, a deeper service winning. A handler joins another service by moving to its module. Its layers are a `#[doxa::layers]` function, which services share and stacks call:
 
 ```rust
-// Unauthenticated routes
-let public = OpenApiRouter::new()
-    .routes(routes!(healthcheck));
+use doxa::auth::{AuthDocs, AuthLayer};
+use doxa::Routes;
 
-// Authenticated routes
-let protected = OpenApiRouter::new()
-    .routes(routes!(list_widgets, get_widget))
-    .layer_documented(AuthLayer::new(auth_state));
+#[derive(Clone, FromRef, doxa::State)]
+pub struct AppState { pub db: DatabaseConnection, pub auth: Arc<AuthState> }
 
-// Merge — /health has no auth metadata, /widgets does
-let (router, openapi) = public.merge(protected).split_for_parts();
+#[doxa::layers(docs = [AuthDocs])]
+fn protected(routes: Routes, state: &AppState) -> Routes {
+    routes.layer(AuthLayer::new(state.auth.clone()))
+}
+
+#[doxa::layers(docs = [protected, AdminDocs])]
+fn admin(routes: Routes, state: &AppState) -> Routes {
+    protected(routes.layer(AdminLayer::new()), state)
+}
+
+// widgets/public.rs
+#[doxa::service]
+pub struct WidgetsPublic;
+
+// widgets/admin.rs
+#[doxa::service(layers = crate::admin)]
+pub struct WidgetsAdmin;
+
+#[get("/widgets/purge")]
+async fn purge(State(db): State<DatabaseConnection>) -> StatusCode { /* ... */ }
 ```
+
+The stack's body is plain `.layer()` calls. `docs = [...]` is what it adds to each operation, named once for the served document and for `doxa::spec()`, which builds the same document with no state: a `DocumentedLayer + Default` type, or another stack for its docs. `AuthDocs` is the bearer requirement and `401` that `AuthLayer` adds.
+
+Handlers name no state type: `#[derive(doxa::State)]` marks the crate's one state, and each handler's `State<T>` and `FromRef` extractors are checked against it at compile time. A crate with routes and no derive is "routes in this crate share a state: add `#[derive(doxa::State)]` to it"; a server with none derives it on a unit struct. `#[get("/x", mount = false)]` leaves a handler to `routes!`.
+
+`doxa::app(&state)` and `doxa::spec()` stop, naming each, on a handler under no service, two services in one module, a declared route nothing implements, a schema name two types claim, or another state type.
 
 ### 7. Full app assembly
 
-Putting docs, auth, and the Scalar UI together:
-
 ```rust
-use std::sync::Arc;
-use doxa::{
-    get, routes, ApiDocBuilder, MountDocsExt, MountOpts,
-    OpenApiRouter, OpenApiRouterExt, ToSchema, ApiError,
-};
-use doxa::auth::{Auth, AuthContext, AuthLayer, AuthState, OidcClaims};
-
-#[get("/widgets")]
-async fn list_widgets(
-    Auth(ctx): Auth<MySession, MyClaims>,
-) -> Json<Vec<Widget>> {
-    let tenant = ctx.claims.scope().unwrap_or("default");
-    Json(db::list_widgets(tenant).await)
-}
-
 #[tokio::main]
 async fn main() {
-    let auth_state = build_auth_state().await;
+    let state = AppState { db: connect().await, auth: build_auth_state().await };
+    let (router, openapi) = doxa::app(&state).split_for_parts();
 
-    let public = OpenApiRouter::new()
-        .routes(routes!(healthcheck));
-
-    let protected = OpenApiRouter::new()
-        .routes(routes!(list_widgets))
-        .layer_documented(
-            AuthLayer::new(auth_state)
-                .with_scheme_name("bearer")
-        );
-
-    let (router, openapi) = public.merge(protected).split_for_parts();
-
-    // bearer_security registers the security scheme that with_scheme_name references
+    // bearer_security registers the scheme AuthDocs names
     let api_doc = ApiDocBuilder::new()
         .title("My Service")
         .version("0.1.0")
@@ -370,13 +357,12 @@ async fn main() {
         .build();
 
     let app = router.mount_docs(api_doc, MountOpts::default());
-
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 ```
 
-`/docs` shows Scalar with the auth lock icon on protected operations. The spec has the `401` response and the `security` requirement on `/widgets` but not on `/health`.
+`/docs` shows Scalar with the auth lock icon on the operations a `protected` service owns, and the `401` response and `security` requirement on those alone.
 
 ### 8. Cedar authorization
 
@@ -623,50 +609,28 @@ When used with `AuditLayer` (example 12), most of this is automatic: HTTP metada
 Stack it **outside** the auth layer so the builder exists before auth runs. Auth failures are recorded automatically. Routes outside both layers are unaudited.
 
 ```rust
-use std::sync::Arc;
-use doxa::{get, routes, ApiDocBuilder, MountDocsExt, MountOpts, OpenApiRouter, OpenApiRouterExt};
-use doxa::auth::{AuthLayer, AuthState};
-use doxa::audit::{AuditLayer, spawn_audit_writer};
+use doxa::auth::{AuthDocs, AuthLayer};
+use doxa::audit::AuditLayer;
+use doxa::Routes;
 
-#[tokio::main]
-async fn main() {
-    let db = connect_to_database().await;
-    let audit_logger = spawn_audit_writer(db.clone(), 4096);
-
-    let auth_state = Arc::new(AuthState {
-        validator: Arc::new(jwks_validator),
-        resolver: Arc::new(claim_resolver),
-        policy: Box::new(policy_router),
-        audit: None, // ← not needed when AuditLayer is in the stack
-    });
-
-    // These routes are audited + authenticated.
-    // Layer order matters: AuditLayer wraps AuthLayer.
-    let audited = OpenApiRouter::new()
-        .routes(routes!(list_documents, get_document, delete_document))
-        .layer_documented(AuthLayer::new(auth_state))
-        .layer(AuditLayer::new(audit_logger));
-
-    // These routes skip auditing entirely — no layers, no audit events
-    let public = OpenApiRouter::new()
-        .routes(routes!(healthcheck, readiness, openapi_spec));
-
-    let (router, openapi) = public.merge(audited).split_for_parts();
-    let docs = ApiDocBuilder::new()
-        .title("My API")
-        .version("0.1.0")
-        .bearer_security("bearer")
-        .merge(openapi)
-        .build();
-
-    let app = router.mount_docs(docs, MountOpts::default());
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+// Layer order matters: AuditLayer wraps AuthLayer.
+#[doxa::layers(docs = [AuthDocs])]
+fn audited(routes: Routes, state: &AppState) -> Routes {
+    routes
+        .layer(AuthLayer::new(state.auth.clone()))
+        .layer(AuditLayer::new(state.audit.clone()))
 }
+
+// documents.rs: audited and authenticated
+#[doxa::service(layers = crate::audited)]
+pub struct Documents;
+
+// health.rs: no layers, no audit events
+#[doxa::service]
+pub struct Health;
 ```
 
-The split is natural: routes registered *before* the layers get auth + audit; routes merged *after* don't. Health checks, readiness probes, and the OpenAPI spec endpoint stay silent.
+The split is by module: handlers in `documents` get auth and audit, and health checks and readiness probes stay silent. `AuthState::audit` can be `None` when `AuditLayer` is in the stack.
 
 ### 13. Audit enrichment in handlers
 
@@ -784,16 +748,18 @@ async fn tag_mutations(
 }
 ```
 
-Stack custom middleware between `AuditLayer` (outermost) and the router:
+Stack custom middleware between `AuditLayer` (outermost) and the routes:
 
 ```rust
 use axum::middleware;
 
-let audited = OpenApiRouter::new()
-    .routes(routes!(list_documents, get_document, delete_document))
-    .layer_documented(AuthLayer::new(auth_state))
-    .layer(middleware::from_fn(ip_denylist_audit))
-    .layer(AuditLayer::new(audit_logger));
+#[doxa::layers(docs = [AuthDocs])]
+fn audited(routes: Routes, state: &AppState) -> Routes {
+    routes
+        .layer(AuthLayer::new(state.auth.clone()))
+        .layer(middleware::from_fn(ip_denylist_audit))
+        .layer(AuditLayer::new(state.audit.clone()))
+}
 ```
 
 `AuditLayer` creates the builder first. Auth stamps actor info. Your custom middleware can inspect it, enrich it, or record a terminal outcome and short-circuit.
@@ -901,13 +867,13 @@ fn main() {
 }
 
 // orders-client/src/lib.rs
-doxa::service!();
+doxa::prelude!();
 doxa::include_client!();
 ```
 
 A document that isn't a dependency, such as a saved `openapi.json`, goes through `doxa_build::openapi_from_json(&text)?` first. `.exhaustive()` drops `#[non_exhaustive]` from its enums, and `.forms()` derives `Form` and `Default` on its structs and enums (doxa feature `forms`; a `.types()` mapping must be `Default` too). Its calls are made by the same stub, so they cache, invalidate, probe with `::can` and stream as a shared-source client's do. The route macros stamp what OpenAPI can't say (entities, keys, dry runs, streams, error types) as `x-doxa`.
 
-Each client crate's routes go to its own server. `doxa::service!();` in the shared `lib.rs` gives the client crate a `service()`, with its own cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and a deployment can change them in `services.json` without a rebuild. Credentials are layers:
+Each client crate's routes go to its own server. `doxa::prelude!();` at the root of the shared `lib.rs` gives the client crate a `service()`, with its own cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and a deployment can change them in `services.json` without a rebuild. Credentials are layers:
 
 ```rust
 layers().push(bearer(|| session::token()));             // every crate's requests
@@ -1010,7 +976,6 @@ When handlers depend on crates the browser can't build, the routes go in an API 
 ```rust
 // orders-api/src/lib.rs
 doxa::prelude!();
-doxa::service!();
 
 route_key!(pub OrderKey { id: u32 });
 

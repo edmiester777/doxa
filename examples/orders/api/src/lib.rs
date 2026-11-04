@@ -1,7 +1,6 @@
 //! The orders API: what `orders-server` serves and its clients call.
 
 doxa::prelude!();
-doxa::service!();
 
 route_key!(pub OrderKey { id: u32 });
 

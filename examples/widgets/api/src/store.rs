@@ -8,8 +8,8 @@ use doxa::policy::{Fetch, FetchByKey, FetchSubset};
 
 use crate::widgets::{Widget, WidgetError, WidgetKey};
 
-/// Widgets in memory, and the names people have suggested.
-#[derive(Clone)]
+/// Widgets in memory, and the names people have suggested; the routes' state.
+#[derive(Clone, doxa::State)]
 pub struct Catalog(Arc<RwLock<Vec<Widget>>>, Arc<RwLock<Vec<String>>>);
 
 impl Catalog {

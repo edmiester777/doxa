@@ -636,3 +636,6 @@ fn an_attribute_that_is_not_a_column_is_refused() {
 
     assert!(Grants::from_residual(&computed).is_err());
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

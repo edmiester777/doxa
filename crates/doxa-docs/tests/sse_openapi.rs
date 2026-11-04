@@ -284,3 +284,6 @@ fn v3_1_opt_out_keeps_schema_and_does_not_upgrade_version() {
         "x-sse-event-names must survive in 3.1 mode too: {sse:#?}",
     );
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

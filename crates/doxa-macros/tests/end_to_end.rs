@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 use utoipa::IntoResponses;
 
+#[derive(Clone, doxa::State)]
+struct NoState;
+
 #[derive(Debug, Serialize, ToSchema)]
 struct Widget {
     id: u32,

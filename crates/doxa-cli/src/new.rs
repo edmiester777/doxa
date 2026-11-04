@@ -131,7 +131,7 @@ mod tests {
         assert!(read("client/Cargo.toml").contains("path = \"../api/src/lib.rs\""));
         assert!(read("web/src/lib.rs").contains("#[doxa::start]"));
         assert!(read("client/build.rs").contains("doxa_role::client()"));
-        assert!(read("server/src/main.rs").contains("use shop_app_api::greeting::*;"));
+        assert!(read("server/src/main.rs").contains("doxa::app(&shop_app_api::NoState)"));
         let settings: serde_json::Value =
             serde_json::from_str(&read(".vscode/settings.json")).unwrap();
         assert_eq!(

@@ -604,3 +604,10 @@ fn a_composite_key_documents_every_segment() {
 // to truncate silently, and then to fail on the first request. It now
 // fails the build, so the pair of tests that pin it are the `compile_fail`
 // doctests on `GrantSite::PARAMS` rather than anything runnable here.
+
+#[derive(Clone, doxa::State)]
+struct NoState;
+
+impl axum::extract::FromRef<NoState> for () {
+    fn from_ref(_: &NoState) {}
+}

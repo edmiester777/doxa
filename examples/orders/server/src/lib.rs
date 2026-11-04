@@ -1,22 +1,28 @@
-//! The orders server: the routes `orders-api` declares, served.
+//! The orders server: the routes `orders-api` declares, served by two services.
+
+mod private;
+mod public;
+
+pub use private::OrdersPrivate;
+pub use public::OrdersPublic;
 
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use axum::extract::{FromRef, Query, Request, State};
+use axum::extract::{FromRef, Request};
 use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::{Json, Router};
-use futures::stream::{self, Stream};
+use axum::response::IntoResponse;
+use axum::Router;
 
-use doxa::auth::{CapabilityContext, FromState, GrantProfile, Granted, Many};
+use doxa::auth::{CapabilityContext, FromState, GrantProfile};
 use doxa::policy::{
     AuthError, Capability, CapabilityChecker, Fetch, FetchByKey, FetchSubset, ResourceEntity,
 };
-use doxa::{asset, implements, routes, Actions, OpenApiRouter, PolicyResource, SseStream, Valid};
+use doxa::{asset, Actions, PolicyResource, Routes};
 
-use orders_api::{NewOrder, Order, OrderError, OrderEvent, OrderFilter, OrderKey};
+use orders_api::{Order, OrderError, OrderKey};
 
 doxa::serves!(orders_api; doc = api_doc);
 
@@ -125,66 +131,7 @@ impl GrantProfile for AppGrants {
     type Error = Infallible;
 }
 
-#[implements(orders_api::get_order)]
-async fn get_order(order: Granted<OrderById>) -> Result<Json<Order>, OrderError> {
-    Ok(Json(order.into_inner().into()))
-}
-
-#[implements(orders_api::cancel_order)]
-async fn cancel_order(
-    order: Granted<OrderById>,
-    State(store): State<Store>,
-) -> Result<StatusCode, Fail<OrderError>> {
-    store.remove(order.id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-#[implements(orders_api::list_orders)]
-async fn list_orders(
-    _scope: Granted<Many<OrderById>>,
-    State(store): State<Store>,
-    Query(filter): Query<OrderFilter>,
-) -> Json<Vec<Order>> {
-    let orders = store.0.read().unwrap();
-    Json(
-        orders
-            .iter()
-            .filter(|o| filter.item.as_ref().is_none_or(|i| &o.item == i))
-            .cloned()
-            .map(Order::from)
-            .collect(),
-    )
-}
-
-#[implements(orders_api::place_order)]
-async fn place_order(
-    State(store): State<Store>,
-    Valid(Json(new)): Valid<Json<NewOrder>>,
-) -> Result<Json<Order>, OrderError> {
-    if new.item == "unobtainium" {
-        return Err(OrderError::OutOfStock(new.item));
-    }
-    let mut orders = store.0.write().unwrap();
-    let id = orders.iter().map(|o| o.id).max().unwrap_or(0) + 1;
-    let row = OrderRow {
-        id,
-        item: new.item,
-        quantity: new.quantity,
-    };
-    orders.push(row.clone());
-    Ok(Json(row.into()))
-}
-
-#[implements(orders_api::order_events)]
-async fn order_events() -> SseStream<OrderEvent, impl Stream<Item = Result<OrderEvent, Infallible>>>
-{
-    SseStream::new(stream::iter([
-        Ok(OrderEvent::Placed { id: 1 }),
-        Ok(OrderEvent::Cancelled { id: 1 }),
-    ]))
-}
-
-#[derive(Clone)]
+#[derive(Clone, doxa::State)]
 struct AppState {
     store: Store,
 }
@@ -219,48 +166,58 @@ impl CapabilityChecker for RoleChecker {
     }
 }
 
-fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::<AppState>::new()
-        .routes(routes!(get_order, cancel_order))
-        .routes(routes!(list_orders, place_order))
-        .routes(routes!(order_events))
+/// Who the caller is, read from `x-role` in place of a real token.
+#[doxa::layers]
+fn caller(routes: Routes, _: &AppState) -> Routes {
+    routes.layer(axum::middleware::from_fn(
+        |mut req: Request, next: Next| async move {
+            let role = req
+                .headers()
+                .get("x-role")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            if let Some(role) = role {
+                req.extensions_mut().insert(CapabilityContext {
+                    tenant_id: Some("acme".into()),
+                    roles: vec![role],
+                });
+            }
+            let checker: Arc<dyn CapabilityChecker> = Arc::new(RoleChecker);
+            req.extensions_mut().insert(checker);
+            next.run(req).await
+        },
+    ))
+}
+
+/// [`caller`], and `401` without a role.
+#[doxa::layers(docs = [caller, doxa::auth::AuthDocs])]
+fn signed_in(routes: Routes, state: &AppState) -> Routes {
+    let routes = routes.layer(axum::middleware::from_fn(
+        |req: Request, next: Next| async move {
+            if req.extensions().get::<CapabilityContext>().is_none() {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            next.run(req).await
+        },
+    ));
+    caller(routes, state)
 }
 
 /// The orders API's OpenAPI document.
 #[doxa::spec]
 pub fn api_doc() -> doxa::ApiDoc {
-    let (_, api) = routes().split_for_parts();
     doxa::ApiDocBuilder::new()
         .title("Orders")
         .version("0.0.0")
         .bearer_security("bearer")
-        .merge(api)
+        .merge(doxa::spec())
         .build()
 }
 
-/// The app, with the caller's role read from `x-role` in place of a real token.
+/// The app over `store`.
 pub fn app(store: Store) -> Router {
-    let (router, _api) = routes().split_for_parts();
+    let (router, _api) = doxa::app(&AppState { store }).split_for_parts();
     router
-        .layer(axum::middleware::from_fn(
-            |mut req: Request, next: Next| async move {
-                let role = req
-                    .headers()
-                    .get("x-role")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                if let Some(role) = role {
-                    req.extensions_mut().insert(CapabilityContext {
-                        tenant_id: Some("acme".into()),
-                        roles: vec![role],
-                    });
-                }
-                let checker: Arc<dyn CapabilityChecker> = Arc::new(RoleChecker);
-                req.extensions_mut().insert(checker);
-                next.run(req).await
-            },
-        ))
-        .with_state(AppState { store })
 }
 
 /// Two orders to start with.

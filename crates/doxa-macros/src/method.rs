@@ -20,14 +20,15 @@ use syn::{
     parse::Parser, parse2, punctuated::Punctuated, ItemFn, LitStr, Meta, Result, Token, Type,
 };
 
-use crate::{client_stub, grant, sig};
+use crate::{app, client_stub, grant, sig};
 
 /// Expand `#[get("/path", ...)]` and friends.
 pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed_args = parse_method_args(args)?;
     let method_ident = syn::Ident::new(method, proc_macro2::Span::call_site());
     let path_lit = parsed_args.path;
-    let (client, extra) = take_client_arg(parsed_args.extra)?;
+    let (mount, extra) = take_mount_arg(parsed_args.extra)?;
+    let (client, extra) = take_client_arg(extra)?;
     let mut item_fn = match routed(item)? {
         Routed::Handler(f) => f,
         Routed::Declaration(f) => return declaration(method, &path_lit, &extra, client, &f),
@@ -45,12 +46,14 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
     let sites = grant::rewrite(&mut item_fn, method, &path_names)?;
 
     let utoipa_attr = build_utoipa_attr(&method_ident, &path_lit, &extra, &item_fn)?;
+    let mount = mount.then(|| app::mount(&item_fn, None));
 
     Ok(quote! {
         #meta
         #sites
         #utoipa_attr
         #item_fn
+        #mount
     })
 }
 
@@ -58,7 +61,8 @@ pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<Toke
 /// the method is the first positional argument.
 pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed = parse_operation_args(args)?;
-    let (client, extra) = take_client_arg(parsed.extra)?;
+    let (mount, extra) = take_mount_arg(parsed.extra)?;
+    let (client, extra) = take_client_arg(extra)?;
     let parsed = OperationArgs { extra, ..parsed };
     let mut item_fn = match routed(item)? {
         Routed::Handler(f) => f,
@@ -79,12 +83,14 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let sites = grant::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
 
     let utoipa_attr = build_utoipa_attr(&parsed.method, &parsed.path, &parsed.extra, &item_fn)?;
+    let mount = mount.then(|| app::mount(&item_fn, None));
 
     Ok(quote! {
         #meta
         #sites
         #utoipa_attr
         #item_fn
+        #mount
     })
 }
 
@@ -197,7 +203,7 @@ fn declaration(
 /// `#[doxa::implements(api::route)]`: the handler serving a declared route, at its method and
 /// path, held to its arguments and answers.
 pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
-    let declaration: syn::Path = parse2(args)?;
+    let (declaration, mount) = implements_args(args)?;
     let mut item_fn: ItemFn = parse2(item)?;
     if doxa_macro_support::is_client() || doxa_macro_support::is_api() {
         return Err(syn::Error::new_spanned(
@@ -215,6 +221,7 @@ pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenSt
     let meta = client_stub::server_meta("", Some(&r), &item_fn, &path);
     let sites = grant::rewrite_for(&mut item_fn, &grant::RouteIs::Declared(&r))?;
     let operation = declared_operation(&item_fn, &r, &path);
+    let mount = mount.then(|| app::mount(&item_fn, Some(&r)));
     Ok(quote! {
         #meta
         #sites
@@ -223,7 +230,29 @@ pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenSt
         // The guard's action is spelled through the declaration's verb.
         #[allow(clippy::type_complexity)]
         #item_fn
+        #mount
     })
+}
+
+/// `api::route` and an optional `, mount = false`.
+fn implements_args(args: TokenStream) -> Result<(syn::Path, bool)> {
+    let parser = |input: syn::parse::ParseStream| -> Result<(syn::Path, Vec<Meta>)> {
+        let path: syn::Path = input.parse()?;
+        let mut rest = Vec::new();
+        while input.parse::<Option<Token![,]>>()?.is_some() && !input.is_empty() {
+            rest.push(input.parse::<Meta>()?);
+        }
+        Ok((path, rest))
+    };
+    let (path, rest) = parser.parse2(args)?;
+    let (mount, rest) = take_mount_arg(rest)?;
+    if let Some(extra) = rest.first() {
+        return Err(syn::Error::new_spanned(
+            extra,
+            "`#[implements]` takes the declaration and `mount = false`",
+        ));
+    }
+    Ok((path, mount))
 }
 
 /// The handler's OpenAPI operation, written by `utoipa::path` on a stand-in with no
@@ -444,26 +473,43 @@ fn client_half(
 
 /// Pull `client = false` out of the arguments; it is doxa's, not utoipa's.
 fn take_client_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
-    let mut client = true;
+    let (flags, rest) = take_flags(extra, &["client"])?;
+    Ok((flags[0], rest))
+}
+
+/// Pull `mount = false` out of the arguments, which leaves the handler to be routed by hand.
+fn take_mount_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
+    let (flags, rest) = take_flags(extra, &["mount"])?;
+    Ok((flags[0], rest))
+}
+
+/// Each named boolean flag, `true` unless given as `false`, and the remaining arguments.
+fn take_flags(extra: Vec<Meta>, names: &[&str]) -> Result<(Vec<bool>, Vec<Meta>)> {
+    let mut flags = vec![true; names.len()];
     let mut rest = Vec::with_capacity(extra.len());
     for meta in extra {
-        match &meta {
-            Meta::NameValue(nv) if nv.path.is_ident("client") => match &nv.value {
-                syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Bool(b),
-                    ..
-                }) => client = b.value,
-                other => {
-                    return Err(syn::Error::new_spanned(
-                        other,
-                        "expected `client = false` or `client = true`",
-                    ))
-                }
-            },
-            _ => rest.push(meta),
+        let at = match &meta {
+            Meta::NameValue(nv) => names.iter().position(|n| nv.path.is_ident(n)),
+            _ => None,
+        };
+        let (Some(at), Meta::NameValue(nv)) = (at, &meta) else {
+            rest.push(meta);
+            continue;
+        };
+        match &nv.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Bool(b),
+                ..
+            }) => flags[at] = b.value,
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    format!("expected `{0} = false` or `{0} = true`", names[at]),
+                ))
+            }
         }
     }
-    Ok((client, rest))
+    Ok((flags, rest))
 }
 
 struct MethodArgs {

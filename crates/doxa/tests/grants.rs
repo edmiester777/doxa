@@ -379,3 +379,10 @@ async fn an_allowed_annotation_reaches_the_event() {
         "and the trail still says what was reached for",
     );
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;
+
+impl axum::extract::FromRef<NoState> for () {
+    fn from_ref(_: &NoState) {}
+}
