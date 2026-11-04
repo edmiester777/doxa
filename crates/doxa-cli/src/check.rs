@@ -1,21 +1,23 @@
-//! `doxa check --wire`: whether an API crate builds for the browser, and which dependency stops it.
+//! `doxa check --wire`: whether an API crate builds for the browser, and which dependency stops it;
+//! and, for it and `doxa build`, whether the graph links two copies of a crate that must be one.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Command;
 
 use serde_json::Value;
 
-const TARGET: &str = "wasm32-unknown-unknown";
+pub const TARGET: &str = "wasm32-unknown-unknown";
 
 type Failure = Box<dyn std::error::Error>;
 
 /// Check `package` for wasm, naming each dependency that doesn't build and how it is reached.
 pub fn wire(package: &str) -> Result<(), Failure> {
-    let meta = metadata()?;
+    let meta = metadata(Some(TARGET))?;
     let graph = Graph::new(&meta);
     let root = graph
         .member(package)
         .ok_or_else(|| format!("no package `{package}` in the workspace"))?;
+    graph.one_copy(root)?;
     let out = cargo()
         .args([
             "check",
@@ -73,20 +75,31 @@ pub fn wire(package: &str) -> Result<(), Failure> {
     .into())
 }
 
+/// Crates an app links once: a second copy is a second cache, service registry and route table.
+const SINGLE: &[&str] = &["doxa-client", "doxa-wire"];
+
+/// Stop when `package`'s graph, for `platform` or every one, links two copies of a [`SINGLE`]
+/// crate, naming how each is reached.
+pub fn one_copy(package: &str, platform: Option<&str>) -> Result<(), Failure> {
+    let meta = metadata(platform)?;
+    let graph = Graph::new(&meta);
+    let root = graph
+        .member(package)
+        .ok_or_else(|| format!("no package `{package}` in the workspace"))?;
+    graph.one_copy(root)
+}
+
 fn cargo() -> Command {
     Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
 }
 
-fn metadata() -> Result<Value, Failure> {
-    let out = cargo()
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--filter-platform",
-            TARGET,
-        ])
-        .output()?;
+fn metadata(platform: Option<&str>) -> Result<Value, Failure> {
+    let mut cmd = cargo();
+    cmd.args(["metadata", "--format-version", "1"]);
+    if let Some(p) = platform {
+        cmd.args(["--filter-platform", p]);
+    }
+    let out = cmd.output()?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr)
             .trim()
@@ -149,9 +162,14 @@ fn items(v: &Value) -> &[Value] {
     v.as_array().map_or(&[], Vec::as_slice)
 }
 
+/// One copy of a crate: its label, and the package names on the path to it.
+type Found<'g, 'a> = (&'g str, Vec<&'a str>);
+
 /// The resolved dependency graph for the wasm target, normal edges only.
 struct Graph<'a> {
     names: HashMap<&'a str, &'a str>,
+    /// `name version (source)`, to tell copies apart.
+    labels: HashMap<&'a str, String>,
     members: Vec<&'a str>,
     deps: HashMap<&'a str, Vec<&'a str>>,
 }
@@ -161,6 +179,19 @@ impl<'a> Graph<'a> {
         let names = items(&meta["packages"])
             .iter()
             .filter_map(|p| Some((p["id"].as_str()?, p["name"].as_str()?)))
+            .collect();
+        let labels = items(&meta["packages"])
+            .iter()
+            .filter_map(|p| {
+                let source = p["source"].as_str().unwrap_or("path");
+                let source = source.split('#').next().unwrap_or(source);
+                let label = format!(
+                    "{} {} ({source})",
+                    p["name"].as_str()?,
+                    p["version"].as_str().unwrap_or("?")
+                );
+                Some((p["id"].as_str()?, label))
+            })
             .collect();
         let members = items(&meta["workspace_members"])
             .iter()
@@ -184,6 +215,7 @@ impl<'a> Graph<'a> {
             .collect();
         Self {
             names,
+            labels,
             members,
             deps,
         }
@@ -196,30 +228,76 @@ impl<'a> Graph<'a> {
             .find(|id| self.names.get(id) == Some(&name))
     }
 
-    /// The shortest path of package names from `root` to the package named `to`.
-    fn chain(&self, root: &'a str, to: &str) -> Option<Vec<&'a str>> {
+    /// Every package `root` reaches, in breadth-first order, each with the one it was reached from.
+    fn reach(&self, root: &'a str) -> (Vec<&'a str>, HashMap<&'a str, &'a str>) {
         let mut seen = HashSet::from([root]);
-        let mut back: HashMap<&str, &str> = HashMap::new();
+        let mut back = HashMap::new();
+        let mut order = Vec::new();
         let mut queue = VecDeque::from([root]);
         while let Some(id) = queue.pop_front() {
-            if self.names.get(id) == Some(&to) {
-                let mut path = vec![self.names[id]];
-                let mut at = id;
-                while let Some(prev) = back.get(at) {
-                    path.push(self.names[prev]);
-                    at = prev;
-                }
-                path.reverse();
-                return Some(path);
-            }
+            order.push(id);
             for dep in self.deps.get(id).into_iter().flatten() {
                 if seen.insert(dep) {
-                    back.insert(dep, id);
+                    back.insert(*dep, id);
                     queue.push_back(dep);
                 }
             }
         }
-        None
+        (order, back)
+    }
+
+    /// Package names from the root to `id`, along `back`.
+    fn path(&self, back: &HashMap<&'a str, &'a str>, id: &'a str) -> Vec<&'a str> {
+        let mut path = vec![self.names[id]];
+        let mut at = id;
+        while let Some(prev) = back.get(at) {
+            path.push(self.names[prev]);
+            at = prev;
+        }
+        path.reverse();
+        path
+    }
+
+    /// The shortest path of package names from `root` to the package named `to`.
+    fn chain(&self, root: &'a str, to: &str) -> Option<Vec<&'a str>> {
+        let (order, back) = self.reach(root);
+        let id = order
+            .into_iter()
+            .find(|id| self.names.get(id) == Some(&to))?;
+        Some(self.path(&back, id))
+    }
+
+    /// Each [`SINGLE`] crate `root` reaches more than one copy of, with the path to each copy.
+    fn copies(&self, root: &'a str) -> Vec<(&'static str, Vec<Found<'_, 'a>>)> {
+        let (order, back) = self.reach(root);
+        SINGLE
+            .iter()
+            .filter_map(|name| {
+                let found: Vec<_> = order
+                    .iter()
+                    .filter(|id| self.names.get(*id) == Some(name))
+                    .map(|id| (self.labels[id].as_str(), self.path(&back, id)))
+                    .collect();
+                (found.len() > 1).then_some((*name, found))
+            })
+            .collect()
+    }
+
+    /// `Err` naming each crate `root` links twice and how it reaches each copy.
+    fn one_copy(&self, root: &'a str) -> Result<(), Failure> {
+        let twice = self.copies(root);
+        if twice.is_empty() {
+            return Ok(());
+        }
+        let mut msg = String::new();
+        for (name, found) in &twice {
+            msg.push_str(&format!("`{name}` is linked {} times:\n", found.len()));
+            for (label, path) in found {
+                msg.push_str(&format!("  {label}: {}\n", path.join(" → ")));
+            }
+        }
+        msg.push_str("depend on one doxa, from one source, everywhere in the graph");
+        Err(msg.into())
     }
 }
 
@@ -283,5 +361,60 @@ mod tests {
             ["api", "core", "orm", "mio"]
         );
         assert!(graph.member("mio").is_none());
+    }
+}
+
+#[cfg(test)]
+mod copies {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn two_copies_of_doxa_client_are_named_with_the_path_to_each() {
+        let normal = json!([{ "kind": null }]);
+        let meta = json!({
+            "packages": [
+                { "id": "w", "name": "web", "version": "0.1.0" },
+                { "id": "k", "name": "kit", "version": "0.2.0", "source": "git+https://x/kit#abc" },
+                { "id": "c1", "name": "doxa-client", "version": "0.1.6" },
+                { "id": "c2", "name": "doxa-client", "version": "0.1.5", "source": "registry+https://crates" },
+                { "id": "r", "name": "doxa-wire", "version": "0.1.6" },
+            ],
+            "workspace_members": ["w"],
+            "resolve": { "nodes": [
+                { "id": "w", "deps": [{ "pkg": "c1", "dep_kinds": normal }, { "pkg": "k", "dep_kinds": normal }] },
+                { "id": "k", "deps": [{ "pkg": "c2", "dep_kinds": normal }] },
+                { "id": "c1", "deps": [{ "pkg": "r", "dep_kinds": normal }] },
+                { "id": "c2", "deps": [{ "pkg": "r", "dep_kinds": normal }] },
+                { "id": "r", "deps": [] },
+            ]}
+        });
+        let graph = Graph::new(&meta);
+        let root = graph.member("web").unwrap();
+        let err = graph.one_copy(root).unwrap_err().to_string();
+        assert!(err.contains("`doxa-client` is linked 2 times"), "{err}");
+        assert!(
+            err.contains("doxa-client 0.1.6 (path): web → doxa-client"),
+            "{err}"
+        );
+        assert!(
+            err.contains("doxa-client 0.1.5 (registry+https://crates): web → kit → doxa-client"),
+            "{err}"
+        );
+        assert!(!err.contains("doxa-wire"), "one doxa-wire: {err}");
+    }
+
+    #[test]
+    fn one_copy_of_each_passes() {
+        let meta = json!({
+            "packages": [{ "id": "w", "name": "web" }, { "id": "c", "name": "doxa-client" }],
+            "workspace_members": ["w"],
+            "resolve": { "nodes": [
+                { "id": "w", "deps": [{ "pkg": "c", "dep_kinds": [{ "kind": null }] }] },
+                { "id": "c", "deps": [] },
+            ]}
+        });
+        let graph = Graph::new(&meta);
+        assert!(graph.one_copy(graph.member("web").unwrap()).is_ok());
     }
 }

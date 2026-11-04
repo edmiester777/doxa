@@ -1030,7 +1030,7 @@ impl From<sea_orm::DbErr> for OrderError {
 
 `doxa::app(&state)` stops naming each route an API crate declares that no handler implements, once the server implements any route of that crate. `#[api(status = 500, internal)]` names the variant `doxa::Internal(msg)` converts into.
 
-A type whose definition needs a server crate, such as an ORM enum, keeps a wire copy in the API crate, and `#[doxa::mirror(orders_api::Status)]` on the server's converts both ways; a variant or field only one side has doesn't compile. `doxa check --wire -p orders-api` builds the API crate for wasm and names a dependency that stops it, with the path that pulls it in.
+A type whose definition needs a server crate, such as an ORM enum, keeps a wire copy in the API crate, and `#[doxa::mirror(orders_api::Status)]` on the server's converts both ways; a variant or field only one side has doesn't compile. `doxa check --wire -p orders-api` builds the API crate for wasm and names a dependency that stops it, with the path that pulls it in. It and `doxa build` stop when the graph links two copies of `doxa-client` or `doxa-wire`, naming the path to each.
 
 ## Design
 

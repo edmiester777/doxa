@@ -139,6 +139,10 @@ fn main() -> ExitCode {
 
 fn build(opts: BuildOptions, lib: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut pipeline = Pipeline::new(&std::env::current_dir()?, opts)?;
+    check::one_copy(&pipeline.web.name, Some(check::TARGET))?;
+    if let Some(server) = &pipeline.web.config.server {
+        check::one_copy(server, None)?;
+    }
     if lib {
         pipeline.build_library()?;
         return Ok(());
