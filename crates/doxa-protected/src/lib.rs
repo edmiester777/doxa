@@ -36,9 +36,8 @@ use utoipa::{PartialSchema, ToSchema};
 ///
 /// # Serde
 ///
-/// Deserializes transparently from a plain string (YAML/JSON config files).
-/// Serialization emits `"[REDACTED]"` to prevent accidental leakage through
-/// JSON API responses or serialized config dumps.
+/// Deserializes from a plain string. Serializes as `"[REDACTED]"`, except when
+/// built for wasm32, where a browser client sends the real value.
 #[derive(Clone)]
 pub struct ProtectedString(Arc<SecretString>);
 
@@ -46,6 +45,15 @@ impl ProtectedString {
     /// Access the secret value. Every call site is grep-able for auditing.
     pub fn expose(&self) -> &str {
         self.0.expose_secret()
+    }
+
+    /// A browser sends what its user typed; everything else redacts.
+    fn on_the_wire(&self, browser: bool) -> &str {
+        if browser {
+            self.expose()
+        } else {
+            "[REDACTED]"
+        }
     }
 }
 
@@ -83,7 +91,7 @@ impl From<&str> for ProtectedString {
 
 impl Serialize for ProtectedString {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str("[REDACTED]")
+        serializer.serialize_str(self.on_the_wire(cfg!(target_arch = "wasm32")))
     }
 }
 
@@ -94,12 +102,8 @@ impl<'de> Deserialize<'de> for ProtectedString {
     }
 }
 
-/// OpenAPI schema for [`ProtectedString`].
-///
-/// Described as a `string` with `format: password` so documentation
-/// viewers render it masked. The serialized form (always `"[REDACTED]"`)
-/// matches this contract — clients should never expect the real value
-/// over the wire.
+/// OpenAPI schema for [`ProtectedString`]: a `string` with `format: password`,
+/// so documentation viewers render it masked.
 impl PartialSchema for ProtectedString {
     fn schema() -> RefOr<Schema> {
         RefOr::T(Schema::Object(
@@ -107,8 +111,7 @@ impl PartialSchema for ProtectedString {
                 .schema_type(SchemaType::Type(Type::String))
                 .format(Some(SchemaFormat::KnownFormat(KnownFormat::Password)))
                 .description(Some(
-                    "Secret value. Always serialized as `\"[REDACTED]\"` — \
-                     the real value is never returned in responses.",
+                    "Secret value. Responses carry `\"[REDACTED]\"`, never the real value.",
                 ))
                 .build(),
         ))
@@ -156,6 +159,13 @@ mod tests {
         let ps = ProtectedString::from("my-secret");
         let json = serde_json::to_string(&ps).unwrap();
         assert_eq!(json, r#""[REDACTED]""#);
+    }
+
+    #[test]
+    fn only_a_browser_build_puts_the_value_on_the_wire() {
+        let ps = ProtectedString::from("my-secret");
+        assert_eq!(ps.on_the_wire(true), "my-secret");
+        assert_eq!(ps.on_the_wire(false), "[REDACTED]");
     }
 
     #[test]
