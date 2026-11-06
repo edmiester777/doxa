@@ -287,6 +287,11 @@ fn view_children_render_into_a_host_the_island_is_given() {
         .find("data-island-slot", "children")
         .expect("a children host");
     assert_eq!(fake.0.borrow().children, [Some(host)]);
+    assert_eq!(
+        dom.attr(host, "style").as_deref(),
+        Some("display: none"),
+        "out of the page until React places it"
+    );
     let button = dom.find_tag("button").unwrap();
     dom.click(button);
     doxa::client::task::run_until_stalled();

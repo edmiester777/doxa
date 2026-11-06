@@ -1016,10 +1016,11 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     for (name, view) in views.slots {
         let live = live.clone();
         // Keyed, so an optional slot appearing doesn't shift the hosts after it.
+        // Hidden until the runtime adopts it: React may never render this prop.
         let slot = el("div")
             .key(name)
             .attr("data-island-slot", name)
-            .attr("style", "display: contents")
+            .attr("style", "display: none")
             .lifecycle(move |phase, node| live.on_slot(name, phase, node))
             .child(view);
         children.push(slot.into_view());

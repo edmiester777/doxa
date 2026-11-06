@@ -35,13 +35,15 @@ function subscribe(l) {
   return () => listeners.delete(l);
 }
 
-// Moves a slot's host, which doxa renders into, to where React puts that prop.
+// Moves a slot's host, which doxa renders into, to where React puts that prop, and shows it there.
 function Adopt({ node }) {
   const ref = useRef(null);
   useLayoutEffect(() => {
     const el = ref.current;
     el.appendChild(node);
+    node.style.display = "contents";
     return () => {
+      node.style.display = "none";
       if (node.parentNode === el) el.removeChild(node);
     };
   }, [node]);
