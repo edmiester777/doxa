@@ -83,6 +83,30 @@ async fn a_page_renders_patches_and_reorders_in_the_document() {
         "the input survives a re-render"
     );
 
+    js_sys::eval(
+        "const el = document.getElementById('draft');
+         const value = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+         window.valueWrites = 0;
+         Object.defineProperty(el, 'value', {
+             configurable: true,
+             get() { return value.get.call(el); },
+             set(next) { window.valueWrites++; value.set.call(el, next); },
+         });",
+    )
+    .unwrap();
+    input
+        .dispatch_event(&web_sys::Event::new("input").unwrap())
+        .unwrap();
+    settle().await;
+    by_id("count").click();
+    settle().await;
+    assert_eq!(
+        js_sys::eval("window.valueWrites").unwrap().as_f64(),
+        Some(0.0),
+        "a value the input already holds isn't written back"
+    );
+    js_sys::eval("delete document.getElementById('draft').value").unwrap();
+
     let three = by_id("item-3");
     ORDER.with(|o| *o.borrow_mut() = vec![3, 1, 2]);
     by_id("count").click();

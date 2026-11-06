@@ -173,7 +173,15 @@ impl Dom for WebDom {
             Prop::Bool(b) => JsValue::from_bool(*b),
             Prop::Unset => JsValue::UNDEFINED,
         };
-        let _ = js_sys::Reflect::set(&n, &JsValue::from_str(name), &v);
+        let key = JsValue::from_str(name);
+        // Writing an unchanged `value` still clears what the input is showing, such as the dot of
+        // a half-typed `1.` that a number input reports as `1`.
+        if let Ok(current) = js_sys::Reflect::get(&n, &key) {
+            if js_sys::Object::is(&current, &v) {
+                return;
+            }
+        }
+        let _ = js_sys::Reflect::set(&n, &key, &v);
     }
 
     fn set_inner_html(&self, node: NodeId, html: &str) {
