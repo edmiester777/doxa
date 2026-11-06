@@ -119,7 +119,6 @@ fn build_css(
     stage: &Path,
     release: bool,
 ) -> Result<Built> {
-    let (web_dir, sources) = (at.web_dir, at.sources);
     let mut input = pre.unwrap_or(source).to_owned();
     let text = std::fs::read_to_string(&input).at(&input)?;
     // Beside the entry, so its relative imports still resolve; removed once built.
@@ -130,7 +129,7 @@ fn build_css(
         input = path.clone();
         unstyled = Some(path);
     }
-    let built = tailwind_and_bundle(web_dir, sources, &input, &text, stage, release, at.library);
+    let built = tailwind_and_bundle(at, &input, &text, stage, release);
     if let Some(path) = unstyled {
         let _ = std::fs::remove_file(path);
     }
@@ -163,32 +162,48 @@ pub fn without_preflight(css: &str) -> String {
     out
 }
 
+/// The Tailwind CLI over `wrapper`. It finds `@import` and `@plugin` packages through `NODE_PATH`,
+/// since a synced install isn't above the stylesheet.
+fn tailwind_command(
+    program: &Path,
+    at: &Inputs<'_>,
+    wrapper: &Path,
+    output: &Path,
+    release: bool,
+) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.arg("--input")
+        .arg(wrapper)
+        .arg("--output")
+        .arg(output)
+        .current_dir(at.web_dir);
+    if release {
+        cmd.arg("--minify");
+    }
+    if let Some(dir) = at.node_modules {
+        cmd.env("NODE_PATH", dir.join("node_modules"));
+    }
+    cmd
+}
+
 fn tailwind_and_bundle(
-    web_dir: &Path,
-    sources: &[String],
+    at: &Inputs<'_>,
     input: &Path,
     text: &str,
     stage: &Path,
     release: bool,
-    library: bool,
 ) -> Result<Built> {
+    let web_dir = at.web_dir;
     let input = input.to_owned();
     let to_bundle = if uses_tailwind(text) {
         std::fs::create_dir_all(stage).at(stage)?;
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();
         let wrapper = stage.join(format!("{stem}.tailwind-in.css"));
         let output = stage.join(format!("{stem}.tailwind-out.css"));
-        let sources: Vec<_> = sources.iter().map(|s| web_dir.join(s)).collect();
+        let sources: Vec<_> = at.sources.iter().map(|s| web_dir.join(s)).collect();
         std::fs::write(&wrapper, tailwind_wrapper(&input, &sources)).at(&wrapper)?;
-        let mut cmd = Command::new(crate::tool::tailwind()?);
-        cmd.arg("--input")
-            .arg(&wrapper)
-            .arg("--output")
-            .arg(&output)
-            .current_dir(web_dir);
-        if release {
-            cmd.arg("--minify");
-        }
+        let tool = crate::tool::tailwind()?;
+        let mut cmd = tailwind_command(&tool, at, &wrapper, &output, release);
         run(
             "tailwindcss",
             &mut cmd,
@@ -203,7 +218,7 @@ fn tailwind_and_bundle(
         &to_bundle,
         entry_dir,
         release,
-        if library { "./" } else { "/" },
+        if at.library { "./" } else { "/" },
     )
 }
 
@@ -483,6 +498,23 @@ mod tests {
              @import \"tailwindcss/theme.css\" layer(theme);\n\
              @import \"tailwindcss/utilities.css\" layer(utilities) source(none);\n.a{}"
         );
+    }
+
+    #[test]
+    fn tailwind_resolves_packages_from_the_install() {
+        let web = Path::new("/w");
+        let installed = Inputs {
+            node_modules: Some(Path::new("/t/js")),
+            ..plain(web)
+        };
+        let env = |at: &Inputs<'_>| {
+            let cmd = tailwind_command(Path::new("tw"), at, Path::new("i"), Path::new("o"), false);
+            cmd.get_envs()
+                .find(|(k, _)| *k == "NODE_PATH")
+                .and_then(|(_, v)| v.map(ToOwned::to_owned))
+        };
+        assert_eq!(env(&installed), Some("/t/js/node_modules".into()));
+        assert_eq!(env(&plain(web)), None);
     }
 
     #[test]
