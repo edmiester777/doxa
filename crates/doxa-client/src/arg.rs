@@ -209,6 +209,9 @@ impl Outgoing {
         let template = self.template;
         let mut out = String::with_capacity(template.len());
         let mut positional = self.positional.iter();
+        // One value per parameter is a tuple read as the server's `Path<(A, B)>` reads it, so each
+        // stays with its own parameter even where a key fills that one by name.
+        let aligned = self.positional.len() == doxa_wire::path_names(template).count();
         let mut rest = template;
         while let Some(open) = rest.find('{') {
             out.push_str(&rest[..open]);
@@ -218,11 +221,13 @@ impl Outgoing {
                 .ok_or_else(|| format!("unclosed `{{` in `{template}`"))?;
             let raw = &rest[open + 1..close];
             let name = raw.trim_start_matches('*');
+            let own = if aligned { positional.next() } else { None };
             let value = self
                 .named
                 .iter()
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| v)
+                .or(own)
                 .or_else(|| positional.next())
                 .ok_or_else(|| format!("no argument fills `{{{name}}}` in `{template}`"))?;
             if raw.starts_with('*') {
@@ -233,6 +238,9 @@ impl Outgoing {
             rest = &rest[close + 1..];
         }
         out.push_str(rest);
+        if positional.next().is_some() {
+            return Err(format!("more path values than `{template}` has parameters"));
+        }
         if !self.query.is_empty() {
             out.push('?');
             out.push_str(&serde_urlencoded::to_string(&self.query).map_err(|e| e.to_string())?);
@@ -357,6 +365,55 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Serialize)]
+    struct OrderKey {
+        name: String,
+    }
+
+    fn key() -> OrderKey {
+        OrderKey {
+            name: "keyed".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_tuple_fills_each_parameter_by_position() {
+        let mut out = Outgoing::new("/orders/{name}/items/{id}");
+        out.path(&("a", 7)).unwrap();
+        assert_eq!(out.url().unwrap(), "/orders/a/items/7");
+    }
+
+    #[test]
+    fn a_tuple_stays_aligned_when_a_key_fills_one_of_its_parameters() {
+        let mut out = Outgoing::new("/orders/{name}/items/{id}");
+        out.key(&key()).unwrap();
+        out.path(&("keyed", 7)).unwrap();
+        assert_eq!(out.url().unwrap(), "/orders/keyed/items/7");
+    }
+
+    #[test]
+    fn a_scalar_fills_the_parameter_a_key_left() {
+        let mut out = Outgoing::new("/orders/{name}/items/{id}");
+        out.key(&key()).unwrap();
+        out.path(&7).unwrap();
+        assert_eq!(out.url().unwrap(), "/orders/keyed/items/7");
+    }
+
+    #[test]
+    fn a_path_value_with_no_parameter_is_an_error() {
+        let mut out = Outgoing::new("/orders/{name}/items/{id}");
+        out.key(&key()).unwrap();
+        out.path(&("a", "b", 7)).unwrap();
+        assert!(out.url().unwrap_err().contains("more path values"));
+    }
+
+    #[test]
+    fn a_parameter_with_no_value_is_an_error() {
+        let mut out = Outgoing::new("/orders/{name}/items/{id}");
+        out.path(&"a").unwrap();
+        assert!(out.url().unwrap_err().contains("{id}"));
+    }
 
     #[test]
     fn each_present_field_is_a_header_by_its_wire_name() {
