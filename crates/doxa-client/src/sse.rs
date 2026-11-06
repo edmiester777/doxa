@@ -36,6 +36,15 @@ impl Default for Backoff {
     }
 }
 
+/// What [`EventStream::next_item`] yields.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamItem<E> {
+    /// The connection is open: first on every stream, then after each reconnect.
+    Connected,
+    /// An event from the server.
+    Event(E),
+}
+
 /// The events of an SSE route, in order.
 ///
 /// ```ignore
@@ -51,6 +60,7 @@ pub struct EventStream<E> {
 impl<E: DeserializeOwned> EventStream<E> {
     pub(crate) fn subscribe(hub: Rc<Hub>) -> Self {
         let inbox = Rc::new(Inbox::default());
+        inbox.items.borrow_mut().push_back(Item::Connected);
         hub.state
             .borrow_mut()
             .subscribers
@@ -75,16 +85,29 @@ impl<E: DeserializeOwned> EventStream<E> {
     /// The next event; `Ok(None)` once the server closes the stream.
     pub async fn next(&mut self) -> Result<Option<E>, Fetch> {
         loop {
+            match self.next_item().await? {
+                Some(StreamItem::Event(event)) => return Ok(Some(event)),
+                Some(StreamItem::Connected) => continue,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// [`next`](Self::next), also reporting each connection; refetch on `Connected` when the
+    /// route has no replay, since events sent during a gap are lost.
+    pub async fn next_item(&mut self) -> Result<Option<StreamItem<E>>, Fetch> {
+        loop {
             let item = std::future::poll_fn(|cx| self.poll_item(cx)).await;
             match item {
                 None => return Ok(None),
+                Some(Item::Connected) => return Ok(Some(StreamItem::Connected)),
                 Some(Item::Failed(e)) => return Err(e),
                 Some(Item::Frame(frame)) => match frame.event.as_deref() {
                     Some("error") => return Err(Fetch::Stream(frame.data.clone())),
                     _ if frame.data.is_empty() => continue,
                     _ => {
                         return serde_json::from_str(&frame.data)
-                            .map(Some)
+                            .map(|event| Some(StreamItem::Event(event)))
                             .map_err(|e| Fetch::Decode(e.to_string()))
                     }
                 },
@@ -136,6 +159,7 @@ struct Inbox {
 
 #[derive(Clone)]
 enum Item {
+    Connected,
     Frame(Rc<Frame>),
     Failed(Fetch),
 }
@@ -263,6 +287,10 @@ impl Hub {
                     if let Some((policy, delay)) = s.backoff.as_mut() {
                         *delay = policy.initial;
                     }
+                    broadcast(&mut s, Item::Connected);
+                    drop(s);
+                    self.waiting.wake_by_ref();
+                    return Poll::Ready(true);
                 }
                 Ok(Response {
                     status: status @ (401 | 403 | 404),
@@ -478,5 +506,66 @@ mod tests {
         let sent = mock.requests();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].header("last-event-id"), Some("7"));
+    }
+
+    fn fast() -> Backoff {
+        Backoff {
+            initial: Duration::from_millis(1),
+            max: Duration::from_millis(1),
+        }
+    }
+
+    #[test]
+    fn an_item_stream_reports_each_connection_before_its_events() {
+        let mock = MockTransport::new();
+        mock.respond(200, vec![], b"data: {\"event\":\"deleted\"}\n\n".to_vec());
+        let h = hub("data: {\"event\":\"deleted\"}\n\n", mock);
+        let mut s = EventStream::<Ev>::subscribe(h).reconnect(fast());
+        crate::task::block_on(async {
+            for expected in [
+                StreamItem::Connected,
+                StreamItem::Event(Ev::Deleted),
+                StreamItem::Connected,
+                StreamItem::Event(Ev::Deleted),
+            ] {
+                assert_eq!(s.next_item().await.unwrap(), Some(expected));
+            }
+        });
+    }
+
+    #[test]
+    fn every_subscriber_hears_of_a_reconnect() {
+        let mock = MockTransport::new();
+        mock.respond(200, vec![], b"data: {\"event\":\"deleted\"}\n\n".to_vec());
+        let h = hub("", mock);
+        let mut a = EventStream::<Ev>::subscribe(h.clone()).reconnect(fast());
+        let mut b = EventStream::<Ev>::subscribe(h);
+        crate::task::block_on(async {
+            for s in [&mut a, &mut b] {
+                assert_eq!(s.next_item().await.unwrap(), Some(StreamItem::Connected));
+                assert_eq!(s.next_item().await.unwrap(), Some(StreamItem::Connected));
+                assert_eq!(
+                    s.next_item().await.unwrap(),
+                    Some(StreamItem::Event(Ev::Deleted))
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_failed_reopen_reports_no_connection() {
+        let mock = MockTransport::new();
+        mock.respond(503, vec![], Vec::new());
+        mock.respond(200, vec![], b"data: {\"event\":\"deleted\"}\n\n".to_vec());
+        let h = hub("", mock);
+        let mut s = EventStream::<Ev>::subscribe(h).reconnect(fast());
+        crate::task::block_on(async {
+            assert_eq!(s.next_item().await.unwrap(), Some(StreamItem::Connected));
+            assert_eq!(s.next_item().await.unwrap(), Some(StreamItem::Connected));
+            assert_eq!(
+                s.next_item().await.unwrap(),
+                Some(StreamItem::Event(Ev::Deleted))
+            );
+        });
     }
 }

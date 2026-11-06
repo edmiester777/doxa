@@ -36,7 +36,7 @@ pub use response::{
     AliasedResult, Attachment, Download, FromResponse, SseOnce, SseStream, StatusCode, Unsupported,
 };
 pub use service::{on_any_session_change, service, Service};
-pub use sse::{Backoff, EventStream, Once};
+pub use sse::{Backoff, EventStream, Once, StreamItem};
 
 pub use doxa_wire::{FieldError, FieldErrors, Validates};
 
