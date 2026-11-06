@@ -940,6 +940,17 @@ extern "js" {
 
 Arguments and returns cross through serde (feature `npm`); JS types declared with `type X;` and `JsValue` pass through untouched, and a `Promise` becomes a future.
 
+A web crate whose APIs run elsewhere names them instead of a `server`, and `doxa dev` forwards each prefix, streams and upgrades included. `env` names a variable that overrides `to`, and `strip` leaves the prefix off the forwarded path:
+
+```toml
+[package.metadata.doxa.proxy]
+"/api" = { to = "http://localhost:8080", env = "ORDERS_URL" }
+"/lake" = { to = "http://localhost:3100", env = "LAKE_URL", strip = true }
+
+[package.metadata.doxa.services]
+lake-client = "/lake"
+```
+
 A crate lists the packages it imports under `[package.metadata.doxa.npm]`, and `doxa build` installs those of every crate the web crate depends on, git dependencies included. The web crate's range wins, two others asking different ranges stop the build, and an app with its own `package.json` is told what it's missing. Its install scripts run, and a `patches/` directory beside it is part of the install: editing a patch reinstalls from clean. Tailwind scans each of those crates that uses doxa-ui, and resolves `@import` and `@plugin` packages from the same install.
 
 ### 19. Icons

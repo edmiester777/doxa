@@ -39,6 +39,22 @@ pub struct DoxaConfig {
     pub preprocess: BTreeMap<String, Preprocess>,
     /// The npm package `doxa build --lib` writes from the `#[component(export)]` components.
     pub library: Option<Library>,
+    /// Path prefix to the upstream `doxa dev` forwards it to.
+    #[serde(default)]
+    pub proxy: BTreeMap<String, Upstream>,
+}
+
+/// `"/dl" = { to = "http://localhost:3100", env = "LAKE_URL", strip = true }`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Upstream {
+    /// The upstream's URL, unless `env` names a set variable.
+    pub to: Option<String>,
+    /// An environment variable holding the upstream's URL, which wins over `to`.
+    pub env: Option<String>,
+    /// Leave the prefix off the forwarded path.
+    #[serde(default)]
+    pub strip: bool,
 }
 
 /// `library = { name = "@acme/kit", scope = ".kit-root" }`.
@@ -146,7 +162,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, wasm_budget_kb, chunk_budget_kb, library, and npm, services and preprocess tables",
+                    "keys are role, server, css, css_sources, public, wasm_budget_kb, chunk_budget_kb, library, and npm, services, preprocess and proxy tables",
                 )
             }),
         }
@@ -340,6 +356,19 @@ mod tests {
     }"#;
 
     #[test]
+    fn a_proxy_table_names_each_upstream() {
+        let config: DoxaConfig = serde_json::from_value(serde_json::json!({
+            "proxy": { "/dl": { "to": "http://a", "env": "A", "strip": true }, "/api": { "env": "B" } }
+        }))
+        .unwrap();
+        let dl = &config.proxy["/dl"];
+        assert_eq!(dl.to.as_deref(), Some("http://a"));
+        assert_eq!(dl.env.as_deref(), Some("A"));
+        assert!(dl.strip);
+        assert!(!config.proxy["/api"].strip);
+    }
+
+    #[test]
     fn finds_the_client_crate_and_its_config() {
         let ws = Workspace::from_json(METADATA).unwrap();
         let web = ws.web_crate(None).unwrap();
@@ -350,6 +379,7 @@ mod tests {
         assert_eq!(web.config.css, ["style/app.css"]);
         assert_eq!(web.config.npm["react"], "^19");
         assert!(web.config.css_sources.is_empty());
+        assert!(web.config.proxy.is_empty());
         assert_eq!(ws.layout().dist(), Path::new("/app/target/doxa/dist"));
     }
 

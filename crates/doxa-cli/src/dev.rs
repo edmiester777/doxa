@@ -1,6 +1,7 @@
-//! `doxa dev`: build once, run the server behind a reloading proxy, and rebuild only
-//! what a change touches.
+//! `doxa dev`: build once, run the server and any configured upstreams behind a reloading
+//! proxy, and rebuild only what a change touches.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,12 +9,12 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use doxa_build::config::{WebCrate, Workspace};
+use doxa_build::config::{Upstream, WebCrate, Workspace};
 use doxa_build::dist::Dist;
 use doxa_build::pipeline::note;
 use doxa_build::{BuildOptions, Pipeline};
@@ -27,6 +28,7 @@ const RELOAD_PATH: &str = "/__doxa/reload";
 /// Where hot patches are fetched from, matching [`Pipeline::patch`]'s jump tables.
 const PATCH_PREFIX: &str = "__doxa_patch/";
 const API_PREFIX: &str = "/api";
+const NO_UPSTREAM: &str = "no server or [package.metadata.doxa.proxy] entry answers this path";
 
 const RELOAD_SCRIPT: &str = r#"<script type="module">
 const es = new EventSource("/__doxa/reload");
@@ -96,7 +98,7 @@ fn canonical(p: &Path) -> PathBuf {
 }
 
 impl Watch {
-    fn new(ws: &Workspace, web: &WebCrate, server: &str) -> Watch {
+    fn new(ws: &Workspace, web: &WebCrate, server: Option<&str>) -> Watch {
         let root = canonical(&ws.workspace_root);
         let extra_dirs = [
             root.join("style"),
@@ -131,8 +133,9 @@ impl Watch {
                 .iter()
                 .map(|d| canonical(d))
                 .collect(),
-            server_dirs: ws
-                .source_dirs(server)
+            server_dirs: server
+                .map(|s| ws.source_dirs(s))
+                .unwrap_or_default()
                 .iter()
                 .map(|d| canonical(d))
                 .collect(),
@@ -276,27 +279,40 @@ pub async fn run(
         Ok(p)
     })
     .await??;
-    let server_pkg = pipeline.web.config.server.clone().ok_or(
-        "no server to run\n  fix: set server = \"<server package>\" in the web crate's [package.metadata.doxa]",
-    )?;
+    let routes = routes(&pipeline.web.config.proxy, |name| std::env::var(name).ok())?;
+    let server_pkg = pipeline.web.config.server.clone();
+    if server_pkg.is_none() && routes.is_empty() {
+        return Err("nothing to serve the API\n  fix: set server = \"<server package>\" or add a [package.metadata.doxa.proxy] table to the web crate".into());
+    }
     let dist = canonical(&pipeline.dist_dir());
     let patches = pipeline.patch_dir();
-    let watch = Watch::new(&pipeline.workspace, &pipeline.web, &server_pkg);
-    let mut server = Server {
-        root: pipeline.workspace.workspace_root.clone(),
-        package: server_pkg,
-        dist: dist.clone(),
-        port: free_port()?,
-        child: None,
+    let watch = Watch::new(&pipeline.workspace, &pipeline.web, server_pkg.as_deref());
+    let mut server = match server_pkg {
+        Some(package) => Some(Server {
+            root: pipeline.workspace.workspace_root.clone(),
+            package,
+            dist: dist.clone(),
+            port: free_port()?,
+            child: None,
+        }),
+        None => None,
     };
     let pipeline = Arc::new(Mutex::new(pipeline));
-    server.start()?;
+    if let Some(server) = &mut server {
+        server.start()?;
+    }
+    for route in &routes {
+        note(format!("proxying {} to {}", route.prefix, route.target));
+    }
 
     let (reload, _) = broadcast::channel(16);
     let proxy = Arc::new(Proxy {
         dist,
         patches,
-        upstream: format!("http://127.0.0.1:{}", server.port),
+        upstream: server
+            .as_ref()
+            .map(|s| format!("http://127.0.0.1:{}", s.port)),
+        routes,
         client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()?,
@@ -363,7 +379,7 @@ pub async fn run(
                 continue;
             }
         };
-        if plan.server {
+        if let (true, Some(server)) = (plan.server, &mut server) {
             server.restart().await?;
             server.wait_ready().await;
         }
@@ -375,8 +391,62 @@ pub async fn run(
         };
         let _ = reload.send(event);
     }
-    server.stop().await;
+    if let Some(server) = &mut server {
+        server.stop().await;
+    }
     Ok(())
+}
+
+/// A `[package.metadata.doxa.proxy]` entry with its upstream settled.
+#[derive(Debug, Clone, PartialEq)]
+struct Route {
+    prefix: String,
+    target: String,
+    strip: bool,
+}
+
+/// The configured routes, longest prefix first.
+fn routes(
+    proxy: &BTreeMap<String, Upstream>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<Route>, String> {
+    let mut routes = Vec::with_capacity(proxy.len());
+    for (prefix, upstream) in proxy {
+        let table = format!("[package.metadata.doxa.proxy] \"{prefix}\"");
+        if !prefix.starts_with('/') || prefix.ends_with('/') {
+            return Err(format!(
+                "{table} isn't a path prefix\n  fix: write it like \"/api\": a leading slash and no trailing one"
+            ));
+        }
+        let from_env = upstream
+            .env
+            .as_deref()
+            .and_then(&env)
+            .filter(|v| !v.is_empty());
+        let Some(target) = from_env.or_else(|| upstream.to.clone()) else {
+            return Err(format!(
+                "{table} has no upstream\n  fix: set `to`, or the variable its `env` names"
+            ));
+        };
+        if !target.starts_with("http://") && !target.starts_with("https://") {
+            return Err(format!(
+                "{table} goes to `{target}`\n  fix: give an http:// or https:// URL"
+            ));
+        }
+        routes.push(Route {
+            prefix: prefix.clone(),
+            target: target.trim_end_matches('/').to_owned(),
+            strip: upstream.strip,
+        });
+    }
+    routes.sort_by_key(|r| std::cmp::Reverse(r.prefix.len()));
+    Ok(routes)
+}
+
+/// What follows `prefix` in `path`, when `prefix` ends at a path segment.
+fn after_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix(prefix)?;
+    (rest.is_empty() || rest.starts_with('/')).then_some(rest)
 }
 
 fn free_port() -> std::io::Result<u16> {
@@ -451,7 +521,9 @@ enum Reload {
 struct Proxy {
     dist: PathBuf,
     patches: PathBuf,
-    upstream: String,
+    /// The server `doxa dev` runs, if any; it answers what no route claims.
+    upstream: Option<String>,
+    routes: Vec<Route>,
     client: reqwest::Client,
     reload: broadcast::Sender<Reload>,
     /// What a page loading the base wasm still has to apply.
@@ -484,11 +556,6 @@ async fn reload_events(State(p): State<Arc<Proxy>>) -> impl IntoResponse {
         }
     });
     Sse::new(events).keep_alive(KeepAlive::default())
-}
-
-fn is_api(path: &str) -> bool {
-    path.starts_with(API_PREFIX)
-        && matches!(path.as_bytes().get(API_PREFIX.len()), None | Some(b'/'))
 }
 
 /// A dist file the proxy answers itself; `index.html` goes through the server.
@@ -537,6 +604,37 @@ fn html_response(status: StatusCode, mut headers: HeaderMap, html: String) -> Re
 }
 
 impl Proxy {
+    fn route(&self, path: &str) -> Option<&Route> {
+        self.routes
+            .iter()
+            .find(|r| after_prefix(path, &r.prefix).is_some())
+    }
+
+    /// Whether `path` never names a dist file or a page.
+    fn is_backend(&self, path: &str) -> bool {
+        after_prefix(path, API_PREFIX).is_some() || self.route(path).is_some()
+    }
+
+    /// The URL `uri` is forwarded to, when anything answers it.
+    fn target(&self, uri: &Uri) -> Option<String> {
+        let path = uri.path();
+        let (base, path) = match self.route(path) {
+            Some(r) if r.strip => (
+                r.target.as_str(),
+                match after_prefix(path, &r.prefix) {
+                    Some("") | None => "/",
+                    Some(rest) => rest,
+                },
+            ),
+            Some(r) => (r.target.as_str(), path),
+            None => (self.upstream.as_deref()?, path),
+        };
+        Some(match uri.query() {
+            Some(query) => format!("{base}{path}?{query}"),
+            None => format!("{base}{path}"),
+        })
+    }
+
     async fn disk(&self, rel: &str) -> Option<Response> {
         let path = match rel.strip_prefix(PATCH_PREFIX) {
             Some(patch) => self.patches.join(patch),
@@ -569,11 +667,7 @@ impl Proxy {
 
     async fn upstream(&self, req: Request) -> Result<Response, String> {
         let (parts, body) = req.into_parts();
-        let url = format!(
-            "{}{}",
-            self.upstream,
-            parts.uri.path_and_query().map_or("/", |p| p.as_str())
-        );
+        let url = self.target(&parts.uri).ok_or(NO_UPSTREAM)?;
         let body = axum::body::to_bytes(body, usize::MAX)
             .await
             .map_err(|e| e.to_string())?;
@@ -644,11 +738,25 @@ fn is_upgrade(req: &Request) -> bool {
 async fn tunnel(p: &Proxy, mut req: Request) -> Result<Response, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let addr = p.upstream.trim_start_matches("http://");
-    let mut upstream = tokio::net::TcpStream::connect(addr)
+    let url = p.target(req.uri()).ok_or(NO_UPSTREAM)?;
+    let url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+    if url.scheme() != "http" {
+        return Err(format!(
+            "can't tunnel an upgrade to {url}: only http:// is supported"
+        ));
+    }
+    let addr = format!(
+        "{}:{}",
+        url.host_str().unwrap_or("127.0.0.1"),
+        url.port_or_known_default().unwrap_or(80)
+    );
+    let mut upstream = tokio::net::TcpStream::connect(&addr)
         .await
         .map_err(|e| e.to_string())?;
-    let target = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    let target = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
     let mut head = format!("{} {target} HTTP/1.1\r\nhost: {addr}\r\n", req.method());
     for (name, value) in req.headers() {
         if name != header::HOST {
@@ -715,20 +823,28 @@ async fn forward(State(p): State<Arc<Proxy>>, req: Request) -> Response {
     }
     let readable = matches!(*req.method(), Method::GET | Method::HEAD);
     let path = req.uri().path().to_owned();
+    let backend = p.is_backend(&path);
     let navigation = readable
-        && !is_api(&path)
+        && !backend
         && req
             .headers()
             .get(header::ACCEPT)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.contains("text/html"));
-    if readable && !is_api(&path) {
+    if readable && !backend {
         if let Some(found) = match asset_rel(&path) {
             Some(rel) => p.disk(rel).await,
             None => None,
         } {
             return found;
         }
+    }
+    if p.target(req.uri()).is_none() {
+        let page = match navigation {
+            true => p.index().await,
+            false => None,
+        };
+        return page.unwrap_or_else(|| StatusCode::NOT_FOUND.into_response());
     }
     match p.upstream(req).await {
         Ok(res) if res.status() == StatusCode::NOT_FOUND && navigation => {
@@ -811,7 +927,8 @@ mod tests {
         let proxy = Arc::new(Proxy {
             dist: PathBuf::from("/nonexistent"),
             patches: PathBuf::from("/nonexistent"),
-            upstream: format!("http://127.0.0.1:{upstream}"),
+            upstream: Some(format!("http://127.0.0.1:{upstream}")),
+            routes: Vec::new(),
             client: reqwest::Client::new(),
             reload: broadcast::channel(1).0,
             latest_patch: Mutex::new(None),
@@ -840,6 +957,175 @@ mod tests {
         let mut back = [0u8; 4];
         c.read_exact(&mut back).await.unwrap();
         assert_eq!(&back, b"ping");
+    }
+
+    fn upstream(to: Option<&str>, env: Option<&str>, strip: bool) -> Upstream {
+        Upstream {
+            to: to.map(Into::into),
+            env: env.map(Into::into),
+            strip,
+        }
+    }
+
+    /// Answers each request with its method, target and body.
+    async fn reporting_server() -> String {
+        async fn report(req: Request) -> String {
+            let (method, uri) = (req.method().clone(), req.uri().clone());
+            let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            format!("{method} {uri} {}", String::from_utf8_lossy(&body))
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().fallback(report);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// A serverless proxy over a dist holding `index.html` and `app.js`.
+    async fn serverless(routes: Vec<Route>, dist: &Path) -> String {
+        std::fs::write(dist.join("index.html"), "<body>shell</body>").unwrap();
+        std::fs::write(dist.join("app.js"), "js").unwrap();
+        let proxy = Arc::new(Proxy {
+            dist: dist.to_owned(),
+            patches: dist.to_owned(),
+            upstream: None,
+            routes,
+            client: reqwest::Client::new(),
+            reload: broadcast::channel(1).0,
+            latest_patch: Mutex::new(None),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().fallback(forward).with_state(proxy);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[test]
+    fn an_env_variable_beats_a_routes_written_upstream() {
+        let proxy = BTreeMap::from([
+            (
+                "/a".to_owned(),
+                upstream(Some("http://a/"), Some("A"), false),
+            ),
+            (
+                "/a/b".to_owned(),
+                upstream(Some("http://b"), Some("B"), true),
+            ),
+            ("/c".to_owned(), upstream(None, Some("C"), false)),
+        ]);
+        let found = routes(&proxy, |name| match name {
+            "A" => Some(String::new()),
+            "B" | "C" => Some(format!("http://{name}.env")),
+            _ => None,
+        })
+        .unwrap();
+        let summary: Vec<_> = found
+            .iter()
+            .map(|r| (r.prefix.as_str(), r.target.as_str(), r.strip))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("/a/b", "http://B.env", true),
+                ("/a", "http://a", false),
+                ("/c", "http://C.env", false),
+            ],
+            "longest prefix first; an empty variable counts as unset"
+        );
+    }
+
+    #[test]
+    fn a_route_without_a_usable_upstream_or_prefix_is_refused() {
+        let refused = |prefix: &str, up: Upstream| {
+            routes(&BTreeMap::from([(prefix.to_owned(), up)]), |_| None).unwrap_err()
+        };
+        assert!(refused("/a", upstream(None, Some("A"), false)).contains("no upstream"));
+        assert!(refused("/a", upstream(Some("a.test"), None, false)).contains("http://"));
+        assert!(refused("a", upstream(Some("http://a"), None, false)).contains("path prefix"));
+        assert!(refused("/", upstream(Some("http://a"), None, false)).contains("path prefix"));
+    }
+
+    #[tokio::test]
+    async fn each_prefix_reaches_its_own_upstream() {
+        let (one, two) = (reporting_server().await, reporting_server().await);
+        let dist = tempfile::tempdir().unwrap();
+        let routes = routes(
+            &BTreeMap::from([
+                ("/api".to_owned(), upstream(Some(&one), None, false)),
+                ("/dl".to_owned(), upstream(Some(&two), None, true)),
+            ]),
+            |_| None,
+        )
+        .unwrap();
+        let base = serverless(routes, dist.path()).await;
+        let client = reqwest::Client::new();
+        let get = |path: &'static str| {
+            let (client, url) = (client.clone(), format!("{base}{path}"));
+            async move {
+                let resp = client
+                    .get(url)
+                    .header(header::ACCEPT, "text/html")
+                    .send()
+                    .await
+                    .unwrap();
+                (resp.status().as_u16(), resp.text().await.unwrap())
+            }
+        };
+
+        assert_eq!(get("/api/me?a=1").await.1, "GET /api/me?a=1 ");
+        assert_eq!(get("/dl/api/me?a=1").await.1, "GET /api/me?a=1 ");
+        assert_eq!(get("/dl").await.1, "GET / ");
+        let posted = client
+            .post(format!("{base}/dl/q"))
+            .body("sql")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(posted.text().await.unwrap(), "POST /q sql");
+
+        assert_eq!(get("/app.js").await.1, "js");
+        let (status, page) = get("/dlx/page").await;
+        assert_eq!(status, 200);
+        assert!(
+            page.contains("shell") && page.contains("/__doxa/reload"),
+            "{page}"
+        );
+        let missing = client
+            .get(format!("{base}/missing.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_follows_its_route() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let port = echo_server().await;
+        let dist = tempfile::tempdir().unwrap();
+        let base = serverless(
+            vec![Route {
+                prefix: "/dl".into(),
+                target: format!("http://127.0.0.1:{port}"),
+                strip: true,
+            }],
+            dist.path(),
+        )
+        .await;
+        let mut c = tokio::net::TcpStream::connect(base.trim_start_matches("http://"))
+            .await
+            .unwrap();
+        c.write_all(
+            b"GET /dl/live HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut head = [0u8; 12];
+        c.read_exact(&mut head).await.unwrap();
+        assert_eq!(&head, b"HTTP/1.1 101");
     }
 
     #[test]
@@ -995,7 +1281,7 @@ mod tests {
         assert_eq!(asset_rel("/"), None);
         assert_eq!(asset_rel("/index.html"), None);
         assert_eq!(asset_rel("/../x"), None);
-        assert!(is_api("/api/x"));
-        assert!(!is_api("/apiary"));
+        assert_eq!(after_prefix("/api/x", API_PREFIX), Some("/x"));
+        assert_eq!(after_prefix("/apiary", API_PREFIX), None);
     }
 }
