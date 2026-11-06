@@ -4,9 +4,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use doxa::ui::block_navigation;
 use doxa::ui::dom::MemDom;
 use doxa::ui::prelude::*;
+use doxa::ui::NavigationGuard;
 
 fn mount(router: Router) -> MemDom {
     let dom = MemDom::new();
@@ -165,12 +165,15 @@ fn set_query_edits_the_current_url() {
 #[page("/editor")]
 fn EditorPage() -> View {
     let dirty = state(true);
-    block_navigation(dirty.get(), "Discard unsaved changes?");
-    view! { <button on:click={move |_| dirty.set(false)}>"save"</button> }
+    view! {
+        <NavigationGuard when={dirty.get()} message="Discard unsaved changes?">
+            <button on:click={move |_| dirty.set(false)}>"save"</button>
+        </NavigationGuard>
+    }
 }
 
 #[test]
-fn block_navigation_asks_before_leaving() {
+fn a_guard_asks_before_leaving_and_shows_what_it_wraps() {
     let dom = mount(Router::new().page::<EditorPage>().page::<HomePage>());
     navigate(EditorPage::route());
     settle();
@@ -185,6 +188,101 @@ fn block_navigation_asks_before_leaving() {
     settle();
     assert_eq!(here(), "/home");
     assert!(dom.confirms().is_empty(), "nothing to ask once saved");
+}
+
+#[test]
+fn staying_on_the_path_never_asks() {
+    let dom = mount(Router::new().page::<EditorPage>());
+    navigate(EditorPage::route());
+    settle();
+    dom.answer_confirm(false);
+    set_query(|q| q.set("tab", "steps"));
+    settle();
+    assert_eq!(here(), "/editor?tab=steps");
+    navigate("/editor/?tab=history");
+    settle();
+    assert_eq!(here(), "/editor/?tab=history");
+    assert!(dom.confirms().is_empty());
+}
+
+#[test]
+fn a_page_with_no_guard_never_asks() {
+    let dom = mount(Router::new().page::<OrdersPage>().page::<HomePage>());
+    navigate("/orders");
+    settle();
+    dom.answer_confirm(false);
+    navigate(HomePage::route());
+    settle();
+    assert_eq!(here(), "/home");
+    assert!(dom.confirms().is_empty());
+}
+
+#[page("/scoped/{*rest}")]
+fn ScopedPage(rest: String) -> View {
+    let _ = rest;
+    view! {
+        <NavigationGuard when={true} message="Leave the editor?" scope="/scoped">
+            <p>"editing"</p>
+        </NavigationGuard>
+    }
+}
+
+#[test]
+fn a_scope_counts_everything_under_it_as_staying() {
+    let dom = mount(Router::new().page::<ScopedPage>().page::<HomePage>());
+    navigate("/scoped/a");
+    settle();
+    dom.answer_confirm(false);
+    navigate("/scoped/b/c");
+    settle();
+    assert_eq!(here(), "/scoped/b/c");
+    assert!(dom.confirms().is_empty());
+
+    navigate("/scoped-not");
+    settle();
+    assert_eq!(
+        here(),
+        "/scoped/b/c",
+        "a shared prefix is not under the scope"
+    );
+    assert_eq!(dom.confirms(), ["Leave the editor?"]);
+
+    navigate(HomePage::route());
+    settle();
+    assert_eq!(here(), "/scoped/b/c");
+    assert_eq!(dom.confirms(), ["Leave the editor?"]);
+}
+
+#[component]
+fn GuardedCard() -> View {
+    view! {
+        <NavigationGuard when={true} message="Discard the card?">
+            <p>"card"</p>
+        </NavigationGuard>
+    }
+}
+
+#[page("/cards")]
+fn CardsPage() -> View {
+    let open = state(true);
+    view! {
+        <button on:click={move |_| open.set(false)}>"close"</button>
+        {open.get().then(|| view! { <GuardedCard/> })}
+    }
+}
+
+#[test]
+fn a_guard_lasts_only_while_mounted() {
+    let dom = mount(Router::new().page::<CardsPage>().page::<HomePage>());
+    navigate(CardsPage::route());
+    settle();
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    dom.answer_confirm(false);
+    navigate(HomePage::route());
+    settle();
+    assert_eq!(here(), "/home");
+    assert!(dom.confirms().is_empty());
 }
 
 #[component]

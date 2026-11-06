@@ -469,7 +469,7 @@ struct NavCell {
     /// The first URL's guards haven't answered yet.
     starting: bool,
     readers: Readers,
-    blockers: Vec<(u64, &'static str)>,
+    blockers: Vec<Blocker>,
     next_blocker: u64,
 }
 
@@ -646,46 +646,197 @@ pub fn navigation() -> Navigation {
     })
 }
 
-/// While `when`, ask the user to confirm `message` before leaving: in-app, back/forward, or the tab.
-#[track_caller]
-pub fn block_navigation(when: bool, message: &'static str) {
-    crate::hooks::effect(
-        &(when, message),
-        async move |&(when, message): &(bool, &'static str)| {
-            if !when {
-                return Ok(());
-            }
-            let id = NAV.with(|n| {
-                let mut n = n.borrow_mut();
-                n.next_blocker += 1;
-                let id = n.next_blocker;
-                n.blockers.push((id, message));
-                id
-            });
-            let unload = runtime::dom().listen_global(
-                crate::dom::Global::Window,
-                "beforeunload",
-                crate::dom::Listen::default(),
-                Rc::new(|e: crate::Event| e.prevent_default()),
-            );
-            crate::browser::hold((Unblock(id), crate::browser::Registration(unload))).await
-        },
-    );
+/// While `when`, asks the user to confirm `message` before leaving what it wraps: in-app,
+/// back/forward, or the tab. Staying on the path, as a query change does, never asks.
+///
+/// ```ignore
+/// view! {
+///     <NavigationGuard when={form.dirty()} message="Discard your changes?">
+///         <Fields/>
+///     </NavigationGuard>
+/// }
+/// ```
+pub struct NavigationGuard;
+
+/// Props of [`NavigationGuard`].
+#[derive(Clone)]
+pub struct NavigationGuardProps {
+    when: bool,
+    message: String,
+    scope: Option<String>,
+    children: View,
+}
+
+required!(
+    NavigationGuard_needs_when,
+    "`<NavigationGuard>` is missing the `when` prop",
+    "add `when={{form.dirty()}}` to the tag"
+);
+
+required!(
+    NavigationGuard_needs_message,
+    "`<NavigationGuard>` is missing the `message` prop",
+    "add `message=\"…\"` to the tag"
+);
+
+/// Builds [`NavigationGuardProps`].
+pub struct NavigationGuardBuilder<W, M> {
+    when: bool,
+    message: String,
+    scope: Option<String>,
+    children: View,
+    _set: PhantomData<(W, M)>,
+}
+
+impl NavigationGuard {
+    /// Start building its props.
+    pub fn props() -> NavigationGuardBuilder<Unset, Unset> {
+        NavigationGuardBuilder {
+            when: false,
+            message: String::new(),
+            scope: None,
+            children: View::empty(),
+            _set: PhantomData,
+        }
+    }
+}
+
+impl<W, M> NavigationGuardBuilder<W, M> {
+    /// Whether there is anything to lose by leaving.
+    pub fn when(self, when: bool) -> NavigationGuardBuilder<Set, M> {
+        NavigationGuardBuilder {
+            when,
+            message: self.message,
+            scope: self.scope,
+            children: self.children,
+            _set: PhantomData,
+        }
+    }
+
+    /// What to ask.
+    pub fn message(self, message: impl Into<String>) -> NavigationGuardBuilder<W, Set> {
+        NavigationGuardBuilder {
+            when: self.when,
+            message: message.into(),
+            scope: self.scope,
+            children: self.children,
+            _set: PhantomData,
+        }
+    }
+
+    /// A path that also counts as staying, with everything under it; by default only the
+    /// current path does.
+    pub fn scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+
+    /// What it guards.
+    pub fn children(mut self, children: View) -> Self {
+        self.children = children;
+        self
+    }
+}
+
+impl<W, M> NavigationGuardBuilder<W, M> {
+    /// Finish; every required prop must be given.
+    pub fn build(self) -> NavigationGuardProps
+    where
+        W: NavigationGuard_needs_when,
+        M: NavigationGuard_needs_message,
+    {
+        NavigationGuardProps {
+            when: self.when,
+            message: self.message,
+            scope: self.scope,
+            children: self.children,
+        }
+    }
+}
+
+impl crate::component::ComponentProps for NavigationGuardProps {
+    type Of = NavigationGuard;
+}
+
+impl Component for NavigationGuard {
+    type Props = NavigationGuardProps;
+    const NAME: &'static str = "NavigationGuard";
+
+    fn render(props: NavigationGuardProps) -> RenderFuture {
+        crate::hooks::effect(
+            &(props.when, props.message, props.scope),
+            async move |(when, message, scope): &(bool, String, Option<String>)| {
+                if !when {
+                    return Ok(());
+                }
+                let id = NAV.with(|n| {
+                    let mut n = n.borrow_mut();
+                    n.next_blocker += 1;
+                    let id = n.next_blocker;
+                    n.blockers.push(Blocker {
+                        id,
+                        message: message.clone(),
+                        scope: scope.clone(),
+                    });
+                    id
+                });
+                let unload = runtime::dom().listen_global(
+                    crate::dom::Global::Window,
+                    "beforeunload",
+                    crate::dom::Listen::default(),
+                    Rc::new(|e: crate::Event| e.prevent_default()),
+                );
+                crate::browser::hold((Unblock(id), crate::browser::Registration(unload))).await
+            },
+        );
+        RenderFuture::ready(Ok(props.children))
+    }
+}
+
+struct Blocker {
+    id: u64,
+    message: String,
+    scope: Option<String>,
 }
 
 struct Unblock(u64);
 
 impl Drop for Unblock {
     fn drop(&mut self) {
-        let _ = NAV.try_with(|n| n.borrow_mut().blockers.retain(|(id, _)| *id != self.0));
+        let _ = NAV.try_with(|n| n.borrow_mut().blockers.retain(|b| b.id != self.0));
     }
 }
 
-/// Whether leaving is allowed, asking the latest blocker if there is one.
-fn allowed() -> bool {
-    match NAV.with(|n| n.borrow().blockers.last().map(|(_, m)| *m)) {
+fn path_of(url: &str) -> &str {
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/')
+}
+
+/// Whether going from `here` to `to` leaves what a guard with `scope` protects.
+fn leaves(here: &str, to: &str, scope: Option<&str>) -> bool {
+    let to = path_of(to);
+    match scope.map(|scope| scope.trim_end_matches('/')) {
+        None => to != path_of(here),
+        Some(scope) => to != scope && !to.strip_prefix(scope).is_some_and(|r| r.starts_with('/')),
+    }
+}
+
+/// Whether going to `to` is allowed, asking the latest guard it would leave, if any.
+fn allowed(to: &str) -> bool {
+    let here = current_url();
+    let message = NAV.with(|n| {
+        n.borrow()
+            .blockers
+            .iter()
+            .rev()
+            .find(|b| leaves(&here, to, b.scope.as_deref()))
+            .map(|b| b.message.clone())
+    });
+    match message {
         None => true,
-        Some(message) => runtime::try_dom().is_none_or(|d| d.confirm(message)),
+        Some(message) => runtime::try_dom().is_none_or(|d| d.confirm(&message)),
     }
 }
 
@@ -810,10 +961,11 @@ pub fn navigate(to: impl Into<Route>) {
     navigate_with(to, Nav::push());
 }
 
-/// Go to `to`, e.g. with `Nav::replace()`; a [`block_navigation`] may refuse.
+/// Go to `to`, e.g. with `Nav::replace()`; a [`NavigationGuard`] may refuse.
 pub fn navigate_with(to: impl Into<Route>, nav: Nav) {
-    if allowed() {
-        go(to.into().0, nav, Origin::App);
+    let to = to.into().0;
+    if allowed(&to) {
+        go(to, nav, Origin::App);
     }
 }
 
@@ -883,7 +1035,7 @@ mod web {
             let _ = js_sys::Reflect::set(&h, &"scrollRestoration".into(), &"manual".into());
         }
         let cb = Closure::<dyn Fn(web_sys::PopStateEvent)>::new(|e: web_sys::PopStateEvent| {
-            if !super::allowed() {
+            if !super::allowed(&current()) {
                 // Undo the move by putting the page we stayed on back on top.
                 write(&super::current_url(), false);
                 return;
