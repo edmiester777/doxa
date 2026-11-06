@@ -48,6 +48,16 @@ pub(crate) struct MountedElement {
     kinds: Vec<std::any::TypeId>,
 }
 
+impl MountedElement {
+    /// Must precede `dom.remove`: a browser fires `blur` from inside `removeChild`, when the
+    /// component owning the handler may already be dead.
+    fn silence(&self) {
+        for (.., handler) in &self.events {
+            *handler.borrow_mut() = Rc::new(|_| {});
+        }
+    }
+}
+
 impl Mounted {
     fn key(&self) -> Option<Key> {
         match self {
@@ -643,6 +653,7 @@ fn unmount(dom: &dyn Dom, parent: NodeId, m: Mounted, hold: bool) {
     match m {
         Mounted::Anchor(n) | Mounted::Text { node: n, .. } => dom.remove(n),
         Mounted::Element(e) => {
+            e.silence();
             let node = NodeRef(e.node);
             let leaving: Vec<_> = if hold {
                 e.directives
@@ -720,6 +731,7 @@ fn kill_children(dom: &dyn Dom, children: &[Mounted]) {
     for c in children {
         match c {
             Mounted::Element(e) => {
+                e.silence();
                 let node = NodeRef(e.node);
                 e.directives
                     .iter()

@@ -60,6 +60,7 @@ pub struct MemDom {
     next: Rc<RefCell<NodeId>>,
     world: Rc<RefCell<World>>,
     ops: Rc<Cell<usize>>,
+    focused: Rc<Cell<Option<NodeId>>>,
 }
 
 impl MemDom {
@@ -342,6 +343,25 @@ impl MemDom {
         !prevented.get()
     }
 
+    /// Give `node` focus, with no events. Removing it or an ancestor then fires its `blur`.
+    pub fn focus(&self, node: NodeId) {
+        self.focused.set(Some(node));
+    }
+
+    /// The focused node, if it is `node` or inside it.
+    fn focus_within(&self, node: NodeId) -> Option<NodeId> {
+        let focused = self.focused.get()?;
+        let nodes = self.nodes.borrow();
+        let mut at = Some(focused);
+        while let Some(n) = at {
+            if n == node {
+                return Some(focused);
+            }
+            at = nodes.get(&n)?.parent;
+        }
+        None
+    }
+
     /// Click `node` with the primary button; false if the default was prevented.
     pub fn click(&self, node: NodeId) -> bool {
         self.dispatch(node, "click", MemEvent::default())
@@ -564,6 +584,11 @@ impl Dom for MemDom {
 
     fn remove(&self, node: NodeId) {
         self.ops.set(self.ops.get() + 1);
+        // A browser fires this synchronously, from inside `removeChild`.
+        if let Some(focused) = self.focus_within(node) {
+            self.focused.set(None);
+            self.dispatch(focused, "blur", MemEvent::default());
+        }
         self.detach(node);
         let mut stack = vec![node];
         let mut nodes = self.nodes.borrow_mut();

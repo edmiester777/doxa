@@ -1,6 +1,6 @@
 //! `form()` against a `MemDom`, and `Valid<Json<T>>` answering `422`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use doxa::client::{Fetch, FieldError, FieldErrors, NoError};
@@ -51,6 +51,74 @@ fn NewOrderForm() -> View {
 
 fn settle() {
     doxa::client::task::run_until_stalled();
+}
+
+#[component]
+fn BoundName() -> View {
+    let form = form(NewOrder::default());
+    let f = form.fields();
+    view! { <input id="bound" bind:value={f.name}/> }
+}
+
+#[component]
+fn Remounting() -> View {
+    let generation = state(0u32);
+    view! {
+        <button id="remount" on:click={move |_| generation.update(|n| *n += 1)}>"Remount"</button>
+        <div>
+            <BoundName key={generation.get()}/>
+        </div>
+    }
+}
+
+#[test]
+fn a_focused_bound_input_can_unmount_with_its_form() {
+    let dom = MemDom::new();
+    App::new(|| view! { <Remounting/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    settle();
+    let before = dom.find("id", "bound").unwrap();
+    dom.focus(before);
+
+    dom.click(dom.find("id", "remount").unwrap());
+    settle();
+
+    assert_ne!(dom.find("id", "bound"), Some(before), "the form remounted");
+}
+
+#[component]
+fn Removable(blurs: Rc<Cell<u32>>) -> View {
+    let shown = state(true);
+    let input = shown.get().then(|| {
+        view! { <input id="removable" on:blur={move |_| blurs.set(blurs.get() + 1)}/> }
+    });
+    view! {
+        <button id="hide" on:click={move |_| shown.set(false)}>"Hide"</button>
+        <div>{input}</div>
+    }
+}
+
+#[test]
+fn removing_a_focused_element_runs_none_of_its_handlers() {
+    let dom = MemDom::new();
+    let blurs = Rc::new(Cell::new(0));
+    let counted = blurs.clone();
+    App::new(move || view! { <Removable blurs={counted.clone()}/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    settle();
+    let input = dom.find("id", "removable").unwrap();
+
+    dom.dispatch(input, "blur", MemEvent::default());
+    assert_eq!(blurs.get(), 1, "a live element hears its blur");
+
+    dom.focus(input);
+    dom.click(dom.find("id", "hide").unwrap());
+    settle();
+
+    assert_eq!(dom.find("id", "removable"), None);
+    assert_eq!(blurs.get(), 1, "removal is not the user leaving the field");
 }
 
 #[test]
