@@ -87,6 +87,8 @@ const LOCKFILES: [&str; 4] = [
     "bun.lockb",
 ];
 
+const APPLIED_PATCHES: &str = ".doxa-patches";
+
 impl Source {
     /// The app's `package.json` beside the web crate or at the workspace root, which must list
     /// everything `needed` names; or else `needed`, the graph's merged
@@ -182,11 +184,14 @@ pub fn install(source: &Source, locked: bool) -> Result<()> {
     let manager = Manager::detect(dir);
     let stamp_path = dir.join("node_modules").join(".doxa-stamp");
     if std::fs::read_to_string(&stamp_path).ok() != Some(stamp(dir)) {
+        clear_if_patches_changed(dir)?;
         let mut cmd = Command::new(manager.program());
         cmd.args(manager.install_args(frozen)).current_dir(dir);
         run(manager.program(), &mut cmd, manager.fix())?;
         // Taken after the install, which may have written the lockfile.
         std::fs::write(&stamp_path, stamp(dir)).at(&stamp_path)?;
+        let applied = dir.join("node_modules").join(APPLIED_PATCHES);
+        std::fs::write(&applied, patches_hash(dir)).at(&applied)?;
     }
     if let (Some(lock_dir), false) = (lock_dir, frozen) {
         copy_lockfiles(dir, lock_dir)?;
@@ -219,7 +224,46 @@ fn stamp(dir: &Path) -> String {
             hash.update(&bytes);
         }
     }
+    hash.update(patches_hash(dir));
     hex::encode(hash.finalize())
+}
+
+/// Remove `node_modules` when `patches/` differs from what it was installed with: an edited patch
+/// can't apply over a package already patched.
+fn clear_if_patches_changed(dir: &Path) -> Result<()> {
+    let modules = dir.join("node_modules");
+    let applied = std::fs::read_to_string(modules.join(APPLIED_PATCHES)).unwrap_or_default();
+    if applied != patches_hash(dir) && modules.is_dir() {
+        std::fs::remove_dir_all(&modules).at(&modules)?;
+    }
+    Ok(())
+}
+
+/// A hash of every file under `dir/patches`; empty when there are none.
+fn patches_hash(dir: &Path) -> String {
+    let mut files = Vec::new();
+    collect_files(&dir.join("patches"), &mut files);
+    if files.is_empty() {
+        return String::new();
+    }
+    files.sort();
+    let mut hash = Sha256::new();
+    for file in files {
+        hash.update(file.to_string_lossy().as_bytes());
+        hash.update(std::fs::read(&file).unwrap_or_default());
+    }
+    hex::encode(hash.finalize())
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +326,36 @@ mod tests {
             "{\"v\":2}",
             "an install's lockfile goes back to be committed"
         );
+    }
+
+    #[test]
+    fn an_edited_patch_forces_a_clean_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, modules) = (dir.path(), dir.path().join("node_modules"));
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join("kept"), "").unwrap();
+
+        clear_if_patches_changed(root).unwrap();
+        assert!(
+            modules.join("kept").exists(),
+            "no patches, nothing to clear"
+        );
+
+        let before = stamp(root);
+        std::fs::create_dir_all(root.join("patches")).unwrap();
+        std::fs::write(root.join("patches/a+1.0.0.patch"), "one").unwrap();
+        assert_ne!(stamp(root), before, "a new patch reinstalls");
+        clear_if_patches_changed(root).unwrap();
+        assert!(!modules.exists(), "installed without that patch");
+
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join(APPLIED_PATCHES), patches_hash(root)).unwrap();
+        clear_if_patches_changed(root).unwrap();
+        assert!(modules.exists(), "installed with this patch");
+
+        std::fs::write(root.join("patches/a+1.0.0.patch"), "two").unwrap();
+        clear_if_patches_changed(root).unwrap();
+        assert!(!modules.exists(), "installed with an older patch");
     }
 
     #[test]
