@@ -114,8 +114,138 @@ impl Bundler for Esbuild {
             "check the import named above; npm packages belong in [package.metadata.doxa.npm]",
         )?;
         let json = std::fs::read_to_string(&metafile).at(&metafile)?;
-        parse_metafile(&json).map_err(|detail| Error::tool("esbuild", &cmd, detail, "upgrade doxa"))
+        let mut output = parse_metafile(&json)
+            .map_err(|detail| Error::tool("esbuild", &cmd, detail, "upgrade doxa"))?;
+        ship_npm_assets(&json, req.out_dir, &mut output)?;
+        Ok(output)
     }
+}
+
+/// esbuild leaves `new URL("x", import.meta.url)` alone, so a file an npm module loads that way
+/// would never reach the output: copy it, content-hashed, and point the URL at the copy.
+pub fn ship_npm_assets(metafile: &str, out_dir: &Path, output: &mut BundleOutput) -> Result<()> {
+    let meta: Metafile = serde_json::from_str(metafile)
+        .map_err(|e| Error::config(format!("bad metafile: {e}"), "upgrade doxa"))?;
+    for (file, chunk) in &meta.outputs {
+        let modules: Vec<PathBuf> = chunk
+            .inputs
+            .keys()
+            .filter(|input| input.contains("node_modules/"))
+            .filter_map(|input| Some(out_dir.join(input).parent()?.to_owned()))
+            .collect();
+        if modules.is_empty() || !file.ends_with(".js") {
+            continue;
+        }
+        let path = out_dir.join(file);
+        let js = std::fs::read_to_string(&path).at(&path)?;
+        let up = "../".repeat(file.trim_start_matches("./").matches('/').count());
+        let mut failed = Ok(());
+        let rewritten = rewrite_asset_urls(&js, |url| {
+            let found = match asset_beside(&modules, url) {
+                Ok(found) => found?,
+                Err(error) => {
+                    failed = Err(error);
+                    return None;
+                }
+            };
+            let name = Path::new(url).file_name()?.to_string_lossy().into_owned();
+            let shipped = format!("assets/{}", crate::dist::hashed_name(&name, &found));
+            let target = out_dir.join(&shipped);
+            if let Err(error) = write_asset(&target, &found) {
+                failed = Err(error);
+                return None;
+            }
+            if !output.files.contains(&shipped) {
+                output.files.push(shipped.clone());
+            }
+            Some(if up.is_empty() {
+                format!("./{shipped}")
+            } else {
+                format!("{up}{shipped}")
+            })
+        });
+        failed?;
+        if rewritten != js {
+            std::fs::write(&path, rewritten).at(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_asset(target: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).at(dir)?;
+    }
+    std::fs::write(target, bytes).at(target)
+}
+
+/// The file `url` names beside one of `modules`; a chunk doesn't record which module held the URL,
+/// so different files under one name can't be told apart and fail the build.
+fn asset_beside(modules: &[PathBuf], url: &str) -> Result<Option<Vec<u8>>> {
+    if url.contains(':') || url.starts_with('/') {
+        return Ok(None);
+    }
+    let mut found: Option<(PathBuf, Vec<u8>)> = None;
+    for dir in modules {
+        let path = dir.join(url);
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).at(&path)?;
+        match &found {
+            Some((first, seen)) if *seen != bytes => {
+                return Err(Error::config(
+                    format!(
+                        "`{url}` is two different files in one chunk: {} and {}",
+                        first.display(),
+                        path.display()
+                    ),
+                    "load one of the packages from its own lazy module, so they split apart",
+                ));
+            }
+            Some(_) => {}
+            None => found = Some((path, bytes)),
+        }
+    }
+    Ok(found.map(|(_, bytes)| bytes))
+}
+
+/// Replace the literal in each `new URL("…", import.meta.url)` that `f` answers for.
+fn rewrite_asset_urls(js: &str, mut f: impl FnMut(&str) -> Option<String>) -> String {
+    const OPEN: &str = "new URL(";
+    let mut out = String::with_capacity(js.len());
+    let mut rest = js;
+    while let Some(at) = rest.find(OPEN) {
+        let start = at + OPEN.len();
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let Some((url, after)) = literal_then_meta_url(rest) else {
+            continue;
+        };
+        let Some(next) = f(url) else {
+            continue;
+        };
+        out.push_str(&format!("\"{next}\""));
+        rest = &rest[rest.len() - after.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The string literal opening `js`, and what follows it, when `, import.meta.url)` comes next.
+fn literal_then_meta_url(js: &str) -> Option<(&str, &str)> {
+    let quote = js
+        .chars()
+        .next()
+        .filter(|q| matches!(q, '"' | '\'' | '`'))?;
+    let body = &js[1..];
+    let url = &body[..body.find(quote)?];
+    let after = &body[url.len() + 1..];
+    let meta = after.trim_start().strip_prefix(',')?.trim_start();
+    meta.strip_prefix("import.meta.url")?
+        .trim_start()
+        .starts_with(')')
+        .then_some((url, after))
 }
 
 #[derive(Deserialize)]
@@ -130,6 +260,8 @@ struct MetaOutput {
     imports: Vec<MetaImport>,
     entry_point: Option<String>,
     css_bundle: Option<String>,
+    #[serde(default)]
+    inputs: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -553,6 +685,77 @@ mod tests {
         assert_eq!(out.chunks, ["chunks/chunk-AAAA.js", "chunks/chunk-BBBB.js"]);
         assert_eq!(out.css.as_deref(), Some("app.css"));
         assert_eq!(out.files.len(), 5);
+    }
+
+    fn bundled(js: &str, pkg_files: &[(&str, &[u8])]) -> (tempfile::TempDir, String) {
+        let root = tempfile::tempdir().unwrap();
+        let pkg = root.path().join("node_modules/pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::create_dir_all(root.path().join("out/chunks")).unwrap();
+        for (name, bytes) in pkg_files {
+            std::fs::write(pkg.join(name), bytes).unwrap();
+        }
+        std::fs::write(root.path().join("out/chunks/c.js"), js).unwrap();
+        let meta = r#"{"outputs": {"chunks/c.js": {"imports": [], "exports": [],
+            "inputs": {"../node_modules/pkg/index.js": {"bytesInOutput": 1}}}}}"#;
+        (root, meta.to_owned())
+    }
+
+    #[test]
+    fn a_file_an_npm_module_loads_by_url_ships_with_the_bundle() {
+        let js = r#"let u = new URL("pkg_bg.wasm", import.meta.url);"#;
+        let (root, meta) = bundled(js, &[("pkg_bg.wasm", b"binary")]);
+        let out_dir = root.path().join("out");
+        let mut output = BundleOutput::default();
+        ship_npm_assets(&meta, &out_dir, &mut output).unwrap();
+
+        let name = crate::dist::hashed_name("pkg_bg.wasm", b"binary");
+        let shipped = format!("assets/{name}");
+        assert_eq!(output.files, std::slice::from_ref(&shipped));
+        assert_eq!(std::fs::read(out_dir.join(&shipped)).unwrap(), b"binary");
+        let chunk = std::fs::read_to_string(out_dir.join("chunks/c.js")).unwrap();
+        assert_eq!(
+            chunk,
+            format!(r#"let u = new URL("../{shipped}", import.meta.url);"#)
+        );
+    }
+
+    #[test]
+    fn a_url_naming_no_file_beside_the_module_is_left_alone() {
+        let js = r#"new URL("./services.json",import.meta.url);new URL("https://a.b/c",import.meta.url);new URL("x.wasm",base);"#;
+        let (root, meta) = bundled(js, &[("x.wasm", b"binary")]);
+        let out_dir = root.path().join("out");
+        let mut output = BundleOutput::default();
+        ship_npm_assets(&meta, &out_dir, &mut output).unwrap();
+        assert!(output.files.is_empty());
+        let chunk = std::fs::read_to_string(out_dir.join("chunks/c.js")).unwrap();
+        assert_eq!(chunk, js);
+    }
+
+    #[test]
+    fn a_chunk_with_no_npm_module_is_not_touched() {
+        let js = r#"new URL("local.wasm",import.meta.url);"#;
+        let (root, _) = bundled(js, &[]);
+        let out_dir = root.path().join("out");
+        std::fs::write(out_dir.join("chunks/local.wasm"), b"binary").unwrap();
+        let meta = r#"{"outputs": {"chunks/c.js": {"inputs": {"../ts/own.js": {}}}}}"#;
+        let mut output = BundleOutput::default();
+        ship_npm_assets(meta, &out_dir, &mut output).unwrap();
+        assert!(output.files.is_empty());
+    }
+
+    #[test]
+    fn one_name_for_two_different_files_fails_the_build() {
+        let js = r#"new URL("bg.wasm",import.meta.url);"#;
+        let (root, _) = bundled(js, &[("bg.wasm", b"one")]);
+        let other = root.path().join("node_modules/other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("bg.wasm"), b"two").unwrap();
+        let meta = r#"{"outputs": {"chunks/c.js": {"inputs": {
+            "../node_modules/pkg/index.js": {}, "../node_modules/other/index.js": {}}}}}"#;
+        let mut output = BundleOutput::default();
+        let error = ship_npm_assets(meta, &root.path().join("out"), &mut output).unwrap_err();
+        assert!(error.to_string().contains("two different files"), "{error}");
     }
 
     #[test]

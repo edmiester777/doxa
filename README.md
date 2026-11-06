@@ -938,7 +938,7 @@ extern "js" {
 }
 ```
 
-Arguments and returns cross through serde (feature `npm`); JS types declared with `type X;` and `JsValue` pass through untouched, and a `Promise` becomes a future.
+Arguments and returns cross through serde (feature `npm`); JS types declared with `type X;` and `JsValue` pass through untouched, and a `Promise` becomes a future. A file an npm module loads with `new URL("x.wasm", import.meta.url)` ships with the bundle on its own.
 
 A web crate whose APIs run elsewhere names them instead of a `server`, and `doxa dev` forwards each prefix, streams and upgrades included. `env` names a variable that overrides `to`, and `strip` leaves the prefix off the forwarded path:
 
