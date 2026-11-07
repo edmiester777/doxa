@@ -1,0 +1,21 @@
+[package]
+name = "doxa-wasm-split"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+authors = ["Jonathan Kelley", "edmiester777"]
+homepage.workspace = true
+rust-version.workspace = true
+description = "wasm-split-cli 0.7.0 from Dioxus, with its main module keeping everything it still uses."
+keywords = ["doxa", "wasm", "split"]
+categories = ["development-tools::build-utils", "wasm"]
+
+[dependencies]
+anyhow = "1.0.98"
+id-arena = "2.2.1"
+itertools = "0.14.0"
+rayon = "1.10.0"
+tracing = "0.1.41"
+walrus = { version = "=0.23.3", features = ["parallel"] }
+wasmparser = "0.235.0"

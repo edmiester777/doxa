@@ -16,7 +16,7 @@ default = ["pipeline"]
 # `doxa build`: wasm, bindings, the JS bundle, CSS and a hashed dist.
 pipeline = [
     "dep:sha2", "dep:hex", "dep:reqwest", "dep:base64", "dep:toml", "dep:tar", "dep:flate2",
-    "dep:brotli", "dep:lightningcss", "dep:wasm-bindgen-cli-support", "dep:wasm-split-cli",
+    "dep:brotli", "dep:lightningcss", "dep:wasm-bindgen-cli-support", "dep:doxa-wasm-split",
     "dep:anyhow", "dep:walrus", "dep:wasmparser", "dep:ar", "dep:subsecond-types",
 ]
 # `ClientSpec`: a client crate generated from a server's OpenAPI document, in its `build.rs`.
@@ -38,9 +38,9 @@ lightningcss = { version = "1.0.0-alpha.68", default-features = false, features 
 # Must equal the `wasm-bindgen` in the app's Cargo.lock; see `bindgen::WASM_BINDGEN_VERSION`.
 wasm-bindgen-cli-support = { version = "=0.2.117", optional = true }
 # Its walrus differs from wasm-bindgen's; they only exchange bytes.
-wasm-split-cli = { version = "=0.7.0", optional = true }
+doxa-wasm-split = { path = "../doxa-wasm-split", version = "0.1.6", optional = true }
 anyhow = { version = "1", optional = true }
-# Hot-patching: the walrus wasm-split-cli already uses, and subsecond's jump table.
+# Hot-patching: the walrus doxa-wasm-split already uses, and subsecond's jump table.
 walrus = { version = "=0.23.3", optional = true }
 wasmparser = { version = "0.214", optional = true }
 ar = { version = "0.9", optional = true }

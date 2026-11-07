@@ -109,7 +109,7 @@ pub fn split(original: &[u8], bindgened: &[u8]) -> Result<Split> {
             "check the web crate links with `-C link-arg=--emit-relocs` and keeps its symbol names"
                 .into(),
     };
-    let out = wasm_split_cli::Splitter::new(original, bindgened)
+    let out = doxa_wasm_split::Splitter::new(original, bindgened)
         .and_then(|s| s.emit())
         .map_err(tool)?;
     let chunks = out
@@ -149,7 +149,7 @@ pub fn split(original: &[u8], bindgened: &[u8]) -> Result<Split> {
 
 /// `__wasm_split.js`: wasm-split's loader, with one export per part fetching its hashed file.
 pub fn loader_js(split: &Split, hashed: impl Fn(&Part) -> String) -> String {
-    let mut js = wasm_split_cli::MAKE_LOAD_JS.to_owned();
+    let mut js = doxa_wasm_split::MAKE_LOAD_JS.to_owned();
     for part in split.chunks.iter().chain(&split.modules) {
         let url = serde_json::to_string(&format!("./{}", hashed(part))).expect("json");
         let needs: Vec<_> = part

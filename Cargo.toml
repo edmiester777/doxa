@@ -16,6 +16,7 @@ members = [
     "crates/doxa-ui-macros",
     "crates/doxa-tailwind",
     "crates/doxa-build",
+    "crates/doxa-wasm-split",
     "crates/doxa-cli",
     "examples/widgets/api",
     "examples/widgets/client",
