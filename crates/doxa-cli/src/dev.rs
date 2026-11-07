@@ -1,5 +1,5 @@
-//! `doxa dev`: build once, run the server and any configured upstreams behind a reloading
-//! proxy, and rebuild only what a change touches.
+//! `doxa dev` and `doxa gallery`: build once, serve behind a reloading proxy, and rebuild only
+//! what a change touches. `doxa dev` also runs the server and any configured upstreams.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -16,6 +16,7 @@ use axum::routing::get;
 use axum::Router;
 use doxa_build::config::{Upstream, WebCrate, Workspace};
 use doxa_build::dist::Dist;
+use doxa_build::hot::Patched;
 use doxa_build::pipeline::note;
 use doxa_build::{BuildOptions, Pipeline};
 use notify_debouncer_mini::notify::RecursiveMode;
@@ -266,22 +267,45 @@ pub async fn run(
     locked: bool,
     hot: bool,
 ) -> Result<(), DynError> {
-    let cwd = std::env::current_dir()?;
     let opts = BuildOptions {
         package,
         locked,
         hot,
         ..BuildOptions::default()
     };
+    serve(opts, port).await
+}
+
+/// Run `doxa gallery` until interrupted. Stories have no API to reach, so nothing is proxied.
+pub async fn gallery(package: Option<String>, port: u16, locked: bool) -> Result<(), DynError> {
+    let opts = BuildOptions {
+        package,
+        locked,
+        hot: true,
+        gallery: true,
+        ..BuildOptions::default()
+    };
+    serve(opts, port).await
+}
+
+async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
+    let cwd = std::env::current_dir()?;
+    let (hot, gallery) = (opts.hot, opts.gallery);
     let pipeline = tokio::task::spawn_blocking(move || -> doxa_build::Result<Pipeline> {
         let mut p = Pipeline::new(&cwd, opts)?;
         p.build()?;
         Ok(p)
     })
     .await??;
-    let routes = routes(&pipeline.web.config.proxy, |name| std::env::var(name).ok())?;
-    let server_pkg = pipeline.web.config.server.clone();
-    if server_pkg.is_none() && routes.is_empty() {
+    let (routes, server_pkg) = if gallery {
+        (Vec::new(), None)
+    } else {
+        (
+            routes(&pipeline.web.config.proxy, |name| std::env::var(name).ok())?,
+            pipeline.web.config.server.clone(),
+        )
+    };
+    if !gallery && server_pkg.is_none() && routes.is_empty() {
         return Err("nothing to serve the API\n  fix: set server = \"<server package>\" or add a [package.metadata.doxa.proxy] table to the web crate".into());
     }
     let dist = canonical(&pipeline.dist_dir());
@@ -355,12 +379,13 @@ pub async fn run(
         if hot && plan.patch && !plan.bundle && !plan.css && !plan.server {
             let p = pipeline.clone();
             match tokio::task::spawn_blocking(move || p.lock().expect("pipeline").patch()).await? {
-                Ok(Some(table)) => {
+                Ok(Patched::Table(table)) => {
                     *proxy.latest_patch.lock().expect("patch") = Some(table.clone());
                     let _ = reload.send(Reload::Patch(table));
                     continue;
                 }
-                Ok(None) => continue,
+                Ok(Patched::NotCompiled) => continue,
+                Ok(Patched::NeedsRebuild(why)) => note(format!("{why}; rebuilding")),
                 Err(e) => {
                     eprintln!("error: {e}");
                     note("rebuilding instead");

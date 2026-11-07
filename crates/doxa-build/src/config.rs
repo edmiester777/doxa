@@ -290,8 +290,10 @@ impl Workspace {
 
     /// Where doxa keeps its outputs.
     pub fn layout(&self) -> Layout {
+        let root = self.target_directory.join("doxa");
         Layout {
-            root: self.target_directory.join("doxa"),
+            work: root.clone(),
+            root,
         }
     }
 }
@@ -301,12 +303,19 @@ impl Workspace {
 pub struct Layout {
     /// `target/doxa`.
     pub root: PathBuf,
+    /// Holds a build's wasm target and stage.
+    pub work: PathBuf,
 }
 
 impl Layout {
+    /// This layout with its own wasm target and stage, so its build can run beside another's.
+    pub fn apart(mut self, name: &str) -> Self {
+        self.work = self.root.join(name);
+        self
+    }
     /// `CARGO_TARGET_DIR` for the wasm build, apart from the server's.
     pub fn wasm_target(&self) -> PathBuf {
-        self.root.join("wasm")
+        self.work.join("wasm")
     }
     /// Where synced npm dependencies are installed.
     pub fn js(&self) -> PathBuf {
@@ -314,7 +323,7 @@ impl Layout {
     }
     /// Intermediate outputs.
     pub fn stage(&self) -> PathBuf {
-        self.root.join("stage")
+        self.work.join("stage")
     }
     /// The served output.
     pub fn dist(&self) -> PathBuf {

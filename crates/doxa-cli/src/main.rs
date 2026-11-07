@@ -2,7 +2,6 @@
 
 mod check;
 mod dev;
-mod gallery;
 mod new;
 
 use std::process::ExitCode;
@@ -58,7 +57,7 @@ enum Command {
         #[arg(long)]
         no_hot: bool,
     },
-    /// Build the `#[story]` functions into a gallery and serve it.
+    /// Build the `#[story]` functions into a gallery, serve it, and patch in each change.
     Gallery {
         /// The web crate; defaults to the one with role = "client".
         #[arg(short, long)]
@@ -124,7 +123,7 @@ fn main() -> ExitCode {
             locked,
         } => tokio::runtime::Runtime::new()
             .map_err(Into::into)
-            .and_then(|rt| rt.block_on(gallery::run(package, port, locked))),
+            .and_then(|rt| rt.block_on(dev::gallery(package, port, locked))),
         Command::Check { package, .. } => check::wire(&package),
         Command::Fmt { args } => return doxa_fmt::run(args),
     };

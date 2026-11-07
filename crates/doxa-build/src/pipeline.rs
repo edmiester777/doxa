@@ -11,6 +11,7 @@ use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
 use crate::error::{run, Error, IoContext, Result};
 use crate::graph::Graph;
+use crate::hot::Patched;
 use crate::{bindgen, css, hot, npm, split};
 
 /// How to build.
@@ -66,6 +67,11 @@ impl Pipeline {
         let workspace = Workspace::load(cwd)?;
         let web = workspace.web_crate(opts.package.as_deref())?;
         let layout = workspace.layout();
+        let layout = if opts.gallery {
+            layout.apart("gallery-build")
+        } else {
+            layout
+        };
         let graph = Graph::load(cwd, &web.name)?;
         let needed = graph.npm(&web.name, &web.config.npm)?;
         let npm = npm::Source::for_app(&web, &workspace.workspace_root, &layout, &needed)?;
@@ -267,9 +273,8 @@ impl Pipeline {
     }
 
     /// Recompile only the web crate and link it as a patch of the hot base into
-    /// [`patch_dir`](Self::patch_dir). Returns the jump table the page applies, as JSON, or
-    /// `None` when the crate didn't compile.
-    pub fn patch(&mut self) -> Result<Option<String>> {
+    /// [`patch_dir`](Self::patch_dir).
+    pub fn patch(&mut self) -> Result<Patched> {
         let dir = self.patch_dir();
         let base = self.hot.as_mut().ok_or_else(|| {
             Error::config("no hot-patchable base", "run a full build with hot on")

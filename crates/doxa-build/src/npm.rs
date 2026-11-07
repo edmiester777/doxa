@@ -375,6 +375,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout {
             root: dir.path().join("target/doxa"),
+            work: dir.path().join("target/doxa"),
         };
         let mut web = WebCrate {
             name: "web".into(),

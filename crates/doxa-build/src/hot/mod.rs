@@ -207,6 +207,28 @@ impl Records {
     }
 }
 
+/// What a patch attempt came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Patched {
+    /// The jump table the page applies, as JSON.
+    Table(String),
+    /// The crate didn't compile; its errors are on stderr.
+    NotCompiled,
+    /// The change needs what a patch can't carry, for the reason given.
+    NeedsRebuild(String),
+}
+
+/// The `#[story]` exports among a link's arguments, sorted.
+fn story_exports(link: &[String]) -> Vec<&str> {
+    let mut stories: Vec<&str> = link
+        .windows(2)
+        .filter(|pair| pair[0] == "--export" && pair[1].starts_with("__doxa_story_"))
+        .map(|pair| pair[1].as_str())
+        .collect();
+    stories.sort_unstable();
+    stories
+}
+
 /// A recorded base build, ready to patch.
 pub struct Base {
     rustc: Rustc,
@@ -224,9 +246,8 @@ impl Base {
         Ok(())
     }
 
-    /// Recompile the web crate, link a patch into `dir`, and return its jump table as JSON,
-    /// naming the patch by its path under `url`; `None` when it didn't compile.
-    pub(crate) fn patch(&mut self, dir: &Path, url: &str) -> Result<Option<String>> {
+    /// Recompile the web crate and link a patch into `dir`, naming it by its path under `url`.
+    pub(crate) fn patch(&mut self, dir: &Path, url: &str) -> Result<Patched> {
         let cache = self
             .cache
             .as_ref()
@@ -260,12 +281,18 @@ impl Base {
             .env(LINK_FILE, &thin)
             .current_dir(&self.rustc.cwd);
         if !compile(&mut cmd)? {
-            return Ok(None);
+            return Ok(Patched::NotCompiled);
         }
         if self.patches == 0 && dir.exists() {
             std::fs::remove_dir_all(dir).at(dir)?;
         }
         let thin_args = read_lines(&thin)?;
+        // A story is a wasm export the JS glue lists, and a patch can't change either.
+        if story_exports(&thin_args) != story_exports(&linker_args(&self.link)) {
+            return Ok(Patched::NeedsRebuild(
+                "the set of stories changed".to_owned(),
+            ));
+        }
         let mut objects: Vec<_> = thin_args
             .iter()
             .filter(|a| a.ends_with(".rcgu.o"))
@@ -314,7 +341,7 @@ impl Base {
         let (bytes, mut table) = wasm::jump_table(&bytes, cache).map_err(patch_error)?;
         std::fs::write(&out, bytes).at(&out)?;
         table.lib = PathBuf::from(format!("{url}/{name}"));
-        Ok(Some(serde_json::to_string(&table).expect("json")))
+        Ok(Patched::Table(serde_json::to_string(&table).expect("json")))
     }
 }
 
@@ -486,6 +513,31 @@ fn missing(path: &Path) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story_exports_ignore_other_exports_and_order() {
+        let link = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let base = link(&[
+            "--export",
+            "__doxa_story_b",
+            "--export",
+            "main",
+            "--export",
+            "__doxa_story_a",
+        ]);
+        let same = link(&["--export", "__doxa_story_a", "--export", "__doxa_story_b"]);
+        let added = link(&[
+            "--export",
+            "__doxa_story_a",
+            "--export",
+            "__doxa_story_b",
+            "--export",
+            "__doxa_story_c",
+        ]);
+        assert_eq!(story_exports(&base), story_exports(&same));
+        assert_ne!(story_exports(&base), story_exports(&added));
+        assert!(story_exports(&link(&["__doxa_story_a.o"])).is_empty());
+    }
 
     #[test]
     fn linker_args_drop_the_linker_flavor_and_output() {

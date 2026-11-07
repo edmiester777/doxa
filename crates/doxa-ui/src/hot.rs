@@ -14,7 +14,15 @@ pub(crate) fn render(f: fn(&Rc<dyn Any>) -> RenderFuture, props: &Rc<dyn Any>) -
     f(props)
 }
 
-/// Expose `globalThis.__doxa_hotpatch(jumpTable)` to `doxa dev`'s reload script, once.
+/// Call a story, through the latest patch of it if there is one.
+pub(crate) fn story<S>(f: fn() -> S) -> S {
+    #[cfg(all(target_arch = "wasm32", debug_assertions))]
+    return subsecond::HotFn::current(f).call(());
+    #[cfg(not(all(target_arch = "wasm32", debug_assertions)))]
+    f()
+}
+
+/// Expose `globalThis.__doxa_hotpatch(jumpTable)` to the dev reload script, once.
 pub(crate) fn install() {
     #[cfg(all(target_arch = "wasm32", debug_assertions))]
     web::install();
