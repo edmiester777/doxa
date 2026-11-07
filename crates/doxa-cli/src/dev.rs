@@ -544,7 +544,9 @@ async fn reload_events(State(p): State<Arc<Proxy>>) -> impl IntoResponse {
                     return Some((Ok(Event::default().event("patch").data(table)), (rx, None)))
                 }
                 Ok(Reload::Page) => {
-                    return Some((Ok(Event::default().event("reload").data("")), (rx, None)))
+                    // A browser discards an event whose data is empty.
+                    let event = Event::default().event("reload").data("page");
+                    return Some((Ok(event), (rx, None)));
                 }
                 Ok(Reload::Css(hrefs)) => {
                     let data = serde_json::to_string(&hrefs).expect("json");
@@ -1099,6 +1101,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_page_reload_event_carries_data_so_a_browser_dispatches_it() {
+        let (reload, _) = broadcast::channel(1);
+        let proxy = Arc::new(Proxy {
+            dist: PathBuf::from("/nonexistent"),
+            patches: PathBuf::from("/nonexistent"),
+            upstream: None,
+            routes: Vec::new(),
+            client: reqwest::Client::new(),
+            reload: reload.clone(),
+            latest_patch: Mutex::new(None),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route(RELOAD_PATH, get(reload_events))
+            .with_state(proxy);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let mut events = reqwest::get(format!("http://127.0.0.1:{port}{RELOAD_PATH}"))
+            .await
+            .unwrap();
+        reload.send(Reload::Page).unwrap();
+        let chunk = events.chunk().await.unwrap().unwrap();
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(text.contains("event: reload"), "{text}");
+        let data = text.lines().find_map(|l| l.strip_prefix("data:"));
+        assert!(data.is_some_and(|d| !d.trim().is_empty()), "{text}");
+    }
+
+    #[tokio::test]
+    async fn with_no_routes_a_navigation_gets_the_page_with_its_reload_script() {
+        let dist = tempfile::tempdir().unwrap();
+        let base = serverless(Vec::new(), dist.path()).await;
+        let page = reqwest::Client::new()
+            .get(format!("{base}/?story=a&theme=light"))
+            .header(header::ACCEPT, "text/html")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            page.contains("shell") && page.contains(RELOAD_PATH),
+            "{page}"
+        );
     }
 
     #[tokio::test]
