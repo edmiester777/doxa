@@ -1,6 +1,7 @@
 //! Hot-patching for `doxa dev`. A fat base build records the web crate's rustc and link
 //! commands; each patch reruns that rustc alone and links its objects against the base.
 
+mod statics;
 pub mod wasm;
 
 use std::path::{Path, PathBuf};
@@ -334,11 +335,14 @@ impl Base {
             "the patch link",
             &self.records.dir.join("lld.rsp"),
         )?;
+        let mut sites = statics::Sites::default();
         for o in &objects {
+            let object = std::fs::read(o).at(Path::new(o))?;
+            sites.read(&object).map_err(patch_error)?;
             let _ = std::fs::remove_file(o);
         }
         let bytes = std::fs::read(&out).at(&out)?;
-        let (bytes, mut table) = wasm::jump_table(&bytes, cache).map_err(patch_error)?;
+        let (bytes, mut table) = wasm::jump_table(&bytes, &sites, cache).map_err(patch_error)?;
         std::fs::write(&out, bytes).at(&out)?;
         table.lib = PathBuf::from(format!("{url}/{name}"));
         Ok(Patched::Table(serde_json::to_string(&table).expect("json")))

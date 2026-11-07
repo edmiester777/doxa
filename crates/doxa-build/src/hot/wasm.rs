@@ -12,6 +12,8 @@ use walrus::{
 };
 use wasmparser::{BinaryReader, Linking, LinkingSectionReader, Payload, SymbolInfo};
 
+use super::statics;
+
 /// The bindgen'd fat module, parsed once per base build.
 pub struct Cache {
     symbol_ifunc: HashMap<String, i32>,
@@ -73,9 +75,22 @@ impl Cache {
 
 /// Satisfy the patch's GOT and `env` imports from the base module and return the table
 /// mapping old table slots to the patch's; `patch` is rewritten in place.
-pub fn jump_table(patch: &[u8], cache: &Cache) -> Result<(Vec<u8>, JumpTable)> {
+pub(super) fn jump_table(
+    patch: &[u8],
+    sites: &statics::Sites,
+    cache: &Cache,
+) -> Result<(Vec<u8>, JumpTable)> {
     let old_symbols = parse_data_symbols(&cache.old_bytes)?;
-    let mut new = Module::from_buffer(patch)?;
+    let (patch, bound) = statics::rebind(patch, sites, |name, size| {
+        let symbol = old_symbols
+            .data_symbol_index
+            .get(name)
+            .and_then(|i| old_symbols.data_symbols.get(i))
+            .filter(|symbol| symbol.size == size)?;
+        data_address(cache, symbol).ok()
+    })?;
+    let mut new = Module::from_buffer(&patch)?;
+    statics::install(&mut new, &bound)?;
     let mut got_mems = vec![];
     let mut got_funcs = vec![];
     let mut wbg_funcs = vec![];
@@ -112,30 +127,13 @@ pub fn jump_table(patch: &[u8], cache: &Cache) -> Result<(Vec<u8>, JumpTable)> {
             .get(import.name.as_str())
             .and_then(|i| old_symbols.data_symbols.get(i))
             .with_context(|| format!("no data symbol {} in the base module", import.name))?;
-        let data = cache
-            .old
-            .data
-            .iter()
-            .nth(symbol.segment)
-            .context("a data segment missing from the base module")?;
-        let offset = match data.kind {
-            DataKind::Active {
-                offset: ConstExpr::Value(walrus::ir::Value::I32(o)),
-                ..
-            } => o,
-            DataKind::Active {
-                offset: ConstExpr::Value(walrus::ir::Value::I64(o)),
-                ..
-            } => o as i32,
-            _ => bail!("a passive data segment in the base module"),
-        };
+        let address = data_address(cache, symbol)?;
         let ImportKind::Global(global) = import.kind else {
             bail!("a GOT.mem import is not a global");
         };
         new.imports.delete(mem);
-        new.globals.get_mut(global).kind = walrus::GlobalKind::Local(ConstExpr::Value(
-            walrus::ir::Value::I32(offset + symbol.segment_offset as i32),
-        ));
+        new.globals.get_mut(global).kind =
+            walrus::GlobalKind::Local(ConstExpr::Value(walrus::ir::Value::I32(address)));
     }
 
     // The base can't export everything (wasm-bindgen caps exports), so the patch reaches
@@ -212,6 +210,28 @@ pub fn jump_table(patch: &[u8], cache: &Cache) -> Result<(Vec<u8>, JumpTable)> {
             ifunc_count: new_ifuncs.len() as u64,
         },
     ))
+}
+
+/// Where a data symbol of the base module lives in memory.
+fn data_address(cache: &Cache, symbol: &DataSymbol) -> Result<i32> {
+    let data = cache
+        .old
+        .data
+        .iter()
+        .nth(symbol.segment)
+        .context("a data segment missing from the base module")?;
+    let offset = match data.kind {
+        DataKind::Active {
+            offset: ConstExpr::Value(walrus::ir::Value::I32(o)),
+            ..
+        } => o,
+        DataKind::Active {
+            offset: ConstExpr::Value(walrus::ir::Value::I64(o)),
+            ..
+        } => o as i32,
+        _ => bail!("a passive data segment in the base module"),
+    };
+    Ok(offset + symbol.segment_offset as i32)
 }
 
 /// The loader adds the table and memory bases to the patch's GOT by calling this export, which
@@ -406,6 +426,7 @@ fn is_bindgen_symbol(name: &str) -> bool {
 }
 
 struct DataSymbol {
+    size: u32,
     segment: usize,
     segment_offset: usize,
 }
@@ -461,6 +482,7 @@ fn parse_data_symbols(bytes: &[u8]) -> Result<Symbols<'_>> {
                 out.data_symbols.insert(
                     index,
                     DataSymbol {
+                        size: def.size,
                         segment: def.index as usize,
                         segment_offset: def.offset as usize,
                     },
