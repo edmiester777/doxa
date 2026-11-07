@@ -29,6 +29,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             where
                 __S: ::core::marker::Send + ::core::marker::Sync,
                 #extractor<__T>: #ax::extract::FromRequest<__S>,
+                <#extractor<__T> as #ax::extract::FromRequest<__S>>::Rejection: ::doxa::InnerRejection,
                 Self: ::doxa::wire::Validates<Value = __T>,
             {
                 type Rejection = ::doxa::ValidRejection<
@@ -55,6 +56,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             where
                 __S: ::core::marker::Send + ::core::marker::Sync,
                 #extractor<__T>: #ax::extract::FromRequestParts<__S>,
+                <#extractor<__T> as #ax::extract::FromRequestParts<__S>>::Rejection: ::doxa::InnerRejection,
                 Self: ::doxa::wire::Validates<Value = __T>,
             {
                 type Rejection = ::doxa::ValidRejection<
@@ -80,6 +82,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         where
             __S: ::core::marker::Send + ::core::marker::Sync,
             #ax::Json<__T>: #ax::extract::OptionalFromRequest<__S>,
+            <#ax::Json<__T> as #ax::extract::OptionalFromRequest<__S>>::Rejection: ::doxa::InnerRejection,
             Self: ::doxa::wire::Validates<Value = ::core::option::Option<__T>>,
         {
             type Rejection = ::doxa::ValidRejection<
@@ -143,7 +146,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
         impl<__E> ::doxa::DocOperationSecurity for #name<__E> {
             fn describe(op: &mut #op) {
-                ::doxa::__private::document_invalid(op);
+                ::doxa::__private::document_rejections(op);
             }
         }
     };

@@ -248,7 +248,7 @@ pub use spa::{Dist, EmbeddedFiles, MountSpaExt, Spa};
 pub use sse::{SseEventMeta, SseStream};
 
 pub use ui::{DeveloperTools, DocumentDownload, ScalarConfig, ScalarLayout, ScalarTheme};
-pub use valid::ValidRejection;
+pub use valid::{InnerRejection, ValidRejection};
 
 // Re-export the companion proc-macro crate so consumers only need
 // `doxa` on their dependency list to write an event-stream
@@ -356,7 +356,7 @@ pub mod __private {
     }
 
     pub use crate::error_responses::merge_response_maps;
-    pub use crate::valid::document_invalid;
+    pub use crate::valid::document_rejections;
 
     // Autoref-specialized dispatch scaffolding referenced by the
     // method macro's generated per-handler `IntoParams` impls. Not

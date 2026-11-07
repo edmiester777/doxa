@@ -107,6 +107,8 @@ impl<E> ApiErrorBody<E> {
 
 /// The `code` of a `422` whose `error` is [`FieldErrors`].
 pub const INVALID: &str = "invalid";
+/// The `code` of a request a validating extractor could not parse; `error` is `null`.
+pub const MALFORMED: &str = "malformed";
 
 /// One input field that failed validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
