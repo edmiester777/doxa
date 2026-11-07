@@ -87,6 +87,30 @@ pub trait Dom {
     fn title(&self) -> String;
     /// Set the document's title.
     fn set_title(&self, title: &str);
+    /// How far `node` has scrolled, and how far it could.
+    fn scroll(&self, _node: NodeId) -> Scroll {
+        Scroll::default()
+    }
+    /// Scroll `node` to `top`, gliding when `smooth`.
+    fn scroll_to(&self, _node: NodeId, _top: f64, _smooth: bool) {}
+    /// Scroll `node`'s ancestors the least that shows it.
+    fn reveal(&self, _node: NodeId) {}
+    /// Every element matching a CSS selector, under `root` or in the whole document.
+    fn query_all(&self, _root: Option<NodeId>, _selector: &str) -> Vec<NodeId> {
+        Vec::new()
+    }
+    /// `node` or its nearest ancestor matching a CSS selector.
+    fn closest(&self, _node: NodeId, _selector: &str) -> Option<NodeId> {
+        None
+    }
+    /// An element's attribute.
+    fn attribute(&self, _node: NodeId, _name: &str) -> Option<String> {
+        None
+    }
+    /// Whether typing into `node` edits it: an input, textarea, select or contenteditable.
+    fn editable(&self, _node: NodeId) -> bool {
+        false
+    }
     /// The browser node behind `node`.
     #[cfg(target_arch = "wasm32")]
     fn raw(&self, _node: NodeId) -> Option<web_sys::Node> {
@@ -150,6 +174,57 @@ impl NodeRef {
         }
     }
 
+    /// How far it has scrolled, and how far it could.
+    pub fn scroll(self) -> Scroll {
+        crate::runtime::dom().scroll(self.0)
+    }
+
+    /// Scroll it to `top`, gliding when `smooth`.
+    pub fn scroll_to(self, top: f64, smooth: bool) {
+        crate::runtime::dom().scroll_to(self.0, top, smooth);
+    }
+
+    /// Scroll it to its end, gliding when `smooth`.
+    pub fn scroll_to_end(self, smooth: bool) {
+        self.scroll_to(self.scroll().height, smooth);
+    }
+
+    /// Scroll its ancestors the least that shows it, unlike [`scroll_into_view`](Self::scroll_into_view).
+    pub fn reveal(self) {
+        crate::runtime::dom().reveal(self.0);
+    }
+
+    /// The first element under it matching a CSS selector.
+    pub fn query(self, selector: &str) -> Option<NodeRef> {
+        self.query_all(selector).into_iter().next()
+    }
+
+    /// Every element under it matching a CSS selector.
+    pub fn query_all(self, selector: &str) -> Vec<NodeRef> {
+        let found = crate::runtime::dom().query_all(Some(self.0), selector);
+        found.into_iter().map(NodeRef).collect()
+    }
+
+    /// It or its nearest ancestor matching a CSS selector.
+    pub fn closest(self, selector: &str) -> Option<NodeRef> {
+        crate::runtime::dom().closest(self.0, selector).map(NodeRef)
+    }
+
+    /// One of its attributes.
+    pub fn attr(self, name: &str) -> Option<String> {
+        crate::runtime::dom().attribute(self.0, name)
+    }
+
+    /// Set one inline CSS property, or remove it with `None`.
+    pub fn set_style(self, name: &str, value: Option<&str>) {
+        crate::runtime::dom().set_style(self.0, name, value);
+    }
+
+    /// Whether typing into it edits it: an input, textarea, select or contenteditable.
+    pub fn is_editable(self) -> bool {
+        crate::runtime::dom().editable(self.0)
+    }
+
     /// Where it is in the viewport, in CSS pixels; `None` without a browser layout.
     pub fn rect(self) -> Option<Rect> {
         #[cfg(target_arch = "wasm32")]
@@ -166,6 +241,30 @@ impl NodeRef {
         }
         #[cfg(not(target_arch = "wasm32"))]
         None
+    }
+}
+
+/// The first element in the document matching a CSS selector.
+pub fn query(selector: &str) -> Option<NodeRef> {
+    let found = crate::runtime::dom().query_all(None, selector);
+    found.into_iter().next().map(NodeRef)
+}
+
+/// An element's scroll position, in CSS pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Scroll {
+    /// How far it has scrolled from the top.
+    pub top: f64,
+    /// The height of its content.
+    pub height: f64,
+    /// The height of the part that shows.
+    pub client_height: f64,
+}
+
+impl Scroll {
+    /// How far its end is below what shows.
+    pub fn from_end(self) -> f64 {
+        self.height - self.top - self.client_height
     }
 }
 
@@ -271,6 +370,8 @@ pub struct MemEvent {
     pub is_composing: bool,
     /// The node the event was fired at; [`MemDom::dispatch`] fills it in.
     pub target: Option<NodeId>,
+    /// For focus events, the node focus is moving to or from.
+    pub related: Option<NodeId>,
     /// For a `<select multiple>`, the chosen options' values.
     pub selected: Vec<String>,
 }
@@ -367,6 +468,31 @@ impl Event {
             #[cfg(target_arch = "wasm32")]
             EventInner::Web(e) => web::target_id(e).map(NodeRef),
             EventInner::Mem(e, _) => e.target.map(NodeRef),
+        }
+    }
+
+    /// The node the event was fired at, including one doxa didn't place, e.g. React's.
+    pub fn target(&self) -> Option<NodeRef> {
+        match &self.inner {
+            #[cfg(target_arch = "wasm32")]
+            EventInner::Web(e) => {
+                let node = wasm_bindgen::JsCast::dyn_into(e.target()?).ok()?;
+                crate::runtime::dom().adopt(node).map(NodeRef)
+            }
+            EventInner::Mem(e, _) => e.target.map(NodeRef),
+        }
+    }
+
+    /// For focus events, the node focus is moving to or from.
+    pub fn related_target(&self) -> Option<NodeRef> {
+        match &self.inner {
+            #[cfg(target_arch = "wasm32")]
+            EventInner::Web(e) => {
+                let focus = wasm_bindgen::JsCast::dyn_ref::<web_sys::FocusEvent>(e)?;
+                let node = wasm_bindgen::JsCast::dyn_into(focus.related_target()?).ok()?;
+                crate::runtime::dom().adopt(node).map(NodeRef)
+            }
+            EventInner::Mem(e, _) => e.related.map(NodeRef),
         }
     }
 

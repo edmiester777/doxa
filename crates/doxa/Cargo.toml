@@ -163,6 +163,10 @@ name = "ui"
 required-features = ["ui"]
 
 [[test]]
+name = "props"
+required-features = ["ui"]
+
+[[test]]
 name = "browser"
 required-features = ["ui"]
 

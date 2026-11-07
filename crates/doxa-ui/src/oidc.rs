@@ -11,9 +11,11 @@ use crate::router::Route;
 pub fn session<C: DeserializeOwned + Clone + 'static>() -> Session<C> {
     let oidc = Oidc::<C>::get();
     let current = state(oidc.session());
-    effect((), async move |_| loop {
-        oidc.changed().await;
-        current.set(oidc.session());
+    effect((), async move |_| -> () {
+        loop {
+            oidc.changed().await;
+            current.set(oidc.session());
+        }
     });
     current.get()
 }

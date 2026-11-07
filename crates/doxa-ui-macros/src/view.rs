@@ -124,6 +124,7 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                     (false, true) => quote!(on_with),
                 };
                 let opts = opts.map(|o| quote!(#o,));
+                let v = handler(a, v);
                 quote_spanned! { span => #out.#method(#event, #opts #v) }
             }
             (n, v) if n.starts_with("use:") => {
@@ -216,6 +217,7 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                 } else {
                     quote!(__on)
                 };
+                let v = handler(a, v);
                 out = quote_spanned! { span => #out.#method(#event, #opts, #v) };
             }
             (n, v) if n.starts_with("use:") => {
@@ -240,6 +242,22 @@ fn component(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
             }
             (n, v) => {
                 let n = n.replace('-', "_");
+                if is_none(a) {
+                    let none = quote::format_ident!("__none_{}", n, span = span);
+                    out = quote_spanned! { span => #out.#none() };
+                    continue;
+                }
+                if let (Some(closure), Some(v)) = (literal_closure(a), &v) {
+                    let prefix = match (closure.asyncness.is_some(), closure.inputs.is_empty()) {
+                        (true, true) => "afn0",
+                        (true, false) => "afn",
+                        (false, true) => "fn0",
+                        (false, false) => "fn",
+                    };
+                    let setter = quote::format_ident!("__{}_{}", prefix, n, span = span);
+                    out = quote_spanned! { span => #out.#setter(#v) };
+                    continue;
+                }
                 let ident = syn::parse_str::<syn::Ident>(&n)
                     .map(|i| syn::Ident::new(&i.to_string(), span))
                     .unwrap_or_else(|_| syn::Ident::new_raw(&n, span));
@@ -379,6 +397,38 @@ fn value(a: &KeyedAttribute) -> Option<TokenStream> {
 
 fn is_async_closure(a: &KeyedAttribute) -> bool {
     matches!(expr(a), Some(Expr::Closure(c)) if c.asyncness.is_some())
+}
+
+/// A handler's tokens; `on:click={move || …}` ignores its event.
+fn handler(a: &KeyedAttribute, v: TokenStream) -> TokenStream {
+    match expr(a) {
+        Some(Expr::Closure(c)) if c.inputs.is_empty() => {
+            let mut c = c.clone();
+            c.inputs.push(syn::parse_quote!(_));
+            c.to_token_stream()
+        }
+        _ => v,
+    }
+}
+
+/// The closure an attribute evaluates to, including `{ let x = …; move |y| … }`.
+fn literal_closure(a: &KeyedAttribute) -> Option<&syn::ExprClosure> {
+    let mut e = expr(a)?;
+    loop {
+        match e {
+            Expr::Closure(c) => return Some(c),
+            Expr::Block(b) => match b.block.stmts.last() {
+                Some(syn::Stmt::Expr(tail, None)) => e = tail,
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+}
+
+/// `prop={None}`, which no conversion could infer a type for.
+fn is_none(a: &KeyedAttribute) -> bool {
+    matches!(expr(a), Some(Expr::Path(p)) if p.qself.is_none() && p.path.is_ident("None"))
 }
 
 /// A literal URL is checked here; anything else must already be a `SafeUrl`.

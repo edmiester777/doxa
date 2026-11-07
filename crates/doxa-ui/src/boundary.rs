@@ -62,6 +62,21 @@ impl<F> CatchBuilder<F> {
         }
     }
 
+    /// `fallback={|e| …}` in `view!`.
+    #[doc(hidden)]
+    pub fn __fn_fallback<V: IntoView>(
+        self,
+        f: impl Fn(&Thrown) -> V + 'static,
+    ) -> CatchBuilder<Set> {
+        self.fallback(f)
+    }
+
+    /// `fallback={|| …}` in `view!`.
+    #[doc(hidden)]
+    pub fn __fn0_fallback<V: IntoView>(self, f: impl Fn() -> V + 'static) -> CatchBuilder<Set> {
+        self.fallback(move |_| f())
+    }
+
     /// The guarded children.
     pub fn children(mut self, children: View) -> Self {
         self.children = children;

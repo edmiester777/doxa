@@ -93,9 +93,10 @@ macro_rules! html_attrs {
                 self
             }
 
-            fn __on_async<F>(mut self, event: &'static str, opts: Listen, handler: F) -> Self
+            fn __on_async<F, R>(mut self, event: &'static str, opts: Listen, handler: F) -> Self
             where
-                F: AsyncFn(Event) -> crate::Result<()> + 'static,
+                F: AsyncFn(Event) -> R + 'static,
+                R: crate::Outcome,
             {
                 self.__rest().events.push((event, opts, async_handler(handler)));
                 self

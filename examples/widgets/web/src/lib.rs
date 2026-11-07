@@ -72,7 +72,7 @@ async fn WidgetsPage(contains: Option<String>) -> Result<View> {
 pub struct Count {
     pub total: usize,
     #[react(event)]
-    pub on_pick: Callback<bool>,
+    pub on_pick: impl Fn(bool),
 }
 
 #[component]

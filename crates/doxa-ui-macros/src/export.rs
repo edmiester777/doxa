@@ -42,14 +42,6 @@ fn segment(ty: &Type) -> Option<(String, Vec<&Type>)> {
     Some((last.ident.to_string(), args))
 }
 
-/// The argument type of a `Callback<T>`, `()` when it has none.
-fn callback_arg(ty: &Type) -> Option<Option<&Type>> {
-    match segment(ty)? {
-        (name, args) if name == "Callback" => Some(args.first().copied()),
-        _ => None,
-    }
-}
-
 /// `ty` in TypeScript, from its syntax; a type it doesn't know is `unknown`.
 pub(crate) fn ts(ty: &Type) -> String {
     match ty {
@@ -62,6 +54,20 @@ pub(crate) fn ts(ty: &Type) -> String {
         Type::Slice(s) => return format!("{}[]", wrap(&ts(&s.elem))),
         Type::Array(a) => return format!("{}[]", wrap(&ts(&a.elem))),
         _ => {}
+    }
+    if let Some(sig) = crate::callback::signature(ty) {
+        return match sig.inputs.as_slice() {
+            [] => "() => void".into(),
+            [one] => format!("(value: {}) => void", ts(one)),
+            many => {
+                let args: Vec<_> = many
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| format!("arg{i}: {}", ts(t)))
+                    .collect();
+                format!("({}) => void", args.join(", "))
+            }
+        };
     }
     let Some((name, args)) = segment(ty) else {
         return "unknown".into();
@@ -76,11 +82,6 @@ pub(crate) fn ts(ty: &Type) -> String {
         "Vec" | "VecDeque" | "HashSet" | "BTreeSet" => format!("{}[]", wrap(&arg(0))),
         "HashMap" | "BTreeMap" => format!("Record<string, {}>", arg(1)),
         "Option" => format!("{} | null", arg(0)),
-        "Callback" => match args.first() {
-            None => "() => void".into(),
-            Some(Type::Tuple(t)) if t.elems.is_empty() => "() => void".into(),
-            Some(t) => format!("(value: {}) => void", ts(t)),
-        },
         _ => "unknown".into(),
     }
 }
@@ -109,10 +110,16 @@ pub(crate) fn expand(parsed: &Parsed) -> syn::Result<TokenStream> {
         }
         let js = camel(&n.to_string());
         let ty = &p.ty;
-        let (value, optional) = if let Some(arg) = callback_arg(ty) {
-            let arg = arg.map_or(quote!(()), |t| quote!(#t));
+        let (value, optional) = if let Some(sig) = crate::callback::signature(ty) {
+            if !matches!(sig.output, syn::ReturnType::Default) {
+                return Err(syn::Error::new(
+                    n.span(),
+                    "an exported component's callback returns nothing: JS answers asynchronously",
+                ));
+            }
+            let inputs = &sig.inputs;
             (
-                quote! { ::doxa::ui::__private::callback::<#arg>(calls, props, #js)? },
+                quote! { ::doxa::ui::__private::callback::<dyn Fn(#(#inputs),*)>(calls, props, #js)? },
                 true,
             )
         } else if p.optional {
@@ -194,10 +201,11 @@ mod tests {
         assert_eq!(ts_of("Vec<Option<String>>"), "(string | null)[]");
         assert_eq!(ts_of("BTreeMap<String, f64>"), "Record<string, number>");
         assert_eq!(ts_of("Callback"), "() => void");
-        assert_eq!(ts_of("Callback<()>"), "() => void");
+        assert_eq!(ts_of("Callback<dyn Fn()>"), "() => void");
+        assert_eq!(ts_of("Callback<dyn Fn(u8)>"), "(value: number) => void");
         assert_eq!(
-            ts_of("Callback<(String, u8)>"),
-            "(value: [string, number]) => void"
+            ts_of("Callback<dyn Fn(String, u8)>"),
+            "(arg0: string, arg1: number) => void"
         );
         assert_eq!(ts_of("Rc<str>"), "string");
         assert_eq!(ts_of("Order"), "unknown");

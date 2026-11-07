@@ -260,6 +260,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             })?;
         }
         f.attrs = kept;
+        crate::callback::desugar(&mut f.ty)?;
         if [optional, event, element, func, render, raw, feed]
             .iter()
             .filter(|b| **b)
@@ -319,10 +320,15 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 ))
             }
             (true, false) => Role::Optional,
-            (false, true) if !last_segment_is(&f.ty, "Callback") => {
+            (false, true)
+                if !crate::callback::signature(&f.ty)
+                    .is_some_and(|s| s.inputs.len() <= 1 && s.future_of.is_none()) =>
+            {
                 return Err(syn::Error::new(
                     f.ty.span(),
-                    format!("`#[react(event)]` field `{name}` must be a `Callback<T>`"),
+                    format!(
+                        "`#[react(event)]` field `{name}` must be an `impl Fn()` or `impl Fn(T)`"
+                    ),
                 ))
             }
             (false, true) => Role::Event,

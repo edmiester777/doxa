@@ -26,12 +26,13 @@ mod npm;
 #[cfg(feature = "oidc")]
 pub mod oidc;
 #[cfg(feature = "npm")]
-pub use npm::JsError;
+pub use npm::{JsCallback, JsError};
 mod plugin;
 mod portal;
 #[cfg(feature = "react")]
 pub mod react;
 mod reconcile;
+mod resource;
 mod router;
 mod runtime;
 mod story;
@@ -45,19 +46,19 @@ pub use attrs::Attrs;
 pub use boundary::{Catch, CatchBuilder, CatchProps, Suspense, SuspenseBuilder, SuspenseProps};
 pub use browser::{
     broadcast, clipboard, debounced, document_event, exit_fullscreen, fullscreen, intersection,
-    interval, media_query, now, resize_observer, save, sleep, stored, window_event, Broadcast,
-    BrowserError, Stored,
+    interval, is_mac, media_query, now, resize_observer, save, sleep, stored, window_event,
+    Broadcast, BrowserError, Stored,
 };
 pub use can::{requires, Can, CanBuilder, CanProps};
 pub use class::ClassPart;
 pub use component::{Component, ComponentProps, IntoRender, RenderFuture, Set, Unset};
 pub use directive::Directive;
-pub use dom::{Event, Listen, NodeRef, Phase, Rect};
+pub use dom::{Event, Listen, NodeRef, Phase, Rect, Scroll};
 /// One [`Field`] per struct field, named by its path in the rules' errors; on an enum, one
 /// per variant's field, plus the variant itself.
 #[cfg(feature = "forms")]
 pub use doxa_ui_macros::Form;
-pub use error::{Result, Thrown};
+pub use error::{Outcome, Result, Thrown};
 #[cfg(feature = "forms")]
 #[doc(hidden)]
 pub use form::At;
@@ -65,12 +66,13 @@ pub use form::At;
 pub use form::{field_errors, form, Field, FieldList, Form, FormFields, RowKey, Submit};
 pub use head::title;
 pub use hooks::{
-    action, context, effect, memo, node_ref, provide, state, try_context, Action, Deps, ElementRef,
-    Singleton, State,
+    action, callback, context, effect, latest, memo, node_ref, provide, reference, state,
+    try_context, Action, Deps, ElementRef, Reference, Singleton, StableCallback, State,
 };
 pub use icon::{Icon, IconExt, IconProps, IconSet, IconStyle};
 pub use plugin::{Plugin, Slot, SlotBuilder, SlotProps, Slots};
 pub use portal::{Portal, PortalBuilder, PortalProps, PortalTarget};
+pub use resource::{polled_resource, resource, Load, LoadError, Resource};
 pub use router::{
     link_active, location, match_path, navigate, navigate_through, navigate_with, navigation,
     redirect, set_query, set_query_as, Keep, Link, LinkBuilder, LinkProps, Nav, Navigation,
@@ -107,7 +109,8 @@ pub mod __private {
     #[cfg(all(feature = "export", target_arch = "wasm32"))]
     pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
     pub use crate::icon::{svg_el, svg_root};
-    pub use crate::view::FromChildren;
+    pub use crate::view::{owner, FromChildren, IntoOptional, OptionOf, Owner};
+    pub use futures_util::future::LocalBoxFuture;
     #[cfg(target_arch = "wasm32")]
     pub use web_sys;
 
@@ -122,7 +125,7 @@ pub mod __private {
     }
     #[cfg(all(feature = "npm", target_arch = "wasm32"))]
     pub use crate::npm::convert::{
-        await_promise, describe, from_js, js_error, js_error_from, to_js,
+        await_promise, describe, from_js, js_callback, js_error, js_error_from, js_node, to_js,
     };
     #[cfg(target_arch = "wasm32")]
     pub use wasm_bindgen;
@@ -135,13 +138,14 @@ pub mod prelude {
     #[cfg(feature = "react")]
     pub use crate::react;
     pub use crate::{
-        action, classes, component, context, debounced, document_event, effect, interval,
-        media_query, memo, navigate, navigate_with, navigation, node_ref, page, provide, redirect,
-        set_query, set_query_as, set_theme, sleep, state, stored, theme, title, try_context, view,
-        window_event, Action, App, Attrs, Callback, Can, Catch, DangerousHtml, Directive,
-        ElementRef, Event, IconExt, IntoView, Keep, Link, Nav, NodeRef, Outlet, Page, Plugin,
-        Portal, Result, Route, Router, SafeUrl, Singleton, Slot, Slots, State, Suspense, Theme,
-        Thrown, View,
+        action, callback, classes, component, context, debounced, document_event, effect, interval,
+        latest, media_query, memo, navigate, navigate_with, navigation, node_ref, page,
+        polled_resource, provide, redirect, reference, resource, set_query, set_query_as,
+        set_theme, sleep, state, stored, theme, title, try_context, view, window_event, Action,
+        App, Attrs, Callback, Can, Catch, DangerousHtml, Directive, ElementRef, Event, IconExt,
+        IntoView, Keep, Link, Load, Nav, NodeRef, Outlet, Page, Plugin, Portal, Reference,
+        Resource, Result, Route, Router, SafeUrl, Scroll, Singleton, Slot, Slots, StableCallback,
+        State, Suspense, Theme, Thrown, View,
     };
     pub use doxa_client::{layers, service, CacheConfig};
 }

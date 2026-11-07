@@ -337,7 +337,7 @@ pub use doxa_ui::start;
 #[doc(hidden)]
 pub mod ui_diagnostics {}
 
-/// An event prop that is a `Callback` compiles:
+/// An event prop that is a function of one value compiles:
 ///
 /// ```
 /// use doxa::ui::prelude::*;
@@ -345,7 +345,19 @@ pub mod ui_diagnostics {}
 /// pub struct Editor {
 ///     pub value: String,
 ///     #[react(event)]
-///     pub on_change: Callback<String>,
+///     pub on_change: impl Fn(String),
+/// }
+/// ```
+///
+/// Two values is "`#[react(event)]` field `on_change` must be an `impl Fn()` or `impl Fn(T)`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/editor.tsx", export = "Editor")]
+/// pub struct Editor {
+///     pub value: String,
+///     #[react(event)]
+///     pub on_change: impl Fn(String, u8),
 /// }
 /// ```
 ///
@@ -490,6 +502,69 @@ pub mod react_diagnostics {}
 #[doc(hidden)]
 pub mod directive_diagnostics {}
 
+/// A function prop is `impl Fn` or `impl AsyncFn`, and its closure is typed by the prop:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(on_move: impl Fn(u32, i32), load: impl AsyncFn(u32) -> String) -> View {
+///     on_move(1, 2);
+///     View::empty()
+/// }
+/// let _ = view! { <Row on_move={|id, by| drop(id.count_ones() + by.count_ones())} load={async |n| n.to_string()}/> };
+/// ```
+///
+/// A prop can be called many times, so anything else is "not `impl FnOnce`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(on_move: impl FnOnce(u32)) -> View {
+///     View::empty()
+/// }
+/// ```
+///
+/// An async prop's future outlives its call, so it can't borrow its arguments:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(load: impl AsyncFn(&str) -> String) -> View {
+///     View::empty()
+/// }
+/// ```
+///
+/// A closure of the wrong arity is refused by the prop:
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(on_move: impl Fn(u32, i32)) -> View {
+///     View::empty()
+/// }
+/// let _ = view! { <Row on_move={|only| drop(only)}/> };
+/// ```
+///
+/// A `View` prop takes any view value; a value that isn't one is refused:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(label: View) -> View { label }
+/// let _ = view! { <Row label="text"/> };
+/// ```
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// struct NotAView;
+/// #[component]
+/// fn Row(label: View) -> View { label }
+/// let _ = view! { <Row label={NotAView}/> };
+/// ```
+#[cfg(feature = "ui")]
+#[doc(hidden)]
+pub mod prop_diagnostics {}
+
 /// A portal names where it renders:
 ///
 /// ```
@@ -554,7 +629,7 @@ pub mod listener_diagnostics {}
 /// ```
 /// use doxa::ui::prelude::*;
 /// #[component(export)]
-/// fn Badge(label: String, on_close: Callback) -> View {
+/// fn Badge(label: String, on_close: impl Fn(), on_move: impl Fn(u32, u32)) -> View {
 ///     view! { <span>{label}</span> }
 /// }
 /// ```

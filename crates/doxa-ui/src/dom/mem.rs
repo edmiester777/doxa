@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{
-    Dom, Event, EventInner, Global, Listen, MemEvent, NodeId, Observe, Observed, Prop, Rect,
+    Dom, Event, EventInner, Global, Listen, MemEvent, NodeId, Observe, Observed, Prop, Rect, Scroll,
 };
 
 enum Kind {
@@ -51,6 +51,95 @@ struct World {
     answer: Option<bool>,
     asked: Vec<String>,
     title: String,
+    scrolls: HashMap<NodeId, Scroll>,
+    revealed: Vec<NodeId>,
+}
+
+/// Whether one compound selector (`div.a#b[c="d"]`) matches an element.
+fn compound_matches(compound: &str, tag: &str, attrs: &[(String, String)]) -> bool {
+    let attr = |name: &str| {
+        attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
+    let mut rest = compound;
+    let name_end = rest.find(['.', '#', '[']).unwrap_or(rest.len());
+    if !matches!(&rest[..name_end], "" | "*") && !rest[..name_end].eq_ignore_ascii_case(tag) {
+        return false;
+    }
+    rest = &rest[name_end..];
+    while !rest.is_empty() {
+        if let Some(body) = rest.strip_prefix('[') {
+            let Some(end) = body.find(']') else {
+                return false;
+            };
+            let holds = match body[..end].split_once('=') {
+                Some((k, v)) => attr(k) == Some(v.trim_matches(['"', '\''])),
+                None => attr(&body[..end]).is_some(),
+            };
+            if !holds {
+                return false;
+            }
+            rest = &body[end + 1..];
+        } else {
+            let (is_class, body) = (rest.starts_with('.'), &rest[1..]);
+            let end = body.find(['.', '#', '[']).unwrap_or(body.len());
+            let holds = if is_class {
+                attr("class").is_some_and(|c| c.split_whitespace().any(|c| c == &body[..end]))
+            } else {
+                attr("id") == Some(&body[..end])
+            };
+            if !holds {
+                return false;
+            }
+            rest = &body[end..];
+        }
+    }
+    true
+}
+
+/// Whether a selector matches `node`, with commas and descendant combinators, the subset tests use.
+fn selector_matches(nodes: &HashMap<NodeId, MemNode>, node: NodeId, selector: &str) -> bool {
+    let element = |id: NodeId| match &nodes.get(&id)?.kind {
+        Kind::Element { tag, attrs, .. } => Some((tag.as_str(), attrs.as_slice())),
+        _ => None,
+    };
+    selector.split(',').any(|alternative| {
+        let mut parts = alternative.split_whitespace().rev();
+        let Some(last) = parts.next() else {
+            return false;
+        };
+        let Some((tag, attrs)) = element(node) else {
+            return false;
+        };
+        if !compound_matches(last, tag, attrs) {
+            return false;
+        }
+        let mut at = nodes.get(&node).and_then(|n| n.parent);
+        parts.all(|part| loop {
+            let Some(id) = at else { return false };
+            at = nodes.get(&id).and_then(|n| n.parent);
+            if element(id).is_some_and(|(tag, attrs)| compound_matches(part, tag, attrs)) {
+                return true;
+            }
+        })
+    })
+}
+
+fn collect_matching(
+    nodes: &HashMap<NodeId, MemNode>,
+    at: NodeId,
+    selector: &str,
+    out: &mut Vec<NodeId>,
+) {
+    let Some(node) = nodes.get(&at) else { return };
+    for child in &node.children {
+        if selector_matches(nodes, *child, selector) {
+            out.push(*child);
+        }
+        collect_matching(nodes, *child, selector, out);
+    }
 }
 
 /// An in-memory [`Dom`]. Clone it to keep a handle after mounting.
@@ -226,6 +315,16 @@ impl MemDom {
     /// The `<body>` element.
     pub fn body(&self) -> NodeId {
         0
+    }
+
+    /// Lay `node` out so that it reports `scroll`.
+    pub fn set_scroll(&self, node: NodeId, scroll: Scroll) {
+        self.world.borrow_mut().scrolls.insert(node, scroll);
+    }
+
+    /// The nodes [`Dom::reveal`] has shown, oldest first.
+    pub fn revealed(&self) -> Vec<NodeId> {
+        self.world.borrow().revealed.clone()
     }
 
     fn add(&self, kind: Kind) -> NodeId {
@@ -618,6 +717,50 @@ impl Dom for MemDom {
             "body" => Some(0),
             s => s.strip_prefix('#').and_then(|id| self.find("id", id)),
         }
+    }
+
+    fn scroll(&self, node: NodeId) -> Scroll {
+        self.world
+            .borrow()
+            .scrolls
+            .get(&node)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn scroll_to(&self, node: NodeId, top: f64, _smooth: bool) {
+        self.world.borrow_mut().scrolls.entry(node).or_default().top = top;
+    }
+
+    fn reveal(&self, node: NodeId) {
+        self.world.borrow_mut().revealed.push(node);
+    }
+
+    fn query_all(&self, root: Option<NodeId>, selector: &str) -> Vec<NodeId> {
+        let nodes = self.nodes.borrow();
+        let mut out = Vec::new();
+        collect_matching(&nodes, root.unwrap_or(0), selector, &mut out);
+        out
+    }
+
+    fn closest(&self, node: NodeId, selector: &str) -> Option<NodeId> {
+        let nodes = self.nodes.borrow();
+        std::iter::successors(Some(node), |n| nodes.get(n)?.parent)
+            .find(|n| selector_matches(&nodes, *n, selector))
+    }
+
+    fn attribute(&self, node: NodeId, name: &str) -> Option<String> {
+        self.attr(node, name)
+    }
+
+    fn editable(&self, node: NodeId) -> bool {
+        let nodes = self.nodes.borrow();
+        matches!(
+            nodes.get(&node).map(|n| &n.kind),
+            Some(Kind::Element { tag, attrs, .. })
+                if matches!(tag.as_str(), "input" | "textarea" | "select")
+                    || attrs.iter().any(|(k, v)| k == "contenteditable" && v != "false")
+        )
     }
 
     fn listen_global(

@@ -41,7 +41,7 @@ serde-wasm-bindgen = { version = "0.6", optional = true }
 wasm-splitter = "=0.7.0"
 # Debug builds render through its jump table, which `doxa dev` patches.
 subsecond = "=0.7.10"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Comment", "Event", "EventTarget", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "KeyboardEvent", "MouseEvent", "History", "Location", "PopStateEvent", "CssStyleDeclaration", "DomTokenList", "NodeList", "DomRect", "AddEventListenerOptions", "ResizeObserver", "IntersectionObserver", "MediaQueryList", "Storage", "BroadcastChannel", "MessageEvent", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Comment", "Event", "EventTarget", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "KeyboardEvent", "MouseEvent", "History", "Location", "PopStateEvent", "CssStyleDeclaration", "DomTokenList", "NodeList", "DomRect", "AddEventListenerOptions", "ResizeObserver", "IntersectionObserver", "MediaQueryList", "Storage", "BroadcastChannel", "MessageEvent", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator", "FocusEvent", "ScrollToOptions", "ScrollBehavior", "ScrollIntoViewOptions", "ScrollLogicalPosition"] }
 
 [dev-dependencies]
 # Path-only, so publishing strips it.

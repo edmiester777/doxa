@@ -6,7 +6,9 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
-use super::{Dom, Event, EventInner, Global, Listen, NodeId, Observe, Observed, Prop, Rect};
+use super::{
+    Dom, Event, EventInner, Global, Listen, NodeId, Observe, Observed, Prop, Rect, Scroll,
+};
 
 type Stops = Rc<RefCell<(u32, std::collections::HashMap<u32, Box<dyn FnOnce()>>)>>;
 
@@ -341,6 +343,70 @@ impl Dom for WebDom {
             Some(v) => s.set_item(key, v),
             None => s.remove_item(key),
         };
+    }
+
+    fn scroll(&self, node: NodeId) -> Scroll {
+        self.element(node)
+            .map_or_else(Scroll::default, |el| Scroll {
+                top: f64::from(el.scroll_top()),
+                height: f64::from(el.scroll_height()),
+                client_height: f64::from(el.client_height()),
+            })
+    }
+
+    fn scroll_to(&self, node: NodeId, top: f64, smooth: bool) {
+        if let Some(el) = self.element(node) {
+            let options = web_sys::ScrollToOptions::new();
+            options.set_top(top);
+            options.set_behavior(if smooth {
+                web_sys::ScrollBehavior::Smooth
+            } else {
+                web_sys::ScrollBehavior::Instant
+            });
+            el.scroll_to_with_scroll_to_options(&options);
+        }
+    }
+
+    fn reveal(&self, node: NodeId) {
+        if let Some(el) = self.element(node) {
+            let options = web_sys::ScrollIntoViewOptions::new();
+            options.set_block(web_sys::ScrollLogicalPosition::Nearest);
+            el.scroll_into_view_with_scroll_into_view_options(&options);
+        }
+    }
+
+    fn query_all(&self, root: Option<NodeId>, selector: &str) -> Vec<NodeId> {
+        let found = match root {
+            Some(root) => self
+                .element(root)
+                .and_then(|el| el.query_selector_all(selector).ok()),
+            None => self.doc.query_selector_all(selector).ok(),
+        };
+        let Some(found) = found else {
+            return Vec::new();
+        };
+        (0..found.length())
+            .filter_map(|i| found.item(i))
+            .filter_map(|node| self.adopt(node))
+            .collect()
+    }
+
+    fn closest(&self, node: NodeId, selector: &str) -> Option<NodeId> {
+        let found = self.element(node)?.closest(selector).ok()??;
+        self.adopt(found.into())
+    }
+
+    fn attribute(&self, node: NodeId, name: &str) -> Option<String> {
+        self.element(node)?.get_attribute(name)
+    }
+
+    fn editable(&self, node: NodeId) -> bool {
+        self.node(node)
+            .and_then(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
+            .is_some_and(|el| {
+                el.is_content_editable()
+                    || matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+            })
     }
 
     fn raw(&self, node: NodeId) -> Option<web_sys::Node> {

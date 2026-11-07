@@ -500,18 +500,39 @@ impl Events {
             .push((name, Rc::new(move |v| Ok((r.0)(args(name, v)?)))));
     }
 
-    pub fn event<T: DeserializeOwned + 'static>(&mut self, name: &'static str, cb: &Callback<T>) {
+    pub fn event(&mut self, name: &'static str, cb: &impl ReactEvent) {
         let (cb, owner) = (cb.clone(), self.owner.clone());
         self.list.push((
             name,
-            Rc::new(move |json: &str| match parse::<T>(json) {
-                Ok(v) => cb.call(v),
-                Err(e) => runtime::throw(
-                    owner.upgrade().as_ref(),
-                    Thrown::msg(format!("React event `{name}`: {e}")),
-                ),
+            Rc::new(move |json: &str| {
+                if let Err(e) = cb.fire(json) {
+                    runtime::throw(
+                        owner.upgrade().as_ref(),
+                        Thrown::msg(format!("React event `{name}`: {e}")),
+                    );
+                }
             }),
         ));
+    }
+}
+
+/// A `Callback` React can call: with nothing, or one JSON value.
+#[doc(hidden)]
+pub trait ReactEvent: Clone + 'static {
+    fn fire(&self, json: &str) -> serde_json::Result<()>;
+}
+
+impl ReactEvent for Callback<dyn Fn()> {
+    fn fire(&self, _: &str) -> serde_json::Result<()> {
+        self();
+        Ok(())
+    }
+}
+
+impl<T: DeserializeOwned + 'static> ReactEvent for Callback<dyn Fn(T)> {
+    fn fire(&self, json: &str) -> serde_json::Result<()> {
+        self(parse(json)?);
+        Ok(())
     }
 }
 

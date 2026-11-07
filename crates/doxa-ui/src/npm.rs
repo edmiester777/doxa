@@ -21,10 +21,69 @@ impl fmt::Display for JsError {
 
 impl std::error::Error for JsError {}
 
+/// A Rust function a JS module can call, alive until this drops: built with
+/// `JsCallback::<dyn Fn(String)>::new(f)`, passed to an `#[npm]` function by reference.
+pub struct JsCallback<F: ?Sized> {
+    #[cfg(target_arch = "wasm32")]
+    closure: wasm_bindgen::closure::Closure<F>,
+    #[cfg(not(target_arch = "wasm32"))]
+    _f: std::marker::PhantomData<fn() -> std::rc::Rc<F>>,
+}
+
+/// What a JS module can pass to a [`JsCallback`].
+#[cfg(target_arch = "wasm32")]
+pub trait JsArg: wasm_bindgen::convert::FromWasmAbi + 'static {}
+#[cfg(target_arch = "wasm32")]
+impl<T: wasm_bindgen::convert::FromWasmAbi + 'static> JsArg for T {}
+/// What a JS module can pass to a [`JsCallback`].
+#[cfg(not(target_arch = "wasm32"))]
+pub trait JsArg: 'static {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: 'static> JsArg for T {}
+
+macro_rules! js_callback {
+    ($($a:ident),*) => {
+        impl<$($a: JsArg),*> JsCallback<dyn Fn($($a),*)> {
+            /// Wrap `f`.
+            #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+            pub fn new(f: impl Fn($($a),*) + 'static) -> Self {
+                JsCallback {
+                    #[cfg(target_arch = "wasm32")]
+                    closure: wasm_bindgen::closure::Closure::new(f),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    _f: std::marker::PhantomData,
+                }
+            }
+        }
+    };
+}
+
+js_callback!();
+js_callback!(A);
+js_callback!(A, B);
+js_callback!(A, B, C);
+js_callback!(A, B, C, D);
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod convert {
-    use super::JsError;
+    use super::{JsCallback, JsError};
     use wasm_bindgen::{JsCast, JsValue};
+
+    /// The JS function behind `f`.
+    pub fn js_callback<F: ?Sized>(f: &JsCallback<F>) -> JsValue
+    where
+        F: wasm_bindgen::closure::WasmClosure,
+    {
+        let function: &JsValue = f.closure.as_ref();
+        function.clone()
+    }
+
+    /// The browser node behind `node`.
+    pub fn js_node(node: crate::NodeRef) -> Result<JsValue, JsError> {
+        node.raw()
+            .map(Into::into)
+            .ok_or_else(|| JsError("the element has left the page".to_owned()))
+    }
 
     /// `value` as JS, JSON-compatible: maps become objects, `u64`s numbers.
     pub fn to_js<T: serde::Serialize + ?Sized>(value: &T) -> Result<JsValue, JsError> {

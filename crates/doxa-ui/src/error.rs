@@ -58,3 +58,25 @@ impl std::error::Error for Message {}
 
 /// What components, effects and actions return.
 pub type Result<T = crate::View, E = Thrown> = std::result::Result<T, E>;
+
+/// What an effect or async handler may return: `()`, or a `Result` for `<Catch>`.
+#[diagnostic::on_unimplemented(
+    message = "an effect or async handler returns `()` or `Result<()>`, not `{Self}`",
+    label = "change what it returns"
+)]
+pub trait Outcome {
+    /// As a `Result`.
+    fn into_result(self) -> Result<()>;
+}
+
+impl Outcome for () {
+    fn into_result(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Outcome for Result<()> {
+    fn into_result(self) -> Result<()> {
+        self
+    }
+}

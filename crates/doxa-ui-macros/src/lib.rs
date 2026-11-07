@@ -5,6 +5,7 @@ use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
 mod binding;
+mod callback;
 mod component;
 mod export;
 mod form;

@@ -130,6 +130,21 @@ fn observe(el: ElementRef, what: Observe, f: impl Fn(Observed) + 'static) {
     });
 }
 
+/// Whether this is a Mac, whose shortcuts hold Command rather than Control; false off a browser.
+pub fn is_mac() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let agent = web_sys::window().and_then(|w| w.navigator().user_agent().ok());
+        agent.is_some_and(|a| {
+            ["Mac", "iPod", "iPhone", "iPad"]
+                .iter()
+                .any(|m| a.contains(m))
+        })
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    false
+}
+
 /// Whether a media query matches, e.g. `"(prefers-color-scheme: dark)"`.
 #[track_caller]
 pub fn media_query(query: &'static str) -> bool {

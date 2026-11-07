@@ -12,7 +12,7 @@ use std::panic::Location;
 use std::rc::Rc;
 
 use crate::runtime::{self, current_or_panic, Cancel, Hook, Instance, Readers};
-use crate::{Result, Thrown};
+use crate::{Callback, Result, Thrown};
 
 #[track_caller]
 pub(crate) fn slot<T: 'static>(
@@ -102,7 +102,6 @@ impl<T: 'static> State<T> {
     }
 
     /// Change the value without re-rendering; `None` once unmounted.
-    #[cfg_attr(not(feature = "react"), allow(dead_code))]
     pub(crate) fn update_silently<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         self.with_cell(|c| f(&mut c.borrow_mut()))
     }
@@ -133,6 +132,123 @@ impl State<bool> {
     /// Flip it.
     pub fn toggle(&self) {
         self.update(|b| *b = !*b);
+    }
+}
+
+/// A value kept between renders that doesn't re-render when changed, like React's `useRef`.
+/// `Copy`, like [`State`]; once its component unmounts, reads are `None` and writes do nothing.
+pub struct Reference<T: 'static>(State<T>);
+
+impl<T> Clone for Reference<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Reference<T> {}
+
+/// A [`Reference`]; `init` is used on the first render only.
+#[track_caller]
+pub fn reference<T: 'static>(init: T) -> Reference<T> {
+    Reference(state(init))
+}
+
+/// A [`Reference`] holding this render's `value`, for code that outlives the render to read.
+#[track_caller]
+pub fn latest<T: 'static>(value: T) -> Reference<T> {
+    let mut value = Some(value);
+    let held = state_with(|| value.take().expect("taken once"));
+    let held = Reference(held);
+    if let Some(value) = value {
+        held.set(value);
+    }
+    held
+}
+
+impl<T: 'static> Reference<T> {
+    /// Read it without cloning.
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        self.0.with_cell(|c| f(&c.borrow()))
+    }
+
+    /// Replace it.
+    pub fn set(&self, value: T) {
+        self.0.update_silently(|v| *v = value);
+    }
+
+    /// Change it in place.
+    pub fn update(&self, f: impl FnOnce(&mut T)) {
+        self.0.update_silently(f);
+    }
+}
+
+impl<T: Clone + 'static> Reference<T> {
+    /// A copy of it.
+    pub fn get(&self) -> Option<T> {
+        self.with(T::clone)
+    }
+}
+
+/// A closure [`callback`] can hold, by its arguments.
+#[doc(hidden)]
+pub trait CallbackFn<Args>: 'static {
+    type Sig: ?Sized + 'static;
+    fn shared(self) -> Rc<Self::Sig>;
+    fn forwarding(latest: Rc<RefCell<Rc<Self::Sig>>>) -> Rc<Self::Sig>;
+}
+
+struct StableCell<F: ?Sized> {
+    latest: Rc<RefCell<Rc<F>>>,
+    stable: Callback<F>,
+}
+
+/// A callback that keeps its identity across renders and always runs the latest closure.
+/// `Copy`, like [`State`]: call it with `.call(…)`, or pass it as a prop.
+pub struct StableCallback<F: ?Sized + 'static> {
+    instance: u64,
+    slot: usize,
+    _f: PhantomData<fn() -> Rc<F>>,
+}
+
+impl<F: ?Sized> Clone for StableCallback<F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: ?Sized> Copy for StableCallback<F> {}
+
+/// A [`StableCallback`] running `f`; annotate its parameters, as nothing else names their types.
+#[track_caller]
+pub fn callback<Args, F: CallbackFn<Args>>(f: F) -> StableCallback<F::Sig> {
+    let next = f.shared();
+    let (inst, slot, cell) = slot("callback", || {
+        let latest = Rc::new(RefCell::new(next.clone()));
+        StableCell {
+            stable: Callback::from_rc(F::forwarding(latest.clone())),
+            latest,
+        }
+    });
+    *cell.latest.borrow_mut() = next;
+    StableCallback {
+        instance: inst.id,
+        slot,
+        _f: PhantomData,
+    }
+}
+
+impl<F: ?Sized + 'static> StableCallback<F> {
+    pub(crate) fn current(&self) -> Option<Callback<F>> {
+        hook_value::<StableCell<F>>(self.instance, self.slot).map(|c| c.stable.clone())
+    }
+}
+
+impl<F: ?Sized + 'static> From<StableCallback<F>> for Callback<F>
+where
+    Callback<F>: Default,
+{
+    fn from(f: StableCallback<F>) -> Self {
+        f.current().unwrap_or_default()
     }
 }
 
@@ -265,13 +381,14 @@ impl EffectSlot {
 
 /// Run `f` after the render commits whenever `deps` change, like React's `useEffect`.
 ///
-/// The previous run is dropped first; dropping is its cleanup. An `Err` goes to
-/// the nearest `<Catch>`.
+/// The previous run is dropped first; dropping is its cleanup. It returns `()` or a `Result`,
+/// whose `Err` goes to the nearest `<Catch>`.
 #[track_caller]
-pub fn effect<D, F>(deps: D, f: F)
+pub fn effect<D, F, R>(deps: D, f: F)
 where
     D: Deps,
-    F: AsyncFnOnce(&D::Owned) -> Result<()> + 'static,
+    F: AsyncFnOnce(&D::Owned) -> R + 'static,
+    R: crate::Outcome,
 {
     let (inst, _, cell) = slot("effect", || EffectSlot {
         deps: RefCell::new(None),
@@ -293,7 +410,7 @@ where
         *cell.deps.borrow_mut() = Some(Box::new(now.clone()));
         cell.stop();
         let task = runtime::spawn_cancellable(async move {
-            if let Err(e) = f(&now).await {
+            if let Err(e) = f(&now).await.into_result() {
                 if let Some(inst) = owner.upgrade() {
                     runtime::throw(Some(&inst), e);
                 }

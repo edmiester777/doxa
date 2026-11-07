@@ -71,12 +71,66 @@ mod web {
         serde_wasm_bindgen::from_value(v).map_err(|e| JsError::new(&format!("prop `{key}`: {e}")))
     }
 
-    /// Prop `key` of `props`, a function called with the [`Callback`]'s argument; missing is a no-op.
-    pub fn callback<T: Serialize + 'static>(
+    /// A signature a JS function can stand behind: its arguments cross as JSON-compatible data.
+    pub trait JsCallable: 'static {
+        fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self>;
+    }
+
+    /// `null` for a value JS has no form for, so the function still gets its position.
+    fn to_arg<T: Serialize>(arg: &T) -> JsValue {
+        arg.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .unwrap_or(JsValue::NULL)
+    }
+
+    impl JsCallable for dyn Fn() {
+        fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self> {
+            Callback::from(move || {
+                let f = latest.borrow().clone();
+                let _ = f.call0(&JsValue::NULL);
+            })
+        }
+    }
+
+    /// `()` and anything else serializing to nothing call the function with no arguments.
+    impl<T: Serialize + 'static> JsCallable for dyn Fn(T) {
+        fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self> {
+            Callback::from(move |arg: T| {
+                let f = latest.borrow().clone();
+                let v = to_arg(&arg);
+                let _ = if v.is_undefined() || v.is_null() {
+                    f.call0(&JsValue::NULL)
+                } else {
+                    f.call1(&JsValue::NULL, &v)
+                };
+            })
+        }
+    }
+
+    macro_rules! js_callable {
+        ($($a:ident $v:ident),+) => {
+            impl<$($a: Serialize + 'static),+> JsCallable for dyn Fn($($a),+) {
+                fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self> {
+                    Callback::from(move |$($v: $a),+| {
+                        let f = latest.borrow().clone();
+                        let args = js_sys::Array::new();
+                        $(args.push(&to_arg(&$v));)+
+                        let _ = f.apply(&JsValue::NULL, &args);
+                    })
+                }
+            }
+        };
+    }
+
+    js_callable!(A a, B b);
+    js_callable!(A a, B b, C c);
+    js_callable!(A a, B b, C c, D d);
+
+    /// Prop `key` of `props`, a function called with the [`Callback`]'s arguments; missing is a no-op.
+    pub fn callback<F: JsCallable + ?Sized>(
         calls: &Calls,
         props: &JsValue,
         key: &'static str,
-    ) -> Result<Callback<T>, JsError> {
+    ) -> Result<Callback<F>, JsError> {
         let v = js_sys::Reflect::get(props, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
         let f: js_sys::Function = if v.is_undefined() || v.is_null() {
             js_sys::Function::new_no_args("")
@@ -86,20 +140,13 @@ mod web {
         };
         let mut map = calls.0.borrow_mut();
         if let Some(call) = map.get(key) {
-            if let Some(cb) = call.callback.downcast_ref::<Callback<T>>() {
+            if let Some(cb) = call.callback.downcast_ref::<Callback<F>>() {
                 *call.latest.borrow_mut() = f;
                 return Ok(cb.clone());
             }
         }
         let latest = Rc::new(RefCell::new(f));
-        let read = latest.clone();
-        let cb = Callback::from(move |arg: T| {
-            let f = read.borrow().clone();
-            let _ = match arg.serialize(&serde_wasm_bindgen::Serializer::json_compatible()) {
-                Ok(v) if !v.is_undefined() && !v.is_null() => f.call1(&JsValue::NULL, &v),
-                _ => f.call0(&JsValue::NULL),
-            };
-        });
+        let cb = F::calling(latest.clone());
         map.insert(
             key,
             Call {

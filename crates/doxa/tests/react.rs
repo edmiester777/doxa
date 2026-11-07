@@ -20,9 +20,9 @@ pub struct Editor {
     pub label: String,
     pub children: String,
     #[react(event)]
-    pub on_change: Callback<String>,
+    pub on_change: impl Fn(String),
     #[react(event)]
-    pub on_blur: Callback<()>,
+    pub on_blur: impl Fn(),
 }
 
 #[react(module = "./ts/monaco.tsx", export = "default", lazy)]
@@ -155,7 +155,7 @@ fn Page() -> View {
                 value={text.get()}
                 label="Source"
                 on_change={move |v: String| SEEN.with(|s| s.borrow_mut().push(format!("{t}:{v}")))}
-                on_blur={move |()| SEEN.with(|s| s.borrow_mut().push(format!("{t}:blur")))}
+                on_blur={move || SEEN.with(|s| s.borrow_mut().push(format!("{t}:blur")))}
             >
                 "hello"
             </Editor>
@@ -248,7 +248,7 @@ fn an_optional_prop_is_left_out_only_when_none() {
                 label="l"
                 read_only={Some(true)}
                 on_change={|_: String| {}}
-                on_blur={|()| {}}
+                on_blur={|| {}}
             />
         }
     })

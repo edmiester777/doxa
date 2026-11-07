@@ -7,17 +7,17 @@ use crate::{Count, WidgetPage};
 
 /// The widgets whose names contain `contains`; `on_open` gets the name picked.
 #[component(export)]
-pub async fn WidgetPicker(contains: Option<String>, on_open: Callback<String>) -> Result<View> {
+pub async fn WidgetPicker(contains: Option<String>, on_open: impl Fn(String)) -> Result<View> {
     let widgets = list_widgets(Filter { contains }).await?;
     let picks = state(0u32);
     Ok(view! {
         <div class="picker">
-            <Count total={widgets.len()} on_pick={move |_: bool| picks.update(|n| *n += 1)}/>
+            <Count total={widgets.len()} on_pick={move || picks.update(|n| *n += 1)}/>
             <p class="picks">{picks.get()}</p>
             {widgets.iter().map(|w| {
                 let (name, open) = (w.name.clone(), on_open.clone());
                 view! {
-                    <button key={w.id} class="open" on:click={move |_| open.call(name.clone())}>
+                    <button key={w.id} class="open" on:click={move || open(name.clone())}>
                         {&w.name}
                     </button>
                 }

@@ -52,6 +52,10 @@ enum Crossing {
     Direct,
     /// Through `serde_wasm_bindgen`.
     Serde,
+    /// A `&JsCallback`'s function.
+    Callback,
+    /// A `NodeRef`'s browser node.
+    Node,
 }
 
 const DIRECT: &[&str] = &[
@@ -69,6 +73,12 @@ fn crossing(ty: &Type, js_types: &[Ident]) -> Crossing {
     let Some(last) = p.path.segments.last() else {
         return Crossing::Serde;
     };
+    if last.ident == "JsCallback" {
+        return Crossing::Callback;
+    }
+    if last.ident == "NodeRef" {
+        return Crossing::Node;
+    }
     let direct = DIRECT.iter().any(|d| last.ident == d)
         || js_types.contains(&last.ident)
         || p.path
@@ -331,6 +341,19 @@ fn function(
                     }
                 });
             }
+            Crossing::Callback => {
+                raw_params.push(quote!(#ident: wasm_bindgen::JsValue));
+                pass.push(quote!(::doxa::ui::__private::js_callback(#ident)));
+            }
+            Crossing::Node => {
+                raw_params.push(quote!(#ident: wasm_bindgen::JsValue));
+                pass.push(quote! {
+                    match ::doxa::ui::__private::js_node(#ident) {
+                        ::core::result::Result::Ok(v) => v,
+                        ::core::result::Result::Err(e) => return __fail(e),
+                    }
+                });
+            }
         }
     }
 
@@ -417,6 +440,14 @@ fn function(
     } else {
         quote!(#bindings::#raw_name(#(#pass),*); let value = ();)
     };
+    // A fallible call has an answer off the browser, so a caller needn't `cfg` around it.
+    let native = if fallible {
+        quote! {
+            ::core::result::Result::Err(::doxa::ui::JsError::new("npm modules load only in the browser"))
+        }
+    } else {
+        quote!(::core::unreachable!("npm modules load only in the browser"))
+    };
     let wrapper = quote! {
         #(#docs)*
         #[allow(unused_variables, clippy::let_unit_value)]
@@ -432,7 +463,7 @@ fn function(
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                ::core::unreachable!("npm modules load only in the browser")
+                #native
             }
         }
     };

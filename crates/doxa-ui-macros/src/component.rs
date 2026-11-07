@@ -134,6 +134,7 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
             }
         }
         pt.attrs = kept;
+        crate::callback::desugar(&mut pt.ty)?;
         let ty = (*pt.ty).clone();
         let optional = is_option(&ty);
         if default.is_none() && (optional || name == "children") {
@@ -187,6 +188,27 @@ fn no_spawn(body: &syn::Block) -> syn::Result<()> {
 
 fn is_option(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.segments.last().is_some_and(|s| s.ident == "Option"))
+}
+
+fn is_named(ty: &Type, name: &str) -> bool {
+    matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == name))
+}
+
+/// A number keeps `Into<Option<_>>`, so an unsuffixed literal still infers.
+fn is_number(ty: &Type) -> bool {
+    const NUMBERS: [&str; 14] = [
+        "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+        "f32", "f64",
+    ];
+    NUMBERS.iter().any(|n| is_named(ty, n))
+}
+
+/// A type no closure converts to, so it needs no setter for one.
+fn is_plain(ty: &Type) -> bool {
+    is_number(ty)
+        || ["View", "String", "bool", "char"]
+            .iter()
+            .any(|n| is_named(ty, n))
 }
 
 pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
@@ -277,7 +299,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
 
     let render = quote! {
         #(#others)*
-        #[allow(non_snake_case, clippy::too_many_arguments)]
+        #[allow(non_snake_case, clippy::too_many_arguments, clippy::type_complexity)]
         #inner_sig #body
         let #props_ty { #(#names),* } = props;
         #call
@@ -331,6 +353,7 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
         #[doc = concat!("Props of [`", #name_str, "`].")]
         #[derive(Clone)]
         #derive_eq
+        #[allow(clippy::type_complexity)]
         #vis struct #props_ty #generics #where_c { #(#fields),* }
 
         #builder
@@ -430,39 +453,111 @@ pub(crate) fn builder(
     let setters = props.iter().map(|p| {
         let (n, t) = (&p.name, &p.ty);
         let pos = required.iter().position(|r| r.name == p.name);
-        let out_params = params.iter().enumerate().map(|(i, g)| {
-            if Some(i) == pos {
-                quote!(::doxa::ui::Set)
-            } else {
-                quote!(#g)
+        let out_params: Vec<_> = params
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                if Some(i) == pos {
+                    quote!(::doxa::ui::Set)
+                } else {
+                    quote!(#g)
+                }
+            })
+            .collect();
+        let method = |name: &Ident, generics: TokenStream, arg: TokenStream, value: TokenStream| {
+            let moves = names.iter().map(|m| {
+                if *m == n {
+                    quote!(#m: ::core::option::Option::Some(#value))
+                } else {
+                    quote!(#m: self.#m)
+                }
+            });
+            quote_spanned! { n.span() =>
+                #[allow(missing_docs)]
+                pub fn #name #generics (self, #arg) -> #builder<#(#tys,)* #(#out_params),*> {
+                    #builder { #(#moves,)* _set: ::core::marker::PhantomData }
+                }
             }
-        });
-        let (arg, convert) = if n == "children" {
+        };
+        let inner = crate::callback::inner_of(t, "Option");
+        let (generics, arg, convert) = if n == "children" {
             (
+                quote!(),
                 quote!(value: ::doxa::ui::View),
                 quote!(::doxa::ui::__private::FromChildren::from_children(value)),
             )
-        } else if mentions_param(t) {
-            (quote!(value: #t), quote!(value))
+        } else if let Some(i) = inner.filter(|_| mentions_param(t)) {
+            (
+                quote!(),
+                quote!(value: impl ::doxa::ui::__private::OptionOf<#i>),
+                quote!(::doxa::ui::__private::OptionOf::into_option(value)),
+            )
+        } else if mentions_param(t) || is_number(t) {
+            // A number takes exactly its type, so an unsuffixed literal infers it.
+            (quote!(), quote!(value: #t), quote!(value))
+        } else if is_named(t, "View") {
+            (
+                quote!(),
+                quote!(value: impl ::doxa::ui::IntoView),
+                quote!(::doxa::ui::IntoView::into_view(value)),
+            )
+        } else if inner.is_some_and(|i| is_named(i, "View")) {
+            (
+                quote!(),
+                quote!(value: impl ::doxa::ui::IntoView),
+                quote!(::doxa::ui::IntoView::into_optional_view(value)),
+            )
+        } else if let Some(i) = inner.filter(|i| !is_number(i)) {
+            (
+                quote!(<__M>),
+                quote!(value: impl ::doxa::ui::__private::IntoOptional<#i, __M>),
+                quote!(::doxa::ui::__private::IntoOptional::into_optional(value)),
+            )
         } else {
             (
+                quote!(),
                 quote!(value: impl ::core::convert::Into<#t>),
                 quote!(::core::convert::Into::into(value)),
             )
         };
-        let moves = names.iter().map(|m| {
-            if *m == n {
-                quote!(#m: ::core::option::Option::Some(#convert))
-            } else {
-                quote!(#m: self.#m)
+        let mut methods = vec![method(n, generics, arg, convert)];
+
+        let unraw = syn::ext::IdentExt::unraw(n);
+        if inner.is_some() {
+            let none = format_ident!("__none_{}", unraw, span = n.span());
+            methods.push(method(
+                &none,
+                quote!(),
+                quote!(),
+                quote!(::core::option::Option::None),
+            ));
+        }
+        let callback = inner.unwrap_or(t);
+        if let Some(sig) = crate::callback::signature(callback) {
+            for (name, generics, arg, built) in crate::callback::closure_setters(n, callback, &sig)
+            {
+                let value = match inner {
+                    Some(_) => quote!(::core::option::Option::Some(#built)),
+                    None => built,
+                };
+                methods.push(method(&name, generics, arg, value));
             }
-        });
-        quote_spanned! { n.span() =>
-            #[allow(missing_docs)]
-            pub fn #n(self, #arg) -> #builder<#(#tys,)* #(#out_params),*> {
-                #builder { #(#moves,)* _set: ::core::marker::PhantomData }
+        } else if n != "children" && !is_plain(callback) {
+            // A literal closure on any other prop takes the ordinary conversion.
+            for prefix in ["fn", "fn0", "afn", "afn0"] {
+                let name = format_ident!("__{}_{}", prefix, unraw, span = n.span());
+                let (arg, value) = if mentions_param(t) {
+                    (quote!(value: #t), quote!(value))
+                } else {
+                    (
+                        quote!(value: impl ::core::convert::Into<#t>),
+                        quote!(::core::convert::Into::into(value)),
+                    )
+                };
+                methods.push(method(&name, quote!(), arg, value));
             }
         }
+        quote!(#(#methods)*)
     });
 
     let build_fields = props.iter().map(|p| {
@@ -499,6 +594,7 @@ pub(crate) fn builder(
         )*
 
         #[doc = concat!("Builds [`", stringify!(#props_ty), "`].")]
+        #[allow(clippy::type_complexity)]
         #vis struct #builder #with_state #state_where {
             #(#builder_fields,)*
             _set: ::core::marker::PhantomData<(fn() -> (#(#tys,)*), #(#params,)*)>,
@@ -511,7 +607,7 @@ pub(crate) fn builder(
             }
         }
 
-        #[allow(dead_code)]
+        #[allow(dead_code, clippy::type_complexity)]
         impl #state_impl #builder #state_ty #state_where {
             #(#setters)*
         }

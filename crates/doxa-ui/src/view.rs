@@ -148,17 +148,19 @@ impl Element {
     }
 
     /// Handle an event with an async closure; an `Err` goes to the nearest `<Catch>`.
-    pub fn on_async<F>(self, event: &'static str, handler: F) -> Self
+    pub fn on_async<F, R>(self, event: &'static str, handler: F) -> Self
     where
-        F: AsyncFn(Event) -> crate::Result<()> + 'static,
+        F: AsyncFn(Event) -> R + 'static,
+        R: crate::Outcome,
     {
         self.on_async_with(event, Listen::default(), handler)
     }
 
     /// [`on_async`](Self::on_async) with listener options.
-    pub fn on_async_with<F>(mut self, event: &'static str, opts: Listen, handler: F) -> Self
+    pub fn on_async_with<F, R>(mut self, event: &'static str, opts: Listen, handler: F) -> Self
     where
-        F: AsyncFn(Event) -> crate::Result<()> + 'static,
+        F: AsyncFn(Event) -> R + 'static,
+        R: crate::Outcome,
     {
         self.events.push((event, opts, async_handler(handler)));
         self
@@ -200,20 +202,16 @@ impl Element {
 }
 
 /// Spawn `handler` per event; an `Err` goes to the `<Catch>` around the instance rendering now.
-pub(crate) fn async_handler<F>(handler: F) -> Handler
+pub(crate) fn async_handler<F, R>(handler: F) -> Handler
 where
-    F: AsyncFn(Event) -> crate::Result<()> + 'static,
+    F: AsyncFn(Event) -> R + 'static,
+    R: crate::Outcome,
 {
     let handler = Rc::new(handler);
-    let owner = crate::runtime::current_instance();
+    let owner = owner();
     Rc::new(move |ev| {
         let handler = handler.clone();
-        let owner = owner.clone();
-        doxa_client::task::spawn(async move {
-            if let Err(e) = handler(ev).await {
-                crate::runtime::throw(owner.as_ref(), e);
-            }
-        });
+        owner.spawn(async move { handler(ev).await });
     })
 }
 
@@ -260,6 +258,15 @@ impl ComponentView {
 pub trait IntoView {
     /// Convert into a view.
     fn into_view(self) -> View;
+
+    /// As an `Option<View>` prop takes it; only an `Option` can be absent.
+    #[doc(hidden)]
+    fn into_optional_view(self) -> Option<View>
+    where
+        Self: Sized,
+    {
+        Some(self.into_view())
+    }
 }
 
 impl IntoView for View {
@@ -325,6 +332,10 @@ display_view!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f3
 impl<T: IntoView> IntoView for Option<T> {
     fn into_view(self) -> View {
         self.map(IntoView::into_view).unwrap_or_default()
+    }
+
+    fn into_optional_view(self) -> Option<View> {
+        self.map(IntoView::into_view)
     }
 }
 
@@ -520,34 +531,154 @@ impl DangerousHtml {
     }
 }
 
-/// A prop holding a handler: `on_select={move |id| …}`.
-pub struct Callback<T = ()>(Rc<RefCell<Handle<T>>>);
+/// What an `Option` prop over a component's own parameter takes: exactly `T`, so the tag
+/// still infers the parameter, or an `Option` of it.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this `Option<{T}>` prop can't be given a `{Self}`",
+    label = "pass a `{T}` or an `Option` of one"
+)]
+pub trait OptionOf<T> {
+    fn into_option(self) -> Option<T>;
+}
 
-type Handle<T> = Rc<dyn Fn(T)>;
+impl<T> OptionOf<T> for T {
+    fn into_option(self) -> Option<T> {
+        Some(self)
+    }
+}
 
-impl<T> Clone for Callback<T> {
+impl<T> OptionOf<T> for Option<T> {
+    fn into_option(self) -> Option<T> {
+        self
+    }
+}
+
+/// A function held in a prop, called like one: `on_move(id, 3)`. A component's signature
+/// writes it `on_move: impl Fn(Uuid, i32)`; anywhere else it is `Callback<dyn Fn(Uuid, i32)>`.
+pub struct Callback<F: ?Sized = dyn Fn()>(Rc<F>);
+
+impl<F: ?Sized> Clone for Callback<F> {
     fn clone(&self) -> Self {
         Callback(self.0.clone())
     }
 }
 
-impl<T> PartialEq for Callback<T> {
+impl<F: ?Sized> PartialEq for Callback<F> {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl<T> Callback<T> {
-    /// Call the handler.
-    pub fn call(&self, value: T) {
-        let f = self.0.borrow().clone();
-        f(value)
+impl<F: ?Sized> std::ops::Deref for Callback<F> {
+    type Target = F;
+    fn deref(&self) -> &F {
+        &self.0
     }
 }
 
-impl<T, F: Fn(T) + 'static> From<F> for Callback<T> {
-    fn from(f: F) -> Self {
-        Callback(Rc::new(RefCell::new(Rc::new(f))))
+impl<F: ?Sized> Callback<F> {
+    /// From a shared function, for a signature `From` doesn't cover, e.g. `Fn(&T, usize)`.
+    pub fn from_rc(f: Rc<F>) -> Self {
+        Callback(f)
+    }
+}
+
+macro_rules! callback_arity {
+    ($($a:ident $v:ident),*) => {
+        impl<$($a: 'static,)* R: 'static, F: Fn($($a),*) -> R + 'static> From<F>
+            for Callback<dyn Fn($($a),*) -> R>
+        {
+            fn from(f: F) -> Self {
+                Callback(Rc::new(f))
+            }
+        }
+
+        impl<$($a: 'static),*> Default for Callback<dyn Fn($($a),*)> {
+            fn default() -> Self {
+                Callback(Rc::new(|$(_: $a),*| {}))
+            }
+        }
+
+        impl<$($a: 'static,)* F: Fn($($a),*) + 'static> crate::hooks::CallbackFn<($($a,)*)> for F {
+            type Sig = dyn Fn($($a),*);
+
+            fn shared(self) -> Rc<Self::Sig> {
+                Rc::new(self)
+            }
+
+            fn forwarding(latest: Rc<RefCell<Rc<Self::Sig>>>) -> Rc<Self::Sig> {
+                Rc::new(move |$($v: $a),*| {
+                    let f = latest.borrow().clone();
+                    f($($v),*)
+                })
+            }
+        }
+
+        impl<$($a: 'static),*> crate::hooks::StableCallback<dyn Fn($($a),*)> {
+            /// Run the latest render's closure; nothing once the component has unmounted.
+            pub fn call(&self, $($v: $a),*) {
+                if let Some(f) = self.current() {
+                    f($($v),*)
+                }
+            }
+        }
+    };
+}
+
+callback_arity!();
+callback_arity!(A a);
+callback_arity!(A a, B b);
+callback_arity!(A a, B b, C c);
+callback_arity!(A a, B b, C c, D d);
+callback_arity!(A a, B b, C c, D d, E e);
+callback_arity!(A a, B b, C c, D d, E e, G g);
+
+/// The current component, so a callback's async closure throws to the `<Catch>` around it.
+#[doc(hidden)]
+pub struct Owner(Option<Rc<crate::runtime::Instance>>);
+
+#[doc(hidden)]
+pub fn owner() -> Owner {
+    Owner(crate::runtime::current_instance())
+}
+
+impl Owner {
+    pub fn spawn<R: crate::Outcome>(&self, run: impl std::future::Future<Output = R> + 'static) {
+        let owner = self.0.clone();
+        doxa_client::task::spawn(async move {
+            if let Err(e) = run.await.into_result() {
+                crate::runtime::throw(owner.as_ref(), e);
+            }
+        });
+    }
+}
+
+/// Keeps [`IntoOptional`]'s two impls from overlapping.
+#[doc(hidden)]
+pub struct AsValue;
+#[doc(hidden)]
+pub struct AsOption;
+
+/// What an `Option<T>` prop takes: `T`, what converts to it, or an `Option` of those.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this `Option<{T}>` prop can't be given a `{Self}`",
+    label = "pass a `{T}`, something `Into<{T}>`, or an `Option` of one"
+)]
+pub trait IntoOptional<T, M> {
+    fn into_optional(self) -> Option<T>;
+}
+
+impl<T, U: Into<T>> IntoOptional<T, AsValue> for U {
+    fn into_optional(self) -> Option<T> {
+        Some(self.into())
+    }
+}
+
+impl<T, U: Into<T>> IntoOptional<T, AsOption> for Option<U> {
+    fn into_optional(self) -> Option<T> {
+        self.map(Into::into)
     }
 }
 
