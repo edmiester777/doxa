@@ -192,6 +192,7 @@ pub fn jump_table(patch: &[u8], cache: &Cache) -> Result<(Vec<u8>, JumpTable)> {
         }
     }
     new.start = None;
+    export_global_relocs(&mut new);
     let bytes = new.emit_wasm();
 
     let new_ifuncs = collect_ifuncs(&new);
@@ -211,6 +212,18 @@ pub fn jump_table(patch: &[u8], cache: &Cache) -> Result<(Vec<u8>, JumpTable)> {
             ifunc_count: new_ifuncs.len() as u64,
         },
     ))
+}
+
+/// The loader adds the table and memory bases to the patch's GOT by calling this export, which
+/// the linker doesn't write; without it, a pointer from the GOT is a slot of the base's table.
+fn export_global_relocs(patch: &mut Module) {
+    const GLOBAL_RELOCS: &str = "__wasm_apply_global_relocs";
+    if patch.exports.iter().any(|e| e.name == GLOBAL_RELOCS) {
+        return;
+    }
+    if let Some(func) = patch.funcs.by_name(GLOBAL_RELOCS) {
+        patch.exports.add(GLOBAL_RELOCS, func);
+    }
 }
 
 /// Before wasm-bindgen: put every local function in the table, and keep the wbg
@@ -491,7 +504,34 @@ fn parse_with_ids(bytes: &[u8]) -> Result<ParsedModule<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_bindgen_symbol;
+    use walrus::{FunctionBuilder, Module};
+
+    use super::{export_global_relocs, is_bindgen_symbol};
+
+    #[test]
+    fn a_patch_exports_its_global_relocations_once() {
+        let mut patch = Module::default();
+        let mut builder = FunctionBuilder::new(&mut patch.types, &[], &[]);
+        builder.name("__wasm_apply_global_relocs".to_owned());
+        let relocs = builder.finish(Vec::new(), &mut patch.funcs);
+        export_global_relocs(&mut patch);
+        export_global_relocs(&mut patch);
+        assert_eq!(patch.exports.iter().count(), 1);
+        assert_eq!(
+            patch
+                .exports
+                .get_func("__wasm_apply_global_relocs")
+                .unwrap(),
+            relocs,
+        );
+    }
+
+    #[test]
+    fn a_patch_without_global_relocations_exports_nothing() {
+        let mut patch = Module::default();
+        export_global_relocs(&mut patch);
+        assert_eq!(patch.exports.iter().count(), 0);
+    }
 
     #[test]
     fn bindgen_symbols_match_in_both_manglings() {

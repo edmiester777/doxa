@@ -478,6 +478,7 @@ fn patch(dom: &dyn Dom, owner: &Rc<Instance>, old: &mut Mounted, new: Node) {
             runtime::run(content);
         }
         (Mounted::Component { inst, .. }, Node::Component(c)) => {
+            inst.render.set(c.render);
             let unchanged = c
                 .same_props
                 .is_some_and(|eq| eq(&inst.props.borrow(), &c.props));
@@ -758,7 +759,61 @@ fn kill_children(dom: &dyn Dom, children: &[Mounted]) {
 
 #[cfg(test)]
 mod tests {
+    use std::any::{Any, TypeId};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use super::lis;
+    use crate::component::{Component, RenderFuture};
+    use crate::testing::Screen;
+    use crate::view::{comp, ComponentNode, IntoView, Node, View};
+
+    thread_local! {
+        static PATCHED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn text(text: &'static str) -> RenderFuture {
+        RenderFuture::ready(Ok(text.into_view()))
+    }
+
+    struct Child;
+
+    /// Hands its child the pointer a patch's own table region would give it.
+    struct Parent;
+
+    impl Component for Parent {
+        type Props = ();
+        const NAME: &'static str = "Parent";
+
+        fn render((): ()) -> RenderFuture {
+            let render: fn(&Rc<dyn Any>) -> RenderFuture = if PATCHED.with(Cell::get) {
+                |_| text("patched")
+            } else {
+                |_| text("base")
+            };
+            RenderFuture::ready(Ok(View(Node::Component(Rc::new(ComponentNode {
+                type_id: TypeId::of::<Child>(),
+                name: "Child",
+                key: None,
+                props: Rc::new(()),
+                render,
+                same_props: Some(|_, _| true),
+            })))))
+        }
+    }
+
+    #[test]
+    fn a_matched_child_renders_through_the_pointer_its_parent_just_gave_it() {
+        let screen = Screen::mount(|| comp::<Parent>(()).into_view());
+        let shown = || {
+            doxa_client::task::run_until_stalled();
+            screen.dom().text(screen.dom().body())
+        };
+        assert_eq!(shown(), "base");
+        PATCHED.with(|p| p.set(true));
+        crate::runtime::rerender_all();
+        assert_eq!(shown(), "patched");
+    }
 
     #[test]
     fn lis_keeps_the_longest_run() {

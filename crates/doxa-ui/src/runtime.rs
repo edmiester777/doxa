@@ -25,13 +25,16 @@ pub(crate) struct Hook {
     pub value: Rc<dyn Any>,
 }
 
+type RenderFn = fn(&Rc<dyn Any>) -> RenderFuture;
+
 pub(crate) struct Instance {
     pub id: u64,
     pub name: &'static str,
     pub type_id: TypeId,
     pub depth: usize,
     pub parent: Option<Weak<Instance>>,
-    pub render: fn(&Rc<dyn Any>) -> RenderFuture,
+    /// Set anew by each parent render: a hot patch's pointer has no entry in a later jump table.
+    pub render: Cell<RenderFn>,
     pub props: RefCell<Rc<dyn Any>>,
     pub hooks: RefCell<Vec<Hook>>,
     pub cursor: Cell<usize>,
@@ -70,7 +73,7 @@ impl Instance {
         name: &'static str,
         type_id: TypeId,
         parent: Option<&Rc<Instance>>,
-        render: fn(&Rc<dyn Any>) -> RenderFuture,
+        render: RenderFn,
         props: Rc<dyn Any>,
         parent_node: NodeId,
     ) -> Rc<Instance> {
@@ -81,7 +84,7 @@ impl Instance {
             type_id,
             depth: parent.map_or(0, |p| p.depth + 1),
             parent: parent.map(Rc::downgrade),
-            render,
+            render: Cell::new(render),
             props: RefCell::new(props),
             hooks: RefCell::new(Vec::new()),
             cursor: Cell::new(0),
@@ -326,7 +329,7 @@ pub(crate) fn run(inst: &Rc<Instance>) {
     let props = inst.props.borrow().clone();
     let mut fut = Box::pin(Tracked {
         inst: inst.clone(),
-        fut: inside(inst, || crate::hot::render(inst.render, &props)),
+        fut: inside(inst, || crate::hot::render(inst.render.get(), &props)),
     });
     match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(out) => commit(inst, out),
