@@ -179,6 +179,10 @@ pub(super) fn jump_table(
         }
     }
 
+    redirect_casts(&mut new, table, |name| {
+        cache.symbol_ifunc.get(name).copied()
+    })?;
+
     let customs: Vec<_> = new.customs.iter().map(|c| c.0).collect();
     for id in customs {
         if new
@@ -196,6 +200,10 @@ pub(super) fn jump_table(
     let new_ifuncs = collect_ifuncs(&new);
     let mut map = AddressMap::default();
     for (name, idx) in &new_ifuncs {
+        // A redirected cast calls the base's slot, so jumping that slot here would loop.
+        if is_cast(name) {
+            continue;
+        }
         if let Some(old) = cache.symbol_ifunc.get(*name) {
             map.insert(*old as u64, *idx as u64);
         }
@@ -406,8 +414,40 @@ fn collect_ifuncs(m: &Module) -> HashMap<&str, i32> {
     out
 }
 
+/// A `wbg_cast` monomorph. wasm-bindgen rewrites the base's to call a generated JS adapter, so
+/// it stays callable, unlike the `breaks_if_inlined` descriptor inside it.
+fn is_cast(name: &str) -> bool {
+    name.contains("8wbg_cast") && !name.contains("breaks_if_inlined")
+}
+
+/// Patch code holds unrewritten copies of the casts, whose descriptors trap when run, so each
+/// calls the base's instead. A cast new to the patch has no adapter without wasm-bindgen.
+fn redirect_casts(
+    new: &mut Module,
+    table: TableId,
+    slot_of: impl Fn(&str) -> Option<i32>,
+) -> Result<()> {
+    let casts: Vec<(FunctionId, String)> = new
+        .funcs
+        .iter()
+        .filter(|f| matches!(f.kind, FunctionKind::Local(_)))
+        .filter_map(|f| Some((f.id(), f.name.clone()?)))
+        .filter(|(_, name)| is_cast(name))
+        .collect();
+    for (func, name) in casts {
+        let slot = slot_of(&name).with_context(|| {
+            format!("{name} casts a type new to this patch, which needs wasm-bindgen")
+        })?;
+        call_through_table(new, table, func, slot, name);
+    }
+    Ok(())
+}
+
 /// Symbols wasm-bindgen consumes itself, after its own heuristics, in legacy and v0 mangling.
 fn is_bindgen_symbol(name: &str) -> bool {
+    if is_cast(name) {
+        return false;
+    }
     [
         "__wbindgen_describe",
         "__wbindgen_externref",
@@ -526,9 +566,9 @@ fn parse_with_ids(bytes: &[u8]) -> Result<ParsedModule<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use walrus::{FunctionBuilder, Module};
+    use walrus::{ir, FunctionBuilder, FunctionId, FunctionKind, Module, TableId};
 
-    use super::{export_global_relocs, is_bindgen_symbol};
+    use super::{export_global_relocs, is_bindgen_symbol, is_cast, redirect_casts};
 
     #[test]
     fn a_patch_exports_its_global_relocations_once() {
@@ -559,14 +599,75 @@ mod tests {
     fn bindgen_symbols_match_in_both_manglings() {
         for name in [
             "_RNvXsu_NtCsisWeVXeeysB_12wasm_bindgen8describeNtB7_7JsValueNtB5_12WasmDescribe8describe",
-            "_RINvNtCsisWeVXeeysB_12wasm_bindgen4___rt8wbg_castReNtB4_7JsValueEB4_",
+            "_RINvNvNtCsisWeVXeeysB_12wasm_bindgen4___rt8wbg_cast17breaks_if_inlinedReNtB4_7JsValueEB4_",
             "_ZN12wasm_bindgen8describe6inform17h0123456789abcdefE",
-            "_ZN12wasm_bindgen4__rt8wbg_cast17h0123456789abcdefE",
         ] {
             assert!(is_bindgen_symbol(name), "{name}");
         }
         assert!(!is_bindgen_symbol(
             "_RNvMs0_NtCsbeQQBaYUKJ5_7doxa_ui3appNtB5_3App5mount"
         ));
+    }
+
+    const CAST: &str = "_RINvNtCsisWeVXeeysB_12wasm_bindgen4___rt8wbg_castReNtB4_7JsValueEB4_";
+
+    #[test]
+    fn a_cast_stays_reachable_but_its_descriptor_doesnt() {
+        for cast in [CAST, "_ZN12wasm_bindgen4__rt8wbg_cast17h0123456789abcdefE"] {
+            assert!(is_cast(cast), "{cast}");
+            assert!(!is_bindgen_symbol(cast), "{cast}");
+        }
+        let descriptor =
+            "_RINvNvNtCsisWeVXeeysB_12wasm_bindgen4___rt8wbg_cast17breaks_if_inlinedReNtB4_7JsValueEB4_";
+        assert!(!is_cast(descriptor));
+    }
+
+    fn patch_with(name: &str) -> (Module, TableId, FunctionId) {
+        let mut patch = Module::default();
+        let table = patch
+            .tables
+            .add_local(false, 8, None, walrus::RefType::Funcref);
+        let mut builder = FunctionBuilder::new(&mut patch.types, &[], &[]);
+        builder.name(name.to_owned()).func_body().unreachable();
+        let func = builder.finish(Vec::new(), &mut patch.funcs);
+        (patch, table, func)
+    }
+
+    fn calls_slot(patch: &Module, func: FunctionId) -> Option<i32> {
+        let FunctionKind::Local(local) = &patch.funcs.get(func).kind else {
+            return None;
+        };
+        let body = local.block(local.entry_block());
+        let (
+            ir::Instr::Const(ir::Const {
+                value: ir::Value::I32(slot),
+            }),
+            _,
+        ) = body.instrs.first()?
+        else {
+            return None;
+        };
+        matches!(body.instrs.last()?.0, ir::Instr::CallIndirect(_)).then_some(*slot)
+    }
+
+    #[test]
+    fn a_patched_cast_calls_the_bases_slot() {
+        let (mut patch, table, func) = patch_with(CAST);
+        redirect_casts(&mut patch, table, |name| (name == CAST).then_some(5)).unwrap();
+        assert_eq!(calls_slot(&patch, func), Some(5));
+    }
+
+    #[test]
+    fn a_cast_the_base_lacks_refuses_the_patch() {
+        let (mut patch, table, _) = patch_with(CAST);
+        let error = redirect_casts(&mut patch, table, |_| None).unwrap_err();
+        assert!(error.to_string().contains("needs wasm-bindgen"), "{error}");
+    }
+
+    #[test]
+    fn other_patch_code_keeps_its_body() {
+        let (mut patch, table, func) = patch_with("_RNvCs0_3app4draw");
+        redirect_casts(&mut patch, table, |_| None).unwrap();
+        assert_eq!(calls_slot(&patch, func), None);
     }
 }
