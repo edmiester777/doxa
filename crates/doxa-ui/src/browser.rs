@@ -96,7 +96,8 @@ pub fn debounced<T: Clone + PartialEq + 'static>(value: T, wait: Duration) -> T 
     out.get()
 }
 
-/// The element's box, updated as it resizes; `None` until the first report.
+/// The element's box, updated as it resizes; `None` until the first report. Width and height are
+/// its layout size, unaffected by CSS transforms; `x` and `y` are its viewport position.
 #[track_caller]
 pub fn resize_observer(el: ElementRef) -> State<Option<Rect>> {
     let size = state(None);

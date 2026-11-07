@@ -253,16 +253,18 @@ impl Dom for WebDom {
         let target = el.clone();
         let cb = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
             let r = target.get_bounding_client_rect();
-            let intersecting = js_sys::Reflect::get(&entries.at(-1), &"isIntersecting".into())
+            let entry = entries.at(-1);
+            let intersecting = js_sys::Reflect::get(&entry, &"isIntersecting".into())
                 .ok()
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let (width, height) = layout_size(&entry).unwrap_or((r.width(), r.height()));
             f(Observed {
                 rect: Rect {
                     x: r.x(),
                     y: r.y(),
-                    width: r.width(),
-                    height: r.height(),
+                    width,
+                    height,
                 },
                 intersecting,
             })
@@ -371,6 +373,14 @@ fn add_listener(
         &o,
     );
     closure
+}
+
+/// The border box before any CSS transform; `None` for an entry that isn't a resize.
+fn layout_size(entry: &JsValue) -> Option<(f64, f64)> {
+    let sizes = js_sys::Reflect::get(entry, &"borderBoxSize".into()).ok()?;
+    let first = js_sys::Reflect::get(&sizes, &0.into()).ok()?;
+    let side = |name: &str| js_sys::Reflect::get(&first, &name.into()).ok()?.as_f64();
+    Some((side("inlineSize")?, side("blockSize")?))
 }
 
 fn media(query: &str) -> Option<web_sys::MediaQueryList> {
