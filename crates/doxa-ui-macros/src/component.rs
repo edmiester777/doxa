@@ -297,11 +297,13 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
         quote!(#vis struct #name #generics (::core::marker::PhantomData<fn() -> (#(#tys,)*)>) #where_c;)
     };
 
+    let observed = props.iter().filter_map(|p| observe(&name_str, p));
     let render = quote! {
         #(#others)*
         #[allow(non_snake_case, clippy::too_many_arguments, clippy::type_complexity)]
         #inner_sig #body
         let #props_ty { #(#names),* } = props;
+        #(#observed)*
         #call
     };
     let (split, render) = if opts.lazy {
@@ -376,6 +378,38 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
         #split
         #exported
     }
+}
+
+/// In a gallery build, a function prop reports each call to the actions panel, then runs.
+fn observe(component: &str, p: &Prop) -> Option<TokenStream> {
+    let n = &p.name;
+    let inner = crate::callback::inner_of(&p.ty, "Option");
+    let ty = inner.unwrap_or(&p.ty);
+    let sig = crate::callback::signature(ty)?;
+    let inputs = &sig.inputs;
+    let output = &sig.output;
+    let vars: Vec<_> = (0..inputs.len())
+        .map(|i| format_ident!("__a{}", i))
+        .collect();
+    let prop = syn::ext::IdentExt::unraw(n).to_string();
+    let wrap = quote! {
+        <#ty>::from_rc(::std::rc::Rc::new(move |#(#vars: #inputs),*| #output {
+            let __args = {
+                use ::doxa::ui::__private::{ShowDebug as _, ShowOpaque as _};
+                ::std::vec![#((&&::doxa::ui::__private::Shown(&#vars)).show()),*]
+            };
+            ::doxa::ui::__private::action(#component, #prop, __args);
+            (*__inner)(#(#vars),*)
+        }))
+    };
+    let value = match inner {
+        Some(_) => quote!(#n.map(|__inner| #wrap)),
+        None => quote!({ let __inner = #n; #wrap }),
+    };
+    Some(quote! {
+        #[cfg(doxa_gallery)]
+        let #n = #value;
+    })
 }
 
 /// The module holding a lazy component's split point.

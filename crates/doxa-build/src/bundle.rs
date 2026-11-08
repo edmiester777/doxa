@@ -494,20 +494,17 @@ pub fn entry_js(glue: &Path, islands: &[PathBuf], wasm_file: &str, split: bool) 
     js
 }
 
-/// The gallery's entry: [`entry_js`]'s imports, then the gallery page in `gallery` over the glue.
+/// The gallery's entry: [`entry_js`]'s imports, then doxa-ui's gallery over the glue and
+/// `stories`, the JSON list of [`Story`](crate::stories::Story).
 pub fn gallery_js(
     glue: &Path,
     islands: &[PathBuf],
     wasm_file: &str,
-    gallery: &Path,
+    stories: &str,
     split: bool,
 ) -> String {
     let lit = |p: &Path| serde_json::to_string(&js_path(p)).expect("json");
-    let mut js = format!(
-        "import init, * as glue from {};\nimport {{ gallery }} from {};\n",
-        lit(glue),
-        lit(gallery)
-    );
+    let mut js = format!("import init, * as glue from {};\n", lit(glue));
     for island in islands {
         js.push_str(&format!("import {};\n", lit(island)));
     }
@@ -517,8 +514,9 @@ pub fn gallery_js(
     }
     js.push_str(SERVICES_JS);
     js.push_str(&format!(
-        "await gallery(glue, () => init({{ module_or_path: new URL({}, import.meta.url) }}));\n",
-        serde_json::to_string(&format!("./{wasm_file}")).expect("json")
+        "await init({{ module_or_path: new URL({}, import.meta.url) }});\nglue.__doxa_gallery(glue, {});\n",
+        serde_json::to_string(&format!("./{wasm_file}")).expect("json"),
+        serde_json::to_string(stories).expect("json")
     ));
     js
 }
@@ -654,16 +652,22 @@ mod tests {
             Path::new("/s/glue.js"),
             &[],
             "app-01.wasm",
-            Path::new("/s/gallery.js"),
+            "[{\"name\":\"a\"}]",
             false,
         );
-        assert!(js.starts_with(
-            "import init, * as glue from \"/s/glue.js\";\nimport { gallery } from \"/s/gallery.js\";\n\
-             globalThis.__DOXA_HOSTED__ = true;\n"
-        ), "{js}");
-        assert!(js.ends_with(
-            "await gallery(glue, () => init({ module_or_path: new URL(\"./app-01.wasm\", import.meta.url) }));\n"
-        ), "{js}");
+        assert!(
+            js.starts_with(
+                "import init, * as glue from \"/s/glue.js\";\nglobalThis.__DOXA_HOSTED__ = true;\n"
+            ),
+            "{js}"
+        );
+        assert!(
+            js.ends_with(
+                "await init({ module_or_path: new URL(\"./app-01.wasm\", import.meta.url) });\n\
+             glue.__doxa_gallery(glue, \"[{\\\"name\\\":\\\"a\\\"}]\");\n"
+            ),
+            "{js}"
+        );
     }
 
     #[test]

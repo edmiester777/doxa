@@ -49,6 +49,29 @@ pub fn strip_link_sections(wasm: &[u8], names: bool) -> Vec<u8> {
     out
 }
 
+/// The contents of every custom section called `name`, joined in order.
+pub(crate) fn custom_section(wasm: &[u8], name: &str) -> Vec<u8> {
+    let mut text = Vec::new();
+    let mut at = 8;
+    while at < wasm.len() {
+        let id = wasm[at];
+        let Some((size, len)) = leb128(&wasm[at + 1..]) else {
+            break;
+        };
+        let payload = at + 1 + len;
+        let end = (payload + size).min(wasm.len());
+        if id == 0 {
+            if let Some((n, l)) = leb128(&wasm[payload..end]) {
+                if wasm.get(payload + l..payload + l + n) == Some(name.as_bytes()) {
+                    text.extend_from_slice(&wasm[payload + l + n..end]);
+                }
+            }
+        }
+        at = end;
+    }
+    text
+}
+
 /// An unsigned LEB128 and how many bytes it took.
 pub(crate) fn leb128(b: &[u8]) -> Option<(usize, usize)> {
     let mut value = 0usize;

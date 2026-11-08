@@ -12,7 +12,7 @@ use crate::dist::{self, Dist};
 use crate::error::{run, Error, IoContext, Result};
 use crate::graph::Graph;
 use crate::hot::Patched;
-use crate::{bindgen, css, hot, npm, split};
+use crate::{bindgen, css, hot, npm, split, stories};
 
 /// How to build.
 #[derive(Debug, Clone, Default)]
@@ -49,6 +49,7 @@ pub struct Pipeline {
     pub(crate) wasm_file: Option<String>,
     /// Modules split off the app wasm, as (hashed name, bytes).
     pub(crate) split_files: Vec<(String, Vec<u8>)>,
+    stories: Vec<stories::Story>,
     hot: Option<hot::Base>,
     bundle: Option<BundleOutput>,
     pub(crate) stylesheets: Vec<(String, css::Built)>,
@@ -93,6 +94,7 @@ impl Pipeline {
             library: false,
             wasm_file: None,
             split_files: Vec::new(),
+            stories: Vec::new(),
             hot: None,
             bundle: None,
             stylesheets: Vec::new(),
@@ -148,6 +150,9 @@ impl Pipeline {
         if self.opts.release {
             cmd.arg("--release");
         }
+        if self.opts.gallery {
+            cmd.args(["--features", "doxa/gallery"]);
+        }
         // wasm-split builds its call graph from the relocations and finds functions by name;
         // only this crate links. Both are stripped from what ships.
         cmd.args(["--", "-C", "link-arg=--emit-relocs", "-C", "strip=none"]);
@@ -187,6 +192,9 @@ impl Pipeline {
             self.hot = Some(base);
         }
         let original = std::fs::read(&wasm).at(&wasm)?;
+        if self.opts.gallery {
+            self.stories = stories::stories(&original, &self.workspace.workspace_root);
+        }
         let splits = split::has_split_points(&original);
         bindgen::generate(&wasm, &out, self.opts.release, splits, self.opts.hot)?;
         let app_wasm = out.join("app_bg.wasm");
@@ -344,9 +352,8 @@ impl Pipeline {
         let entry = entry_dir.join("app.js");
         let split = !self.split_files.is_empty();
         let js = if self.opts.gallery {
-            let gallery = dir.join("gallery.js");
-            std::fs::write(&gallery, include_str!("../js/gallery.js")).at(&gallery)?;
-            gallery_js(&rewritten, &islands, &wasm_file, &gallery, split)
+            let listed = serde_json::to_string(&self.stories).expect("json");
+            gallery_js(&rewritten, &islands, &wasm_file, &listed, split)
         } else {
             entry_js(&rewritten, &islands, &wasm_file, split)
         };

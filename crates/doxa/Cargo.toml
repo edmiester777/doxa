@@ -94,6 +94,8 @@ npm = ["ui", "doxa-ui/npm"]
 forms = ["ui", "doxa-ui/forms"]
 # `#[component(export)]`: components a foreign React host mounts, from `doxa build --lib`.
 export = ["ui", "doxa-ui/export"]
+# The `doxa gallery` interface; `doxa gallery` turns it on.
+gallery = ["ui", "doxa-ui/gallery"]
 # `cn![]`: Tailwind class lists merged so the last conflicting class wins.
 tailwind = ["ui", "dep:doxa-tailwind"]
 
@@ -193,6 +195,10 @@ required-features = ["client", "garde", "validator", "serde-valid"]
 [[test]]
 name = "react"
 required-features = ["react"]
+
+[[test]]
+name = "gallery"
+required-features = ["gallery"]
 
 [[test]]
 name = "granted"

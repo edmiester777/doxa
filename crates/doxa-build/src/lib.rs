@@ -34,6 +34,8 @@ pub mod pipeline;
 #[cfg(feature = "pipeline")]
 pub mod split;
 #[cfg(feature = "pipeline")]
+pub mod stories;
+#[cfg(feature = "pipeline")]
 pub mod tool;
 
 #[cfg(feature = "client")]

@@ -111,6 +111,7 @@ pub fn story(_args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
     let name = &item.sig.ident;
     let export = format!("__doxa_story_{name}");
+    let name_str = name.to_string();
     quote! {
         #item
 
@@ -125,6 +126,16 @@ pub fn story(_args: TokenStream, item: TokenStream) -> TokenStream {
             ) -> ::core::result::Result<::doxa::ui::__private::StoryHandle, ::doxa::ui::__private::wasm_bindgen::JsError> {
                 ::doxa::ui::__private::mount_story(host, #name)
             }
+
+            // Read by `doxa gallery` for the story's place in the tree and its source.
+            #[cfg(all(doxa_gallery, target_arch = "wasm32"))]
+            const __DOXA_STORY_META: &str =
+                concat!(#name_str, "\t", module_path!(), "\t", file!(), "\t", line!(), "\n");
+            #[cfg(all(doxa_gallery, target_arch = "wasm32"))]
+            #[used]
+            #[unsafe(link_section = "doxa_stories")]
+            static __DOXA_STORY: [u8; __DOXA_STORY_META.len()] =
+                ::doxa::ui::__private::story_meta(__DOXA_STORY_META);
         };
     }
     .into()

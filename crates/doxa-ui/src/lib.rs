@@ -3,6 +3,15 @@
 //!
 //! Most apps only need `use doxa::ui::prelude::*;`.
 
+// The gallery is written with doxa's own macros, which name `::doxa::ui`.
+#[cfg(all(feature = "gallery", not(test)))]
+extern crate self as doxa;
+#[cfg(all(feature = "gallery", not(test)))]
+#[doc(hidden)]
+pub mod ui {
+    pub use crate::*;
+}
+
 mod app;
 mod attrs;
 mod boundary;
@@ -17,6 +26,8 @@ mod error;
 mod export;
 #[cfg(feature = "forms")]
 mod form;
+#[cfg(feature = "gallery")]
+pub mod gallery;
 mod head;
 mod hooks;
 mod hot;
@@ -109,6 +120,7 @@ pub mod __private {
     #[cfg(all(feature = "export", target_arch = "wasm32"))]
     pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
     pub use crate::icon::{svg_el, svg_root};
+    pub use crate::story::{action, story_meta, ShowDebug, ShowOpaque, Shown};
     pub use crate::view::{owner, FromChildren, IntoOptional, OptionOf, Owner};
     pub use futures_util::future::LocalBoxFuture;
     #[cfg(target_arch = "wasm32")]

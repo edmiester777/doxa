@@ -38,25 +38,7 @@ pub struct Prop {
 
 /// The exported components described in the linked `wasm`.
 pub fn exports(wasm: &[u8]) -> Result<Vec<Export>> {
-    let mut text = Vec::new();
-    let mut at = 8;
-    while at < wasm.len() {
-        let id = wasm[at];
-        let Some((size, len)) = split::leb128(&wasm[at + 1..]) else {
-            break;
-        };
-        let payload = at + 1 + len;
-        let end = (payload + size).min(wasm.len());
-        if id == 0 {
-            if let Some((n, l)) = split::leb128(&wasm[payload..end]) {
-                if wasm.get(payload + l..payload + l + n) == Some(SECTION.as_bytes()) {
-                    text.extend_from_slice(&wasm[payload + l + n..end]);
-                }
-            }
-        }
-        at = end;
-    }
-    String::from_utf8_lossy(&text)
+    String::from_utf8_lossy(&split::custom_section(wasm, SECTION))
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
