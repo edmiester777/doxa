@@ -1,6 +1,6 @@
 //! `#[npm(module = "…")] extern "js" { … }`: a plain JS module as typed Rust.
 //!
-//! Strings, numbers, bools and the block's own JS types pass through as they are; every
+//! Strings, numbers, bools, `Js` and the block's own JS types pass through as they are; every
 //! other argument and return value crosses as JSON-compatible data through serde.
 
 use proc_macro2::TokenStream;
@@ -56,6 +56,8 @@ enum Crossing {
     Callback,
     /// A `NodeRef`'s browser node.
     Node,
+    /// A `Js`'s value.
+    Js,
 }
 
 const DIRECT: &[&str] = &[
@@ -78,6 +80,9 @@ fn crossing(ty: &Type, js_types: &[Ident]) -> Crossing {
     }
     if last.ident == "NodeRef" {
         return Crossing::Node;
+    }
+    if last.ident == "Js" {
+        return Crossing::Js;
     }
     let direct = DIRECT.iter().any(|d| last.ident == d)
         || js_types.contains(&last.ident)
@@ -111,10 +116,37 @@ fn ok_type(ret: &ReturnType) -> (Option<Type>, bool) {
     ((!unit).then(|| (**ty).clone()), false)
 }
 
-/// The JS name: `#[npm(export = "…")]` on the function, else its own name in camelCase.
-fn js_name(f: &ForeignItemFn) -> syn::Result<String> {
-    let mut name = None;
+/// A function's `#[npm(…)]` options.
+struct FnOpts {
+    /// `export = "…"`, else its own name in camelCase.
+    js: String,
+    constructor: bool,
+}
+
+fn fn_opts(f: &ForeignItemFn) -> syn::Result<FnOpts> {
+    let (mut name, mut constructor) = (None, false);
     for attr in f.attrs.iter().filter(|a| a.path().is_ident("npm")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("export") {
+                name = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("constructor") {
+                constructor = true;
+            } else {
+                return Err(meta.error("expected `export = \"…\"` or `constructor`"));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(FnOpts {
+        js: name.unwrap_or_else(|| camel(&f.sig.ident.to_string())),
+        constructor,
+    })
+}
+
+/// A type's JS class name: `#[npm(export = "…")]` on it, else its own name.
+fn type_name(t: &syn::ForeignItemType) -> syn::Result<String> {
+    let mut name = None;
+    for attr in t.attrs.iter().filter(|a| a.path().is_ident("npm")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("export") {
                 name = Some(meta.value()?.parse::<LitStr>()?.value());
@@ -124,7 +156,7 @@ fn js_name(f: &ForeignItemFn) -> syn::Result<String> {
             }
         })?;
     }
-    Ok(name.unwrap_or_else(|| camel(&f.sig.ident.to_string())))
+    Ok(name.unwrap_or_else(|| t.ident.to_string()))
 }
 
 fn camel(name: &str) -> String {
@@ -156,14 +188,19 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
     }
     let tracked = tracked.iter().map(|p| p.to_string_lossy().into_owned());
 
-    let js_types: Vec<Ident> = block
+    let types: Vec<&syn::ForeignItemType> = block
         .items
         .iter()
         .filter_map(|i| match i {
-            ForeignItem::Type(t) => Some(t.ident.clone()),
+            ForeignItem::Type(t) => Some(t),
             _ => None,
         })
         .collect();
+    let js_types: Vec<Ident> = types.iter().map(|t| t.ident.clone()).collect();
+    let classes: Vec<String> = types
+        .iter()
+        .map(|t| type_name(t))
+        .collect::<syn::Result<_>>()?;
     let mut fns = Vec::new();
     for item in &block.items {
         match item {
@@ -192,50 +229,87 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
         }
     }
 
-    let names: Vec<String> = fns.iter().map(js_name).collect::<syn::Result<_>>()?;
+    let opts: Vec<FnOpts> = fns.iter().map(fn_opts).collect::<syn::Result<_>>()?;
     let spec = if args.lazy {
+        let names: Vec<&str> = opts.iter().map(|o| o.js.as_str()).collect();
         format!("doxa-npm:lazy:{}:{module}", names.join(","))
     } else {
         module.clone()
     };
+    // Named by its items too, so two blocks over one module don't collide.
+    let items = js_types
+        .iter()
+        .chain(fns.iter().map(|f| &f.sig.ident))
+        .map(Ident::to_string);
     let bindings = format_ident!(
         "__doxa_npm_{}",
-        spec.chars()
+        std::iter::once(spec.clone())
+            .chain(items)
+            .collect::<Vec<_>>()
+            .join("_")
+            .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect::<String>()
     );
 
     let mut raw = Vec::new();
     let mut wrappers = Vec::new();
-    for (f, name) in fns.iter().zip(&names) {
-        let (r, w) = function(f, name, &js_types, &bindings)?;
+    for (f, o) in fns.iter().zip(&opts) {
+        let class = match o.constructor {
+            true => Some(constructs(f, &js_types, &classes)?),
+            false => None,
+        };
+        let (r, w) = function(f, &o.js, class, &js_types, &bindings)?;
         raw.push(r);
         wrappers.push(w);
     }
 
-    let types_wasm = js_types.iter().map(|t| {
+    let types_wasm = types.iter().zip(&classes).map(|(item, class)| {
+        let t = &item.ident;
+        let docs = item.attrs.iter().filter(|a| a.path().is_ident("doc"));
+        let renamed = (t != class.as_str()).then(|| quote!(#[wasm_bindgen(js_name = #class)]));
         let default = args
             .export
             .as_ref()
-            .filter(|e| e.value() == "default" && Some(t) == js_types.first())
-            .map(|_| {
+            .filter(|_| Some(t) == js_types.first())
+            .map(|e| {
                 let getter = format_ident!("__default_{}", t);
+                let name = e.value();
                 quote! {
-                    #[wasm_bindgen(js_name = default, thread_local_v2)]
-                    static #getter: #t;
+                    #[wasm_bindgen(js_name = #name, thread_local_v2)]
+                    pub static #getter: #t;
                 }
             });
         quote! {
+            #(#docs)*
             #[derive(Clone)]
+            #renamed
             pub type #t;
             #default
+        }
+    });
+    let into_js = js_types.iter().map(|t| {
+        quote! {
+            impl ::core::convert::From<#t> for ::doxa::ui::Js {
+                fn from(v: #t) -> ::doxa::ui::Js {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        ::doxa::ui::Js::from(::doxa::ui::__private::wasm_bindgen::JsValue::from(v))
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let _ = v;
+                        ::doxa::ui::Js::native()
+                    }
+                }
+            }
         }
     });
     let defaults = js_types.first().filter(|_| args.export.is_some()).map(|t| {
         let getter = format_ident!("__default_{}", t);
         quote! {
             impl #t {
-                /// The module's default export.
+                /// The block's `export` from its module.
                 pub fn get() -> #t {
                     #[cfg(target_arch = "wasm32")]
                     {
@@ -249,8 +323,11 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
             }
         }
     });
-    let natives = js_types.iter().map(|t| {
+    let natives = types.iter().map(|item| {
+        let t = &item.ident;
+        let docs = item.attrs.iter().filter(|a| a.path().is_ident("doc"));
         quote! {
+            #(#docs)*
             #[cfg(not(target_arch = "wasm32"))]
             #[derive(Clone)]
             #[doc = "A JS value; only the browser has one."]
@@ -272,7 +349,8 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
             use super::*;
             use ::doxa::ui::__private::wasm_bindgen;
             use wasm_bindgen::prelude::wasm_bindgen;
-            #[wasm_bindgen(module = #spec, wasm_bindgen = ::doxa::ui::__private::wasm_bindgen)]
+            // One token: wasm-bindgen's static getters take the path as a `tt`.
+            #[wasm_bindgen(module = #spec, wasm_bindgen = wasm_bindgen)]
             extern "C" {
                 #(#types_wasm)*
                 #(#raw)*
@@ -281,15 +359,41 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
 
         #(#reexports)*
         #(#natives)*
+        #(#into_js)*
         #defaults
         #(#wrappers)*
     })
+}
+
+/// The JS class a `#[npm(constructor)]` function makes: the block type it returns.
+fn constructs(f: &ForeignItemFn, js_types: &[Ident], classes: &[String]) -> syn::Result<String> {
+    let refuse = |msg: &str| Err(syn::Error::new_spanned(&f.sig.ident, msg));
+    if f.sig.asyncness.is_some() {
+        return refuse("a constructor isn't `async`");
+    }
+    let has_this = f.sig.inputs.iter().any(
+        |a| matches!(a, FnArg::Typed(pt) if matches!(&*pt.pat, Pat::Ident(p) if p.ident == "this")),
+    );
+    if has_this {
+        return refuse("a constructor takes no `this`");
+    }
+    let made = match ok_type(&f.sig.output).0 {
+        Some(Type::Path(p)) if p.qself.is_none() && p.path.segments.len() == 1 => {
+            js_types.iter().position(|t| p.path.is_ident(t))
+        }
+        _ => None,
+    };
+    match made {
+        Some(i) => Ok(classes[i].clone()),
+        None => refuse("a constructor returns one of this block's `type`s"),
+    }
 }
 
 /// The raw extern for `f`, and the typed wrapper around it.
 fn function(
     f: &ForeignItemFn,
     js: &str,
+    class: Option<String>,
     js_types: &[Ident],
     bindings: &Ident,
 ) -> syn::Result<(TokenStream, TokenStream)> {
@@ -304,6 +408,8 @@ fn function(
     let mut params = Vec::new();
     let mut pass = Vec::new();
     let mut method = false;
+    // wasm-bindgen puts methods and constructors on their type.
+    let mut owner: Option<Type> = class.as_ref().and(ok.clone());
     for (i, arg) in f.sig.inputs.iter().enumerate() {
         let FnArg::Typed(pt) = arg else {
             return Err(syn::Error::new_spanned(
@@ -321,6 +427,10 @@ fn function(
                 return Err(syn::Error::new_spanned(&pt.pat, "`this` comes first"));
             }
             method = true;
+            owner = Some(match &**ty {
+                Type::Reference(r) => (*r.elem).clone(),
+                t => t.clone(),
+            });
             raw_params.push(quote!(this: #ty));
             params.push(quote!(this: #ty));
             pass.push(quote!(this));
@@ -354,23 +464,36 @@ fn function(
                     }
                 });
             }
+            Crossing::Js => {
+                raw_params.push(quote!(#ident: wasm_bindgen::JsValue));
+                pass.push(quote!(::doxa::ui::__private::js_raw(#ident)));
+            }
         }
     }
 
     // The raw call answers a JsValue (or a Promise of one); the wrapper reads it as `ok`.
     let catch = (fallible || is_async).then(|| quote!(catch,));
-    let method_attr = method.then(|| quote!(method,));
+    let kind = match (&class, method) {
+        (Some(class), _) => quote!(constructor, js_class = #class,),
+        (None, true) => quote!(method, js_name = #js,),
+        (None, false) => quote!(js_name = #js,),
+    };
+    // A constructor's raw return is its class, which wasm-bindgen puts it on.
+    let raw_ok = match (&class, &ok) {
+        (Some(_), Some(t)) => quote!(#t),
+        _ => quote!(wasm_bindgen::JsValue),
+    };
     let raw_ret = if is_async || fallible || ok.is_some() {
         if catch.is_some() {
-            quote!(-> ::core::result::Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>)
+            quote!(-> ::core::result::Result<#raw_ok, wasm_bindgen::JsValue>)
         } else {
-            quote!(-> wasm_bindgen::JsValue)
+            quote!(-> #raw_ok)
         }
     } else {
         quote!()
     };
     let raw = quote! {
-        #[wasm_bindgen(#method_attr #catch js_name = #js)]
+        #[wasm_bindgen(#kind #catch)]
         pub fn #raw_name(#(#raw_params),*) #raw_ret;
     };
 
@@ -387,8 +510,11 @@ fn function(
         }
         _ => false,
     };
+    let is_js = |t: &Type| matches!(t, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Js"));
     let read = match &ok {
         None => quote!(::core::result::Result::Ok(())),
+        Some(_) if class.is_some() => quote!(::core::result::Result::Ok(value)),
+        Some(t) if is_js(t) => quote!(::core::result::Result::Ok(::doxa::ui::Js::from(value))),
         Some(t) => match js_value(t) {
             true => quote! {
                 wasm_bindgen::JsCast::dyn_into::<#t>(value)
@@ -417,9 +543,13 @@ fn function(
             };
         }
     };
+    let callee = match &owner {
+        Some(t) => quote!(#bindings::#t::#raw_name),
+        None => quote!(#bindings::#raw_name),
+    };
     let call = if is_async {
         quote! {
-            let promise = match #bindings::#raw_name(#(#pass),*) {
+            let promise = match #callee(#(#pass),*) {
                 ::core::result::Result::Ok(p) => p,
                 ::core::result::Result::Err(e) => return __fail(::doxa::ui::__private::js_error_from(e)),
             };
@@ -430,15 +560,15 @@ fn function(
         }
     } else if catch.is_some() {
         quote! {
-            let value = match #bindings::#raw_name(#(#pass),*) {
+            let value = match #callee(#(#pass),*) {
                 ::core::result::Result::Ok(v) => v,
                 ::core::result::Result::Err(e) => return __fail(::doxa::ui::__private::js_error_from(e)),
             };
         }
     } else if ok.is_some() {
-        quote!(let value = #bindings::#raw_name(#(#pass),*);)
+        quote!(let value = #callee(#(#pass),*);)
     } else {
-        quote!(#bindings::#raw_name(#(#pass),*); let value = ();)
+        quote!(#callee(#(#pass),*); let value = ();)
     };
     // A fallible call has an answer off the browser, so a caller needn't `cfg` around it.
     let native = if fallible {
@@ -466,6 +596,10 @@ fn function(
                 #native
             }
         }
+    };
+    let wrapper = match (&class, &ok) {
+        (Some(_), Some(t)) => quote!(impl #t { #wrapper }),
+        _ => wrapper,
     };
     Ok((raw, wrapper))
 }

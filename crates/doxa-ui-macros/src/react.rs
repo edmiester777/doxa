@@ -132,6 +132,10 @@ enum Role {
     },
     /// `#[react(render)]`: a `Render` React places as an element.
     Render,
+    /// `#[react(component)]`: a `Render` React renders as a component, given its props.
+    Component,
+    /// `#[react(js)]`: a `Js`, `Vec<Js>` or `Option` of one, passed as it is.
+    Js,
     /// `#[react(raw)]`: an `Rc<[number]>` copied into a JS typed array.
     Raw,
     /// `#[react(feed)]`: a `Feed<T>` JS subscribes to.
@@ -178,17 +182,27 @@ fn camel(name: &str) -> String {
     out
 }
 
+/// `T` in `outer<T>`.
+fn inner<'a>(ty: &'a Type, outer: &str) -> Option<&'a Type> {
+    let Type::Path(p) = ty else { return None };
+    let last = p.path.segments.last().filter(|s| s.ident == outer)?;
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    match args.args.first() {
+        Some(syn::GenericArgument::Type(t)) => Some(t),
+        _ => None,
+    }
+}
+
+/// `outer<T>` where `T`'s last segment is `name`.
+fn generic_of(ty: &Type, outer: &str, name: &str) -> bool {
+    inner(ty, outer).is_some_and(|t| last_segment_is(t, name))
+}
+
 /// `Option<T>` where `T`'s last segment is `name`.
 fn option_of(ty: &Type, name: &str) -> bool {
-    let Type::Path(p) = ty else { return false };
-    let Some(last) = p.path.segments.last() else {
-        return false;
-    };
-    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-        return false;
-    };
-    last.ident == "Option"
-        && matches!(args.args.first(), Some(syn::GenericArgument::Type(t)) if last_segment_is(t, name))
+    generic_of(ty, "Option", name)
 }
 
 fn last_segment_is(ty: &Type, name: &str) -> bool {
@@ -228,6 +242,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         }
         let (mut optional, mut event, mut element, mut rename) = (false, false, false, None);
         let (mut func, mut render, mut raw, mut feed) = (false, false, false, false);
+        let (mut component, mut js) = (false, false);
         let mut kept = Vec::new();
         for attr in f.attrs.drain(..) {
             if !attr.path().is_ident("react") {
@@ -249,11 +264,22 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                     raw = true;
                 } else if m.path.is_ident("feed") {
                     feed = true;
+                } else if m.path.is_ident("component") {
+                    component = true;
+                } else if m.path.is_ident("js") {
+                    js = true;
                 } else if m.path.is_ident("rename") {
-                    rename = Some(m.value()?.parse::<LitStr>()?.value());
+                    let lit = m.value()?.parse::<LitStr>()?;
+                    if lit.value().split('.').any(str::is_empty) {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "`rename` is a prop name, or a dotted path like `components.code`",
+                        ));
+                    }
+                    rename = Some(lit.value());
                 } else {
                     return Err(m.error(
-                        "expected `optional`, `event`, `element`, `func`, `render`, `raw`, `feed` or `rename = \"…\"`",
+                        "expected `optional`, `event`, `element`, `func`, `render`, `component`, `js`, `raw`, `feed` or `rename = \"…\"`",
                     ));
                 }
                 Ok(())
@@ -261,15 +287,33 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         }
         f.attrs = kept;
         crate::callback::desugar(&mut f.ty)?;
-        if [optional, event, element, func, render, raw, feed]
-            .iter()
-            .filter(|b| **b)
-            .count()
+        if [
+            optional, event, element, func, render, component, js, raw, feed,
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count()
             > 1
         {
             return Err(syn::Error::new(
                 name.span(),
-                "a prop takes one of `optional`, `event`, `element`, `func`, `render`, `raw` and `feed`",
+                "a prop takes one of `optional`, `event`, `element`, `func`, `render`, `component`, `js`, `raw` and `feed`",
+            ));
+        }
+        if component && !last_segment_is(&f.ty, "Render") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(component)]` field `{name}` must be a `Render<P>`"),
+            ));
+        }
+        let js_typed = last_segment_is(&f.ty, "Js")
+            || generic_of(&f.ty, "Vec", "Js")
+            || option_of(&f.ty, "Js")
+            || matches!(inner(&f.ty, "Option"), Some(t) if generic_of(t, "Vec", "Js"));
+        if js && !js_typed {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(js)]` field `{name}` must be a `Js`, `Vec<Js>`, or an `Option` of one"),
             ));
         }
         if raw && !last_segment_is(&f.ty, "Rc") {
@@ -307,6 +351,8 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
         let role = match (optional, event) {
             _ if element => Role::Element,
             _ if render => Role::Render,
+            _ if component => Role::Component,
+            _ if js => Role::Js,
             _ if raw => Role::Raw,
             _ if feed => Role::Feed,
             _ if func => Role::Func {
@@ -369,7 +415,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             ty: f.ty.clone(),
             default: (f.name == "children"
                 || matches!(f.role, Role::Optional | Role::Slot { optional: true })
-                || (matches!(f.role, Role::Data) && last_segment_is(&f.ty, "Option")))
+                || (matches!(f.role, Role::Data | Role::Js) && last_segment_is(&f.ty, "Option")))
             .then(|| quote!(::core::default::Default::default())),
             optional: false,
         })
@@ -420,7 +466,12 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
 
     let same = fields
         .iter()
-        .filter(|f| matches!(f.role, Role::Data | Role::Optional | Role::Raw | Role::Feed))
+        .filter(|f| {
+            matches!(
+                f.role,
+                Role::Data | Role::Optional | Role::Raw | Role::Feed | Role::Js
+            )
+        })
         .map(|f| {
             let n = &f.name;
             match f.role {
@@ -438,9 +489,13 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             Role::Optional => Some(quote_spanned! { f.ty.span() => out.opt(#js, &self.#n); }),
             Role::Raw => Some(quote_spanned! { f.ty.span() => out.raw(#js, &self.#n); }),
             Role::Feed => Some(quote_spanned! { f.ty.span() => out.feed(#js, &self.#n); }),
-            Role::Event | Role::Slot { .. } | Role::Element | Role::Func { .. } | Role::Render => {
-                None
-            }
+            Role::Js => Some(quote_spanned! { f.ty.span() => out.js(#js, &self.#n); }),
+            Role::Event
+            | Role::Slot { .. }
+            | Role::Element
+            | Role::Func { .. }
+            | Role::Render
+            | Role::Component => None,
         }
     });
     let views = fields.iter().filter_map(|f| {
@@ -464,6 +519,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 Some(quote_spanned! { span => out.async_func(#js, &self.#n); })
             }
             Role::Render => Some(quote_spanned! { span => out.render(#js, &self.#n); }),
+            Role::Component => Some(quote_spanned! { span => out.component(#js, &self.#n); }),
             _ => None,
         }
     });

@@ -13,7 +13,7 @@ use crate::dom::{NodeRef, Phase};
 use crate::portal::Portal;
 use crate::runtime::{self, Instance};
 use crate::view::{comp, el, Callback, Element, Handler, Node};
-use crate::{Event, IntoView, Thrown, View};
+use crate::{Event, IntoView, Js, Thrown, View};
 
 /// Where a `#[react]` component's JS lives.
 #[derive(Debug)]
@@ -57,6 +57,40 @@ pub struct Data {
     props: Props,
     raw: Vec<(&'static str, RawData)>,
     feeds: Vec<(&'static str, FeedFns)>,
+    js: Vec<(&'static str, JsProp)>,
+}
+
+/// A `#[react(js)]` prop's value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JsProp {
+    /// The value itself.
+    One(Js),
+    /// A JS array of them, the same array while they are the same values.
+    Array(Vec<Js>),
+}
+
+/// What a `#[react(js)]` field can be: a [`Js`], a `Vec<Js>`, or an `Option` of one.
+pub trait JsField {
+    #[doc(hidden)]
+    fn js_prop(&self) -> Option<JsProp>;
+}
+
+impl JsField for Js {
+    fn js_prop(&self) -> Option<JsProp> {
+        Some(JsProp::One(self.clone()))
+    }
+}
+
+impl JsField for Vec<Js> {
+    fn js_prop(&self) -> Option<JsProp> {
+        Some(JsProp::Array(self.clone()))
+    }
+}
+
+impl<T: JsField> JsField for Option<T> {
+    fn js_prop(&self) -> Option<JsProp> {
+        self.as_ref().and_then(T::js_prop)
+    }
 }
 
 impl Data {
@@ -85,6 +119,11 @@ impl Data {
         self.feeds.push((name, feed.fns()));
     }
 
+    /// A `#[react(js)]` value, left out when `None`.
+    pub fn js(&mut self, name: &'static str, value: &impl JsField) {
+        self.js.extend(value.js_prop().map(|v| (name, v)));
+    }
+
     /// Leave the prop out when `None`.
     pub fn opt<T: Serialize>(&mut self, name: &'static str, value: &Option<T>) {
         if let Some(v) = value {
@@ -103,6 +142,8 @@ pub struct Events {
     funcs: Vec<(&'static str, FuncFn)>,
     async_funcs: Vec<(&'static str, AsyncFuncFn)>,
     renders: Vec<(&'static str, RenderView)>,
+    /// The `renders` React gets as components.
+    components: Vec<&'static str>,
     owner: Weak<Instance>,
 }
 
@@ -448,6 +489,8 @@ pub struct RenderFns {
     pub update: Rc<dyn Fn(u32, serde_json::Value)>,
     /// React removed it.
     pub unmount: Rc<dyn Fn(u32)>,
+    /// A `#[react(component)]`: React renders it as a component, with its props as the arguments.
+    pub component: bool,
 }
 
 fn args<A: DeserializeOwned>(name: &str, v: serde_json::Value) -> Result<A, String> {
@@ -498,6 +541,12 @@ impl Events {
         let r = r.clone();
         self.renders
             .push((name, Rc::new(move |v| Ok((r.0)(args(name, v)?)))));
+    }
+
+    /// [`render`](Self::render), as a component React gives its props.
+    pub fn component<P: DeserializeOwned + 'static>(&mut self, name: &'static str, r: &Render<P>) {
+        self.render(name, r);
+        self.components.push(name);
     }
 
     pub fn event(&mut self, name: &'static str, cb: &impl ReactEvent) {
@@ -615,6 +664,8 @@ pub struct Content {
     pub raw: Vec<(&'static str, RawData)>,
     /// `#[react(feed)]` channels.
     pub feeds: Vec<(&'static str, FeedFns)>,
+    /// `#[react(js)]` values.
+    pub js: Vec<(&'static str, JsProp)>,
 }
 
 /// An island for the bridge to render.
@@ -719,6 +770,7 @@ struct Live<P> {
     funcs: Targets<FuncFn>,
     async_funcs: Targets<AsyncFuncFn>,
     renders: Targets<RenderView>,
+    components: RefCell<Vec<&'static str>>,
     /// Each `Render` React has mounted: its key, prop, element and arguments.
     rendered: crate::State<Vec<Rendered>>,
     shell_events: RefCell<Vec<ShellEvent>>,
@@ -758,6 +810,7 @@ impl<P: IslandProps> Live<P> {
         retarget(&self.funcs, e.funcs);
         retarget(&self.async_funcs, e.async_funcs);
         retarget(&self.renders, e.renders);
+        *self.components.borrow_mut() = e.components;
     }
 
     /// The functions React gets: each calls whichever function the latest render passed.
@@ -789,6 +842,7 @@ impl<P: IslandProps> Live<P> {
             })
             .collect();
         let rendered = self.rendered;
+        let components = self.components.borrow();
         let renders = self
             .renders
             .borrow()
@@ -811,6 +865,7 @@ impl<P: IslandProps> Live<P> {
                         }
                     }),
                     unmount: Rc::new(move |key| rendered.update(|r| r.retain(|e| e.0 != key))),
+                    component: components.contains(&name),
                 };
                 (name, fns)
             })
@@ -859,6 +914,7 @@ impl<P: IslandProps> Live<P> {
             shells,
             raw: d.raw,
             feeds: d.feeds,
+            js: d.js,
         };
         Some((props, content))
     }
@@ -994,6 +1050,7 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
         funcs: RefCell::default(),
         async_funcs: RefCell::default(),
         renders: RefCell::default(),
+        components: RefCell::default(),
         rendered,
         shell_events: RefCell::default(),
         handle: Rc::default(),
@@ -1008,6 +1065,7 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
         funcs: Vec::new(),
         async_funcs: Vec::new(),
         renders: Vec::new(),
+        components: Vec::new(),
         owner: Rc::downgrade(&inst),
     };
     props.events(&mut events);
@@ -1138,6 +1196,8 @@ mod web {
         shells: HashMap<String, JsValue>,
         /// Typed arrays and feed subscribers by prop, with the identity they were made from.
         made: HashMap<&'static str, (usize, JsValue)>,
+        /// `#[react(js)]` arrays by prop, with the values they hold.
+        arrays: HashMap<&'static str, (Vec<crate::Js>, JsValue)>,
         keep: Vec<Box<dyn std::any::Any>>,
     }
 
@@ -1265,6 +1325,22 @@ mod web {
                 set(&feeds, name, &v);
             }
             set(&out, "feeds", &feeds);
+            let js: JsValue = js_sys::Object::new().into();
+            for (name, value) in &c.js {
+                let v = match value {
+                    super::JsProp::One(v) => v.as_ref().clone(),
+                    super::JsProp::Array(items) => match f.arrays.get(name) {
+                        Some((had, v)) if had == items => v.clone(),
+                        _ => {
+                            let v = JsValue::from(crate::Js::array(items.iter().cloned()));
+                            f.arrays.insert(name, (items.clone(), v.clone()));
+                            v
+                        }
+                    },
+                };
+                set(&js, name, &v);
+            }
+            set(&out, "js", &js);
             out
         }
     }
@@ -1279,7 +1355,7 @@ mod web {
         serde_wasm_bindgen::from_value(v).unwrap_or(serde_json::Value::Null)
     }
 
-    /// `{ funcs: { name: fn }, asyncFuncs: { name: fn }, renders: { name: { mount, update, unmount } } }`.
+    /// `{ funcs: { name: fn }, asyncFuncs: { name: fn }, renders: { name: { mount, update, unmount, component } } }`.
     fn calls(
         funcs: Vec<(&'static str, super::FuncFn)>,
         async_funcs: Vec<(&'static str, super::AsyncFuncFn)>,
@@ -1338,6 +1414,7 @@ mod web {
             let c = Closure::<dyn Fn(u32)>::new(move |key| unmount(key));
             set(&o, "unmount", c.as_ref());
             keep.push(Box::new(c));
+            set(&o, "component", &JsValue::from_bool(fns.component));
             set(&r, name, &o);
         }
         set(&out, "renders", &r);

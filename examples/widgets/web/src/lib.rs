@@ -6,6 +6,7 @@ use widgets_client::widgets::*;
 
 pub mod button;
 pub mod icons;
+pub mod interop;
 pub mod kit;
 pub mod motion;
 pub mod runs;
@@ -27,6 +28,7 @@ pub fn app() -> App {
                 .page::<WidgetPage>()
                 .page::<words::WordsPage>()
                 .page::<icons::IconsPage>()
+                .page::<interop::InteropPage>()
                 .page::<runs::RunsPage>()
         })
         .not_found(|| view! { <p class="missing">"No such page"</p> });

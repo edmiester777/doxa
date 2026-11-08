@@ -70,6 +70,9 @@ fn describe(c: &Content) -> String {
     for (name, _) in &c.feeds {
         out.push_str(&format!(" feed:{name}"));
     }
+    for (name, _) in &c.js {
+        out.push_str(&format!(" js:{name}"));
+    }
     for s in &c.shells {
         let attrs: Vec<_> = s.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let events: Vec<_> = s.events.iter().map(|(n, _)| *n).collect();
@@ -688,4 +691,96 @@ fn a_raw_array_is_sent_once_per_allocation_and_a_feed_streams() {
     (feed.unsubscribe)(id);
     click(&dom, "say");
     assert_eq!(got.borrow().len(), 3);
+}
+
+#[derive(Clone, serde::Deserialize)]
+pub struct CodeArgs {
+    #[serde(rename = "className", default)]
+    class_name: Option<String>,
+    children: String,
+}
+
+#[react(module = "./ts/markdown.tsx", export = "Markdown")]
+pub struct Markdown {
+    pub children: String,
+    #[react(js)]
+    pub remark_plugins: Vec<doxa::ui::Js>,
+    #[react(js)]
+    pub url_transform: Option<doxa::ui::Js>,
+    #[react(rename = "options.depth")]
+    pub depth: u32,
+    #[react(component, rename = "components.code")]
+    pub code: Render<CodeArgs>,
+    #[react(element, rename = "icons.success")]
+    pub success: View,
+}
+
+#[component]
+fn Doc() -> View {
+    let transform = state(false);
+    let plugins = vec![
+        doxa::ui::Js::json("gfm"),
+        doxa::ui::Js::array([doxa::ui::Js::json("sanitize"), doxa::ui::Js::json(&1)]),
+    ];
+    view! {
+        <button id="transform" on:click={move |_| transform.set(true)}>"t"</button>
+        <Markdown
+            remark_plugins={plugins}
+            url_transform={transform.get().then(|| doxa::ui::Js::json("same-origin"))}
+            depth={2u32}
+            code={|p: CodeArgs| view! {
+                <code class={p.class_name.unwrap_or_default()}>{p.children}</code>
+            }}
+            success={view! { <svg class="ok"/> }}
+        >
+            "hi"
+        </Markdown>
+    }
+}
+
+#[test]
+fn js_values_pass_untouched_and_dotted_names_reach_react_as_paths() {
+    use doxa::ui::dom::Dom;
+    let fake = Fake::default();
+    doxa::ui::react::set_bridge(fake.clone());
+    let dom = MemDom::new();
+    App::new(|| view! { <Doc/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    assert_eq!(
+        fake.log(),
+        [
+            r#"mount Markdown 1 {"children":"hi","options.depth":2} js:remarkPlugins icons.success=<svg class=ok|>"#
+        ],
+        "a `None` js value is left out; the runtime nests dotted names"
+    );
+
+    click(&dom, "transform");
+    assert_eq!(
+        fake.log(),
+        [
+            r#"update 1 {"children":"hi","options.depth":2} js:remarkPlugins js:urlTransform icons.success=<svg class=ok|>"#
+        ]
+    );
+
+    // React renders the component with its props; doxa reads the ones it declared.
+    let code = fake.0.borrow().renders[&1]
+        .iter()
+        .find(|(n, _)| *n == "components.code")
+        .map(|(_, f)| f.clone())
+        .expect("the component is passed");
+    assert!(
+        code.component,
+        "React gets it as a component, not a render prop"
+    );
+    let el = dom.create_element("div", None);
+    dom.insert(dom.body(), el, None);
+    (code.mount)(
+        1,
+        doxa::ui::NodeRef::from_id(el),
+        serde_json::json!({"className": "language-rs", "children": "fn x", "node": {"type": "element"}}),
+    );
+    doxa::client::task::run_until_stalled();
+    let shown = dom.find("class", "language-rs").expect("the code view");
+    assert_eq!(dom.text(shown), "fn x");
 }

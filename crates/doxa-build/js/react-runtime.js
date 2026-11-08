@@ -146,9 +146,31 @@ function shellElement(shell, portals) {
   return createElement(shell.tag, props, portals);
 }
 
+// A dotted name, from a `rename`, is a path into nested objects, copied rather than mutated.
+function nest(props) {
+  const made = new Set();
+  for (const key of Object.keys(props)) {
+    if (!key.includes(".")) continue;
+    const path = key.split(".");
+    const last = path.pop();
+    let at = props;
+    for (const seg of path) {
+      if (!made.has(at[seg])) {
+        const had = at[seg];
+        at[seg] = had !== null && typeof had === "object" ? { ...had } : {};
+        made.add(at[seg]);
+      }
+      at = at[seg];
+    }
+    at[last] = props[key];
+    delete props[key];
+  }
+  return props;
+}
+
 // Nested islands render inside `children`, or else the first slot or element, so they get this island's context.
 function propsOf(island, content) {
-  const props = { ...content.props, ...content.raw, ...content.feeds, ...island.events };
+  const props = { ...content.props, ...content.raw, ...content.feeds, ...content.js, ...island.events };
   const slots = Object.keys(content.slots);
   const home = slots.includes("children") ? "children" : (slots[0] ?? content.shells[0]?.prop);
   const portals = (name) => (name === home ? createElement(Portals, { parent: island.id }) : null);
@@ -158,7 +180,23 @@ function propsOf(island, content) {
   for (const shell of content.shells) {
     props[shell.prop] = shellElement(shell, portals(shell.prop));
   }
-  return props;
+  return nest(props);
+}
+
+// What of a component's props Rust can read: functions, symbols, React elements and class
+// instances such as DOM nodes are left out, and are `null` in an array.
+function plain(value, depth = 0) {
+  if (value === null || ["string", "number", "boolean"].includes(typeof value)) return value;
+  if (typeof value !== "object" || depth > 32 || "$$typeof" in value) return undefined;
+  if (Array.isArray(value)) return value.map((v) => plain(v, depth + 1) ?? null);
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return undefined;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    const p = plain(v, depth + 1);
+    if (p !== undefined) out[k] = p;
+  }
+  return out;
 }
 
 // One argument as itself, several as an array, which Rust reads as a tuple.
@@ -220,7 +258,9 @@ export function mount(id, parent, host, component, content, handlers, onError, c
       update: (...a) => island.live && raw.update(...a),
       unmount: (...a) => island.live && raw.unmount(...a),
     };
-    island.events[name] = (...args) => createElement(DoxaRender, { fns, args: pack(args) });
+    island.events[name] = raw.component
+      ? (props) => createElement(DoxaRender, { fns, args: plain(props) })
+      : (...args) => createElement(DoxaRender, { fns, args: pack(args) });
   }
   island.props = propsOf(island, content);
   islands.set(id, island);

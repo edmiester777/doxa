@@ -96,6 +96,10 @@ pub(crate) mod convert {
         serde_wasm_bindgen::from_value(value).map_err(|e| JsError(e.to_string()))
     }
 
+    pub fn js_raw(value: impl std::borrow::Borrow<crate::Js>) -> JsValue {
+        value.borrow().as_ref().clone()
+    }
+
     pub fn js_error(message: &str) -> JsError {
         JsError(message.to_owned())
     }

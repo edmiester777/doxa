@@ -467,6 +467,55 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
+/// A JS value Rust only passes along is `js`, a component React renders with its props is
+/// `component`, and a dotted `rename` is a path into a nested prop:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// use doxa::ui::{react::Render, Js};
+/// #[react(module = "./ts/markdown.tsx", export = "Markdown")]
+/// pub struct Markdown {
+///     #[react(js)]
+///     pub remark_plugins: Vec<Js>,
+///     #[react(component, rename = "components.code")]
+///     pub code: Render<serde_json::Value>,
+/// }
+/// ```
+///
+/// A `js` field of anything else is "`#[react(js)]` field `remark_plugins` must be a `Js`, `Vec<Js>`, or an `Option` of one":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/markdown.tsx", export = "Markdown")]
+/// pub struct Markdown {
+///     #[react(js)]
+///     pub remark_plugins: Vec<String>,
+/// }
+/// ```
+///
+/// A `component` is "`#[react(component)]` field `code` must be a `Render<P>`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// use doxa::ui::react::Func;
+/// #[react(module = "./ts/markdown.tsx", export = "Markdown")]
+/// pub struct Markdown {
+///     #[react(component)]
+///     pub code: Func<u32, String>,
+/// }
+/// ```
+///
+/// and an empty path segment is "`rename` is a prop name, or a dotted path like `components.code`":
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/markdown.tsx", export = "Markdown")]
+/// pub struct Markdown {
+///     #[react(rename = "components..code")]
+///     pub code: String,
+/// }
+/// ```
+///
 /// An npm module this crate doesn't declare is rejected; the local module above compiles:
 ///
 /// ```compile_fail
@@ -479,6 +528,39 @@ pub mod ui_diagnostics {}
 #[cfg(feature = "react")]
 #[doc(hidden)]
 pub mod react_diagnostics {}
+
+/// A constructor makes one of the block's types, and a `Js` passes any JS value through:
+///
+/// ```
+/// use doxa::ui::{npm, Js};
+/// #[npm(module = "./ts/term.js")]
+/// extern "js" {
+///     type Terminal;
+///     #[npm(constructor)]
+///     fn new(rows: u32) -> Terminal;
+///     fn load_addon(this: &Terminal, addon: Js);
+/// }
+/// fn open(addon: Js) -> Js {
+///     let term = Terminal::new(24);
+///     load_addon(&term, addon);
+///     Js::from(term)
+/// }
+/// ```
+///
+/// One returning anything else is "a constructor returns one of this block's `type`s":
+///
+/// ```compile_fail
+/// use doxa::ui::npm;
+/// #[npm(module = "./ts/term.js")]
+/// extern "js" {
+///     type Terminal;
+///     #[npm(constructor)]
+///     fn new(rows: u32) -> String;
+/// }
+/// ```
+#[cfg(feature = "npm")]
+#[doc(hidden)]
+pub mod npm_diagnostics {}
 
 /// `use:name={value}` attaches what `name(value)` returns:
 ///

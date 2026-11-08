@@ -32,10 +32,14 @@ mod head;
 mod hooks;
 mod hot;
 mod icon;
+#[cfg(any(feature = "npm", feature = "react"))]
+mod js;
 #[cfg(feature = "npm")]
 mod npm;
 #[cfg(feature = "oidc")]
 pub mod oidc;
+#[cfg(any(feature = "npm", feature = "react"))]
+pub use js::Js;
 #[cfg(feature = "npm")]
 pub use npm::{JsCallback, JsError};
 mod plugin;
@@ -137,7 +141,8 @@ pub mod __private {
     }
     #[cfg(all(feature = "npm", target_arch = "wasm32"))]
     pub use crate::npm::convert::{
-        await_promise, describe, from_js, js_callback, js_error, js_error_from, js_node, to_js,
+        await_promise, describe, from_js, js_callback, js_error, js_error_from, js_node, js_raw,
+        to_js,
     };
     #[cfg(target_arch = "wasm32")]
     pub use wasm_bindgen;
