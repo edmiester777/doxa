@@ -176,6 +176,7 @@ impl RootHandle {
     }
 
     /// Render the root again, as its own state changing would.
+    #[cfg(feature = "export")]
     pub(crate) fn refresh(&self) {
         if let Some(inst) = Instance::find(self.id) {
             runtime::schedule(&inst);

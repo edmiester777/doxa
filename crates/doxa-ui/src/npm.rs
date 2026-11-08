@@ -70,9 +70,9 @@ pub(crate) mod convert {
     use wasm_bindgen::{JsCast, JsValue};
 
     /// The JS function behind `f`.
-    pub fn js_callback<F: ?Sized>(f: &JsCallback<F>) -> JsValue
+    pub fn js_callback<F>(f: &JsCallback<F>) -> JsValue
     where
-        F: wasm_bindgen::closure::WasmClosure,
+        F: ?Sized + wasm_bindgen::closure::WasmClosure,
     {
         let function: &JsValue = f.closure.as_ref();
         function.clone()
