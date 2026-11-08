@@ -1,8 +1,8 @@
-//! The widgets UI: pages that call the server's routes as functions.
+//! The shop UI: pages that call the server's routes as functions.
 
 use doxa::ui::prelude::*;
 use doxa::ui::{form, Field};
-use widgets_client::widgets::*;
+use shop_api::widgets::*;
 
 pub mod button;
 pub mod icons;

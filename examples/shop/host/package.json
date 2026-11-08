@@ -1,5 +1,5 @@
 {
-  "name": "widgets-host",
+  "name": "shop-host",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5",
-    "@widgets/kit": "file:../../../target/doxa/lib",
+    "@shop/kit": "file:../../../target/doxa/lib",
     "react": "^19",
     "react-dom": "^19",
     "react-router": "^7"

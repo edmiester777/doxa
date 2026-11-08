@@ -10,20 +10,20 @@ use futures::stream::{self, Stream};
 use doxa::auth::{Granted, Many};
 use doxa::{implements, SseStream};
 
-use orders_api::{Order, OrderError, OrderEvent, OrderFilter};
+use shop_api::orders::{Order, OrderError, OrderEvent, OrderFilter};
 
-use crate::{OrderById, Store};
+use super::{OrderById, Store};
 
 /// Reads, behind the caller's role.
 #[doxa::service(layers = crate::caller)]
 pub struct OrdersPublic;
 
-#[implements(orders_api::get_order)]
+#[implements(shop_api::orders::get_order)]
 async fn get_order(order: Granted<OrderById>) -> Result<Json<Order>, OrderError> {
     Ok(Json(order.into_inner().into()))
 }
 
-#[implements(orders_api::list_orders)]
+#[implements(shop_api::orders::list_orders)]
 async fn list_orders(
     _scope: Granted<Many<OrderById>>,
     State(store): State<Store>,
@@ -40,7 +40,7 @@ async fn list_orders(
     )
 }
 
-#[implements(orders_api::order_events)]
+#[implements(shop_api::orders::order_events)]
 async fn order_events() -> SseStream<OrderEvent, impl Stream<Item = Result<OrderEvent, Infallible>>>
 {
     SseStream::new(stream::iter([
@@ -49,7 +49,7 @@ async fn order_events() -> SseStream<OrderEvent, impl Stream<Item = Result<Order
     ]))
 }
 
-#[implements(orders_api::count_orders)]
+#[implements(shop_api::orders::count_orders)]
 async fn count_orders(State(store): State<Store>) -> (StatusCode, Json<usize>) {
     let count = store.0.read().unwrap().len();
     let status = if count > 1 {

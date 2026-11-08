@@ -18,13 +18,9 @@ members = [
     "crates/doxa-build",
     "crates/doxa-wasm-split",
     "crates/doxa-cli",
-    "examples/widgets/api",
-    "examples/widgets/client",
-    "examples/widgets/server",
-    "examples/widgets/spec-client",
-    "examples/widgets/web",
-    "examples/orders/api",
-    "examples/orders/server",
+    "examples/shop/api",
+    "examples/shop/server",
+    "examples/shop/web",
     "crates/doxa-fmt",
 ]
 

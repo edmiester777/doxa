@@ -1,4 +1,4 @@
-//! The orders API: what `orders-server` serves and its clients call.
+//! Orders for widgets.
 
 doxa::prelude!();
 

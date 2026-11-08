@@ -1,10 +1,10 @@
 [package]
-name = "orders-api"
+name = "shop-api"
 version = "0.0.0"
 edition.workspace = true
 publish = false
 
-# The orders routes as declarations, built for the server and for its browser and native clients.
+# The shop's routes as declarations, built for the server and for the browser.
 [dependencies]
 doxa = { workspace = true, features = ["client", "garde"] }
 garde = { workspace = true, features = ["derive"] }
@@ -13,7 +13,7 @@ thiserror = { workspace = true }
 utoipa = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-doxa = { workspace = true, features = ["auth"] }
+doxa = { workspace = true, features = ["auth", "policy"] }
 
 [build-dependencies]
 doxa-role = { workspace = true }

@@ -1,5 +1,5 @@
 [package]
-name = "widgets-web"
+name = "shop-web"
 version = "0.0.0"
 edition.workspace = true
 publish = false
@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-widgets-client = { path = "../client" }
+shop-api = { path = "../api" }
 doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind"] }
 futures = { workspace = true }
 serde = { workspace = true }
@@ -20,17 +20,17 @@ web-sys = { version = "0.3", features = ["AddEventListenerOptions", "CssStyleDec
 
 [package.metadata.doxa]
 role = "client"
-server = "widgets-server"
+server = "shop-server"
 wasm_budget_kb = 450
 css = ["style/app.css"]
-library = { name = "@widgets/kit", scope = ".widgets-kit" }
+library = { name = "@shop/kit", scope = ".shop-kit" }
 
 [package.metadata.doxa.npm]
 react = "^19"
 react-dom = "^19"
 
 [dev-dependencies]
-widgets-server = { path = "../server" }
+shop-server = { path = "../server" }
 doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind", "client-router"] }
 tokio = { workspace = true }
 serde = { workspace = true }

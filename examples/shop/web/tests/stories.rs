@@ -19,7 +19,7 @@ async fn the_feed_story_shows_each_event_as_the_script_reaches_it() {
     let story = StoryRoot::mount_on(
         Rc::new(dom.clone()),
         dom.body(),
-        widgets_web::stories::feed_streaming,
+        shop_web::stories::feed_streaming,
     );
     settle().await;
     let feed = dom.find("class", "feed").expect("the feed");
@@ -41,7 +41,7 @@ async fn the_picker_story_lists_the_mocked_widgets() {
     let _story = StoryRoot::mount_on(
         Rc::new(dom.clone()),
         dom.body(),
-        widgets_web::stories::picker_three,
+        shop_web::stories::picker_three,
     );
     settle().await;
     let picker = dom.find("class", "picker").expect("the picker");

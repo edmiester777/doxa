@@ -6,7 +6,7 @@ use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::{scripted, MockTransport};
 use doxa::ui::prelude::*;
 use doxa::ui::story;
-use widgets_client::widgets::*;
+use shop_api::widgets::*;
 
 use crate::kit::WidgetPicker;
 
@@ -35,7 +35,7 @@ pub fn WidgetFeed(name: String) -> View {
 pub fn feed_streaming() -> (View, Scoped) {
     let script = scripted::<WidgetEvent>(include_str!("../fixtures/feed.jsonl"))
         .every(Duration::from_millis(400));
-    let guard = widgets_client::service()
+    let guard = shop_api::service()
         .layers()
         .push_scoped(transport(script.transport()));
     (view! { <WidgetFeed name={"gear".to_owned()}/> }, guard)
@@ -54,8 +54,6 @@ pub fn picker_three() -> (View, Scoped) {
         })
         .collect();
     mock.json(200, &widgets);
-    let guard = widgets_client::service()
-        .layers()
-        .push_scoped(transport(mock));
+    let guard = shop_api::service().layers().push_scoped(transport(mock));
     (view! { <WidgetPicker on_open={|_: String| ()}/> }, guard)
 }

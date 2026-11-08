@@ -33,7 +33,7 @@ jobs:
       run: rustup target add wasm32-unknown-unknown
     - name: Check the client half for the browser
       run: |
-        cargo check -p doxa-client -p doxa-ui -p widgets-client -p widgets-web -p orders-api --target wasm32-unknown-unknown
+        cargo check -p doxa-client -p doxa-ui -p shop-api -p shop-web --target wasm32-unknown-unknown
         cargo check -p doxa --features react --target wasm32-unknown-unknown
 
   browser:
@@ -65,7 +65,7 @@ jobs:
     - name: Install wasm-opt
       run: sudo apt-get install -y binaryen
     - name: Build the example optimized, inside its wasm budget
-      working-directory: examples/widgets
+      working-directory: examples/shop
       run: cargo run -q -p doxa-cli -- build --release
 
   msrv:

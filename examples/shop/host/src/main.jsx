@@ -2,8 +2,8 @@ import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, Link, Outlet, RouterProvider, useParams } from "react-router";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { RenameWidget, WidgetPicker, WidgetTitle, configure } from "@widgets/kit";
-import "@widgets/kit/style.css";
+import { RenameWidget, WidgetPicker, WidgetTitle, configure } from "@shop/kit";
+import "@shop/kit/style.css";
 
 const queryClient = new QueryClient();
 

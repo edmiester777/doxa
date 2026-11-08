@@ -1,7 +1,8 @@
 use doxa::client::{Granted, Json, Query};
 use doxa::wire::contract::{Declared, NoError};
 use doxa::wire::Method;
-use orders_api::*;
+use shop_api::orders::*;
+use shop_api::widgets::{get_widget, upload_files, WidgetKey};
 
 trait Same<T> {}
 impl<T> Same<T> for T {}
@@ -43,7 +44,7 @@ fn a_capability_guarded_declaration_names_it_and_invalidates_its_resource() {
 fn a_declaration_carries_its_route_and_docs() {
     let spec = <place_order::Route as Declared>::SPEC;
     assert_eq!((spec.method, spec.path), (Method::Post, "/api/orders"));
-    assert_eq!(spec.package, "orders-api");
+    assert_eq!(spec.package, "shop-api");
     assert_eq!(<get_order::Route as Declared>::DOCS, "One order.");
 }
 
@@ -51,4 +52,11 @@ fn a_declaration_carries_its_route_and_docs() {
 fn a_declaration_is_a_call_natively_too() {
     let call = get_order(OrderKey { id: 7 });
     assert_eq!(call.url().unwrap(), "/api/orders/7");
+    let call = get_widget(WidgetKey { name: "a b".into() });
+    assert_eq!(call.url().unwrap(), "/api/widgets/a%20b");
+}
+
+#[test]
+fn an_unguarded_declaration_has_no_dry_run() {
+    assert!(!<upload_files::Route as Declared>::SPEC.dry_run);
 }

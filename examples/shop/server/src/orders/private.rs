@@ -7,15 +7,15 @@ use axum::Json;
 use doxa::auth::{Cap, Granted};
 use doxa::{implements, Valid};
 
-use orders_api::{order_action, NewOrder, Order, OrderError};
+use shop_api::orders::{order_action, NewOrder, Order, OrderError};
 
-use crate::{Gone, OrderById, OrderRow, Store};
+use super::{Gone, OrderById, OrderRow, Store};
 
 /// Changes, refused without a role.
 #[doxa::service(layers = crate::signed_in)]
 pub struct OrdersPrivate;
 
-#[implements(orders_api::cancel_order)]
+#[implements(shop_api::orders::cancel_order)]
 async fn cancel_order(
     order: Granted<OrderById>,
     State(store): State<Store>,
@@ -24,12 +24,12 @@ async fn cancel_order(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[implements(orders_api::refund_order)]
+#[implements(shop_api::orders::refund_order)]
 async fn refund_order(_: Granted<OrderById>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-#[implements(orders_api::place_order)]
+#[implements(shop_api::orders::place_order)]
 async fn place_order(
     _: Granted<Cap<order_action::Place>>,
     State(store): State<Store>,

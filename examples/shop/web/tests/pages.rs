@@ -16,10 +16,10 @@ thread_local! {
 
 /// Answer this thread's calls with a fresh server, as `role`, from an empty cache.
 fn serve(role: &str) {
-    let s = widgets_client::service();
+    let s = shop_api::service();
     SERVED.with(|g| g.borrow_mut().take());
     s.end_session();
-    let router = widgets_server::app(widgets_server::seeded());
+    let router = shop_server::app(shop_server::seeded());
     let guard = s.layers().push_scoped(transport(
         RouterTransport::new(router).with_header("x-role", role),
     ));
@@ -29,7 +29,7 @@ fn serve(role: &str) {
 fn mount(role: &str) -> MemDom {
     serve(role);
     let dom = MemDom::new();
-    widgets_web::app()
+    shop_web::app()
         .mount_on(Rc::new(dom.clone()), dom.body())
         .keep();
     dom
@@ -48,7 +48,7 @@ async fn the_list_page_renders_every_widget_with_one_request() {
     let dom = mount("viewer");
     settle().await;
     assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "sprocketgearcog");
-    assert_eq!(widgets_client::service().requests_sent(), 1);
+    assert_eq!(shop_api::service().requests_sent(), 1);
 }
 
 #[tokio::test]
@@ -72,7 +72,7 @@ async fn a_link_navigates_and_the_rename_button_follows_the_guard() {
 async fn a_renamed_can_takes_its_probe_directly() {
     use doxa::ui::prelude::{view, App};
     use doxa::ui::Can as Allowed;
-    use widgets_client::widgets::{rename_widget, WidgetKey};
+    use shop_api::widgets::{rename_widget, WidgetKey};
 
     for (role, shown) in [("editor", true), ("viewer", false)] {
         serve(role);
@@ -97,8 +97,8 @@ async fn a_renamed_can_takes_its_probe_directly() {
 #[tokio::test]
 async fn a_generic_table_infers_its_row_type_from_the_tag() {
     use doxa::ui::prelude::{view, App};
-    use widgets_client::widgets::Widget;
-    use widgets_web::table::{Column, Table};
+    use shop_api::widgets::Widget;
+    use shop_web::table::{Column, Table};
 
     serve("viewer");
     let dom = MemDom::new();
@@ -130,7 +130,7 @@ async fn a_generic_table_infers_its_row_type_from_the_tag() {
 #[tokio::test]
 async fn a_tags_extra_attributes_handlers_and_directives_reach_the_element() {
     use doxa::ui::prelude::{state, view, App, Directive, NodeRef};
-    use widgets_web::button::Button;
+    use shop_web::button::Button;
 
     #[derive(Clone)]
     struct Mark(std::rc::Rc<std::cell::Cell<bool>>);
@@ -228,7 +228,7 @@ async fn a_class_toggle_patches_only_its_own_class() {
 async fn a_user_clicks_through_the_list_by_role_and_text_with_a_fake_island() {
     use doxa::ui::prelude::view;
     use doxa::ui::testing::{fake, Role, Screen};
-    use widgets_web::Count;
+    use shop_web::Count;
 
     serve("viewer");
     fake::<Count>(|p| {
@@ -240,7 +240,7 @@ async fn a_user_clicks_through_the_list_by_role_and_text_with_a_fake_island() {
             </button>
         }
     });
-    let screen = Screen::app(widgets_web::app());
+    let screen = Screen::app(shop_web::app());
 
     screen.role(Role::Button).name("3 widgets").click().await;
     screen.find_text("1").await.expect("the pick reached Rust");
@@ -504,7 +504,7 @@ async fn a_query_that_does_not_parse_shows_not_found() {
 #[tokio::test]
 async fn an_exported_component_renders_again_with_the_hosts_new_props() {
     use doxa::ui::Exported;
-    use widgets_web::kit::{WidgetTitle, WidgetTitleProps};
+    use shop_web::kit::{WidgetTitle, WidgetTitleProps};
 
     serve("viewer");
     let dom = MemDom::new();
@@ -534,11 +534,11 @@ async fn an_exported_component_renders_again_with_the_hosts_new_props() {
 async fn twenty_cans_over_one_capability_send_one_request() {
     use doxa::ui::prelude::{view, App};
     use doxa::ui::{Can, View};
-    use widgets_client::widgets::widget_action;
+    use shop_api::widgets::widget_action;
 
     for (role, shown) in [("editor", "E".repeat(20)), ("viewer", String::new())] {
         serve(role);
-        let before = widgets_client::service().requests_sent();
+        let before = shop_api::service().requests_sent();
         let dom = MemDom::new();
         App::new(|| {
             let links: Vec<View> = (0..20)
@@ -556,7 +556,7 @@ async fn twenty_cans_over_one_capability_send_one_request() {
         .keep();
         settle().await;
         assert_eq!(dom.text(dom.body()), shown, "{role}");
-        let sent = widgets_client::service().requests_sent() - before;
+        let sent = shop_api::service().requests_sent() - before;
         assert_eq!(sent, 1, "{role}");
     }
 }
@@ -564,7 +564,7 @@ async fn twenty_cans_over_one_capability_send_one_request() {
 #[tokio::test]
 async fn requires_sends_a_caller_without_the_capability_elsewhere() {
     use doxa::ui::{requires, Route};
-    use widgets_client::widgets::widget_action;
+    use shop_api::widgets::widget_action;
 
     serve("editor");
     let guard = requires(widget_action::Update, "/widgets");

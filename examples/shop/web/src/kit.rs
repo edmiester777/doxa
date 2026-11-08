@@ -1,7 +1,7 @@
 //! Components a React app embeds, through `doxa build --lib`.
 
 use doxa::ui::prelude::*;
-use widgets_client::widgets::*;
+use shop_api::widgets::*;
 
 use crate::{Count, WidgetPage};
 

@@ -1,4 +1,4 @@
-//! `orders-api`'s calls, sent through `orders-server`'s router in-process.
+//! The order calls, sent through the shop router in-process.
 
 use std::cell::RefCell;
 use std::time::Duration;
@@ -6,17 +6,17 @@ use std::time::Duration;
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
 use doxa::client::{CacheConfig, Fetch, Permission};
-use orders_api::*;
+use shop_api::orders::*;
 
 thread_local! {
     static SERVED: RefCell<Option<Scoped>> = const { RefCell::new(None) };
 }
 
 fn install(role: &str) {
-    let s = orders_api::service();
+    let s = shop_api::service();
     SERVED.with(|g| g.borrow_mut().take());
     s.end_session();
-    let router = RouterTransport::new(orders_server::app(orders_server::seeded()));
+    let router = RouterTransport::new(shop_server::app(shop_server::seeded()));
     let guard = s
         .layers()
         .push_scoped(transport(router.with_header("x-role", role)));
@@ -113,7 +113,7 @@ async fn a_declared_stream_streams() {
 
 #[test]
 fn the_document_names_each_route_by_its_declaration() {
-    let api = doxa::__private::IntoSpec::into_spec(orders_server::api_doc());
+    let api = doxa::__private::IntoSpec::into_spec(shop_server::api_doc());
     let op = api.paths.paths["/api/orders/{id}"].delete.as_ref().unwrap();
     assert_eq!(op.operation_id.as_deref(), Some("cancel_order"));
     assert_eq!(op.summary.as_deref(), Some("Cancel an order."));
@@ -122,7 +122,7 @@ fn the_document_names_each_route_by_its_declaration() {
 #[tokio::test]
 async fn placing_an_order_refreshes_the_cached_list() {
     install("clerk");
-    let s = orders_api::service();
+    let s = shop_api::service();
     s.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
     assert_eq!(list_orders(OrderFilter::default()).await.unwrap().len(), 2);
     place_order(NewOrder {
@@ -155,7 +155,7 @@ async fn the_capabilities_route_agrees_with_the_guard() {
 #[tokio::test]
 async fn a_capability_only_route_answers_can_from_the_callers_capabilities() {
     install("clerk");
-    let s = orders_api::service();
+    let s = shop_api::service();
     let before = s.requests_sent();
     for _ in 0..5 {
         assert_eq!(place_order::can().await, Permission::Allowed);
@@ -180,7 +180,7 @@ async fn a_declared_202_answers_with_the_return_types_body() {
 
 #[test]
 fn a_declarations_responses_reach_the_document() {
-    let api = doxa::__private::IntoSpec::into_spec(orders_server::api_doc());
+    let api = doxa::__private::IntoSpec::into_spec(shop_server::api_doc());
     let op = api.paths.paths["/api/orders/count"].post.as_ref().unwrap();
     let mut statuses: Vec<_> = op.responses.responses.keys().cloned().collect();
     statuses.sort();

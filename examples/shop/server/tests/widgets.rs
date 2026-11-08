@@ -1,12 +1,12 @@
-//! The client stubs, sent through the real server router in-process.
+//! The widget calls, sent through the shop router in-process.
 
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
 use doxa::client::{CacheConfig, Cached, Fetch, Permission, Service};
+use shop_api::widgets::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
-use widgets_client::widgets::*;
 
 thread_local! {
     static SERVED: RefCell<Option<Scoped>> = const { RefCell::new(None) };
@@ -14,7 +14,7 @@ thread_local! {
 
 /// Answer this thread's calls with `router`, as `role`, from an empty cache.
 fn serve(router: RouterTransport, role: &str) -> Rc<Service> {
-    let s = widgets_client::service();
+    let s = shop_api::service();
     SERVED.with(|g| g.borrow_mut().take());
     s.end_session();
     let guard = s
@@ -25,7 +25,7 @@ fn serve(router: RouterTransport, role: &str) -> Rc<Service> {
 }
 
 fn seeded() -> RouterTransport {
-    RouterTransport::new(widgets_server::app(widgets_server::seeded()))
+    RouterTransport::new(shop_server::app(shop_server::seeded()))
 }
 
 fn install(role: &str) -> Rc<Service> {
@@ -53,9 +53,9 @@ async fn a_route_is_called_like_a_function() {
 }
 
 #[tokio::test]
-async fn a_route_in_a_private_server_module_is_public_to_the_client() {
+async fn a_route_with_no_arguments_is_called_too() {
     install("viewer");
-    let version = widgets_client::meta::version().await.unwrap();
+    let version = shop_api::version().await.unwrap();
     assert_eq!(*version, "0.0.0");
 }
 
@@ -122,7 +122,7 @@ async fn an_invalid_body_is_refused_with_the_servers_fields_and_never_sent() {
     );
 
     // The server, reached without the client's check, answers with the same fields.
-    let server = widgets_server::app(widgets_server::seeded());
+    let server = shop_server::app(shop_server::seeded());
     let response = tower::ServiceExt::oneshot(
         server,
         axum::http::Request::patch("/api/widgets/sprocket")
@@ -251,11 +251,9 @@ async fn identical_streams_share_one_connection() {
 
 #[tokio::test]
 async fn a_probe_of_an_unguarded_route_is_unknown_and_never_runs_it() {
-    let catalog = widgets_server::seeded();
-    serve(
-        RouterTransport::new(widgets_server::app(catalog.clone())),
-        "viewer",
-    );
+    let shop = shop_server::seeded();
+    let catalog = shop.widgets.clone();
+    serve(RouterTransport::new(shop_server::app(shop)), "viewer");
     assert_eq!(suggest_name::can().await, Permission::Unknown);
     assert!(catalog.suggestions().is_empty());
     let status = suggest_name(Rename {

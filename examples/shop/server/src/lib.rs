@@ -1,151 +1,67 @@
-//! The orders server: the routes `orders-api` declares, served by two services.
+//! The shop server: every route `shop-api` declares, implemented and guarded.
 
-mod private;
-mod public;
+pub mod orders;
+pub mod widgets;
 
-/// What the caller may do, at `GET /doxa/capabilities`.
-#[doxa::service(layers = caller)]
-pub struct Orders;
-
-pub use private::OrdersPrivate;
-pub use public::OrdersPublic;
-
-use std::convert::Infallible;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::{FromRef, Request};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
-use axum::Router;
+use axum::{Json, Router};
 
-use doxa::auth::{CapabilityContext, FromState, GrantProfile};
-use doxa::policy::{
-    AuthError, Capability, CapabilityChecker, Fetch, FetchByKey, FetchSubset, ResourceEntity,
-};
-use doxa::{asset, PolicyResource, Routes};
+use doxa::auth::CapabilityContext;
+use doxa::policy::{AuthError, Capability, CapabilityChecker, ResourceEntity};
+use doxa::{implements, Routes};
 
-use orders_api::{Order, OrderAction, OrderError, OrderKey};
+use orders::{OrderRow, Store};
+use widgets::{Catalog, WidgetRow};
 
-/// An order as the server stores it.
-#[derive(Debug, Clone, serde::Serialize, PolicyResource)]
-#[resource(entity_type = "Order")]
-pub struct OrderRow {
-    #[resource(id)]
-    pub id: u32,
-    #[resource(attr)]
-    pub item: String,
-    pub quantity: u32,
-}
+/// The version route, and what the caller may do at `GET /doxa/capabilities`.
+#[doxa::service(layers = caller)]
+pub struct Shop;
 
-impl From<OrderRow> for Order {
-    fn from(row: OrderRow) -> Self {
-        Order {
-            id: row.id,
-            item: row.item,
-            quantity: row.quantity,
-        }
-    }
-}
-
-#[asset(
-    row = OrderRow,
-    key = OrderKey,
-    profile = AppGrants,
-    actions = OrderAction,
-    list = tenant,
-    entity = orders_api::Order
-)]
-pub struct OrderById;
-
-/// Orders in memory.
-#[derive(Clone, Default)]
-pub struct Store(Arc<RwLock<Vec<OrderRow>>>);
-
-/// A store that has lost an order it was asked for.
-pub struct Gone(u32);
-
-impl From<Gone> for OrderError {
-    fn from(Gone(id): Gone) -> Self {
-        OrderError::NotFound(id)
-    }
-}
-
-impl Store {
-    /// A store holding `orders`.
-    pub fn new(orders: Vec<OrderRow>) -> Self {
-        Self(Arc::new(RwLock::new(orders)))
-    }
-
-    fn remove(&self, id: u32) -> Result<(), Gone> {
-        let mut orders = self.0.write().unwrap();
-        let at = orders.iter().position(|o| o.id == id).ok_or(Gone(id))?;
-        orders.remove(at);
-        Ok(())
-    }
-}
-
-impl Fetch<Store> for OrderRow {
-    type Error = Infallible;
-}
-
-impl FetchByKey<Store> for OrderRow {
-    type Key = OrderKey;
-
-    async fn fetch(key: OrderKey, src: &Store, _scope: &str) -> Result<Option<Self>, Infallible> {
-        Ok(src
-            .0
-            .read()
-            .unwrap()
-            .iter()
-            .find(|o| o.id == key.id)
-            .cloned())
-    }
-}
-
-impl FetchSubset for OrderRow {
-    type Filter = String;
-
-    fn subset(scope: &str) -> String {
-        scope.to_owned()
-    }
-}
-
-/// How this app's guards find the caller and the store.
-pub struct AppGrants;
-
-impl GrantProfile for AppGrants {
-    type Ctx = CapabilityContext;
-    type State = Store;
-    type Source = FromState<Store>;
-    type Error = Infallible;
-}
-
+/// Everything the routes read.
 #[derive(Clone, doxa::State)]
-struct AppState {
-    store: Store,
+pub struct ShopState {
+    pub orders: Store,
+    pub widgets: Catalog,
 }
 
-impl FromRef<AppState> for Store {
-    fn from_ref(state: &AppState) -> Self {
-        state.store.clone()
+impl FromRef<ShopState> for Store {
+    fn from_ref(state: &ShopState) -> Self {
+        state.orders.clone()
     }
 }
 
-/// `viewer` may read; `clerk` may also cancel and place; `admin` may do anything.
+impl FromRef<ShopState> for Catalog {
+    fn from_ref(state: &ShopState) -> Self {
+        state.widgets.clone()
+    }
+}
+
+#[implements(shop_api::version)]
+async fn version() -> Json<String> {
+    Json(env!("CARGO_PKG_VERSION").to_owned())
+}
+
+/// `viewer` reads; `editor` renames widgets; `clerk` places and cancels orders; `admin` does
+/// anything.
 struct RoleChecker;
 
 #[async_trait]
 impl CapabilityChecker for RoleChecker {
     async fn check(&self, _: &str, roles: &[String], cap: &Capability) -> Result<bool, AuthError> {
-        if roles.iter().any(|r| r == "admin") {
+        let has = |r: &str| roles.iter().any(|x| x == r);
+        if has("admin") {
             return Ok(true);
         }
-        let clerk = roles.iter().any(|r| r == "clerk");
         Ok(match cap.name {
-            "orders.cancel" | "orders.place" => clerk,
-            _ => clerk || roles.iter().any(|r| r == "viewer"),
+            "orders.cancel" | "orders.place" => has("clerk"),
+            "widgets.update" => has("editor"),
+            _ => has("viewer") || has("editor") || has("clerk"),
         })
     }
 
@@ -156,13 +72,19 @@ impl CapabilityChecker for RoleChecker {
         action: &str,
         _: &ResourceEntity,
     ) -> Result<bool, AuthError> {
-        Ok(action != "cancel" || roles.iter().any(|r| r == "clerk"))
+        let has = |r: &str| roles.iter().any(|x| x == r);
+        Ok(has("admin")
+            || match action {
+                "cancel" => has("clerk"),
+                "update" => has("editor"),
+                _ => true,
+            })
     }
 }
 
 /// Who the caller is, read from `x-role` in place of a real token.
 #[doxa::layers]
-fn caller(routes: Routes, _: &AppState) -> Routes {
+fn caller(routes: Routes, _: &ShopState) -> Routes {
     routes.layer(axum::middleware::from_fn(
         |mut req: Request, next: Next| async move {
             let role = req
@@ -185,7 +107,7 @@ fn caller(routes: Routes, _: &AppState) -> Routes {
 
 /// [`caller`], and `401` without a role.
 #[doxa::layers(docs = [caller, doxa::auth::AuthDocs])]
-fn signed_in(routes: Routes, state: &AppState) -> Routes {
+fn signed_in(routes: Routes, state: &ShopState) -> Routes {
     let routes = routes.layer(axum::middleware::from_fn(
         |req: Request, next: Next| async move {
             if req.extensions().get::<CapabilityContext>().is_none() {
@@ -197,37 +119,42 @@ fn signed_in(routes: Routes, state: &AppState) -> Routes {
     caller(routes, state)
 }
 
-/// The orders API's OpenAPI document.
+/// The shop's OpenAPI document.
 #[doxa::spec]
 pub fn api_doc() -> doxa::ApiDoc {
     doxa::ApiDocBuilder::new()
-        .title("Orders")
+        .title("Shop")
         .version("0.0.0")
         .bearer_security("bearer")
         .merge(doxa::spec())
         .build()
 }
 
-/// The app over `store`.
-pub fn app(store: Store) -> Router {
-    let (router, _api) = doxa::app(&AppState { store }).split_for_parts();
-    router
+/// The app over `state`.
+pub fn app(state: ShopState) -> Router {
+    let (router, _api) = doxa::app(&state).split_for_parts();
+    router.layer(doxa::ETagLayer)
 }
 
-/// Two orders to start with.
-pub fn seeded() -> Store {
-    Store::new(vec![
-        OrderRow {
-            id: 1,
-            item: "sprocket".into(),
-            quantity: 2,
-        },
-        OrderRow {
-            id: 2,
-            item: "gear".into(),
-            quantity: 5,
-        },
-    ])
+/// Three widgets and two orders to start with.
+pub fn seeded() -> ShopState {
+    let widget = |id, name: &str| WidgetRow {
+        id,
+        name: name.into(),
+    };
+    let order = |id, item: &str, quantity| OrderRow {
+        id,
+        item: item.into(),
+        quantity,
+    };
+    ShopState {
+        widgets: Catalog::new(vec![
+            widget(1, "sprocket"),
+            widget(2, "gear"),
+            widget(3, "cog"),
+        ]),
+        orders: Store::new(vec![order(1, "sprocket", 2), order(2, "gear", 5)]),
+    }
 }
 
 /// A handler's own error converts into the declared one:
@@ -235,11 +162,11 @@ pub fn seeded() -> Store {
 /// ```
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// struct Lost;
-/// impl From<Lost> for orders_api::OrderError {
-///     fn from(_: Lost) -> Self { orders_api::OrderError::NotFound(0) }
+/// impl From<Lost> for shop_api::orders::OrderError {
+///     fn from(_: Lost) -> Self { shop_api::orders::OrderError::NotFound(0) }
 /// }
-/// #[doxa::implements(orders_api::cancel_order, mount = false)]
-/// async fn cancel(_: doxa::auth::Granted<orders_server::OrderById>) -> Result<axum::http::StatusCode, Lost> {
+/// #[doxa::implements(shop_api::orders::cancel_order, mount = false)]
+/// async fn cancel(_: doxa::auth::Granted<shop_server::orders::OrderById>) -> Result<axum::http::StatusCode, Lost> {
 ///     Err(Lost)
 /// }
 /// ```
@@ -249,8 +176,8 @@ pub fn seeded() -> Store {
 /// ```compile_fail
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// struct Lost;
-/// #[doxa::implements(orders_api::cancel_order, mount = false)]
-/// async fn cancel(_: doxa::auth::Granted<orders_server::OrderById>) -> Result<axum::http::StatusCode, Lost> {
+/// #[doxa::implements(shop_api::orders::cancel_order, mount = false)]
+/// async fn cancel(_: doxa::auth::Granted<shop_server::orders::OrderById>) -> Result<axum::http::StatusCode, Lost> {
 ///     Err(Lost)
 /// }
 /// ```
@@ -262,22 +189,22 @@ pub mod error_diagnostics {}
 /// ```
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// use doxa::auth::{Granted, Many};
-/// use orders_server::OrderById;
-/// #[doxa::implements(orders_api::get_order, mount = false)]
-/// async fn get(order: Granted<OrderById>) -> Result<axum::Json<orders_api::Order>, orders_api::OrderError> {
+/// use shop_server::orders::OrderById;
+/// #[doxa::implements(shop_api::orders::get_order, mount = false)]
+/// async fn get(order: Granted<OrderById>) -> Result<axum::Json<shop_api::orders::Order>, shop_api::orders::OrderError> {
 ///     unimplemented!()
 /// }
 /// ```
 ///
 /// A list guard the declaration doesn't state is "`get` guards a list of `OrderById`, which
-/// `orders_api::get_order` doesn't declare":
+/// `shop_api::orders::get_order` doesn't declare":
 ///
 /// ```compile_fail
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// use doxa::auth::{Granted, Many};
-/// use orders_server::OrderById;
-/// #[doxa::implements(orders_api::get_order, mount = false)]
-/// async fn get(_: Granted<Many<OrderById>>, order: Granted<OrderById>) -> Result<axum::Json<orders_api::Order>, orders_api::OrderError> {
+/// use shop_server::orders::OrderById;
+/// #[doxa::implements(shop_api::orders::get_order, mount = false)]
+/// async fn get(_: Granted<Many<OrderById>>, order: Granted<OrderById>) -> Result<axum::Json<shop_api::orders::Order>, shop_api::orders::OrderError> {
 ///     unimplemented!()
 /// }
 /// ```
@@ -289,20 +216,20 @@ pub mod guard_diagnostics {}
 /// ```
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// use doxa::auth::{Cap, Granted};
-/// use orders_api::{order_action, NewOrder, Order, OrderError};
-/// #[doxa::implements(orders_api::place_order, mount = false)]
+/// use shop_api::orders::{order_action, NewOrder, Order, OrderError};
+/// #[doxa::implements(shop_api::orders::place_order, mount = false)]
 /// async fn place(_: Granted<Cap<order_action::Place>>, _: doxa::Valid<axum::Json<NewOrder>>) -> Result<axum::Json<Order>, OrderError> {
 ///     unimplemented!()
 /// }
 /// ```
 ///
-/// Another one is "`place` and `orders_api::place_order` guard different capabilities":
+/// Another one is "`place` and `shop_api::orders::place_order` guard different capabilities":
 ///
 /// ```compile_fail
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// use doxa::auth::{Cap, Granted};
-/// use orders_api::{order_action, NewOrder, Order, OrderError};
-/// #[doxa::implements(orders_api::place_order, mount = false)]
+/// use shop_api::orders::{order_action, NewOrder, Order, OrderError};
+/// #[doxa::implements(shop_api::orders::place_order, mount = false)]
 /// async fn place(_: Granted<Cap<order_action::Cancel>>, _: doxa::Valid<axum::Json<NewOrder>>) -> Result<axum::Json<Order>, OrderError> {
 ///     unimplemented!()
 /// }
@@ -316,8 +243,8 @@ pub mod capability_diagnostics {}
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// use doxa::SseStream as Events;
 /// use futures::stream::{self, Stream};
-/// use orders_api::OrderEvent;
-/// #[doxa::implements(orders_api::order_events, mount = false)]
+/// use shop_api::orders::OrderEvent;
+/// #[doxa::implements(shop_api::orders::order_events, mount = false)]
 /// async fn events() -> Events<OrderEvent, impl Stream<Item = Result<OrderEvent, std::convert::Infallible>>> {
 ///     Events::new(stream::empty())
 /// }
@@ -329,7 +256,7 @@ pub mod capability_diagnostics {}
 /// ```compile_fail
 /// # #[derive(Clone, doxa::State)] struct NoState;
 /// use axum::Json as Body;
-/// #[doxa::implements(orders_api::order_events, mount = false)]
+/// #[doxa::implements(shop_api::orders::order_events, mount = false)]
 /// async fn events() -> Body<u32> {
 ///     Body(0)
 /// }

@@ -4,7 +4,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   esbuild: { jsx: "automatic" },
   // The package's wasm is fetched at run time, not imported.
-  optimizeDeps: { exclude: ["@widgets/kit"] },
+  optimizeDeps: { exclude: ["@shop/kit"] },
   // `file:` links the package from target/, where React isn't installed.
   resolve: { dedupe: ["react", "react-dom"] },
   server: {

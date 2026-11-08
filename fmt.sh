@@ -11,7 +11,7 @@ cargo clippy -p doxa-ui --no-default-features $WASM -- -D warnings
 for feat in react export forms oidc npm gallery; do
   cargo clippy -p doxa-ui --no-default-features --features "$feat" $WASM -- -D warnings
 done
-cargo clippy -p widgets-web -p widgets-client -p widgets-spec-client $WASM -- -D warnings
+cargo clippy -p shop-web -p shop-api $WASM -- -D warnings
 cargo +nightly fmt --all
 cargo run -q -p doxa-fmt -- crates examples
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace

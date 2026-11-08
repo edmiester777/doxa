@@ -1,17 +1,20 @@
-# widgets
+# shop
 
-One app, written once and compiled for both halves.
+A small widget shop, written once and compiled for both halves.
 
 | Crate | What it is |
 |---|---|
-| `api` | The routes, DTOs and errors. The server's view of the shared source. |
-| `client` | The same source (`[lib] path = "../api/src/lib.rs"`) with `doxa_role::client()` in `build.rs`: every route becomes a typed call. |
-| `server` | The axum app: the routes behind a stand-in auth layer, with `ETagLayer`. |
-| `web` | The pages (`doxa::ui`) inside a layout, and a React component from `ts/count.tsx`, mounted by `#[doxa::start]`. |
+| `api` | Every route as a declaration, with its DTOs and errors. Builds for the server and the browser. |
+| `server` | The axum app: each declaration `#[implements]`-ed, guarded by role, documented in OpenAPI. |
+| `web` | The pages, `#[story]`s, React and npm interop, and the `--lib` kit `host/` embeds. |
 
 ```sh
-cargo test -p widgets-client -p widgets-web     # client calls and pages, against the real router, natively
-cargo check -p widgets-web --target wasm32-unknown-unknown
-doxa dev                                        # rebuild on change, at http://127.0.0.1:3000
-doxa build && ./target/debug/widgets-server     # the server with the app embedded
+cargo test -p shop-api -p shop-server -p shop-web   # calls and pages, against the real router
+doxa dev                                            # rebuild on change, at http://127.0.0.1:3000
+doxa gallery                                        # the stories, at http://127.0.0.1:4710
+doxa build && ./target/debug/shop-server            # the server with the app embedded
 ```
+
+The server reads the caller's role from an `x-role` header in place of a real token:
+`viewer` reads, `editor` renames widgets, `clerk` places and cancels orders, and `admin` does
+anything. A browser that sends none is an `admin`.
