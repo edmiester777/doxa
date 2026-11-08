@@ -126,3 +126,42 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 .src .l::before { counter-increment: line; content: counter(line); display: inline-block; width: 3.5em; padding-right: 1.25em; text-align: right; color: var(--faint); user-select: none; }
 .t-com { color: var(--com); font-style: italic; } .t-str { color: var(--str); } .t-num { color: var(--num); } .t-kw { color: var(--kw); }
 .t-ty { color: var(--ty); } .t-mac { color: var(--mac); } .t-attr { color: var(--attr); } .t-life { color: var(--kw); font-style: italic; }
+
+.mnav, .scrim, .tool.close { display: none; }
+@media (min-width: 600px) {
+  .app:not(.panel-open) .panel, .app:not(.panel-open) .resize-y { display: none; }
+}
+
+/* On a phone the tree and the panel are bottom drawers, opened from a bar at the foot. */
+@media (max-width: 599px) {
+  .app { display: flex; flex-direction: column; height: 100dvh; }
+  .main { flex: 1; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+  .bar { overflow-x: auto; scrollbar-width: none; }
+  .bar::-webkit-scrollbar { display: none; }
+  .bar .crumb, .bar .dims, .bar .grow, .wide, .search kbd, .resize-x, .resize-y, .foot { display: none; }
+
+  .mnav { display: flex; align-items: center; justify-content: space-between; height: calc(40px + env(safe-area-inset-bottom, 0px)); padding: 0 6px env(safe-area-inset-bottom, 0px); border-top: 1px solid var(--border); background: var(--surface); flex: none; }
+  .mnav .who { max-width: calc(100% - 40px); color: var(--text); font-weight: 550; }
+  .mnav .who span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app.sheet .mnav { visibility: hidden; }
+
+  .scrim { display: block; position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, .4); opacity: 0; pointer-events: none; transition: opacity .3s; }
+  .app.menu .scrim, .app.sheet .scrim { opacity: 1; pointer-events: auto; }
+
+  .side, .app .panel {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--surface);
+    border-radius: 14px 14px 0 0; box-shadow: 0 -8px 32px rgba(0, 0, 0, .18); padding-bottom: env(safe-area-inset-bottom, 0px);
+    transform: translateY(100%); visibility: hidden; transition: transform .3s cubic-bezier(.2, .8, .2, 1), visibility 0s .3s;
+  }
+  .side { height: 90dvh; }
+  .app .panel { height: 42dvh; border-top: 0; }
+  .app.menu .side, .app.sheet .panel { transform: none; visibility: visible; transition: transform .3s cubic-bezier(.2, .8, .2, 1); }
+  .tool.close { display: inline-flex; }
+  .brand small { margin-left: 0; }
+  .brand .close { margin-left: auto; }
+  .search input { height: 40px; font-size: 16px; }
+  .row { height: 38px; font-size: 14px; }
+  .row.dir { font-size: 12px; }
+  .tab { height: 44px; }
+  .tabs { height: 44px; }
+}

@@ -122,6 +122,25 @@ fn the_url_picks_the_story_viewport_theme_and_panel() {
 }
 
 #[test]
+fn the_phone_bar_opens_the_tree_and_a_pick_closes_it() {
+    let dom = mount(start());
+    let open = dom
+        .find("aria-label", "Open the story list")
+        .expect("the phone bar's menu button");
+    assert_eq!(dom.text(open), "Forms / Button");
+    let app = dom.find("class", "app panel-open").expect("the app");
+
+    dom.click(open);
+    doxa::client::task::run_until_stalled();
+    assert!(dom.attr(app, "class").unwrap().contains("menu"));
+
+    dom.click(leaf(&dom, "full_list").unwrap());
+    doxa::client::task::run_until_stalled();
+    assert!(!dom.attr(app, "class").unwrap().contains("menu"));
+    assert_eq!(dom.text(open), "Lists / Full list");
+}
+
+#[test]
 fn an_unknown_story_in_the_url_falls_back_to_the_first() {
     let dom = mount(Initial {
         story: Some("gone".into()),

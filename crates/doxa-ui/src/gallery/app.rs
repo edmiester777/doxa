@@ -36,6 +36,9 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     let actions = state(Vec::<Logged>::new());
     let copied = state(false);
     let dragging = state(None::<Axis>);
+    // The phone layout's drawers: the story tree, and the panel.
+    let menu = state(false);
+    let sheet = state(false);
     let panel_open = stored("doxa-gallery:panel-open", || true);
     let side = stored("doxa-gallery:side", || 248.0f64);
     let panel = stored("doxa-gallery:panel", || 260.0f64);
@@ -49,6 +52,21 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
         .as_ref()
         .and_then(|n| entries.iter().find(|e| &e.name == n))
         .cloned();
+    // The phone bar's label: the folders too, while that stays short.
+    let full_name = match &meta {
+        Some(m) => {
+            let name = human(&m.name);
+            let mut parts: Vec<String> = folders(m, &entries).iter().map(|p| human(p)).collect();
+            parts.push(name.clone());
+            let full = parts.join(" / ");
+            if full.chars().count() < 24 {
+                full
+            } else {
+                name
+            }
+        }
+        None => "No story".to_owned(),
+    };
     title(match &current {
         Some(n) => format!("{} · Stories", human(n)),
         None => "Stories".to_owned(),
@@ -63,6 +81,7 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     effect(&url, async move |url: &String| replace_url(url));
 
     let select = move |name: String| {
+        menu.set(false);
         if story.get().as_ref() != Some(&name) {
             actions.set(Vec::new());
             story.set(Some(name));
@@ -77,6 +96,10 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
         remount.update(|n| *n += 1);
     };
     let flip_panel = move || panel_open.set(!panel_open.get());
+    let shut = move || {
+        menu.set(false);
+        sheet.set(false);
+    };
 
     let shortcut = {
         let entries = entries.clone();
@@ -94,6 +117,7 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
             };
             match key {
                 "/" => search.get().into_iter().for_each(|s| s.focus()),
+                "Escape" if menu.get() || sheet.get() => shut(),
                 "Escape" if !query.with(String::is_empty) => query.set(String::new()),
                 "ArrowDown" | "j" => step(1),
                 "ArrowUp" | "k" => step(-1),
@@ -216,6 +240,14 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
                 <span class="logo">"d"</span>
                 "doxa"
                 <small>"stories"</small>
+                <button
+                    class="tool close"
+                    title="Close"
+                    aria-label="Close the story list"
+                    on:click={move || menu.set(false)}
+                >
+                    {icon("close")}
+                </button>
             </div>
             <label class="search">
                 {icon("search")}
@@ -331,9 +363,9 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
             >
                 {icon("external")}
             </a>
-            <span class="sep"/>
+            <span class="sep wide"/>
             <button
-                class="tool"
+                class="tool wide"
                 class:on={panel_open.get()}
                 title="Toggle the panel (P)"
                 aria-label="Toggle the panel"
@@ -462,30 +494,61 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
                     "Clear"
                 </button>
             })}
+            <button
+                class="tool close"
+                title="Close"
+                aria-label="Close the panel"
+                on:click={move || sheet.set(false)}
+            >
+                {icon("close")}
+            </button>
         </div>
     };
-    let lower = panel_open.get().then(|| {
-        view! {
-            <div
-                class="resize-y"
-                class:on={dragging.get() == Some(Axis::Panel)}
-                title="Drag to resize"
-                on:pointerdown={drag(Axis::Panel)}
-                on:pointermove={moved}
-                on:pointerup={move || dropped()}
-                on:pointercancel={move || dropped()}
-            />
-            <section class="panel">
-                {tabs}
-                <div class="body">{body}</div>
-            </section>
-        }
-    });
+    let mobile_bar = view! {
+        <nav class="mnav" aria-label="Navigation controls">
+            <button
+                class="tool who"
+                aria-label="Open the story list"
+                aria-expanded={menu.get().to_string()}
+                on:click={move || menu.set(true)}
+            >
+                {icon("menu")}
+                <span>{full_name}</span>
+            </button>
+            <button
+                class="tool"
+                aria-label="Open the panel"
+                aria-expanded={sheet.get().to_string()}
+                on:click={move || sheet.set(true)}
+            >
+                {icon("panel")}
+            </button>
+        </nav>
+        <div class="scrim" on:click={move || shut()}/>
+    };
+    let lower = view! {
+        <div
+            class="resize-y"
+            class:on={dragging.get() == Some(Axis::Panel)}
+            title="Drag to resize"
+            on:pointerdown={drag(Axis::Panel)}
+            on:pointermove={moved}
+            on:pointerup={move || dropped()}
+            on:pointercancel={move || dropped()}
+        />
+        <section class="panel">
+            {tabs}
+            <div class="body">{body}</div>
+        </section>
+    };
 
     let axis = dragging.get();
     view! {
         <div
             class="app"
+            class:panel-open={panel_open.get()}
+            class:menu={menu.get()}
+            class:sheet={sheet.get()}
             class:dragging={axis.is_some()}
             class:x={axis == Some(Axis::Side)}
             class:y={axis == Some(Axis::Panel)}
@@ -497,6 +560,7 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
                 {canvas}
                 {lower}
             </main>
+            {mobile_bar}
         </div>
     }
 }
@@ -691,6 +755,16 @@ fn icon(name: &str) -> View {
         "check" => view! {
             <svg class="i" viewBox="0 0 24 24">
                 <path d="m5 12 5 5 9-10"/>
+            </svg>
+        },
+        "menu" => view! {
+            <svg class="i" viewBox="0 0 24 24">
+                <path d="M4 7h16M4 12h16M4 17h16"/>
+            </svg>
+        },
+        "close" => view! {
+            <svg class="i" viewBox="0 0 24 24">
+                <path d="M6 6l12 12M18 6 6 18"/>
             </svg>
         },
         "bolt" => {
