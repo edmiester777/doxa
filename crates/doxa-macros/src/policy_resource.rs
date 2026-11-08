@@ -594,7 +594,7 @@ fn is_primary_key(field: &syn::Field) -> bool {
     })
 }
 
-/// `company_id` -> `CompanyId`, matching the `Column` variant
+/// `tenant_id` -> `TenantId`, matching the `Column` variant
 /// `DeriveEntityModel` generates from a field name.
 fn column_variant(field: &Ident) -> Ident {
     let raw = field.to_string();
@@ -839,8 +839,8 @@ mod tests {
     fn field_names_become_column_variants() {
         assert_eq!(column_variant(&parse_ident("name")), parse_ident("Name"));
         assert_eq!(
-            column_variant(&parse_ident("company_id")),
-            parse_ident("CompanyId"),
+            column_variant(&parse_ident("tenant_id")),
+            parse_ident("TenantId"),
         );
         assert_eq!(
             column_variant(&parse_ident("entity_uid")),
@@ -882,7 +882,7 @@ mod tests {
                 #[resource(attr)]
                 region: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -890,7 +890,7 @@ mod tests {
             out.contains("impl :: doxa :: policy :: ScopedTable for Model"),
             "{out}",
         );
-        assert!(out.contains("Column :: CompanyId"), "{out}");
+        assert!(out.contains("Column :: TenantId"), "{out}");
         assert!(
             out.contains(r#""region" => :: std :: option :: Option :: Some (Column :: Region)"#),
             "a table without a key still resolves its policy attributes: {out}",
@@ -924,7 +924,7 @@ mod tests {
                 #[resource(id, attr, key)]
                 name: String,
                 #[resource(parent = "Tenant", scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -938,7 +938,7 @@ mod tests {
         );
         assert!(out.contains("type Key = String"), "{out}");
         assert!(out.contains("Column :: Name"), "{out}");
-        assert!(out.contains("Column :: CompanyId"), "{out}");
+        assert!(out.contains("Column :: TenantId"), "{out}");
     }
 
     /// Each way in gets a key struct, and the field names are the field
@@ -956,7 +956,7 @@ mod tests {
                 #[resource(attr, key)]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -982,7 +982,7 @@ mod tests {
                 #[sea_orm(primary_key)]
                 group_id: Uuid,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1003,7 +1003,7 @@ mod tests {
                 #[resource(id, key)]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1029,7 +1029,7 @@ mod tests {
                 #[resource(attr = "region")]
                 region_code: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1049,7 +1049,7 @@ mod tests {
         // The scope column is not an attribute and gets no entry: a policy
         // naming it would be filtering on the tenant, which every lookup
         // already confines.
-        assert!(!out.contains("Some (Column :: CompanyId)"), "{out}");
+        assert!(!out.contains("Some (Column :: TenantId)"), "{out}");
     }
 
     /// The route's key and the Cedar id answer different questions, so a
@@ -1063,7 +1063,7 @@ mod tests {
                 #[resource(key)]
                 id: Uuid,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1192,7 +1192,7 @@ mod tests {
                 #[resource(id, key = "slug")]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1357,7 +1357,7 @@ mod tests {
                 #[resource(id, key)]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 

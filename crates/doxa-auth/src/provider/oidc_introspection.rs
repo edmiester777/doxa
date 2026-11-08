@@ -5,7 +5,7 @@
 //!   `/oauth/token_introspection`, or any other RFC 7662 endpoint;
 //! - lets the deployment configure the *names* of the claims it should pluck
 //!   out via [`OidcClaimConfig`], so provider-specific keys (`groups`,
-//!   `usersRoles`, `cognito:groups`, …) never leak past the resolver boundary.
+//!   `cognito:groups`, …) never leak past the resolver boundary.
 
 use std::collections::HashMap;
 
@@ -172,24 +172,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_legacy_response_with_custom_claim_names() {
-        // Mimics the IdentityServer4 / Duende shape the original code was
-        // hard-coded against — verifies the new resolver can still consume
-        // it via configurable claim names.
+    fn parses_response_with_custom_claim_names() {
         let body = body_from(json!({
             "active": true,
-            "sub": "user-legacy",
-            "companyId": "acme",
-            "usersRoles": ["data_scientist"]
+            "sub": "user-1",
+            "orgId": "acme",
+            "appRoles": ["editor"]
         }));
         let mapping = OidcClaimConfig {
             sub_claim: "sub".into(),
-            scope_claim: "companyId".into(),
-            roles_claim: "usersRoles".into(),
+            scope_claim: "orgId".into(),
+            roles_claim: "appRoles".into(),
         };
         let claims = parse_introspection_response(&body, &mapping).expect("parsed");
         assert_eq!(claims.scope.as_deref(), Some("acme"));
-        assert_eq!(claims.roles, vec!["data_scientist"]);
+        assert_eq!(claims.roles, vec!["editor"]);
     }
 
     #[test]

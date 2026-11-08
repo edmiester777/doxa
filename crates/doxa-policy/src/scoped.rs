@@ -63,7 +63,7 @@ pub type PrimaryKeyOf<R> =
 /// ```ignore
 /// impl ScopedTable for Model {
 ///     type Entity = Entity;
-///     const SCOPE_COLUMN: Column = Column::CompanyId;
+///     const SCOPE_COLUMN: Column = Column::TenantId;
 /// }
 ///
 /// let page = Model::scoped("acme").paginate(&db, 50);
