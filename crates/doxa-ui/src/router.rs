@@ -969,6 +969,18 @@ pub fn navigate_with(to: impl Into<Route>, nav: Nav) {
     }
 }
 
+/// The browser URL of the app URL `route`: under the base `doxa build` served it at.
+pub fn href(route: &Route) -> Route {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Route(web::href(&route.0))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        route.clone()
+    }
+}
+
 fn initial_url() -> String {
     #[cfg(target_arch = "wasm32")]
     {
@@ -985,14 +997,38 @@ mod web {
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};
 
+    thread_local! {
+        static BASE: String = base_of_document();
+    }
+
+    /// `doxa build`'s `<meta name="doxa-base">` without its trailing `/`; empty at `/`.
+    fn base_of_document() -> String {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.query_selector("meta[name=doxa-base]").ok().flatten())
+            .and_then(|m| m.get_attribute("content"))
+            .map(|b| b.trim_end_matches('/').to_owned())
+            .unwrap_or_default()
+    }
+
+    /// The browser URL of the app URL `url`.
+    pub fn href(url: &str) -> String {
+        BASE.with(|b| match b.is_empty() || !url.starts_with('/') {
+            true => url.to_owned(),
+            false => format!("{b}{url}"),
+        })
+    }
+
     pub fn current() -> String {
         let loc = web_sys::window().map(|w| w.location());
         loc.map(|l| {
-            format!(
-                "{}{}",
-                l.pathname().unwrap_or_default(),
-                l.search().unwrap_or_default()
-            )
+            let path = l.pathname().unwrap_or_default();
+            let path = BASE.with(|b| match path.strip_prefix(b.as_str()) {
+                Some(rest) if !b.is_empty() && rest.is_empty() => "/".to_owned(),
+                Some(rest) if rest.starts_with('/') => rest.to_owned(),
+                _ => path.clone(),
+            });
+            format!("{path}{}", l.search().unwrap_or_default())
         })
         .unwrap_or_else(|| "/".to_owned())
     }
@@ -1003,6 +1039,7 @@ mod web {
     pub fn write(url: &str, replace: bool) {
         let Some(w) = web_sys::window() else { return };
         let Ok(h) = w.history() else { return };
+        let url = &href(url);
         if replace {
             let state = h.state().unwrap_or(JsValue::NULL);
             let _ = h.replace_state_with_url(&state, "", Some(url));
@@ -1194,7 +1231,7 @@ impl Component for Link {
         .collect::<Vec<_>>()
         .join(" ");
         let a = el("a")
-            .url("href", props.to.clone())
+            .url("href", href(&props.to))
             .attr("class", (!class.is_empty()).then_some(class))
             .attr("aria-current", active.then_some("page"))
             .on("click", move |e| {

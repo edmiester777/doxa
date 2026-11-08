@@ -24,6 +24,8 @@ pub struct DoxaConfig {
     pub css_sources: Vec<String>,
     /// A directory copied into the dist as-is, relative to the web crate.
     pub public: Option<String>,
+    /// The path the app is served under, e.g. `/docs/`; `/` when unset.
+    pub base: Option<String>,
     /// npm dependencies, name to version range.
     #[serde(default)]
     pub npm: BTreeMap<String, String>,
@@ -162,7 +164,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, wasm_budget_kb, chunk_budget_kb, library, and npm, services, preprocess and proxy tables",
+                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, and npm, services, preprocess and proxy tables",
                 )
             }),
         }

@@ -29,6 +29,8 @@ pub struct BuildOptions {
     pub gallery: bool,
     /// Build a fat base that [`Pipeline::patch`] can hot-patch.
     pub hot: bool,
+    /// The path served under; overrides the web crate's `base`.
+    pub base: Option<String>,
 }
 
 /// One app's build, holding what earlier steps produced.
@@ -108,6 +110,12 @@ impl Pipeline {
         } else {
             self.layout.dist()
         }
+    }
+
+    /// The path served under, with a leading and trailing `/`.
+    pub fn base(&self) -> String {
+        let base = self.opts.base.as_ref().or(self.web.config.base.as_ref());
+        dist::normalize_base(base.map_or("/", String::as_str))
     }
 
     /// Every step, then the dist.
@@ -215,7 +223,8 @@ impl Pipeline {
             }
         }
         let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
-        if self.opts.release {
+        // The gallery carries its own UI and every story, so the app's budgets don't apply.
+        if self.opts.release && !self.opts.gallery {
             check_budget(
                 "the app wasm",
                 bytes.len(),
@@ -251,7 +260,10 @@ impl Pipeline {
             check_budget(
                 &part.file,
                 part.bytes.len(),
-                self.web.config.chunk_budget_kb,
+                self.web
+                    .config
+                    .chunk_budget_kb
+                    .filter(|_| !self.opts.gallery),
                 "chunk_budget_kb",
             )?;
         }
@@ -374,6 +386,7 @@ impl Pipeline {
         let stage = self.layout.stage().join("css");
         let cfg = &self.web.config;
         let mut out = Vec::new();
+        let base = self.base();
         for entry in &cfg.css {
             note(format!("building {entry}"));
             let inputs = css::Inputs {
@@ -382,6 +395,7 @@ impl Pipeline {
                 preprocess: &cfg.preprocess,
                 node_modules: self.npm.dir(),
                 library: self.library,
+                base: &base,
             };
             let built = css::build(&inputs, entry, &stage, self.opts.release)?;
             let stem = Path::new(entry)
@@ -401,6 +415,7 @@ impl Pipeline {
         };
         let mut d = Dist {
             services: self.web.config.services.clone(),
+            base: self.base(),
             ..Dist::default()
         };
         let app_wasm = self.bindgen_dir().join("app_bg.wasm");

@@ -4,6 +4,7 @@ mod check;
 mod dev;
 mod new;
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -41,6 +42,12 @@ enum Command {
         /// Write the `#[component(export)]` components as an npm package in target/doxa/lib.
         #[arg(long)]
         lib: bool,
+        /// The path the app is served under, e.g. /docs/; overrides the web crate's `base`.
+        #[arg(long)]
+        base: Option<String>,
+        /// Write a static site to this directory instead of building the server.
+        #[arg(long, conflicts_with = "lib")]
+        out: Option<PathBuf>,
     },
     /// Build, run the server, and rebuild and reload on change.
     Dev {
@@ -68,6 +75,12 @@ enum Command {
         /// Install npm dependencies from the lockfile only.
         #[arg(long)]
         locked: bool,
+        /// The path the gallery is served under, with `--out`.
+        #[arg(long, requires = "out")]
+        base: Option<String>,
+        /// Write the gallery as a static site to this directory instead of serving it.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Check an API crate builds for the browser, naming the dependency that doesn't.
     Check {
@@ -99,15 +112,19 @@ fn main() -> ExitCode {
             package,
             locked,
             lib,
+            base,
+            out,
         } => build(
             BuildOptions {
                 release,
                 package,
                 locked,
-                compress: !lib,
+                compress: !lib && out.is_none(),
+                base,
                 ..BuildOptions::default()
             },
             lib,
+            out.as_deref(),
         ),
         Command::Dev {
             package,
@@ -119,8 +136,26 @@ fn main() -> ExitCode {
             .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot))),
         Command::Gallery {
             package,
+            locked,
+            base,
+            out: Some(out),
+            ..
+        } => export(
+            BuildOptions {
+                release: true,
+                package,
+                locked,
+                gallery: true,
+                base,
+                ..BuildOptions::default()
+            },
+            &out,
+        ),
+        Command::Gallery {
+            package,
             port,
             locked,
+            ..
         } => tokio::runtime::Runtime::new()
             .map_err(Into::into)
             .and_then(|rt| rt.block_on(dev::gallery(package, port, locked))),
@@ -136,7 +171,14 @@ fn main() -> ExitCode {
     }
 }
 
-fn build(opts: BuildOptions, lib: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn build(
+    opts: BuildOptions,
+    lib: bool,
+    out: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(out) = out {
+        return export(opts, out);
+    }
     let mut pipeline = Pipeline::new(&std::env::current_dir()?, opts)?;
     check::one_copy(&pipeline.web.name, Some(check::TARGET))?;
     if let Some(server) = &pipeline.web.config.server {
@@ -153,6 +195,16 @@ fn build(opts: BuildOptions, lib: bool) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// Build the app or gallery, and write it to `out` as a static site.
+fn export(opts: BuildOptions, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut pipeline = Pipeline::new(&std::env::current_dir()?, opts)?;
+    check::one_copy(&pipeline.web.name, Some(check::TARGET))?;
+    let _ = pipeline.build()?;
+    doxa_build::dist::export(&pipeline.dist_dir(), out)?;
+    eprintln!("wrote {}", out.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,8 +217,13 @@ mod tests {
     fn build_flags() {
         assert!(matches!(
             parse(&["doxa", "build", "--release", "-p", "web", "--locked"]),
-            Command::Build { release: true, package: Some(p), locked: true, lib: false } if p == "web"
+            Command::Build { release: true, package: Some(p), locked: true, lib: false, .. } if p == "web"
         ));
+        assert!(matches!(
+            parse(&["doxa", "build", "--base", "/docs/", "--out", "site"]),
+            Command::Build { base: Some(b), out: Some(o), .. } if b == "/docs/" && o == Path::new("site")
+        ));
+        assert!(Cli::try_parse_from(["doxa", "build", "--lib", "--out", "s"]).is_err());
         assert!(matches!(
             parse(&["doxa", "build", "--lib"]),
             Command::Build { lib: true, .. }
@@ -177,7 +234,9 @@ mod tests {
                 release: false,
                 package: None,
                 locked: false,
-                lib: false
+                lib: false,
+                base: None,
+                out: None,
             }
         ));
     }
@@ -198,8 +257,21 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["doxa", "gallery"]),
-            Command::Gallery { port: 4710, .. }
+            Command::Gallery {
+                port: 4710,
+                out: None,
+                ..
+            }
         ));
+        assert!(matches!(
+            parse(&["doxa", "gallery", "--out", "g", "--base", "/doxa/gallery/"]),
+            Command::Gallery {
+                out: Some(_),
+                base: Some(_),
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["doxa", "gallery", "--base", "/g/"]).is_err());
     }
 
     #[test]

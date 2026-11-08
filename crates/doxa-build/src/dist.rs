@@ -38,6 +38,18 @@ pub struct Dist {
     pub stylesheets: Vec<String>,
     /// Client crate to base URL, the default `services.json`.
     pub services: BTreeMap<String, String>,
+    /// The path served under, as [`normalize_base`] gives it; empty means `/`.
+    pub base: String,
+}
+
+/// `docs` and `/docs` become `/docs/`; empty becomes `/`.
+pub fn normalize_base(base: &str) -> String {
+    let inner = base.trim_matches('/');
+    if inner.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("/{inner}/")
+    }
 }
 
 impl Dist {
@@ -56,21 +68,29 @@ impl Dist {
 
     /// The tags `index.html` needs.
     pub fn html_tags(&self) -> String {
+        let base = attr(if self.base.is_empty() {
+            "/"
+        } else {
+            &self.base
+        });
         let mut tags = String::new();
+        if base != "/" {
+            tags.push_str(&format!("<meta name=\"doxa-base\" content=\"{base}\">\n"));
+        }
         for m in &self.preload {
             tags.push_str(&format!(
-                "<link rel=\"modulepreload\" href=\"/{}\">\n",
+                "<link rel=\"modulepreload\" href=\"{base}{}\">\n",
                 attr(m)
             ));
         }
         for s in &self.stylesheets {
             tags.push_str(&format!(
-                "<link rel=\"stylesheet\" href=\"/{}\" data-doxa-css>\n",
+                "<link rel=\"stylesheet\" href=\"{base}{}\" data-doxa-css>\n",
                 attr(s)
             ));
         }
         tags.push_str(&format!(
-            "<script type=\"module\" src=\"/{}\"></script>\n",
+            "<script type=\"module\" src=\"{base}{}\"></script>\n",
             attr(&self.entry)
         ));
         tags
@@ -150,6 +170,37 @@ pub fn write(dir: &Path, dist: &Dist, index_html: &str, compress: bool) -> Resul
     put(&dir, "embed.rs", embed_rs(&dir, &written).as_bytes())
 }
 
+/// Copy the written dist at `dist_dir` to `out` as a static site: no `embed.rs` or compressed
+/// siblings, and `index.html` again as `404.html` so a static host serves deep links.
+pub fn export(dist_dir: &Path, out: &Path) -> Result<()> {
+    if out.exists() {
+        std::fs::remove_dir_all(out).at(out)?;
+    }
+    copy_static(dist_dir, dist_dir, out)?;
+    let index = out.join("index.html");
+    let not_found = out.join("404.html");
+    std::fs::copy(&index, &not_found).at(&not_found)?;
+    Ok(())
+}
+
+fn copy_static(root: &Path, dir: &Path, out: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(dir).at(dir)? {
+        let path = entry.at(dir)?.path();
+        let rel = path.strip_prefix(root).expect("under root");
+        if path.is_dir() {
+            copy_static(root, &path, out)?;
+            continue;
+        }
+        let name = rel.to_string_lossy();
+        let compressed = name.ends_with(".br") || name.ends_with(".gz");
+        if name == "embed.rs" || (compressed && root.join(&name[..name.len() - 3]).is_file()) {
+            continue;
+        }
+        put(out, &name, &std::fs::read(&path).at(&path)?)?;
+    }
+    Ok(())
+}
+
 fn put(dir: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
     let path = dir.join(rel);
     if let Some(parent) = path.parent() {
@@ -227,6 +278,23 @@ mod tests {
     }
 
     #[test]
+    fn a_base_prefixes_every_tag_and_is_announced() {
+        let d = Dist {
+            base: normalize_base("docs"),
+            ..sample()
+        };
+        let tags = d.html_tags();
+        assert!(
+            tags.starts_with("<meta name=\"doxa-base\" content=\"/docs/\">\n"),
+            "{tags}"
+        );
+        assert_eq!(tags.matches("=\"/docs/").count(), 5, "{tags}");
+        assert!(!sample().html_tags().contains("doxa-base"));
+        assert_eq!(normalize_base(""), "/");
+        assert_eq!(normalize_base("/a/b"), "/a/b/");
+    }
+
+    #[test]
     fn tags_preload_link_and_boot() {
         let d = sample();
         let js = hashed_name("app.js", b"js");
@@ -295,5 +363,30 @@ mod tests {
             "{embed}"
         );
         assert!(!embed.contains("embed.rs"), "{embed}");
+    }
+
+    #[test]
+    fn an_export_is_plain_files_with_a_404_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dist, out) = (dir.path().join("dist"), dir.path().join("site"));
+        write(&dist, &sample(), "<html></html>", true).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("stale.txt"), "x").unwrap();
+        export(&dist, &out).unwrap();
+        let js = hashed_name("app.js", b"js");
+        assert!(out.join(&js).is_file());
+        assert!(out.join("chunks/chunk-AB12CD34.js").is_file());
+        assert_eq!(
+            std::fs::read_to_string(out.join("404.html")).unwrap(),
+            "<html></html>"
+        );
+        for gone in [
+            format!("{js}.br"),
+            "index.html.gz".into(),
+            "embed.rs".into(),
+            "stale.txt".into(),
+        ] {
+            assert!(!out.join(&gone).exists(), "{gone}");
+        }
     }
 }

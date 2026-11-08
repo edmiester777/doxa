@@ -50,6 +50,8 @@ pub struct Inputs<'a> {
     pub node_modules: Option<&'a Path>,
     /// For a library: no Preflight, and `url()`s relative to the stylesheet.
     pub library: bool,
+    /// What an app's `url()`s start with: the path it is served under.
+    pub base: &'a str,
 }
 
 /// Where a preprocessor writes `input`'s CSS: beside it, so relative paths still resolve.
@@ -218,7 +220,7 @@ fn tailwind_and_bundle(
         &to_bundle,
         entry_dir,
         release,
-        if at.library { "./" } else { "/" },
+        if at.library { "./" } else { at.base },
     )
 }
 
@@ -423,6 +425,7 @@ mod tests {
             preprocess: &NONE,
             node_modules: None,
             library: false,
+            base: "/",
         }
     }
 
