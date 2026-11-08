@@ -23,6 +23,8 @@ pub enum PortalTarget {
     Selector(Rc<str>),
     /// This element.
     Node(NodeRef),
+    /// Just before this node, under its parent.
+    Before(NodeRef),
 }
 
 impl From<&str> for PortalTarget {

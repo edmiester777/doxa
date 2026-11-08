@@ -57,6 +57,8 @@ pub trait Dom {
     fn remove(&self, node: NodeId);
     /// The node after `node` under the same parent.
     fn next_sibling(&self, node: NodeId) -> Option<NodeId>;
+    /// The node `node` is under.
+    fn parent(&self, node: NodeId) -> Option<NodeId>;
     /// Call `handler` for every `event` on `node`.
     fn listen(&self, node: NodeId, event: &str, opts: Listen, handler: Rc<dyn Fn(Event)>);
     /// The element matching a CSS selector, for mounting.

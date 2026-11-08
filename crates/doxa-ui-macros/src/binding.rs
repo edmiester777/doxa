@@ -177,6 +177,16 @@ fn camel(name: &str) -> String {
 
 pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStream> {
     let module = crate::react::specifier(&args.module)?;
+    if let Some(e) = args
+        .export
+        .as_ref()
+        .filter(|e| e.value() == "*" && !args.lazy)
+    {
+        return Err(syn::Error::new(
+            e.span(),
+            "`export = \"*\"`, the module itself, is for a `lazy` block",
+        ));
+    }
     let mut tracked = Vec::new();
     if !module.starts_with("doxa-island:") {
         let dir = std::env::var_os("CARGO_MANIFEST_DIR").map(std::path::PathBuf::from);
@@ -214,14 +224,12 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
             }
         }
     }
+    // A method needs an instance, so by then its module has loaded.
     if args.lazy {
-        if let Some(t) = js_types.first() {
-            return Err(syn::Error::new_spanned(
-                t,
-                "a `lazy` module is loaded on first call, so its block holds only `async fn`s",
-            ));
-        }
-        if let Some(f) = fns.iter().find(|f| f.sig.asyncness.is_none()) {
+        if let Some(f) = fns
+            .iter()
+            .find(|f| f.sig.asyncness.is_none() && !is_method(f))
+        {
             return Err(syn::Error::new_spanned(
                 &f.sig.ident,
                 "a `lazy` module is loaded on first call, so this must be an `async fn`",
@@ -230,8 +238,29 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
     }
 
     let opts: Vec<FnOpts> = fns.iter().map(fn_opts).collect::<syn::Result<_>>()?;
+    let made: Vec<Option<String>> = fns
+        .iter()
+        .zip(&opts)
+        .map(|(f, o)| {
+            o.constructor
+                .then(|| constructs(f, &js_types, &classes, args.lazy))
+                .transpose()
+        })
+        .collect::<syn::Result<_>>()?;
     let spec = if args.lazy {
-        let names: Vec<&str> = opts.iter().map(|o| o.js.as_str()).collect();
+        // What the generated module exports: calls, `new$Class`es, `get$export` and `type$Class`es.
+        let names: Vec<String> = fns
+            .iter()
+            .zip(&opts)
+            .zip(&made)
+            .filter(|((f, _), _)| !is_method(f))
+            .map(|((_, o), class)| match class {
+                Some(class) => format!("new${class}"),
+                None => o.js.clone(),
+            })
+            .chain(args.export.iter().map(|e| getter_name(&e.value())))
+            .chain(classes.iter().map(|c| format!("type${c}")))
+            .collect();
         format!("doxa-npm:lazy:{}:{module}", names.join(","))
     } else {
         module.clone()
@@ -254,12 +283,8 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
 
     let mut raw = Vec::new();
     let mut wrappers = Vec::new();
-    for (f, o) in fns.iter().zip(&opts) {
-        let class = match o.constructor {
-            true => Some(constructs(f, &js_types, &classes)?),
-            false => None,
-        };
-        let (r, w) = function(f, &o.js, class, &js_types, &bindings)?;
+    for ((f, o), class) in fns.iter().zip(&opts).zip(made) {
+        let (r, w) = function(f, &o.js, class, args.lazy, &js_types, &bindings)?;
         raw.push(r);
         wrappers.push(w);
     }
@@ -267,27 +292,47 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
     let types_wasm = types.iter().zip(&classes).map(|(item, class)| {
         let t = &item.ident;
         let docs = item.attrs.iter().filter(|a| a.path().is_ident("doc"));
-        let renamed = (t != class.as_str()).then(|| quote!(#[wasm_bindgen(js_name = #class)]));
-        let default = args
+        let proxied = format!("type${class}");
+        quote! {
+            #(#docs)*
+            #[derive(Clone)]
+            #[wasm_bindgen(js_name = #proxied)]
+            pub type #t;
+        }
+    });
+    let default_wasm = types.iter().map(|item| {
+        let t = &item.ident;
+        args
             .export
             .as_ref()
             .filter(|_| Some(t) == js_types.first())
             .map(|e| {
                 let getter = format_ident!("__default_{}", t);
                 let name = e.value();
-                quote! {
-                    #[wasm_bindgen(js_name = #name, thread_local_v2)]
-                    pub static #getter: #t;
+                match args.lazy {
+                    true => {
+                        let proxied = getter_name(&name);
+                        quote! {
+                            #[wasm_bindgen(catch, js_name = #proxied)]
+                            pub fn #getter() -> ::core::result::Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>;
+                        }
+                    }
+                    false => quote! {
+                        #[wasm_bindgen(js_name = #name, thread_local_v2)]
+                        pub static #getter: #t;
+                    },
                 }
-            });
-        quote! {
-            #(#docs)*
-            #[derive(Clone)]
-            #renamed
-            pub type #t;
-            #default
-        }
+            })
     });
+    // Types import from their own module, as only wasm-bindgen's `instanceof` shim reads them
+    // and the real one need not export a type's name.
+    let types_spec = match args.lazy {
+        true => spec.clone(),
+        false => {
+            let names: Vec<String> = classes.iter().map(|c| format!("type${c}")).collect();
+            format!("doxa-npm:types:{}:{module}", names.join(","))
+        }
+    };
     let into_js = js_types.iter().map(|t| {
         quote! {
             impl ::core::convert::From<#t> for ::doxa::ui::Js {
@@ -307,20 +352,40 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
     });
     let defaults = js_types.first().filter(|_| args.export.is_some()).map(|t| {
         let getter = format_ident!("__default_{}", t);
-        quote! {
-            impl #t {
-                /// The block's `export` from its module.
-                pub fn get() -> #t {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        #bindings::#getter.with(::core::clone::Clone::clone)
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        ::core::unreachable!("npm modules load only in the browser")
+        match args.lazy {
+            true => quote! {
+                impl #t {
+                    /// The block's `export`, once its module has loaded.
+                    pub async fn get() -> ::core::result::Result<#t, ::doxa::ui::JsError> {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            use ::doxa::ui::__private::{await_promise, js_error_from, wasm_bindgen};
+                            let promise = #bindings::#getter().map_err(js_error_from)?;
+                            let value = await_promise(promise).await.map_err(js_error_from)?;
+                            ::core::result::Result::Ok(wasm_bindgen::JsCast::unchecked_into(value))
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            ::core::result::Result::Err(::doxa::ui::JsError::new("npm modules load only in the browser"))
+                        }
                     }
                 }
-            }
+            },
+            false => quote! {
+                impl #t {
+                    /// The block's `export` from its module.
+                    pub fn get() -> #t {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            #bindings::#getter.with(::core::clone::Clone::clone)
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            ::core::unreachable!("npm modules load only in the browser")
+                        }
+                    }
+                }
+            },
         }
     });
     let natives = types.iter().map(|item| {
@@ -350,9 +415,13 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
             use ::doxa::ui::__private::wasm_bindgen;
             use wasm_bindgen::prelude::wasm_bindgen;
             // One token: wasm-bindgen's static getters take the path as a `tt`.
-            #[wasm_bindgen(module = #spec, wasm_bindgen = wasm_bindgen)]
+            #[wasm_bindgen(module = #types_spec, wasm_bindgen = wasm_bindgen)]
             extern "C" {
                 #(#types_wasm)*
+            }
+            #[wasm_bindgen(module = #spec, wasm_bindgen = wasm_bindgen)]
+            extern "C" {
+                #(#default_wasm)*
                 #(#raw)*
             }
         }
@@ -365,16 +434,33 @@ pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStre
     })
 }
 
-/// The JS class a `#[npm(constructor)]` function makes: the block type it returns.
-fn constructs(f: &ForeignItemFn, js_types: &[Ident], classes: &[String]) -> syn::Result<String> {
-    let refuse = |msg: &str| Err(syn::Error::new_spanned(&f.sig.ident, msg));
-    if f.sig.asyncness.is_some() {
-        return refuse("a constructor isn't `async`");
+/// What a lazy block's generated module exports its `export` under: `ns$` for the namespace.
+fn getter_name(export: &str) -> String {
+    match export {
+        "*" => "ns$".to_owned(),
+        name => format!("get${name}"),
     }
-    let has_this = f.sig.inputs.iter().any(
+}
+
+/// Whether `f` takes `this`.
+fn is_method(f: &ForeignItemFn) -> bool {
+    f.sig.inputs.iter().any(
         |a| matches!(a, FnArg::Typed(pt) if matches!(&*pt.pat, Pat::Ident(p) if p.ident == "this")),
-    );
-    if has_this {
+    )
+}
+
+/// The JS class a `#[npm(constructor)]` function makes: the block type it returns.
+fn constructs(
+    f: &ForeignItemFn,
+    js_types: &[Ident],
+    classes: &[String],
+    lazy: bool,
+) -> syn::Result<String> {
+    let refuse = |msg: &str| Err(syn::Error::new_spanned(&f.sig.ident, msg));
+    if !lazy && f.sig.asyncness.is_some() {
+        return refuse("a constructor isn't `async` unless its block is `lazy`");
+    }
+    if is_method(f) {
         return refuse("a constructor takes no `this`");
     }
     let made = match ok_type(&f.sig.output).0 {
@@ -394,6 +480,7 @@ fn function(
     f: &ForeignItemFn,
     js: &str,
     class: Option<String>,
+    lazy: bool,
     js_types: &[Ident],
     bindings: &Ident,
 ) -> syn::Result<(TokenStream, TokenStream)> {
@@ -408,8 +495,8 @@ fn function(
     let mut params = Vec::new();
     let mut pass = Vec::new();
     let mut method = false;
-    // wasm-bindgen puts methods and constructors on their type.
-    let mut owner: Option<Type> = class.as_ref().and(ok.clone());
+    // wasm-bindgen puts methods and constructors on their type; a lazy constructor is a call.
+    let mut owner: Option<Type> = class.as_ref().filter(|_| !lazy).and(ok.clone());
     for (i, arg) in f.sig.inputs.iter().enumerate() {
         let FnArg::Typed(pt) = arg else {
             return Err(syn::Error::new_spanned(
@@ -474,13 +561,17 @@ fn function(
     // The raw call answers a JsValue (or a Promise of one); the wrapper reads it as `ok`.
     let catch = (fallible || is_async).then(|| quote!(catch,));
     let kind = match (&class, method) {
+        (Some(class), _) if lazy => {
+            let proxied = format!("new${class}");
+            quote!(js_name = #proxied,)
+        }
         (Some(class), _) => quote!(constructor, js_class = #class,),
         (None, true) => quote!(method, js_name = #js,),
         (None, false) => quote!(js_name = #js,),
     };
     // A constructor's raw return is its class, which wasm-bindgen puts it on.
     let raw_ok = match (&class, &ok) {
-        (Some(_), Some(t)) => quote!(#t),
+        (Some(_), Some(t)) if !lazy => quote!(#t),
         _ => quote!(wasm_bindgen::JsValue),
     };
     let raw_ret = if is_async || fallible || ok.is_some() {
@@ -497,12 +588,10 @@ fn function(
         pub fn #raw_name(#(#raw_params),*) #raw_ret;
     };
 
-    let js_value = |t: &Type| match t {
+    let last_is = |t: &Type, pick: &dyn Fn(&Ident) -> bool| matches!(t, Type::Path(p) if p.path.segments.last().is_some_and(|s| pick(&s.ident)));
+    let checked = |t: &Type| match t {
         Type::Path(p) => {
-            p.path
-                .segments
-                .last()
-                .is_some_and(|s| s.ident == "JsValue" || js_types.contains(&s.ident))
+            p.path.segments.last().is_some_and(|s| s.ident == "JsValue")
                 || p.path
                     .segments
                     .first()
@@ -510,18 +599,21 @@ fn function(
         }
         _ => false,
     };
-    let is_js = |t: &Type| matches!(t, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Js"));
     let read = match &ok {
         None => quote!(::core::result::Result::Ok(())),
-        Some(_) if class.is_some() => quote!(::core::result::Result::Ok(value)),
-        Some(t) if is_js(t) => quote!(::core::result::Result::Ok(::doxa::ui::Js::from(value))),
-        Some(t) => match js_value(t) {
-            true => quote! {
-                wasm_bindgen::JsCast::dyn_into::<#t>(value)
-                    .map_err(|_| ::doxa::ui::__private::js_error("the JS value isn't the type declared"))
-            },
-            false => quote!(::doxa::ui::__private::from_js::<#t>(value)),
+        Some(_) if class.is_some() && !lazy => quote!(::core::result::Result::Ok(value)),
+        Some(t) if last_is(t, &|i| i == "Js") => {
+            quote!(::core::result::Result::Ok(::doxa::ui::Js::from(value)))
+        }
+        // A block type is often a plain object, so `instanceof` would refuse it.
+        Some(t) if last_is(t, &|i| js_types.contains(i)) => {
+            quote!(::core::result::Result::Ok(wasm_bindgen::JsCast::unchecked_into::<#t>(value)))
+        }
+        Some(t) if checked(t) => quote! {
+            wasm_bindgen::JsCast::dyn_into::<#t>(value)
+                .map_err(|_| ::doxa::ui::__private::js_error("the JS value isn't the type declared"))
         },
+        Some(t) => quote!(::doxa::ui::__private::from_js::<#t>(value)),
     };
     let ret = &f.sig.output;
     let asyncness = &f.sig.asyncness;

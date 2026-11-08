@@ -333,11 +333,18 @@ fn mount_portal(
     p: &PortalNode,
     before: Option<NodeId>,
 ) -> Mounted {
-    let target = match &p.to {
-        PortalTarget::Node(n) => n.id(),
-        PortalTarget::Selector(s) => dom
-            .query(s)
-            .unwrap_or_else(|| panic!("no element matches `<Portal to={s:?}>`")),
+    let (target, before_node) = match &p.to {
+        PortalTarget::Node(n) => (n.id(), None),
+        PortalTarget::Before(n) => (
+            dom.parent(n.id())
+                .expect("a `PortalTarget::Before` node is in the document"),
+            Some(n.id()),
+        ),
+        PortalTarget::Selector(s) => (
+            dom.query(s)
+                .unwrap_or_else(|| panic!("no element matches `<Portal to={s:?}>`")),
+            None,
+        ),
     };
     let anchor = dom.create_anchor();
     dom.insert(parent, anchor, before);
@@ -353,7 +360,7 @@ fn mount_portal(
         target,
     );
     let end = dom.create_anchor();
-    dom.insert(target, end, None);
+    dom.insert(target, end, before_node);
     content.region.borrow_mut().push(Mounted::Anchor(end));
     runtime::run(&content);
     Mounted::Portal {

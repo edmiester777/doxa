@@ -8,7 +8,7 @@ use std::rc::Rc;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::react::{set_bridge, Bridge, Content, EventFn, IslandProps, Mount, Props};
+use crate::react::{set_bridge, Bridge, Content, EventFn, IslandProps, Mount, Props, SlotPlacer};
 use crate::{App, Component, RootHandle, View};
 
 /// What a stand-in sees: the island's data props, and its event props to call.
@@ -61,6 +61,7 @@ fn clear(root: &mut Option<(RootHandle, crate::dom::NodeId)>) {
 struct Fakes {
     stands: HashMap<&'static str, Stand>,
     live: HashMap<u32, Live>,
+    slots: Rc<SlotPlacer>,
 }
 
 thread_local! {
@@ -85,6 +86,8 @@ struct FakeBridge(Rc<RefCell<Fakes>>);
 
 impl Bridge for FakeBridge {
     fn mount(&self, m: Mount<'_>) {
+        let slots = self.0.borrow().slots.clone();
+        slots.mount(m.id, m.host, &m.content.slots);
         let Some(stand) = self.0.borrow().stands.get(m.island.name).cloned() else {
             return;
         };
@@ -101,10 +104,14 @@ impl Bridge for FakeBridge {
     }
 
     fn update(&self, id: u32, content: &Content) {
+        let slots = self.0.borrow().slots.clone();
+        slots.update(id, &content.slots);
         render(&self.0, id, content.props.clone());
     }
 
     fn unmount(&self, id: u32) {
+        let slots = self.0.borrow().slots.clone();
+        slots.unmount(id);
         let live = self.0.borrow_mut().live.remove(&id);
         drop(live);
     }

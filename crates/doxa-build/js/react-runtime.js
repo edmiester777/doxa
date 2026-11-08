@@ -9,6 +9,7 @@ import {
   Suspense,
   useLayoutEffect,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
@@ -35,19 +36,45 @@ function subscribe(l) {
   return () => listeners.delete(l);
 }
 
-// Moves a slot's host, which doxa renders into, to where React puts that prop, and shows it there.
-function Adopt({ node }) {
-  const ref = useRef(null);
+// The nodes from `start` through `end`, moved before `at`, or out of the document without it.
+function moveRange(start, end, at) {
+  const into = at ? null : document.createDocumentFragment();
+  let n = start;
+  while (n) {
+    const next = n === end ? null : n.nextSibling;
+    if (at) at.before(n);
+    else into.appendChild(n);
+    n = next;
+  }
+}
+
+// Two comments before `marker`, a `<template>` valid in any parent, between which doxa renders.
+// `place(end)` runs once React commits; the range follows the marker when React moves it.
+function useRange(marker, place, remove, deps) {
+  const range = useRef(null);
   useLayoutEffect(() => {
-    const el = ref.current;
-    el.appendChild(node);
-    node.style.display = "contents";
+    const start = document.createComment("");
+    const end = document.createComment("");
+    marker.current.before(start, end);
+    range.current = { start, end };
+    place(end);
     return () => {
-      node.style.display = "none";
-      if (node.parentNode === el) el.removeChild(node);
+      remove();
+      moveRange(start, end, null);
     };
-  }, [node]);
-  return createElement("div", { ref, style: { display: "contents" } });
+  }, deps);
+  useLayoutEffect(() => {
+    const { start, end } = range.current;
+    if (end.nextSibling !== marker.current) moveRange(start, end, marker.current);
+  });
+  return range;
+}
+
+// Where React puts a slot prop; doxa renders the slot's view there.
+function SlotMarker({ island, name, at }) {
+  const marker = useRef(null);
+  useRange(marker, (end) => island.live && at(end), () => island.live && at(null), [at]);
+  return createElement("template", { ref: marker });
 }
 
 const IslandView = memo(({ component, props, handle }) =>
@@ -131,8 +158,11 @@ function styleObject(css) {
 }
 
 // The element React renders for a `#[react(element)]` prop; doxa renders its children into it.
-function shellElement(shell, portals) {
-  const props = { ref: shell.ref };
+// Rust drops its functions on unmount, before React detaches the ref, so both check `live`.
+function shellElement(island, shell, portals) {
+  island.refs[shell.prop] = shell.ref;
+  island.refWrappers[shell.prop] ??= (el) => island.live && island.refs[shell.prop](el);
+  const props = { ref: island.refWrappers[shell.prop] };
   for (const [k, v] of Object.entries(shell.attrs)) {
     if (k === "class") props.className = v;
     else if (k === "for") props.htmlFor = v;
@@ -140,7 +170,7 @@ function shellElement(shell, portals) {
     else props[k] = v;
   }
   for (const [name, f] of Object.entries(shell.events)) {
-    props[reactEvent(name)] = (e) => f(e.nativeEvent ?? e);
+    props[reactEvent(name)] = (e) => island.live && f(e.nativeEvent ?? e);
   }
   // Only portals go inside, which add no DOM, so React leaves doxa's children alone.
   return createElement(shell.tag, props, portals);
@@ -174,11 +204,11 @@ function propsOf(island, content) {
   const slots = Object.keys(content.slots);
   const home = slots.includes("children") ? "children" : (slots[0] ?? content.shells[0]?.prop);
   const portals = (name) => (name === home ? createElement(Portals, { parent: island.id }) : null);
-  for (const [name, node] of Object.entries(content.slots)) {
-    props[name] = createElement(Fragment, null, createElement(Adopt, { node }), portals(name));
+  for (const [name, at] of Object.entries(content.slots)) {
+    props[name] = createElement(Fragment, null, createElement(SlotMarker, { island, name, at }), portals(name));
   }
   for (const shell of content.shells) {
-    props[shell.prop] = shellElement(shell, portals(shell.prop));
+    props[shell.prop] = shellElement(island, shell, portals(shell.prop));
   }
   return nest(props);
 }
@@ -205,22 +235,53 @@ function pack(args) {
 }
 
 let renders = 0;
+// Each mounted component's setter for where its `children` go, by key.
+const holes = new Map();
 
-// A doxa view React places, mounted after React commits its element and never during a render.
-function DoxaRender({ fns, args }) {
-  const ref = useRef(null);
+// Rust's answer, once doxa has drawn a component's children hole, and `null` once it's gone.
+export function childrenAt(key, node) {
+  holes.get(key)?.(node ?? null);
+}
+
+const HOLE_LAST =
+  "a component's `children` must come last in their element, or last in the view";
+
+// A doxa view React places; it mounts after React commits and never during a render.
+function DoxaRender({ fns, args, children }) {
+  const marker = useRef(null);
   const key = useRef(0);
   const first = useRef(true);
-  useLayoutEffect(() => {
+  const [hole, setHole] = useState(null);
+  const place = (end) => {
     key.current = ++renders;
-    fns.mount(key.current, ref.current, args);
-    return () => fns.unmount(key.current);
-  }, [fns]);
+    // Read once, when drawn: React's own children land after the hole.
+    holes.set(key.current, (node) => {
+      if (node === null) return setHole(null);
+      if (node.parentNode === end.parentNode) {
+        return setHole(node.nextSibling === end ? { inline: true } : { error: HOLE_LAST });
+      }
+      setHole(node.nextSibling === null ? { into: node.parentNode } : { error: HOLE_LAST });
+    });
+    fns.mount(key.current, end, args);
+  };
+  const remove = () => {
+    holes.delete(key.current);
+    fns.unmount(key.current);
+  };
+  useRange(marker, place, remove, [fns]);
   useLayoutEffect(() => {
     if (first.current) first.current = false;
     else fns.update(key.current, args);
   }, [args]);
-  return createElement("div", { ref, style: { display: "contents" } });
+  if (hole?.error) throw new Error(hole.error);
+  const kids = hole && children != null ? children : null;
+  return createElement(
+    Fragment,
+    null,
+    createElement("template", { ref: marker }),
+    hole?.inline ? kids : null,
+    hole?.into && kids ? createPortal(kids, hole.into) : null,
+  );
 }
 
 export function mount(id, parent, host, component, content, handlers, onError, calls, onHandle, rootId) {
@@ -231,7 +292,18 @@ export function mount(id, parent, host, component, content, handlers, onError, c
     root = createRoot(el);
     root.render(createElement(Portals, { parent: null }));
   }
-  const island = { id, parent: parent ?? null, root: rootId, host, component, live: true, events: {}, props: null };
+  const island = {
+    id,
+    parent: parent ?? null,
+    root: rootId,
+    host,
+    component,
+    live: true,
+    events: {},
+    refs: {},
+    refWrappers: {},
+    props: null,
+  };
   island.onError = (message) => {
     if (island.live) onError(message);
   };
@@ -259,7 +331,7 @@ export function mount(id, parent, host, component, content, handlers, onError, c
       unmount: (...a) => island.live && raw.unmount(...a),
     };
     island.events[name] = raw.component
-      ? (props) => createElement(DoxaRender, { fns, args: plain(props) })
+      ? (props) => createElement(DoxaRender, { fns, args: plain(props), children: props.children })
       : (...args) => createElement(DoxaRender, { fns, args: pack(args) });
   }
   island.props = propsOf(island, content);

@@ -472,13 +472,13 @@ pub mod ui_diagnostics {}
 ///
 /// ```
 /// use doxa::ui::prelude::*;
-/// use doxa::ui::{react::Render, Js};
+/// use doxa::ui::{react::ComponentFn, Js};
 /// #[react(module = "./ts/markdown.tsx", export = "Markdown")]
 /// pub struct Markdown {
 ///     #[react(js)]
 ///     pub remark_plugins: Vec<Js>,
 ///     #[react(component, rename = "components.code")]
-///     pub code: Render<serde_json::Value>,
+///     pub code: ComponentFn<serde_json::Value>,
 /// }
 /// ```
 ///
@@ -493,7 +493,7 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
-/// A `component` is "`#[react(component)]` field `code` must be a `Render<P>`":
+/// A `component` is "`#[react(component)]` field `code` must be a `ComponentFn<P>`":
 ///
 /// ```compile_fail
 /// use doxa::ui::prelude::*;
@@ -544,6 +544,64 @@ pub mod react_diagnostics {}
 ///     let term = Terminal::new(24);
 ///     load_addon(&term, addon);
 ///     Js::from(term)
+/// }
+/// ```
+///
+/// In a `lazy` block, the constructor and `get()` load the module, so they are `async`; a
+/// method needs an instance, so it is not:
+///
+/// ```
+/// use doxa::ui::{npm, JsError};
+/// #[npm(module = "./ts/term.js", lazy)]
+/// extern "js" {
+///     type Terminal;
+///     #[npm(constructor)]
+///     async fn new(rows: u32) -> Result<Terminal, JsError>;
+///     fn write(this: &Terminal, data: &str);
+/// }
+/// #[npm(module = "./ts/term.js", export = "theme", lazy)]
+/// extern "js" {
+///     type Theme;
+/// }
+/// async fn open() -> Result<Theme, JsError> {
+///     write(&Terminal::new(24).await?, "hi");
+///     Theme::get().await
+/// }
+/// ```
+///
+/// A `lazy` constructor that isn't `async` is "a `lazy` module is loaded on first call, so this must be an `async fn`":
+///
+/// ```compile_fail
+/// use doxa::ui::npm;
+/// #[npm(module = "./ts/term.js", lazy)]
+/// extern "js" {
+///     type Terminal;
+///     #[npm(constructor)]
+///     fn new(rows: u32) -> Terminal;
+/// }
+/// ```
+///
+/// `export = "*"` is the module itself, its functions called as methods once it has loaded:
+///
+/// ```
+/// use doxa::ui::{npm, Js, JsError};
+/// #[npm(module = "./ts/plot.js", export = "*", lazy)]
+/// extern "js" {
+///     type Plot;
+///     fn dot(this: &Plot, data: Js, options: Js) -> Result<Js, JsError>;
+/// }
+/// async fn marks(data: Js, options: Js) -> Result<Js, JsError> {
+///     dot(&Plot::get().await?, data, options)
+/// }
+/// ```
+///
+/// An eager block can't import a namespace, so there it is "`export = \"*\"`, the module itself, is for a `lazy` block":
+///
+/// ```compile_fail
+/// use doxa::ui::npm;
+/// #[npm(module = "./ts/plot.js", export = "*")]
+/// extern "js" {
+///     type Plot;
 /// }
 /// ```
 ///

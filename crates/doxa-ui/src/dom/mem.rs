@@ -706,6 +706,10 @@ impl Dom for MemDom {
         siblings.get(at + 1).copied()
     }
 
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.nodes.borrow().get(&node)?.parent
+    }
+
     fn listen(&self, node: NodeId, event: &str, opts: Listen, handler: Rc<dyn Fn(Event)>) {
         if let Some(n) = self.nodes.borrow_mut().get_mut(&node) {
             n.listeners.push((event.to_owned(), opts, handler));

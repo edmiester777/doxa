@@ -393,11 +393,11 @@ pub fn rewrite_react(glue: &str, web_root: &Path) -> (String, ReactModules) {
     (out, modules)
 }
 
-/// The prefix a `lazy` `#[npm]` block's module is imported under.
+/// The prefix of a module generated for an `#[npm]` block: its types, or a `lazy` one's calls.
 pub const NPM_SCHEME: &str = "doxa-npm:";
 
-/// Point every `doxa-npm:lazy:<names>:<module>` specifier at a generated module whose
-/// exports load the real one on first call, so esbuild splits it into a chunk of its own.
+/// Point every `doxa-npm:<lazy|types>:<names>:<module>` specifier at its generated module; a
+/// lazy one loads the real module on first call, so esbuild splits it into a chunk of its own.
 pub fn rewrite_npm(glue: &str, web_root: &Path) -> (String, ReactModules) {
     let mut modules: ReactModules = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -407,29 +407,60 @@ pub fn rewrite_npm(glue: &str, web_root: &Path) -> (String, ReactModules) {
             None => {
                 seen.push(spec.to_owned());
                 let i = seen.len() - 1;
-                modules.push((format!("npm/lazy-{i}.js"), lazy_npm_js(spec, web_root)));
+                modules.push((format!("npm/{i}.js"), npm_js(spec, web_root)));
                 i
             }
         };
-        format!("./npm/lazy-{i}.js")
+        format!("./npm/{i}.js")
     });
     (out, modules)
 }
 
-/// `lazy:toString,parse:cronstrue` as async proxies over a dynamic import.
-fn lazy_npm_js(spec: &str, web_root: &Path) -> String {
-    let rest = spec.strip_prefix("lazy:").unwrap_or(spec);
+/// `lazy:toString,parse:cronstrue` as async proxies over a dynamic import; `types:` names only
+/// types, over a static one. `new$C` constructs the export `C`, `get$x` answers the export `x`,
+/// `ns$` the module, and `type$C` is an `instanceof` target.
+fn npm_js(spec: &str, web_root: &Path) -> String {
+    let (lazy, rest) = match spec.strip_prefix("types:") {
+        Some(rest) => (false, rest),
+        None => (true, spec.strip_prefix("lazy:").unwrap_or(spec)),
+    };
     let (names, module) = rest.split_once(':').unwrap_or(("", rest));
     let module = match module.strip_prefix(ISLAND_SCHEME) {
         Some(rel) => js_path(&web_root.join(rel)),
         None => module.to_owned(),
     };
     let lit = serde_json::to_string(&module).expect("json");
-    let mut js = format!("let m;\nconst load = () => (m ??= import({lit}));\n");
+    let mut js = match lazy {
+        true => {
+            format!("let m, r;\nconst load = () => (m ??= import({lit}).then((x) => (r = x)));\n")
+        }
+        false => format!("import * as r from {lit};\n"),
+    };
     for (i, name) in names.split(',').filter(|n| !n.is_empty()).enumerate() {
         let key = serde_json::to_string(name).expect("json");
+        // Only wasm-bindgen's `instanceof` shim reads a type, and only an unlinked build keeps it.
+        if let Some(class) = name.strip_prefix("type$") {
+            let class = serde_json::to_string(class).expect("json");
+            js.push_str(&format!(
+                "const t{i} = {{ [Symbol.hasInstance](v) {{ const C = r?.[{class}]; \
+                 return typeof C === \"function\" ? v instanceof C : v != null; }} }};\n\
+                 export {{ t{i} as {key} }};\n"
+            ));
+            continue;
+        }
+        let body = if name == "ns$" {
+            "return await load();".to_owned()
+        } else if let Some(class) = name.strip_prefix("new$") {
+            let class = serde_json::to_string(class).expect("json");
+            format!("const C = (await load())[{class}]; return new C(...a);")
+        } else if let Some(export) = name.strip_prefix("get$") {
+            let export = serde_json::to_string(export).expect("json");
+            format!("return (await load())[{export}];")
+        } else {
+            format!("return (await load())[{key}](...a);")
+        };
         js.push_str(&format!(
-            "async function f{i}(...a) {{ return (await load())[{key}](...a); }}\nexport {{ f{i} as {key} }};\n"
+            "async function f{i}(...a) {{ {body} }}\nexport {{ f{i} as {key} }};\n"
         ));
     }
     js
@@ -800,10 +831,10 @@ mod tests {
         let glue = "import { toString, parse } from 'doxa-npm:lazy:toString,parse:cronstrue';\n\
                     import { pad } from 'doxa-npm:lazy:pad:doxa-island:ts/pad.js';\n";
         let (out, modules) = rewrite_npm(glue, Path::new("/app/web"));
-        assert!(out.contains("from './npm/lazy-0.js'"), "{out}");
-        assert!(out.contains("from './npm/lazy-1.js'"), "{out}");
+        assert!(out.contains("from './npm/0.js'"), "{out}");
+        assert!(out.contains("from './npm/1.js'"), "{out}");
         let (file, js) = &modules[0];
-        assert_eq!(file, "npm/lazy-0.js");
+        assert_eq!(file, "npm/0.js");
         assert!(js.contains("import(\"cronstrue\")"), "{js}");
         assert!(js.contains("export { f1 as \"parse\" }"), "{js}");
         assert!(
@@ -811,5 +842,41 @@ mod tests {
             "{}",
             modules[1].1
         );
+    }
+
+    #[test]
+    fn a_lazy_constructor_and_export_value_load_their_module_first() {
+        let glue = "import { new$Terminal, get$default, ns$ } from 'doxa-npm:lazy:new$Terminal,get$default,ns$:@xterm/xterm';\n";
+        let (_, modules) = rewrite_npm(glue, Path::new("/app/web"));
+        let js = &modules[0].1;
+        assert!(
+            js.contains("const C = (await load())[\"Terminal\"]; return new C(...a);"),
+            "{js}"
+        );
+        assert!(js.contains("return (await load())[\"default\"];"), "{js}");
+        assert!(
+            js.contains("async function f2(...a) { return await load(); }"),
+            "{js}"
+        );
+        assert!(js.contains("export { f0 as \"new$Terminal\" }"), "{js}");
+    }
+
+    #[test]
+    fn a_lazy_type_is_exported_for_instanceof() {
+        let glue = "import { type$Terminal } from 'doxa-npm:lazy:type$Terminal:@xterm/xterm';\n";
+        let (_, modules) = rewrite_npm(glue, Path::new("/app/web"));
+        let js = &modules[0].1;
+        assert!(js.contains("const C = r?.[\"Terminal\"];"), "{js}");
+        assert!(js.contains("export { t0 as \"type$Terminal\" }"), "{js}");
+    }
+
+    #[test]
+    fn an_eager_blocks_types_import_the_module_statically() {
+        let glue = "import { type$Toast } from 'doxa-npm:types:type$Toast:sonner';\n";
+        let (_, modules) = rewrite_npm(glue, Path::new("/app/web"));
+        let js = &modules[0].1;
+        assert!(js.starts_with("import * as r from \"sonner\";"), "{js}");
+        assert!(!js.contains("import(\"sonner\")"), "{js}");
+        assert!(js.contains("export { t0 as \"type$Toast\" }"), "{js}");
     }
 }

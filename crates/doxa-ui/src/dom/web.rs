@@ -213,6 +213,11 @@ impl Dom for WebDom {
         self.id_of(&next)
     }
 
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        let parent = self.node(node)?.parent_node()?;
+        Some(self.id_of(&parent).unwrap_or_else(|| self.add(parent)))
+    }
+
     fn listen(&self, node: NodeId, event: &str, opts: Listen, handler: Rc<dyn Fn(Event)>) {
         let Some(n) = self.node(node) else { return };
         let closure = add_listener(&n, event, opts, handler);

@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::component::RenderFuture;
 use crate::dom::{NodeRef, Phase};
-use crate::portal::Portal;
+use crate::portal::{Portal, PortalTarget};
 use crate::runtime::{self, Instance};
 use crate::view::{comp, el, Callback, Element, Handler, Node};
 use crate::{Event, IntoView, Js, Thrown, View};
@@ -210,6 +210,36 @@ impl<A, V: IntoView, F: Fn(A) -> V + 'static> From<F> for Render<A> {
     fn from(f: F) -> Self {
         Render(Rc::new(move |a| f(a).into_view()))
     }
+}
+
+/// A doxa view React renders as a component: `#[react(component)] pub code: ComponentFn<CodeProps>`.
+///
+/// It is given React's props, without what isn't data, and a `View` where React's `children` go.
+pub struct ComponentFn<P>(Rc<dyn Fn(P, View) -> View>);
+
+impl<P> Clone for ComponentFn<P> {
+    fn clone(&self) -> Self {
+        ComponentFn(self.0.clone())
+    }
+}
+
+impl<P, V: IntoView, F: Fn(P, View) -> V + 'static> From<F> for ComponentFn<P> {
+    fn from(f: F) -> Self {
+        ComponentFn(Rc::new(move |p, children| f(p, children).into_view()))
+    }
+}
+
+/// Marks where React places a component's `children`: into the marker's parent, which it must
+/// end, or after the view when it ends that. Told to the bridge, keyed by its render.
+fn children_hole(key: u32) -> View {
+    el("template")
+        .attr("data-react-children", "")
+        .lifecycle(move |phase, node| match phase {
+            Phase::Mounted => bridge().children(key, Some(node)),
+            Phase::Unmounting => bridge().children(key, None),
+            Phase::Patched => {}
+        })
+        .into_view()
 }
 
 /// A `#[react(raw)]` array, by element type. Copied once per `Rc` into a JS-owned typed array:
@@ -478,12 +508,13 @@ pub type AsyncFuncFn = Rc<
         serde_json::Value,
     ) -> futures_util::future::LocalBoxFuture<'static, Result<serde_json::Value, String>>,
 >;
-type RenderView = Rc<dyn Fn(serde_json::Value) -> Result<View, String>>;
+/// Given the key React mounted it under, and its arguments.
+type RenderView = Rc<dyn Fn(u32, serde_json::Value) -> Result<View, String>>;
 
-/// A [`Render`] as JS drives it: a doxa view mounted into, updated in and removed from an element React owns.
+/// A [`Render`] as JS drives it: a doxa view mounted, updated and removed where React placed it.
 #[derive(Clone)]
 pub struct RenderFns {
-    /// Render into `node` with these arguments; `key` names it after.
+    /// Render just before `node`, a marker, with these arguments; `key` names it after.
     pub mount: Rc<dyn Fn(u32, NodeRef, serde_json::Value)>,
     /// New arguments.
     pub update: Rc<dyn Fn(u32, serde_json::Value)>,
@@ -540,12 +571,20 @@ impl Events {
     pub fn render<A: DeserializeOwned + 'static>(&mut self, name: &'static str, r: &Render<A>) {
         let r = r.clone();
         self.renders
-            .push((name, Rc::new(move |v| Ok((r.0)(args(name, v)?)))));
+            .push((name, Rc::new(move |_, v| Ok((r.0)(args(name, v)?)))));
     }
 
-    /// [`render`](Self::render), as a component React gives its props.
-    pub fn component<P: DeserializeOwned + 'static>(&mut self, name: &'static str, r: &Render<P>) {
-        self.render(name, r);
+    /// A component React gives its props, with a hole for its `children`.
+    pub fn component<P: DeserializeOwned + 'static>(
+        &mut self,
+        name: &'static str,
+        c: &ComponentFn<P>,
+    ) {
+        let c = c.clone();
+        self.renders.push((
+            name,
+            Rc::new(move |key, v| Ok((c.0)(args(name, v)?, children_hole(key)))),
+        ));
         self.components.push(name);
     }
 
@@ -656,8 +695,8 @@ impl Shell {
 pub struct Content {
     /// The non-event props.
     pub props: Props,
-    /// Hosts doxa renders each slot prop into, for React to place.
-    pub slots: Vec<(&'static str, NodeRef)>,
+    /// Each slot prop, told the marker React renders for it, before which doxa renders the view.
+    pub slots: Vec<(&'static str, NodeFn)>,
     /// Elements for React to render.
     pub shells: Vec<Shell>,
     /// `#[react(raw)]` arrays, copied into JS typed arrays.
@@ -704,6 +743,8 @@ pub trait Bridge {
     fn update(&self, id: u32, content: &Content);
     /// Remove an island's portal.
     fn unmount(&self, id: u32);
+    /// Where the component React mounted under `key` puts its `children`; `None` once it's gone.
+    fn children(&self, _key: u32, _node: Option<NodeRef>) {}
 }
 
 /// Passed down the doxa tree so a nested island knows the island around it.
@@ -736,16 +777,79 @@ fn default_bridge() -> Rc<dyn Bridge> {
     Rc::new(web::WebBridge::default())
 }
 
-/// Natively nothing runs React, so islands render as their empty host.
+/// Natively nothing runs React, so islands render as their host and slots.
 #[cfg(not(target_arch = "wasm32"))]
 fn default_bridge() -> Rc<dyn Bridge> {
-    struct Inert;
+    #[derive(Default)]
+    struct Inert(SlotPlacer);
     impl Bridge for Inert {
-        fn mount(&self, _: Mount<'_>) {}
-        fn update(&self, _: u32, _: &Content) {}
-        fn unmount(&self, _: u32) {}
+        fn mount(&self, m: Mount<'_>) {
+            self.0.mount(m.id, m.host, &m.content.slots);
+        }
+        fn update(&self, id: u32, content: &Content) {
+            self.0.update(id, &content.slots);
+        }
+        fn unmount(&self, id: u32) {
+            self.0.unmount(id);
+        }
     }
-    Rc::new(Inert)
+    Rc::new(Inert::default())
+}
+
+/// For a bridge without React: places each slot as React would, at a marker in the island's host.
+#[derive(Default)]
+pub struct SlotPlacer(RefCell<std::collections::HashMap<u32, Placed>>);
+
+struct Placed {
+    host: NodeRef,
+    markers: Vec<(&'static str, crate::dom::NodeId, NodeFn)>,
+}
+
+impl SlotPlacer {
+    /// On [`Bridge::mount`].
+    pub fn mount(&self, id: u32, host: NodeRef, slots: &[(&'static str, NodeFn)]) {
+        let placed = Placed {
+            host,
+            markers: Vec::new(),
+        };
+        self.0.borrow_mut().insert(id, placed);
+        self.update(id, slots);
+    }
+
+    /// On [`Bridge::update`].
+    pub fn update(&self, id: u32, slots: &[(&'static str, NodeFn)]) {
+        let dom = runtime::dom();
+        let mut told = Vec::new();
+        {
+            let mut all = self.0.borrow_mut();
+            let Some(p) = all.get_mut(&id) else { return };
+            p.markers.retain(|(name, marker, f)| {
+                let kept = slots.iter().any(|(n, _)| n == name);
+                if !kept {
+                    dom.remove(*marker);
+                    told.push((f.clone(), None));
+                }
+                kept
+            });
+            for (name, f) in slots {
+                if p.markers.iter().all(|(n, ..)| n != name) {
+                    let marker = dom.create_element("template", None);
+                    dom.set_attr(marker, "data-island-slot", name);
+                    dom.insert(p.host.id(), marker, None);
+                    p.markers.push((name, marker, f.clone()));
+                    told.push((f.clone(), Some(NodeRef(marker))));
+                }
+            }
+        }
+        for (f, n) in told {
+            f(n);
+        }
+    }
+
+    /// On [`Bridge::unmount`].
+    pub fn unmount(&self, id: u32) {
+        self.0.borrow_mut().remove(&id);
+    }
 }
 
 type Shared<T> = Rc<RefCell<T>>;
@@ -755,7 +859,7 @@ type ShellEvent = ((&'static str, &'static str), Shared<Handler>, Handler);
 /// What React was last given, to skip updates that change nothing.
 struct Sent<P> {
     props: P,
-    slots: Vec<(&'static str, NodeRef)>,
+    slots: Vec<&'static str>,
     shells: Vec<Shell>,
 }
 
@@ -776,10 +880,10 @@ struct Live<P> {
     shell_events: RefCell<Vec<ShellEvent>>,
     /// This render's `handle={…}`.
     handle: Shared<Option<HandleSink>>,
+    /// Each shell's and slot's stable [`NodeFn`], by prop.
     shell_nodes: RefCell<Vec<(&'static str, NodeFn)>>,
-    slots: RefCell<Vec<(&'static str, NodeRef)>>,
-    /// This render's props and shells.
-    latest: RefCell<Option<(P, Vec<Shell>)>>,
+    /// This render's props, shells and slots.
+    latest: RefCell<Option<Latest<P>>>,
     sent: RefCell<Option<Sent<P>>>,
 }
 
@@ -787,6 +891,8 @@ struct Live<P> {
 type Targets<T> = RefCell<Vec<(&'static str, Shared<T>)>>;
 
 type Rendered = (u32, &'static str, NodeRef, serde_json::Value);
+
+type Latest<P> = (P, Vec<Shell>, Vec<(&'static str, NodeFn)>);
 
 struct Forwarders {
     funcs: Vec<(&'static str, FuncFn)>,
@@ -905,12 +1011,12 @@ impl<P: IslandProps> Live<P> {
     }
 
     fn content(&self) -> Option<(P, Content)> {
-        let (props, shells) = self.latest.borrow().clone()?;
+        let (props, shells, slots) = self.latest.borrow().clone()?;
         let mut d = Data::default();
         props.data(&mut d);
         let content = Content {
             props: d.props,
-            slots: self.slots.borrow().clone(),
+            slots,
             shells,
             raw: d.raw,
             feeds: d.feeds,
@@ -977,7 +1083,7 @@ impl<P: IslandProps> Live<P> {
     fn record(&self, props: P, content: Content) {
         *self.sent.borrow_mut() = Some(Sent {
             props,
-            slots: content.slots,
+            slots: content.slots.iter().map(|(n, _)| *n).collect(),
             shells: content.shells,
         });
     }
@@ -992,7 +1098,7 @@ impl<P: IslandProps> Live<P> {
         };
         let same = self.sent.borrow().as_ref().is_some_and(|s| {
             s.props.same_data(&props)
-                && s.slots == content.slots
+                && s.slots.iter().eq(content.slots.iter().map(|(n, _)| n))
                 && s.shells.len() == content.shells.len()
                 && s.shells.iter().zip(&content.shells).all(|(a, b)| a.same(b))
         });
@@ -1014,15 +1120,6 @@ impl<P: IslandProps> Live<P> {
             }
         }
     }
-
-    fn on_slot(&self, name: &'static str, phase: Phase, node: NodeRef) {
-        match phase {
-            Phase::Mounted => self.slots.borrow_mut().push((name, node)),
-            Phase::Unmounting => self.slots.borrow_mut().retain(|(n, _)| *n != name),
-            Phase::Patched => return,
-        }
-        self.resend();
-    }
 }
 
 /// `view` as one element, through any one-child fragments around it.
@@ -1039,6 +1136,7 @@ fn single_element(node: &Node) -> Option<Rc<Element>> {
 pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     let me = crate::runtime::current_or_panic("island");
     let targets = crate::hooks::state(Vec::<(&'static str, NodeRef)>::new());
+    let markers = crate::hooks::state(Vec::<(&'static str, NodeRef)>::new());
     let rendered = crate::hooks::state(Vec::<Rendered>::new());
     let (inst, _, live) = crate::hooks::slot("island", || Live::<P> {
         id: next_id(),
@@ -1055,7 +1153,6 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
         shell_events: RefCell::default(),
         handle: Rc::default(),
         shell_nodes: RefCell::default(),
-        slots: RefCell::default(),
         latest: RefCell::new(None),
         sent: RefCell::new(None),
     });
@@ -1075,7 +1172,7 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
     let mut views = Views::default();
     props.views(&mut views);
     let mut children: Vec<View> = Vec::new();
-    // Each `Render` React mounted, as a portal into its element so it sits inside this island.
+    // Each `Render` React mounted, as a portal before its marker so it sits inside this island.
     for (key, prop, node, args) in rendered.get() {
         let f = live
             .renders
@@ -1083,26 +1180,37 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
             .iter()
             .find(|(n, _)| *n == prop)
             .map(|(_, c)| c.borrow().clone());
-        let view = match f.map(|f| f(args)) {
+        let view = match f.map(|f| f(key, args)) {
             Some(Ok(v)) => v,
             Some(Err(e)) => return RenderFuture::ready(Err(Thrown::msg(e))),
             None => continue,
         };
-        let portal = Portal::props().to(node).children(view).build();
+        let portal = Portal::props()
+            .to(PortalTarget::Before(node))
+            .children(view)
+            .build();
         children.push(comp::<Portal>(portal).key(key).into_view());
     }
-    // Slot hosts mount before the island host, so their nodes are known by then.
+    // A slot mounts while React renders its prop, before the marker it rendered.
+    let mut slots = Vec::new();
     for (name, view) in views.slots {
-        let live = live.clone();
-        // Keyed, so an optional slot appearing doesn't shift the hosts after it.
-        // Hidden until the runtime adopts it: React may never render this prop.
-        let slot = el("div")
-            .key(name)
-            .attr("data-island-slot", name)
-            .attr("style", "display: none")
-            .lifecycle(move |phase, node| live.on_slot(name, phase, node))
-            .child(view);
-        children.push(slot.into_view());
+        let node = live.shell_node(name, || {
+            Rc::new(move |n: Option<NodeRef>| {
+                markers.update(|m| {
+                    m.retain(|(p, _)| *p != name);
+                    m.extend(n.map(|n| (name, n)));
+                })
+            })
+        });
+        slots.push((name, node));
+        let at = markers.with(|m| m.iter().find(|(p, _)| *p == name).map(|(_, n)| *n));
+        if let Some(at) = at {
+            let portal = Portal::props()
+                .to(PortalTarget::Before(at))
+                .children(view)
+                .build();
+            children.push(comp::<Portal>(portal).key(name).into_view());
+        }
     }
     let mut shells = Vec::new();
     for (prop, view) in views.elements {
@@ -1138,7 +1246,7 @@ pub fn render<P: IslandProps>(props: P) -> RenderFuture {
             children.push(comp::<Portal>(portal).into_view());
         }
     }
-    *live.latest.borrow_mut() = Some((props, shells));
+    *live.latest.borrow_mut() = Some((props, shells, slots));
     let host = el("div")
         .attr("data-island", P::ISLAND.name)
         .attr("style", "display: contents")
@@ -1187,6 +1295,8 @@ mod web {
         fn js_update(id: u32, content: &JsValue);
         #[wasm_bindgen(js_name = unmount)]
         fn js_unmount(id: u32);
+        #[wasm_bindgen(js_name = childrenAt)]
+        fn js_children_at(key: u32, node: Option<web_sys::Node>);
     }
 
     /// One island's JS functions, by key, so each is created once and React sees it unchanged.
@@ -1238,7 +1348,7 @@ mod web {
     }
 
     impl WebBridge {
-        /// `{ props, slots: { name: node }, shells: [{ prop, tag, attrs, events, ref }] }`.
+        /// `{ props, slots: { name: ref }, shells: [{ prop, tag, attrs, events, ref }] }`.
         fn to_js(&self, id: u32, c: &Content) -> JsValue {
             use serde::Serialize;
             let out: JsValue = js_sys::Object::new().into();
@@ -1247,15 +1357,25 @@ mod web {
                 .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
                 .unwrap_or(JsValue::NULL);
             set(&out, "props", &props);
-            let slots: JsValue = js_sys::Object::new().into();
-            for (name, node) in &c.slots {
-                if let Some(n) = node.raw() {
-                    set(&slots, name, &n);
-                }
-            }
-            set(&out, "slots", &slots);
             let mut all = self.0.borrow_mut();
             let f = all.entry(id).or_default();
+            let slots: JsValue = js_sys::Object::new().into();
+            for (name, node) in &c.slots {
+                let js = f.shells.entry(format!("{name}:slot")).or_insert_with(|| {
+                    let node = node.clone();
+                    let c = Closure::<dyn Fn(JsValue)>::new(move |el: JsValue| {
+                        let n = el.dyn_into::<web_sys::Node>().ok().and_then(|n| {
+                            crate::runtime::try_dom()?.adopt(n).map(NodeRef::from_id)
+                        });
+                        node(n)
+                    });
+                    let v = c.as_ref().clone();
+                    f.keep.push(Box::new(c));
+                    v
+                });
+                set(&slots, name, js);
+            }
+            set(&out, "slots", &slots);
             let shells = js_sys::Array::new();
             for s in &c.shells {
                 let shell: JsValue = js_sys::Object::new().into();
@@ -1482,6 +1602,10 @@ mod web {
         fn unmount(&self, id: u32) {
             js_unmount(id);
             self.0.borrow_mut().remove(&id);
+        }
+
+        fn children(&self, key: u32, node: Option<NodeRef>) {
+            js_children_at(key, node.and_then(|n| n.raw()));
         }
     }
 }

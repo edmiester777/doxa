@@ -4,11 +4,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use doxa::ui::dom::MemDom;
+use doxa::ui::dom::{Dom, MemDom};
 use doxa::ui::prelude::*;
 use doxa::ui::react::{
     AsyncFunc, AsyncFuncFn, Bridge, Content, EventFn, Func, FuncFn, IslandProps, Mount, Render,
-    RenderFns, Shell,
+    RenderFns, Shell, SlotPlacer,
 };
 
 #[react(module = "./ts/editor.tsx", export = "Editor")]
@@ -40,7 +40,7 @@ pub struct Dialog {
 struct Calls {
     log: Vec<String>,
     hosts: Vec<u32>,
-    children: Vec<Option<u32>>,
+    slots: Rc<SlotPlacer>,
     parents: Vec<(&'static str, Option<u32>)>,
     roots: Vec<u64>,
     events: HashMap<u32, Vec<(&'static str, EventFn)>>,
@@ -51,6 +51,7 @@ struct Calls {
     renders: HashMap<u32, Vec<(&'static str, RenderFns)>>,
     handles: HashMap<u32, doxa::ui::react::HandleSink>,
     feeds: HashMap<u32, Vec<(&'static str, doxa::ui::react::FeedFns)>>,
+    holes: Vec<(u32, Option<u32>)>,
 }
 
 #[derive(Clone, Default)]
@@ -97,8 +98,6 @@ impl Bridge for Fake {
             describe(m.content)
         ));
         c.hosts.push(m.host.id());
-        let children = m.content.slots.iter().find(|(n, _)| *n == "children");
-        c.children.push(children.map(|(_, n)| n.id()));
         c.parents.push((m.island.name, m.parent));
         c.roots.push(m.root);
         c.events.insert(m.id, m.events);
@@ -111,16 +110,28 @@ impl Bridge for Fake {
         if let Some(h) = m.on_handle {
             c.handles.insert(m.id, h);
         }
+        let slots = c.slots.clone();
+        drop(c);
+        slots.mount(m.id, m.host, &m.content.slots);
     }
 
     fn update(&self, id: u32, content: &Content) {
         let mut c = self.0.borrow_mut();
         c.log.push(format!("update {id} {}", describe(content)));
         c.shells.insert(id, content.shells.clone());
+        let slots = c.slots.clone();
+        drop(c);
+        slots.update(id, &content.slots);
     }
 
     fn unmount(&self, id: u32) {
         self.0.borrow_mut().log.push(format!("unmount {id}"));
+        let slots = self.0.borrow().slots.clone();
+        slots.unmount(id);
+    }
+
+    fn children(&self, key: u32, node: Option<doxa::ui::NodeRef>) {
+        self.0.borrow_mut().holes.push((key, node.map(|n| n.id())));
     }
 }
 
@@ -274,31 +285,31 @@ fn Confirm() -> View {
 }
 
 #[test]
-fn view_children_render_into_a_host_the_island_is_given() {
+fn view_children_render_before_the_marker_react_places() {
     let fake = Fake::default();
     doxa::ui::react::set_bridge(fake.clone());
     let dom = MemDom::new();
     App::new(|| view! { <Confirm/> })
         .mount_on(Rc::new(dom.clone()), dom.body())
         .keep();
+    doxa::client::task::run_until_stalled();
     assert_eq!(
         fake.log(),
         [r#"mount Dialog 1 {"title":"Sure?"} slots:children"#]
     );
 
-    let host = dom
+    let marker = dom
         .find("data-island-slot", "children")
-        .expect("a children host");
-    assert_eq!(fake.0.borrow().children, [Some(host)]);
+        .expect("the marker React rendered");
+    let button = dom.find_tag("button").expect("the slot rendered");
     assert_eq!(
-        dom.attr(host, "style").as_deref(),
-        Some("display: none"),
-        "out of the page until React places it"
+        dom.next_sibling(button),
+        Some(marker),
+        "right before the marker, with no host around it"
     );
-    let button = dom.find_tag("button").unwrap();
     dom.click(button);
     doxa::client::task::run_until_stalled();
-    assert_eq!(dom.text(host), "1", "doxa keeps rendering the children");
+    assert_eq!(dom.text(button), "1", "doxa keeps rendering the children");
     assert_eq!(fake.log(), Vec::<String>::new(), "React sees no new props");
 }
 
@@ -337,6 +348,7 @@ fn a_nested_island_mounts_inside_the_island_around_it() {
     })
     .mount_on(Rc::new(dom.clone()), dom.body())
     .keep();
+    doxa::client::task::run_until_stalled();
     let mut parents = fake.0.borrow().parents.clone();
     parents.sort();
     assert_eq!(
@@ -451,7 +463,7 @@ fn an_element_prop_is_rendered_by_react_with_doxa_children_inside() {
     doxa::client::task::run_until_stalled();
     assert_eq!(
         fake.log(),
-        ["update 1 {} slots:children,icon render=<button class=btn|click>"]
+        ["update 1 {} slots:icon,children render=<button class=btn|click>"]
     );
     assert_eq!(dom.text(button), "Filter");
 
@@ -540,13 +552,15 @@ fn react_calls_funcs_awaits_async_funcs_and_places_renders() {
     let page = doxa::client::task::block_on(load_more(serde_json::json!(2))).unwrap();
     assert_eq!(page.as_array().map(Vec::len), Some(2));
 
-    // React mounts the render into an element it owns; doxa fills it with context from the island.
+    // React mounts the render before a marker it owns; doxa fills in context from the island.
     let cell = fake.0.borrow().renders[&1][0].1.clone();
     let el = dom.create_element("td", None);
     dom.insert(dom.body(), el, None);
+    let marker = dom.create_element("template", None);
+    dom.insert(el, marker, None);
     (cell.mount)(
         7,
-        doxa::ui::NodeRef::from_id(el),
+        doxa::ui::NodeRef::from_id(marker),
         serde_json::json!([{"id": 1, "name": "a"}, "name"]),
     );
     settle();
@@ -710,7 +724,7 @@ pub struct Markdown {
     #[react(rename = "options.depth")]
     pub depth: u32,
     #[react(component, rename = "components.code")]
-    pub code: Render<CodeArgs>,
+    pub code: doxa::ui::react::ComponentFn<CodeArgs>,
     #[react(element, rename = "icons.success")]
     pub success: View,
 }
@@ -728,8 +742,11 @@ fn Doc() -> View {
             remark_plugins={plugins}
             url_transform={transform.get().then(|| doxa::ui::Js::json("same-origin"))}
             depth={2u32}
-            code={|p: CodeArgs| view! {
-                <code class={p.class_name.unwrap_or_default()}>{p.children}</code>
+            code={|p: CodeArgs, children: View| view! {
+                <code class={p.class_name.unwrap_or_default()}>
+                    {p.children}
+                    {children}
+                </code>
             }}
             success={view! { <svg class="ok"/> }}
         >
@@ -775,12 +792,25 @@ fn js_values_pass_untouched_and_dotted_names_reach_react_as_paths() {
     );
     let el = dom.create_element("div", None);
     dom.insert(dom.body(), el, None);
+    let marker = dom.create_element("template", None);
+    dom.insert(el, marker, None);
     (code.mount)(
         1,
-        doxa::ui::NodeRef::from_id(el),
+        doxa::ui::NodeRef::from_id(marker),
         serde_json::json!({"className": "language-rs", "children": "fn x", "node": {"type": "element"}}),
     );
     doxa::client::task::run_until_stalled();
     let shown = dom.find("class", "language-rs").expect("the code view");
     assert_eq!(dom.text(shown), "fn x");
+    let hole = dom
+        .find("data-react-children", "")
+        .expect("a hole for React's children");
+    assert_eq!(
+        fake.0.borrow().holes,
+        [(1, Some(hole))],
+        "the bridge is told where they go"
+    );
+    (code.unmount)(1);
+    doxa::client::task::run_until_stalled();
+    assert_eq!(fake.0.borrow().holes.last(), Some(&(1, None)));
 }

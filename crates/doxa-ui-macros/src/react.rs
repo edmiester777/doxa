@@ -132,7 +132,7 @@ enum Role {
     },
     /// `#[react(render)]`: a `Render` React places as an element.
     Render,
-    /// `#[react(component)]`: a `Render` React renders as a component, given its props.
+    /// `#[react(component)]`: a `ComponentFn` React renders as a component, given its props.
     Component,
     /// `#[react(js)]`: a `Js`, `Vec<Js>` or `Option` of one, passed as it is.
     Js,
@@ -300,10 +300,10 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 "a prop takes one of `optional`, `event`, `element`, `func`, `render`, `component`, `js`, `raw` and `feed`",
             ));
         }
-        if component && !last_segment_is(&f.ty, "Render") {
+        if component && !last_segment_is(&f.ty, "ComponentFn") {
             return Err(syn::Error::new(
                 f.ty.span(),
-                format!("`#[react(component)]` field `{name}` must be a `Render<P>`"),
+                format!("`#[react(component)]` field `{name}` must be a `ComponentFn<P>`"),
             ));
         }
         let js_typed = last_segment_is(&f.ty, "Js")

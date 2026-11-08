@@ -24,7 +24,9 @@ export function exclaim(s: string): string {
 export function Pipeline(props: {
   text: string;
   plugins: ((s: string) => string)[];
-  components: { letter: ComponentType<{ letter: string; index: number; onClick: () => void }> };
+  components: {
+    letter: ComponentType<{ letter: string; index: number; onClick: () => void; children: ReactNode }>;
+  };
   icons: { done: ReactNode };
 }) {
   const out = props.plugins.reduce((s, f) => f(s), props.text);
@@ -35,7 +37,9 @@ export function Pipeline(props: {
       <ul>
         {[...out].map((letter, index) => (
           <li key={index}>
-            <Letter letter={letter} index={index} onClick={() => {}} />
+            <Letter letter={letter} index={index} onClick={() => {}}>
+              <em className="kid">{letter}</em>
+            </Letter>
           </li>
         ))}
       </ul>
