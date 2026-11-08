@@ -63,7 +63,7 @@ enum Command {
         #[arg(short, long)]
         package: Option<String>,
         /// The port to serve on.
-        #[arg(long, default_value_t = 3100)]
+        #[arg(long, default_value_t = 4710)]
         port: u16,
         /// Install npm dependencies from the lockfile only.
         #[arg(long)]
@@ -198,7 +198,7 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["doxa", "gallery"]),
-            Command::Gallery { port: 3100, .. }
+            Command::Gallery { port: 4710, .. }
         ));
     }
 
