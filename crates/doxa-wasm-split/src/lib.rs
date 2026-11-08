@@ -24,6 +24,9 @@ use wasmparser::{
 
 pub const MAKE_LOAD_JS: &str = include_str!("./__wasm_split.js");
 
+/// Each emission re-parses the whole module, so peak memory is this many parsed copies.
+const EMIT_THREADS: usize = 4;
+
 /// A parsed wasm module with additional metadata and functionality for splitting and patching.
 ///
 /// This struct assumes that relocations will be present in incoming wasm binary.
@@ -126,15 +129,21 @@ impl<'a> Splitter<'a> {
     pub fn emit(self) -> Result<OutputModules> {
         tracing::info!("Emitting split modules.");
 
-        let chunks = (0..self.chunks.len())
-            .into_par_iter()
-            .map(|idx| self.emit_split_chunk(idx))
-            .collect::<Result<Vec<SplitModule>>>()?;
-
-        let modules = (0..self.split_points.len())
-            .into_par_iter()
-            .map(|idx| self.emit_split_module(idx))
-            .collect::<Result<Vec<SplitModule>>>()?;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(EMIT_THREADS)
+            .build()
+            .context("building the split emission thread pool")?;
+        let (chunks, modules) = pool.install(|| {
+            let chunks = (0..self.chunks.len())
+                .into_par_iter()
+                .map(|idx| self.emit_split_chunk(idx))
+                .collect::<Result<Vec<SplitModule>>>()?;
+            let modules = (0..self.split_points.len())
+                .into_par_iter()
+                .map(|idx| self.emit_split_module(idx))
+                .collect::<Result<Vec<SplitModule>>>()?;
+            anyhow::Ok((chunks, modules))
+        })?;
 
         // Emit the main module, consuming self since we're going to
         let main = self.emit_main_module()?;
