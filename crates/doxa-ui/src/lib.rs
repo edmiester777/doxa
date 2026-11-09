@@ -94,7 +94,7 @@ pub use router::{
     NavigationGuard, NavigationGuardBuilder, NavigationGuardProps, Outlet, OutletBuilder,
     OutletProps, Page, Prefetch, Query, Route, Router, Segments,
 };
-pub use story::{IntoStory, StoryRoot};
+pub use story::{IntoStory, Story, StoryRoot};
 pub use theme::{set_theme, theme, Theme};
 pub use view::{
     comp, el, BindChecked, BindSelected, BindValue, Callback, ComponentView, DangerousHtml,

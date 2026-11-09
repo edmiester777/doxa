@@ -71,6 +71,27 @@ fn keyed_children_move_instead_of_being_recreated() {
 }
 
 #[component]
+fn Bullets(children: View) -> View {
+    view! { <ul>{children}</ul> }
+}
+
+#[test]
+fn an_array_is_a_view_of_its_items() {
+    let dom = mount(|| {
+        view! {
+            <Bullets>
+                {[view! { <li>"a"</li> }, view! { <li>"b"</li> }]}
+                {["c", "d"]}
+            </Bullets>
+        }
+    });
+    assert_eq!(
+        dom.html(dom.find_tag("ul").unwrap()),
+        "<ul><li>a</li><li>b</li>cd</ul>"
+    );
+}
+
+#[component]
 fn Flaky(fail: bool) -> Result<View> {
     if fail {
         return Err(Thrown::msg("boom"));

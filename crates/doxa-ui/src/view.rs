@@ -345,6 +345,37 @@ impl<T: IntoView> IntoView for Vec<T> {
     }
 }
 
+impl<T: IntoView, const N: usize> IntoView for [T; N] {
+    fn into_view(self) -> View {
+        self.into_iter().collect()
+    }
+}
+
+macro_rules! tuple_view {
+    ($($t:ident),+) => {
+        impl<$($t: IntoView),+> IntoView for ($($t,)+) {
+            #[allow(non_snake_case)]
+            fn into_view(self) -> View {
+                let ($($t,)+) = self;
+                View(Node::Fragment(Rc::new([$($t.into_view().0),+])))
+            }
+        }
+    };
+}
+
+tuple_view!(A);
+tuple_view!(A, B);
+tuple_view!(A, B, C);
+tuple_view!(A, B, C, D);
+tuple_view!(A, B, C, D, E);
+tuple_view!(A, B, C, D, E, F);
+tuple_view!(A, B, C, D, E, F, G);
+tuple_view!(A, B, C, D, E, F, G, H);
+tuple_view!(A, B, C, D, E, F, G, H, I);
+tuple_view!(A, B, C, D, E, F, G, H, I, J);
+tuple_view!(A, B, C, D, E, F, G, H, I, J, K);
+tuple_view!(A, B, C, D, E, F, G, H, I, J, K, L);
+
 impl<T: IntoView> FromIterator<T> for View {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> View {
         View(Node::Fragment(

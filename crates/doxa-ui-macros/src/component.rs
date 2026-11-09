@@ -203,6 +203,55 @@ fn is_number(ty: &Type) -> bool {
     NUMBERS.iter().any(|n| is_named(ty, n))
 }
 
+/// A `Vec` or tuple with a `View` inside: the setter's argument, taking any `IntoView` there, and
+/// the expression converting `__v{depth}` to `ty`.
+fn views_in(ty: &Type, depth: usize) -> Option<(TokenStream, TokenStream)> {
+    let v = format_ident!("__v{depth}");
+    if is_named(ty, "View") {
+        return Some((
+            quote!(impl ::doxa::ui::IntoView),
+            quote!(::doxa::ui::IntoView::into_view(#v)),
+        ));
+    }
+    if let Some(item) = crate::callback::inner_of(ty, "Vec") {
+        let (arg, expr) = views_in(item, depth + 1)?;
+        let next = format_ident!("__v{}", depth + 1);
+        return Some((
+            quote!(impl ::core::iter::IntoIterator<Item = #arg>),
+            quote!(#v.into_iter().map(|#next| #expr).collect::<::std::vec::Vec<_>>()),
+        ));
+    }
+    let Type::Tuple(tuple) = ty else { return None };
+    let next = format_ident!("__v{}", depth + 1);
+    let parts: Vec<_> = tuple
+        .elems
+        .iter()
+        .map(|t| match views_in(t, depth + 1) {
+            Some(nested) => (true, nested),
+            None if is_number(t) => (false, (quote!(#t), quote!(#next))),
+            None => (
+                false,
+                (
+                    quote!(impl ::core::convert::Into<#t>),
+                    quote!(::core::convert::Into::into(#next)),
+                ),
+            ),
+        })
+        .collect();
+    if !parts.iter().any(|(nested, _)| *nested) {
+        return None;
+    }
+    let fields: Vec<_> = (0..parts.len())
+        .map(|i| format_ident!("__t{depth}_{i}"))
+        .collect();
+    let args = parts.iter().map(|(_, (a, _))| a);
+    let exprs = parts.iter().map(|(_, (_, e))| e);
+    Some((
+        quote!((#(#args,)*)),
+        quote!({ let (#(#fields,)*) = #v; (#({ let #next = #fields; #exprs },)*) }),
+    ))
+}
+
 /// A type no closure converts to, so it needs no setter for one.
 fn is_plain(ty: &Type) -> bool {
     is_number(ty)
@@ -483,8 +532,10 @@ pub(crate) fn builder(
         let (generics, arg, convert) = if n == "children" {
             (
                 quote!(),
-                quote!(value: ::doxa::ui::View),
-                quote!(::doxa::ui::__private::FromChildren::from_children(value)),
+                quote!(value: impl ::doxa::ui::IntoView),
+                quote!(::doxa::ui::__private::FromChildren::from_children(
+                    ::doxa::ui::IntoView::into_view(value)
+                )),
             )
         } else if let Some(i) = inner.filter(|_| mentions_param(t)) {
             (
@@ -495,6 +546,12 @@ pub(crate) fn builder(
         } else if mentions_param(t) || is_number(t) {
             // A number takes exactly its type, so an unsuffixed literal infers it.
             (quote!(), quote!(value: #t), quote!(value))
+        } else if let Some((arg, expr)) = (!is_named(t, "View")).then(|| views_in(t, 0)).flatten() {
+            (
+                quote!(),
+                quote!(value: #arg),
+                quote!({ let __v0 = value; #expr }),
+            )
         } else if is_named(t, "View") {
             (
                 quote!(),

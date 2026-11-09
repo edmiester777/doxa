@@ -8,12 +8,15 @@ use crate::app::{App, RootHandle};
 use crate::dom::{Dom, NodeId};
 use crate::{IntoView, View};
 
-/// What a story returns: a view, or a view and what must live as long as it, such as a
-/// [`push_scoped`](doxa_client::layer) guard.
+/// What a story returns: a view, or a [`Story`].
 pub trait IntoStory {
     #[doc(hidden)]
     fn into_story(self) -> (View, Box<dyn Any>);
 }
+
+/// A story's view and what must live as long as it, such as a
+/// [`push_scoped`](doxa_client::layer) guard.
+pub struct Story<V, K>(pub V, pub K);
 
 impl<V: IntoView> IntoStory for V {
     fn into_story(self) -> (View, Box<dyn Any>) {
@@ -21,7 +24,7 @@ impl<V: IntoView> IntoStory for V {
     }
 }
 
-impl<V: IntoView, K: 'static> IntoStory for (V, K) {
+impl<V: IntoView, K: 'static> IntoStory for Story<V, K> {
     fn into_story(self) -> (View, Box<dyn Any>) {
         (self.0.into_view(), Box::new(self.1))
     }
@@ -100,9 +103,9 @@ mod tests {
         }
     }
 
-    fn counted() -> (View, Guard) {
+    fn counted() -> Story<View, Guard> {
         RUNS.with(|r| r.set(r.get() + 1));
-        ("shown".into_view(), Guard)
+        Story("shown".into_view(), Guard)
     }
 
     #[test]

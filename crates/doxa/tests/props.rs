@@ -473,3 +473,48 @@ fn elements_query_scroll_and_reveal_without_touching_the_browser() {
     assert_eq!(at.get(), 900.0);
     assert_eq!(dom.revealed().len(), 1);
 }
+
+#[component]
+fn Facts(rows: Vec<(View, View)>, #[prop(default)] notes: Vec<(String, View, u32)>) -> View {
+    view! {
+        <dl>
+            {rows.into_iter().map(|(k, v)| view! {
+                <dt>{k}</dt>
+                <dd>{v}</dd>
+            }).collect::<View>()}
+        </dl>
+        <ul>
+            {notes.into_iter().map(|(a, b, n)| view! { <li>{(a, b, n)}</li> }).collect::<View>()}
+        </ul>
+    }
+}
+
+#[test]
+fn a_list_prop_takes_anything_into_view_in_its_view_places() {
+    let dom = mount(|| {
+        view! {
+            <Facts
+                rows={[("Id", view! { <b>"m-1"</b> }), ("Rows", "1,247".into_view())]}
+                notes={vec![("a", 1, 2)]}
+            />
+        }
+    });
+    assert_eq!(
+        dom.html(dom.find_tag("dl").unwrap()),
+        "<dl><dt>Id</dt><dd><b>m-1</b></dd><dt>Rows</dt><dd>1,247</dd></dl>"
+    );
+    assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "a12");
+}
+
+#[component]
+fn Shelf(children: View) -> View {
+    view! { <p>{children}</p> }
+}
+
+#[test]
+fn children_set_directly_take_anything_into_view() {
+    let dom = mount(|| {
+        doxa::ui::__private::comp_for(Shelf::props().children(("x", 1, ["y", "z"])).build())
+    });
+    assert_eq!(dom.text(dom.find_tag("p").unwrap()), "x1yz");
+}

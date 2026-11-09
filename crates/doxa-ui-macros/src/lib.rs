@@ -105,7 +105,7 @@ pub fn derive_form(item: TokenStream) -> TokenStream {
 }
 
 /// A view shown alone in `doxa gallery`: `#[story] fn empty_list() -> View { … }`. Return
-/// `(view, guard)` to keep a `push_scoped` layer for the story's life.
+/// `Story(view, guard)` to keep a `push_scoped` layer for the story's life.
 #[proc_macro_attribute]
 pub fn story(_args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);

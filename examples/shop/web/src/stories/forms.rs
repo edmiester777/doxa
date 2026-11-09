@@ -5,7 +5,7 @@ use std::time::Duration;
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::{Request, Response, Transport};
 use doxa::ui::prelude::*;
-use doxa::ui::{form, story, Field};
+use doxa::ui::{form, story, Field, Story};
 use futures::future::LocalBoxFuture;
 use shop_api::widgets::*;
 
@@ -58,7 +58,7 @@ impl Transport for Echo {
 
 /// Clear the name and the rule fails before anything is sent; save and the button waits.
 #[story]
-pub fn rename_form() -> (View, Scoped) {
+pub fn rename_form() -> Story<View, Scoped> {
     let guard = shop_api::service()
         .layers()
         .push_scoped(transport(Echo(Duration::from_millis(800))));
@@ -66,5 +66,5 @@ pub fn rename_form() -> (View, Scoped) {
         id: 2,
         name: "gear".into(),
     };
-    (view! { <RenameCard widget={gear}/> }, guard)
+    Story(view! { <RenameCard widget={gear}/> }, guard)
 }

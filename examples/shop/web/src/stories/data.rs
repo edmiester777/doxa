@@ -5,7 +5,7 @@ use std::time::Duration;
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::{scripted, MockTransport};
 use doxa::ui::prelude::*;
-use doxa::ui::story;
+use doxa::ui::{story, Story};
 use shop_api::widgets::*;
 
 use super::{widgets, Slow};
@@ -40,27 +40,27 @@ pub fn WidgetFeed(name: String) -> View {
 
 /// The feed as a server streams it, one event every 400 ms.
 #[story]
-pub fn feed_streaming() -> (View, Scoped) {
+pub fn feed_streaming() -> Story<View, Scoped> {
     let script = scripted::<WidgetEvent>(include_str!("../../fixtures/feed.jsonl"))
         .every(Duration::from_millis(400));
     let guard = shop_api::service()
         .layers()
         .push_scoped(transport(script.transport()));
-    (view! { <WidgetFeed name={"gear".to_owned()}/> }, guard)
+    Story(view! { <WidgetFeed name={"gear".to_owned()}/> }, guard)
 }
 
 /// The picker over the list the mock answers.
 #[story]
-pub fn picker() -> (View, Scoped) {
+pub fn picker() -> Story<View, Scoped> {
     let mock = MockTransport::new();
     mock.json(200, &widgets());
     let guard = shop_api::service().layers().push_scoped(transport(mock));
-    (view! { <WidgetPicker on_open={|_: String| ()}/> }, guard)
+    Story(view! { <WidgetPicker on_open={|_: String| ()}/> }, guard)
 }
 
 /// The picker while its list is on the way: `<Suspense>` shows the fallback for 1.5 s.
 #[story]
-pub fn picker_loading() -> (View, Scoped) {
+pub fn picker_loading() -> Story<View, Scoped> {
     let slow = Slow(serde_json::json!(widgets()), Duration::from_millis(1500));
     let guard = shop_api::service().layers().push_scoped(transport(slow));
     let view = view! {
@@ -68,7 +68,7 @@ pub fn picker_loading() -> (View, Scoped) {
             <WidgetPicker on_open={|_: String| ()}/>
         </Suspense>
     };
-    (view, guard)
+    Story(view, guard)
 }
 
 /// One generic `Table`, its row type inferred from `rows`.

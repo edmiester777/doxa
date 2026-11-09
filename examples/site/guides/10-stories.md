@@ -7,24 +7,24 @@ A story is a component in a particular state: loading, empty, streaming, broken.
 ```rust
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::{scripted, MockTransport};
-use doxa::ui::story;
+use doxa::ui::{story, Story};
 
 /// The feed as a server streams it, one event every 400 ms.
 #[story]
-pub fn feed_streaming() -> (View, Scoped) {
+pub fn feed_streaming() -> Story<View, Scoped> {
     let script = scripted::<WidgetEvent>(include_str!("../fixtures/feed.jsonl"))
         .every(Duration::from_millis(400));
     let guard = shop_api::service().layers().push_scoped(transport(script.transport()));
-    (view! { <WidgetFeed name={"gear".to_owned()}/> }, guard)
+    Story(view! { <WidgetFeed name={"gear".to_owned()}/> }, guard)
 }
 
 /// The picker over the list the mock answers.
 #[story]
-pub fn picker() -> (View, Scoped) {
+pub fn picker() -> Story<View, Scoped> {
     let mock = MockTransport::new();
     mock.json(200, &widgets());
     let guard = shop_api::service().layers().push_scoped(transport(mock));
-    (view! { <WidgetPicker on_open={|_: String| ()}/> }, guard)
+    Story(view! { <WidgetPicker on_open={|_: String| ()}/> }, guard)
 }
 ```
 
