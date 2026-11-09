@@ -18,6 +18,8 @@ pub const LIB_ENV: &str = "DOXA_LIB";
 pub const SERVER_ONLY_ENV: &str = "DOXA_SERVER_ONLY";
 /// The `client_only` directories, as comma-separated module names.
 pub const CLIENT_ONLY_ENV: &str = "DOXA_CLIENT_ONLY";
+/// `[package.metadata.doxa] service`: the package whose service the crate's entities belong to.
+pub const SERVICE_ENV: &str = "DOXA_SERVICE";
 
 /// Build this crate as the client half: routes become typed HTTP calls.
 pub fn client() {
@@ -43,6 +45,9 @@ pub fn api() {
         "cargo::rustc-env={CLIENT_ONLY_ENV}={}",
         split.client.join(",")
     );
+    if let Some(service) = &split.service {
+        println!("cargo::rustc-env={SERVICE_ENV}={service}");
+    }
 }
 
 /// Build this crate as the server half. The default; only needed to say so.
@@ -62,6 +67,7 @@ struct Split {
     lib: PathBuf,
     server: Vec<String>,
     client: Vec<String>,
+    service: Option<String>,
 }
 
 impl Split {
@@ -106,10 +112,19 @@ impl Split {
                 pair[0]
             ));
         }
+        let service = match doxa.and_then(|d| d.get("service")) {
+            None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .ok_or("`[package.metadata.doxa] service` is a package name")?
+                    .to_owned(),
+            ),
+        };
         Ok(Split {
             lib,
             server,
             client,
+            service,
         })
     }
 }
@@ -177,8 +192,18 @@ mod tests {
                 lib: root.join("src/lib.rs"),
                 server: vec!["server".into()],
                 client: vec!["browser".into()],
+                service: None,
             }
         );
+    }
+
+    #[test]
+    fn names_the_service_its_entities_belong_to() {
+        let root = crate_with(&[]);
+        let read = |toml: &str| Split::read(&root, toml);
+        let split = read("[package.metadata.doxa]\nservice = \"shop-api\"").unwrap();
+        assert_eq!(split.service.as_deref(), Some("shop-api"));
+        assert!(read("[package.metadata.doxa]\nservice = 1").is_err());
     }
 
     #[test]

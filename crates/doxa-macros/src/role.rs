@@ -22,11 +22,12 @@ pub fn prelude(input: TokenStream, file: Option<std::path::PathBuf>) -> syn::Res
         doxa_macro_support::Role::Api => (quote!(api), true),
         doxa_macro_support::Role::Server => (quote!(server), false),
     };
+    let pkg_name = package();
     let service = service.then(|| {
         quote! {
             /// The package name this crate's routes and entities carry, which names its service.
             #[allow(dead_code)]
-            pub const PACKAGE: &str = ::core::env!("CARGO_PKG_NAME");
+            pub const PACKAGE: &str = #pkg_name;
 
             /// This crate's service: its server's base URL, layers, cache and session.
             #[allow(dead_code)]
@@ -91,6 +92,14 @@ fn sided_modules(file: Option<&std::path::Path>) -> TokenStream {
         }
     }
     out
+}
+
+/// The package whose service this crate's routes, entities and actions belong to.
+pub fn package() -> TokenStream {
+    match std::env::var("DOXA_SERVICE") {
+        Ok(service) => quote!(#service),
+        Err(_) => quote!(::core::env!("CARGO_PKG_NAME")),
+    }
 }
 
 /// The `AssetFor` parameter: an API crate's root marker, so its assets may guard another crate's
@@ -231,11 +240,12 @@ pub fn derive_identity(input: TokenStream) -> syn::Result<TokenStream> {
         },
     );
 
+    let pkg_name = package();
     Ok(quote! {
         impl ::doxa::wire::Identity for #name {
             type Id = #id_ty;
             const ENTITY_TYPE: &'static str = #entity;
-            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+            const PACKAGE: &'static str = #pkg_name;
             const ID_FIELD: &'static str = #id_field;
             #key_consts
             fn identity(&self) -> #id_ty {

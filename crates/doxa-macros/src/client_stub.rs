@@ -543,6 +543,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
     };
     let lifetime = (!refused.is_empty()).then(|| quote!(<'__doxa>));
 
+    let pkg_name = crate::role::package();
     Ok(quote! {
         #[allow(non_snake_case, missing_docs)]
         pub mod #name {
@@ -556,7 +557,7 @@ pub fn expand(route: &Route<'_>, item_fn: &ItemFn, extra: TokenStream) -> syn::R
                 entities: &[#(#entities),*],
                 dry_run: #dry_run,
                 invalidates: #invalidates,
-                package: ::core::env!("CARGO_PKG_NAME"),
+                package: #pkg_name,
             };
             #coverage
             #refusal

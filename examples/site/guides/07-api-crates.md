@@ -83,7 +83,7 @@ router.guard(requires(order_action::Place, "/orders"))
 
 ## Where requests go
 
-Each API crate gets its own `service()`, with its own base URL, cache, session and layers. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and `services.json` changes them per deployment without a rebuild. Credentials are layers:
+Each API crate gets its own `service()`, with its own base URL, cache, session and layers. A types crate below one, whose entities and actions that API serves, says so with `[package.metadata.doxa] service = "shop-api"`. Base URLs default to `[package.metadata.doxa.services]` on the web crate, and `services.json` changes them per deployment without a rebuild. Credentials are layers:
 
 ```rust
 layers().push(bearer(|| session::token()));          // every crate's requests

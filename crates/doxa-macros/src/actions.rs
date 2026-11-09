@@ -322,12 +322,13 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             None => format!("The `{action}` action."),
         };
 
+        let pkg_name = crate::role::package();
         let named = cap_name.as_ref().map(|cap| {
             quote! {
                 impl ::doxa::wire::Capability for #ident {
                     const NAME: &'static str = #cap;
                     const ENTITY_TYPE: &'static str = #resource;
-                    const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+                    const PACKAGE: &'static str = #pkg_name;
                 }
             }
         });

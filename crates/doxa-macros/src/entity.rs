@@ -52,13 +52,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             quote!(#name)
         }
     };
+    let pkg_name = crate::role::package();
     Ok(quote! {
         #item
 
         impl ::doxa::wire::Keyed for #ident {
             type Key = #key;
             const ENTITY_TYPE: &'static str = #name;
-            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+            const PACKAGE: &'static str = #pkg_name;
         }
     })
 }

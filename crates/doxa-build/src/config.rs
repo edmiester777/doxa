@@ -50,6 +50,8 @@ pub struct DoxaConfig {
     /// In an API crate, directories beside the lib root that only the browser compiles.
     #[serde(default)]
     pub client_only: Vec<String>,
+    /// The service a types crate's entities and actions belong to, when it isn't this package.
+    pub service: Option<String>,
 }
 
 /// `"/dl" = { to = "http://localhost:3100", env = "LAKE_URL", strip = true }`.
@@ -170,7 +172,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, server_only, client_only, and npm, services, preprocess and proxy tables",
+                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, server_only, client_only, service, and npm, services, preprocess and proxy tables",
                 )
             }),
         }

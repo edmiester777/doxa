@@ -206,13 +206,14 @@ pub fn expand_client(args: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let Some(actions) = &args.actions else {
         return Err(syn::Error::new(name.span(), "`asset` needs `actions = …`"));
     };
+    let pkg_name = crate::role::package();
     Ok(quote! {
         #item
 
         impl ::doxa::wire::Keyed for #name {
             type Key = #key;
             const ENTITY_TYPE: &'static str = <#actions as ::doxa::wire::Vocabulary>::ENTITY_TYPE;
-            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+            const PACKAGE: &'static str = #pkg_name;
         }
     })
 }
@@ -450,6 +451,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     }
     let of_entity = of_entity(name, args.entity.as_ref(), !args.not_default);
 
+    let pkg_name = crate::role::package();
     Ok(quote! {
         #item
 
@@ -477,7 +479,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         impl ::doxa::wire::Keyed for #name {
             type Key = #key;
             const ENTITY_TYPE: &'static str = <#actions as ::doxa::wire::Vocabulary>::ENTITY_TYPE;
-            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+            const PACKAGE: &'static str = #pkg_name;
         }
 
         #of_entity
