@@ -788,7 +788,15 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// compile.
 #[proc_macro_attribute]
 pub fn asset(args: TokenStream, item: TokenStream) -> TokenStream {
+    use doxa_macro_support::{tag, Role, Side};
     let (args, item): (TS2, TS2) = (args.into(), item.into());
+    // An API crate's browser names entities, never assets.
+    if Role::current() == Role::Api {
+        return asset::expand(args, item)
+            .map(|s| tag(Side::Server, s))
+            .unwrap_or_else(syn::Error::into_compile_error)
+            .into();
+    }
     by_role(
         || asset::expand(args.clone(), item.clone()),
         || asset::expand_client(args.clone(), item.clone()),
