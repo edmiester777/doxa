@@ -3,7 +3,7 @@ routes doxa's `<Link>`s through react-router, `invalidated` marks react-query's 
 after a doxa mutation, and `invalidate(["Widget"])` does the reverse.
 
 ```sh
-cd examples/shop && doxa build --lib        # writes target/doxa/lib
+doxa build --lib -p shop-web                 # writes target/doxa/lib
 cargo run -p shop-server                     # the API, on :3000
 cd host && npm install && npm run dev
 ```

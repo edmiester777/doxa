@@ -13,10 +13,10 @@ futures = { workspace = true }
 serde = { workspace = true }
 utoipa = { workspace = true }
 tokio = { workspace = true }
+tower = { workspace = true }
 
 [dev-dependencies]
 doxa = { workspace = true, features = ["client-router"] }
-tower = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
