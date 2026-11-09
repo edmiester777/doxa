@@ -54,7 +54,7 @@ enum Command {
         /// The web crate; defaults to the one with role = "client".
         #[arg(short, long)]
         package: Option<String>,
-        /// The port to serve on.
+        /// The port to serve on, at `$DOXA_HOST` (default 127.0.0.1).
         #[arg(long, default_value_t = 3000)]
         port: u16,
         /// Install npm dependencies from the lockfile only.
@@ -69,7 +69,7 @@ enum Command {
         /// The web crate; defaults to the one with role = "client".
         #[arg(short, long)]
         package: Option<String>,
-        /// The port to serve on.
+        /// The port to serve on, at `$DOXA_HOST` (default 127.0.0.1).
         #[arg(long, default_value_t = 4710)]
         port: u16,
         /// Install npm dependencies from the lockfile only.

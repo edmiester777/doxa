@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -347,8 +348,16 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
         .route(RELOAD_PATH, get(reload_events))
         .fallback(forward)
         .with_state(proxy.clone());
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    note(format!("serving http://127.0.0.1:{port}"));
+    let host = match std::env::var("DOXA_HOST") {
+        Ok(h) => h
+            .parse::<IpAddr>()
+            .map_err(|_| format!("DOXA_HOST={h} is not an IP address"))?,
+        Err(_) => Ipv4Addr::LOCALHOST.into(),
+    };
+    let listener = tokio::net::TcpListener::bind((host, port)).await?;
+    for url in urls(host, lan_ip(), port) {
+        note(format!("serving {url}"));
+    }
     tokio::spawn(async move { axum::serve(listener, app).await });
 
     let (changed, mut changes) = mpsc::unbounded_channel::<Vec<PathBuf>>();
@@ -472,6 +481,29 @@ fn routes(
 fn after_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = path.strip_prefix(prefix)?;
     (rest.is_empty() || rest.starts_with('/')).then_some(rest)
+}
+
+/// Where a browser reaches a server bound to `host`: localhost and the LAN address for
+/// `0.0.0.0`, else `host` itself.
+fn urls(host: IpAddr, lan: Option<IpAddr>, port: u16) -> Vec<String> {
+    let hosts = if host.is_unspecified() {
+        std::iter::once(IpAddr::from(Ipv4Addr::LOCALHOST))
+            .chain(lan)
+            .collect()
+    } else {
+        vec![host]
+    };
+    hosts
+        .into_iter()
+        .map(|h| format!("http://{}", std::net::SocketAddr::new(h, port)))
+        .collect()
+}
+
+/// The address this machine routes outward from; a UDP connect sends nothing.
+fn lan_ip() -> Option<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    Some(socket.local_addr().ok()?.ip())
 }
 
 fn free_port() -> std::io::Result<u16> {
@@ -920,6 +952,23 @@ mod tests {
 
     fn plan(paths: &[&str]) -> Plan {
         classify(paths.iter().map(Path::new), &watch())
+    }
+
+    #[test]
+    fn an_unspecified_host_is_shown_as_localhost_and_the_lan_address() {
+        let lan = Some(IpAddr::from([192, 168, 1, 20]));
+        assert_eq!(
+            urls(Ipv4Addr::UNSPECIFIED.into(), lan, 3000),
+            ["http://127.0.0.1:3000", "http://192.168.1.20:3000"]
+        );
+        assert_eq!(
+            urls(Ipv4Addr::UNSPECIFIED.into(), None, 3000),
+            ["http://127.0.0.1:3000"]
+        );
+        assert_eq!(
+            urls(Ipv4Addr::LOCALHOST.into(), lan, 4710),
+            ["http://127.0.0.1:4710"]
+        );
     }
 
     /// Accepts any upgrade, then echoes what it receives.
