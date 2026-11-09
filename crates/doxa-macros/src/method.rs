@@ -42,6 +42,7 @@ fn route(method: &str, path: &LitStr, extra: Vec<Meta>, item: TokenStream) -> Re
     let (client, extra) = take_client_arg(extra)?;
     let (flags, extra) = take_route_flags(extra)?;
     let (touches, extra) = take_touches(extra)?;
+    let (answers, extra) = take_answers(extra)?;
     let item_fn = handler(item)?;
     let r = Parts {
         method,
@@ -51,11 +52,18 @@ fn route(method: &str, path: &LitStr, extra: Vec<Meta>, item: TokenStream) -> Re
         client,
         flags,
         touches: &touches,
+        answers: answers.as_ref(),
     };
     match doxa_macro_support::Role::current() {
-        doxa_macro_support::Role::Client => {
-            client_half(method, path, &extra, client, flags, &touches, &item_fn)
-        }
+        doxa_macro_support::Role::Client => client_half(
+            method,
+            path,
+            &extra,
+            client,
+            flags,
+            &touches,
+            &answering(&item_fn, r.answers),
+        ),
         doxa_macro_support::Role::Server => serve(&r, item_fn),
         doxa_macro_support::Role::Api => both_halves(&r, item_fn),
     }
@@ -71,6 +79,8 @@ struct Parts<'a> {
     client: bool,
     flags: Flags,
     touches: &'a [syn::Path],
+    /// `answers = T`: what the browser receives from a handler whose return type it can't name.
+    answers: Option<&'a Type>,
 }
 
 fn handler(item: TokenStream) -> Result<ItemFn> {
@@ -98,7 +108,12 @@ fn serve(r: &Parts<'_>, mut item_fn: ItemFn) -> Result<TokenStream> {
     let path_names = sig::parse_path_names(&r.path.value());
     let sites = grant::rewrite(&mut item_fn, r.method, &path_names)?;
 
-    let utoipa_attr = build_utoipa_attr(&method_ident, r.path, r.extra, &item_fn)?;
+    let utoipa_attr = build_utoipa_attr(
+        &method_ident,
+        r.path,
+        r.extra,
+        &answering(&item_fn, r.answers),
+    )?;
     let mount = r.mount.then(|| app::mount(&item_fn));
     grant::stop_dry_runs(&mut item_fn);
 
@@ -145,7 +160,7 @@ fn both_halves(r: &Parts<'_>, item_fn: ItemFn) -> Result<TokenStream> {
     )?;
     let server = tag(Side::Server, quote!(#served #by));
 
-    let mut client_fn = item_fn;
+    let mut client_fn = answering(&item_fn, r.answers);
     for arg in &mut client_fn.sig.inputs {
         if let syn::FnArg::Typed(pt) = arg {
             grant_as_granted(&mut pt.ty)?;
@@ -420,6 +435,30 @@ fn take_touches(extra: Vec<Meta>) -> Result<(Vec<syn::Path>, Vec<Meta>)> {
         }
     }
     Ok((touches, rest))
+}
+
+/// Pull `answers = T` out of the arguments.
+fn take_answers(extra: Vec<Meta>) -> Result<(Option<Type>, Vec<Meta>)> {
+    let mut answers = None;
+    let mut rest = Vec::with_capacity(extra.len());
+    for meta in extra {
+        match &meta {
+            Meta::NameValue(nv) if nv.path.is_ident("answers") => {
+                answers = Some(parse2::<Type>(nv.value.to_token_stream())?);
+            }
+            _ => rest.push(meta),
+        }
+    }
+    Ok((answers, rest))
+}
+
+/// `item_fn` as the browser and the document see it: returning `answers` when given.
+fn answering(item_fn: &ItemFn, answers: Option<&Type>) -> ItemFn {
+    let mut f = item_fn.clone();
+    if let Some(t) = answers {
+        f.sig.output = syn::parse_quote!(-> #t);
+    }
+    f
 }
 
 /// Pull `client = false` out of the arguments; it is doxa's, not utoipa's.
@@ -788,6 +827,27 @@ mod tests {
         let mut item: ItemFn = syn::parse2(f).unwrap();
         let checks = grant_for_server(&mut item).unwrap();
         (item.sig.to_token_stream().to_string(), checks.to_string())
+    }
+
+    #[test]
+    fn answers_is_what_the_browser_receives_and_the_server_keeps_its_own() {
+        let (answers, rest) = take_answers(vec![
+            syn::parse_quote!(answers = String),
+            syn::parse_quote!(tag = "Health"),
+        ])
+        .unwrap();
+        assert_eq!(rest.len(), 1);
+        let item: ItemFn = syn::parse_quote! { async fn metrics() -> Prometheus { todo!() } };
+        let seen = answering(&item, answers.as_ref());
+        assert_eq!(seen.sig.output.to_token_stream().to_string(), "-> String");
+        assert_eq!(
+            answering(&item, None)
+                .sig
+                .output
+                .to_token_stream()
+                .to_string(),
+            "-> Prometheus"
+        );
     }
 
     #[test]
