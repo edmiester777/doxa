@@ -314,14 +314,14 @@ pub use doxa_ui::start;
 /// An icon whose SVG file exists compiles:
 ///
 /// ```
-/// #[doxa::ui::icons(dir = "../../examples/shop/web/assets/icons")]
+/// #[doxa::ui::icons(from = "../../examples/shop/web/assets/icons/{kebab}.svg")]
 /// enum Glyph { Trash2 }
 /// ```
 ///
-/// An icon with no file is "no icon `Trash3`: `…/trash-3.svg` doesn't exist":
+/// An icon with no file is "no icon `Trash3`: `…/trash-3.svg` doesn't resolve":
 ///
 /// ```compile_fail
-/// #[doxa::ui::icons(dir = "../../examples/shop/web/assets/icons")]
+/// #[doxa::ui::icons(from = "../../examples/shop/web/assets/icons/{kebab}.svg")]
 /// enum Glyph { Trash3 }
 /// ```
 #[cfg(feature = "ui")]

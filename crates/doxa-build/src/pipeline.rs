@@ -151,7 +151,7 @@ impl Pipeline {
         ])
         .env("CARGO_TARGET_DIR", self.layout.wasm_target())
         .current_dir(&self.workspace.workspace_root);
-        // Where `#[icons(npm = …)]` reads its SVG files.
+        // Where `#[icons]` resolves package imports.
         if let Some(dir) = self.npm.dir() {
             cmd.env("DOXA_NODE_MODULES", dir.join("node_modules"));
         }

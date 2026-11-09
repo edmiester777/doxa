@@ -4,7 +4,7 @@ use doxa::ui::icons;
 use doxa::ui::prelude::*;
 
 /// Drawn by doxa from `assets/icons/*.svg`.
-#[icons(dir = "./assets/icons")]
+#[icons(from = "./assets/icons/{kebab}.svg")]
 pub enum Glyph {
     Plus,
     Trash2,

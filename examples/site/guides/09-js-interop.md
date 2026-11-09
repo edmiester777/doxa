@@ -62,7 +62,7 @@ Each of these runs live in the gallery's [React stories](https://edmiester777.gi
 ## Icons
 
 ```rust
-#[icons(npm = "lucide-static", dir = "icons")]   // SVGs read at compile time
+#[icons(from = "lucide-static/icons/{kebab}.svg")]   // resolved like an import, read at compile time
 pub enum Icon { ChevronDown, Plus, Trash2 }
 
 #[react(module = "lucide-react")]                // each variant a React island
@@ -71,7 +71,7 @@ pub enum Lucide { ChevronDown, Plus, #[react(export = "Trash2")] Trash }
 view! { <button>{Icon::Plus.size(16)}"Add"</button> {Lucide::Trash.class("muted")} }
 ```
 
-Only the variants you list are compiled in, and one with no SVG file fails to compile.
+`from` resolves the way the JS bundle resolves an import, so package `exports` maps and `./` paths from the crate both work. Only the variants you list are compiled in, and one that doesn't resolve fails to compile.
 
 ## Ship components to a React app
 

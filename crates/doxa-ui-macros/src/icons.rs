@@ -1,7 +1,10 @@
-//! Icon enums. `#[icons]` reads one SVG file per variant into `view!` nodes at compile time;
+//! Icon enums. `#[icons]` resolves one SVG per variant through esbuild into `view!` nodes;
 //! `#[react(module = …)]` on an enum makes each variant an island of the export it names.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
@@ -205,12 +208,19 @@ pub(crate) fn expand_react(args: react::Args, mut item: ItemEnum) -> syn::Result
 }
 
 pub(crate) struct Args {
-    npm: Option<LitStr>,
-    dir: LitStr,
-    case: Case,
+    from: LitStr,
+    template: Template,
 }
 
-#[derive(Clone, Copy)]
+/// `from` split around its one `{case}` placeholder.
+#[derive(Debug, PartialEq)]
+struct Template {
+    before: String,
+    case: Case,
+    after: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Case {
     Kebab,
     Snake,
@@ -218,49 +228,63 @@ enum Case {
     Camel,
 }
 
+impl Template {
+    fn parse(from: &str) -> Result<Self, String> {
+        let cases = [
+            ("{kebab}", Case::Kebab),
+            ("{snake}", Case::Snake),
+            ("{pascal}", Case::Pascal),
+            ("{camel}", Case::Camel),
+        ];
+        let mut found = cases
+            .iter()
+            .flat_map(|&(p, case)| from.match_indices(p).map(move |(at, _)| (at, p, case)));
+        let (at, placeholder, case) = found.next().ok_or_else(|| {
+            format!("`from` names each variant's file with `{{kebab}}`, `{{snake}}`, `{{pascal}}` or `{{camel}}`, as in `\"lucide-static/icons/{{kebab}}.svg\"`; `{from}` has none")
+        })?;
+        if found.next().is_some() {
+            return Err(format!("`{from}` has more than one placeholder"));
+        }
+        Ok(Template {
+            before: from[..at].to_owned(),
+            case,
+            after: from[at + placeholder.len()..].to_owned(),
+        })
+    }
+
+    fn specifier(&self, name: &str) -> String {
+        format!("{}{name}{}", self.before, self.after)
+    }
+}
+
 impl syn::parse::Parse for Args {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let (mut npm, mut dir, mut case) = (None, None, Case::Kebab);
         let start = input.span();
+        let mut from = None;
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
             let value: LitStr = input.parse()?;
-            match key.to_string().as_str() {
-                "npm" => npm = Some(value),
-                "dir" => dir = Some(value),
-                "case" => {
-                    case = match value.value().as_str() {
-                        "kebab" => Case::Kebab,
-                        "snake" => Case::Snake,
-                        "pascal" => Case::Pascal,
-                        "camel" => Case::Camel,
-                        _ => {
-                            return Err(syn::Error::new(
-                                value.span(),
-                                "`case` is `kebab`, `snake`, `pascal` or `camel`",
-                            ))
-                        }
-                    }
-                }
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!("unknown option `{other}`; expected `npm`, `dir` or `case`"),
-                    ))
-                }
+            if key != "from" {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("unknown option `{key}`; expected `from = \"…\"`"),
+                ));
             }
+            from = Some(value);
             if !input.is_empty() {
                 input.parse::<syn::Token![,]>()?;
             }
         }
-        let dir = dir.ok_or_else(|| {
+        let from = from.ok_or_else(|| {
             syn::Error::new(
                 start,
-                "`#[icons]` needs `dir = \"…\"`: `#[icons(npm = \"lucide-static\", dir = \"icons\")]` or `#[icons(dir = \"./assets/icons\")]`",
+                "`#[icons]` needs `from = \"…\"`: `#[icons(from = \"lucide-static/icons/{kebab}.svg\")]` or `#[icons(from = \"./assets/icons/{kebab}.svg\")]`",
             )
         })?;
-        Ok(Args { npm, dir, case })
+        let template =
+            Template::parse(&from.value()).map_err(|e| syn::Error::new(from.span(), e))?;
+        Ok(Args { from, template })
     }
 }
 
@@ -314,64 +338,168 @@ fn file_name(ident: &str, case: Case) -> String {
     }
 }
 
-/// Where `package` is installed: `DOXA_NODE_MODULES`, else a `node_modules` (or `doxa build`'s
-/// `target/doxa/js/node_modules`) at or above the crate.
-fn installed(package: &str, env: Option<PathBuf>, crate_dir: &Path) -> Option<PathBuf> {
-    if let Some(root) = env {
-        return Some(root.join(package)).filter(|p| p.is_dir());
-    }
-    crate_dir.ancestors().find_map(|at| {
-        [
-            at.join("node_modules"),
-            at.join("target/doxa/js/node_modules"),
-        ]
-        .into_iter()
-        .map(|root| root.join(package))
-        .find(|p| p.is_dir())
+/// `doxa build`'s npm install (`DOXA_NODE_MODULES`, else `target/doxa/js/node_modules` at or
+/// above the crate), which esbuild searches after the `node_modules` above the crate.
+fn node_path(env: Option<PathBuf>, crate_dir: &Path) -> Option<PathBuf> {
+    env.or_else(|| {
+        crate_dir
+            .ancestors()
+            .map(|at| at.join("target/doxa/js/node_modules"))
+            .find(|p| p.is_dir())
     })
 }
 
-/// `#[icons(npm = "lucide-static", dir = "icons", case = "kebab")] enum Icon { Plus, … }`.
+enum Resolved {
+    /// One file per specifier, in order.
+    Files(Vec<PathBuf>),
+    /// The specifiers esbuild couldn't resolve.
+    Missing(Vec<String>),
+}
+
+/// Resolve each specifier from `crate_dir` the way the bundle does.
+fn resolve(specs: &[String], crate_dir: &Path) -> Result<Resolved, String> {
+    static RUN: AtomicUsize = AtomicUsize::new(0);
+    let esbuild = doxa_build::tool::esbuild().map_err(|e| e.to_string())?;
+    let tmp = std::env::temp_dir().join(format!(
+        "doxa-icons-{}-{}",
+        std::process::id(),
+        RUN.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let meta = tmp.join("meta.json");
+    let mut cmd = Command::new(&esbuild);
+    // Read from stdin, imports resolve from the working directory.
+    cmd.current_dir(crate_dir)
+        .args([
+            "--bundle",
+            "--loader:.svg=empty",
+            "--log-level=error",
+            "--log-limit=0",
+            "--color=false",
+        ])
+        .arg(format!("--outfile={}", tmp.join("out.js").display()))
+        .arg(format!("--metafile={}", meta.display()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(dir) = node_path(
+        std::env::var_os("DOXA_NODE_MODULES").map(PathBuf::from),
+        crate_dir,
+    ) {
+        cmd.env("NODE_PATH", dir);
+    }
+    let mut run = || -> Result<_, String> {
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("couldn't start `{}`: {e}", esbuild.display()))?;
+        let entry: String = specs
+            .iter()
+            .map(|s| format!("import {};\n", serde_json::Value::from(s.as_str())))
+            .collect();
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(entry.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        if !out.status.success() {
+            let missing = unresolved(&stderr);
+            if missing.is_empty() {
+                return Err(format!("esbuild failed:\n{stderr}"));
+            }
+            return Ok(Resolved::Missing(missing));
+        }
+        let json =
+            std::fs::read_to_string(&meta).map_err(|e| format!("{}: {e}", meta.display()))?;
+        let found = imports(&json)?;
+        specs
+            .iter()
+            .map(|s| match found.iter().find(|(o, _)| o == s) {
+                Some((_, p)) => Ok(crate_dir.join(p)),
+                None => Err(format!("esbuild's metafile has no import of `{s}`")),
+            })
+            .collect::<Result<_, _>>()
+            .map(Resolved::Files)
+    };
+    let result = run();
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+/// The specifiers in esbuild's `Could not resolve "…"` errors.
+fn unresolved(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|l| l.split_once("Could not resolve \"")?.1.split_once('"'))
+        .map(|(spec, _)| spec.to_owned())
+        .collect()
+}
+
+/// Each stdin import's specifier and the path it resolved to, relative to the working directory.
+fn imports(metafile: &str) -> Result<Vec<(String, String)>, String> {
+    let meta: serde_json::Value =
+        serde_json::from_str(metafile).map_err(|e| format!("bad esbuild metafile: {e}"))?;
+    let list = meta["inputs"]["<stdin>"]["imports"]
+        .as_array()
+        .ok_or("esbuild's metafile lists no imports")?;
+    Ok(list
+        .iter()
+        .filter_map(|i| {
+            Some((
+                i["original"].as_str()?.to_owned(),
+                i["path"].as_str()?.to_owned(),
+            ))
+        })
+        .collect())
+}
+
+/// `#[icons(from = "lucide-static/icons/{kebab}.svg")] enum Icon { Plus, … }`.
 pub(crate) fn expand_icons(args: Args, mut item: ItemEnum) -> syn::Result<TokenStream> {
     let list = variants(&mut item, "icons", "file")?;
     derive_missing(&mut item);
     let crate_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
-    let mut tracked = Vec::new();
-    let base = match &args.npm {
-        Some(npm) => {
-            let package = npm.value();
-            tracked = react::tracked(npm, &package)?;
-            let env = std::env::var_os("DOXA_NODE_MODULES").map(PathBuf::from);
-            let root = installed(&package, env, &crate_dir).ok_or_else(|| {
+    let specs: Vec<String> = list
+        .iter()
+        .map(|v| {
+            let file = match &v.rename {
+                Some(f) => f.value(),
+                None => file_name(&v.ident.to_string(), args.template.case),
+            };
+            args.template.specifier(&file)
+        })
+        .collect();
+    let mut tracked = match specs[0].starts_with(['.', '/']) {
+        true => Vec::new(),
+        false => react::tracked(&args.from, &specs[0])?,
+    };
+    let files = match resolve(&specs, &crate_dir)
+        .map_err(|e| syn::Error::new(args.from.span(), e))?
+    {
+        Resolved::Files(files) => files,
+        Resolved::Missing(missing) => {
+            let mut errors = list.iter().zip(&specs).filter(|(_, s)| missing.contains(s)).map(|(v, s)| {
                 syn::Error::new(
-                    npm.span(),
-                    format!(
-                        "`{package}` isn't installed in node_modules; run `doxa build` once to install it"
-                    ),
+                    v.ident.span(),
+                    format!("no icon `{}`: `{s}` doesn't resolve; name its file with `#[icons(file = \"…\")]`", v.ident),
                 )
-            })?;
-            root.join(args.dir.value())
+            });
+            let mut first = errors.next().unwrap_or_else(|| {
+                syn::Error::new(
+                    args.from.span(),
+                    format!("esbuild couldn't resolve {missing:?}"),
+                )
+            });
+            errors.for_each(|e| first.combine(e));
+            return Err(first);
         }
-        None => crate_dir.join(args.dir.value().trim_start_matches("./")),
     };
     let name = &item.ident;
     let mut arms = Vec::new();
-    for v in &list {
-        let file = match &v.rename {
-            Some(f) => f.value(),
-            None => file_name(&v.ident.to_string(), args.case),
-        };
-        let path = base.join(format!("{file}.svg"));
-        let svg = std::fs::read_to_string(&path).map_err(|_| {
-            syn::Error::new(
-                v.ident.span(),
-                format!(
-                    "no icon `{}`: `{}` doesn't exist; name the file with `#[icons(file = \"…\")]`",
-                    v.ident,
-                    path.display()
-                ),
-            )
-        })?;
+    for (v, path) in list.iter().zip(files) {
+        let svg = std::fs::read_to_string(&path)
+            .map_err(|e| syn::Error::new(v.ident.span(), format!("`{}`: {e}", path.display())))?;
         let (attrs, body) = svg_tokens(&svg, v.ident.span(), &path)?;
         tracked.push(path.to_string_lossy().into_owned());
         let ident = &v.ident;
@@ -482,19 +610,47 @@ mod tests {
     }
 
     #[test]
-    fn a_package_is_found_above_the_crate_or_under_doxa_builds_install() {
-        let dir = std::env::temp_dir().join(format!("doxa-icons-{}", std::process::id()));
+    fn from_splits_around_its_one_placeholder() {
+        let t = Template::parse("lucide-static/icons/{kebab}.svg").unwrap();
+        assert_eq!(t.case, Case::Kebab);
+        assert_eq!(t.specifier("trash-2"), "lucide-static/icons/trash-2.svg");
+        assert!(Template::parse("icons/plus.svg")
+            .unwrap_err()
+            .contains("has none"));
+        assert!(Template::parse("{kebab}/{snake}.svg")
+            .unwrap_err()
+            .contains("more than one"));
+    }
+
+    #[test]
+    fn doxa_builds_install_is_found_above_the_crate() {
+        let dir = std::env::temp_dir().join(format!("doxa-icons-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let web = dir.join("web");
-        std::fs::create_dir_all(dir.join("target/doxa/js/node_modules/lucide-static")).unwrap();
+        std::fs::create_dir_all(dir.join("target/doxa/js/node_modules")).unwrap();
         std::fs::create_dir_all(&web).unwrap();
         assert_eq!(
-            installed("lucide-static", None, &web),
-            Some(dir.join("target/doxa/js/node_modules/lucide-static"))
+            node_path(None, &web),
+            Some(dir.join("target/doxa/js/node_modules"))
         );
-        assert_eq!(installed("missing", None, &web), None);
-        let env = dir.join("target/doxa/js/node_modules");
-        assert!(installed("lucide-static", Some(env), Path::new("/")).is_some());
+        let env = PathBuf::from("/elsewhere");
+        assert_eq!(node_path(Some(env.clone()), &web), Some(env));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn esbuild_output_names_resolved_and_missing_imports() {
+        let stderr =
+            "✘ [ERROR] Could not resolve \"./assets/icons/nope.svg\"\n\n    <stdin>:2:7:\n";
+        assert_eq!(unresolved(stderr), ["./assets/icons/nope.svg"]);
+        let meta = r#"{"inputs":{"<stdin>":{"imports":[{"path":"assets/icons/plus.svg","kind":"import-statement","original":"./assets/icons/plus.svg"}]}}}"#;
+        assert_eq!(
+            imports(meta).unwrap(),
+            [(
+                "./assets/icons/plus.svg".to_owned(),
+                "assets/icons/plus.svg".to_owned()
+            )]
+        );
     }
 
     #[test]

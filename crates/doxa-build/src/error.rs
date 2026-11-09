@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+#[cfg(feature = "pipeline")]
 use std::process::Command;
 
 /// What went wrong in a build step.
@@ -68,6 +69,7 @@ impl Error {
         }
     }
 
+    #[cfg(feature = "pipeline")]
     pub(crate) fn tool(
         tool: &'static str,
         command: &Command,
@@ -97,6 +99,7 @@ impl<T> IoContext<T> for std::io::Result<T> {
     }
 }
 
+#[cfg(feature = "pipeline")]
 pub(crate) fn display_command(command: &Command) -> String {
     let mut out = command.get_program().to_string_lossy().into_owned();
     for arg in command.get_args() {
@@ -107,6 +110,7 @@ pub(crate) fn display_command(command: &Command) -> String {
 }
 
 /// Run `command`, failing with a [`Error::Tool`] that names `tool` and `fix`.
+#[cfg(feature = "pipeline")]
 pub(crate) fn run(tool: &'static str, command: &mut Command, fix: &str) -> Result<()> {
     let status = command
         .status()

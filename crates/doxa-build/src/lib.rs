@@ -18,7 +18,7 @@ pub mod config;
 pub mod css;
 #[cfg(feature = "pipeline")]
 pub mod dist;
-#[cfg(feature = "pipeline")]
+#[cfg(feature = "tool")]
 mod error;
 /// The web crate's resolved dependency graph.
 #[cfg(feature = "pipeline")]
@@ -35,12 +35,12 @@ pub mod pipeline;
 pub mod split;
 #[cfg(feature = "pipeline")]
 pub mod stories;
-#[cfg(feature = "pipeline")]
+#[cfg(feature = "tool")]
 pub mod tool;
 
 #[cfg(feature = "client")]
 pub use client::{openapi_from_json, ClientSpec, GenerateError};
-#[cfg(feature = "pipeline")]
+#[cfg(feature = "tool")]
 pub use error::{Error, Result};
 #[cfg(feature = "pipeline")]
 pub use pipeline::{BuildOptions, Pipeline};

@@ -101,7 +101,7 @@ pub use view::{
     Element, IntoAttr, IntoProp, IntoView, Key, SafeUrl, View,
 };
 
-/// An enum of icons read from SVG files at compile time: `#[icons(npm = "lucide-static", dir = "icons")]`.
+/// An enum of SVG icons read at compile time: `#[icons(from = "lucide-static/icons/{kebab}.svg")]`.
 pub use doxa_ui_macros::icons;
 #[cfg(feature = "npm")]
 pub use doxa_ui_macros::npm;

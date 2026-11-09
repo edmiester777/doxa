@@ -82,8 +82,8 @@ pub fn react(args: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// An enum of icons from SVG files: `#[icons(npm = "lucide-static", dir = "icons", case = "kebab")]`,
-/// or `#[icons(dir = "./assets/icons")]` under the crate; `#[icons(file = "…")]` renames a variant's file.
+/// An enum of SVG icons resolved as the bundle imports them: `#[icons(from = "lucide-static/icons/{kebab}.svg")]`
+/// or `"./assets/icons/{kebab}.svg"`; `#[icons(file = "…")]` on a variant replaces its `{kebab}`.
 #[proc_macro_attribute]
 pub fn icons(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as icons::Args);

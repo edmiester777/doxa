@@ -15,11 +15,12 @@ categories = ["development-tools::build-utils", "wasm"]
 default = ["pipeline"]
 # `doxa build`: wasm, bindings, the JS bundle, CSS and a hashed dist.
 pipeline = [
-    "dep:sha2", "dep:hex", "dep:reqwest", "dep:base64", "dep:toml", "dep:tar", "dep:flate2",
-    "dep:brotli", "dep:lightningcss", "dep:wasm-bindgen-cli-support", "dep:doxa-wasm-split",
+    "tool", "dep:toml", "dep:brotli", "dep:lightningcss", "dep:wasm-bindgen-cli-support", "dep:doxa-wasm-split",
     "dep:anyhow", "dep:walrus", "dep:wasmparser", "dep:ar", "dep:subsecond-types",
     "dep:syn", "dep:proc-macro2",
 ]
+# The managed esbuild and Tailwind binaries, which `#[icons]` also resolves through.
+tool = ["dep:sha2", "dep:hex", "dep:reqwest", "dep:base64", "dep:tar", "dep:flate2"]
 # `ClientSpec`: a client crate generated from a server's OpenAPI document, in its `build.rs`.
 client = ["dep:utoipa", "dep:proc-macro2", "dep:quote"]
 
