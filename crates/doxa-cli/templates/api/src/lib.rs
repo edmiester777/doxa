@@ -1,4 +1,4 @@
-//! Every route, declared once: the server implements them and the browser calls them.
+//! Every route, written once: the server runs its body and the browser calls it.
 
 doxa::prelude!();
 
@@ -14,6 +14,12 @@ pub struct Who {
     pub name: Option<String>,
 }
 
+/// Every route.
+#[doxa::service]
+pub struct Api;
+
 /// Say hello.
 #[get("/api/greeting")]
-pub async fn greeting(who: Query<Who>) -> Json<Greeting>;
+pub async fn greeting(Query(who): Query<Who>) -> Json<Greeting> {
+    Json(greet(who.name))
+}

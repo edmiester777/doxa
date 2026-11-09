@@ -113,8 +113,10 @@ struct Args {
     load_with: Option<Path>,
     /// `list = tenant`: emit a `Scoping` confined to the caller's tenant.
     list: Option<Ident>,
-    /// The API crate's `#[doxa::entity]` this asset guards.
+    /// The `#[doxa::entity]` this asset guards.
     entity: Option<Path>,
+    /// `default = false`: a route reaches it only as `Grant<E, by = …>`.
+    not_default: bool,
 }
 
 impl Parse for Args {
@@ -164,11 +166,14 @@ impl Parse for Args {
                 out.load_with = Some(input.parse()?);
             } else if key == "entity" {
                 out.entity = Some(input.parse()?);
+            } else if key == "default" {
+                out.not_default = !input.parse::<syn::LitBool>()?.value;
             } else {
                 return Err(syn::Error::new(
                     key.span(),
                     "unknown `asset` option; expected `profile`, `actions`, `row`, `key`, \
-                     `with`, `list`, `ctx`, `source`, `error`, `load_with` or `entity`",
+                     `with`, `list`, `ctx`, `source`, `error`, `load_with`, `entity` or \
+                     `default`",
                 ));
             }
 
@@ -437,7 +442,13 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             }
         },
     };
-    let of_entity = of_entity(name, args.entity.as_ref());
+    if args.not_default && args.entity.is_none() {
+        return Err(syn::Error::new(
+            name.span(),
+            "`default = false` steps aside for another asset of the same entity: add `entity = …`",
+        ));
+    }
+    let of_entity = of_entity(name, args.entity.as_ref(), !args.not_default);
 
     Ok(quote! {
         #item
@@ -473,11 +484,19 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     })
 }
 
-/// `entity = …`: the declared entity, held to this asset's entity type and key.
-fn of_entity(name: &Ident, entity: Option<&Path>) -> TokenStream {
+/// `entity = …`: the entity, held to this asset's entity type and key, and unless `default`
+/// is off the asset a route's `Grant<entity>` guards with.
+fn of_entity(name: &Ident, entity: Option<&Path>, default: bool) -> TokenStream {
     let Some(entity) = entity else {
         return TokenStream::new();
     };
+    let asset_for = default.then(|| {
+        quote! {
+            impl ::doxa::auth::AssetFor for #entity {
+                type Asset = #name;
+            }
+        }
+    });
     let named = format!(
         "`{name}` guards a different entity type than `{}` declares; name the asset's \
          vocabulary after it, or give the entity `name = \"…\"`",
@@ -491,6 +510,7 @@ fn of_entity(name: &Ident, entity: Option<&Path>) -> TokenStream {
         impl ::doxa::wire::contract::OfEntity for #name {
             type Entity = #entity;
         }
+        #asset_for
 
         const _: () = ::core::assert!(
             ::doxa::wire::str_eq(
@@ -538,6 +558,29 @@ mod tests {
             ),
         );
         assert!(!plain.contains("OfEntity"), "{plain}");
+    }
+
+    #[test]
+    fn the_entitys_default_asset_is_the_one_that_doesnt_step_aside() {
+        let item = quote!(
+            pub struct OrderById;
+        );
+        let default = expand_ok(
+            quote!(profile = P, actions = A, entity = Order),
+            item.clone(),
+        );
+        assert!(
+            default.contains("AssetFor for Order { type Asset = OrderById ; }"),
+            "{default}"
+        );
+        let aside = expand_ok(
+            quote!(profile = P, actions = A, entity = Order, default = false),
+            item.clone(),
+        );
+        assert!(!aside.contains("AssetFor"), "{aside}");
+        assert!(aside.contains("OfEntity for OrderById"), "{aside}");
+        let err = expand(quote!(profile = P, actions = A, default = false), item).unwrap_err();
+        assert!(err.to_string().contains("add `entity = …`"), "{err}");
     }
 
     fn expand_ok(args: TokenStream, item: TokenStream) -> String {

@@ -15,12 +15,12 @@ embed = ["doxa/embed"]
 ```rust
 use doxa::{dist, MountSpaExt, Spa};
 
-let app = shop_server::app(state).mount_spa(Spa::auto(dist!()));
+let app = shop_api::server::app(state).mount_spa(Spa::auto(dist!()));
 ```
 
 ```sh
 doxa build --release -p shop-web
-./target/release/shop-server
+./target/release/shop-api
 ```
 
 `doxa build` compiles the web crate to wasm, runs `wasm-opt` when it's on your `PATH`, bundles the JS and CSS with content hashes, precompresses everything with brotli and gzip, and builds the server with the result inside. `Spa` serves the hashed files with long cache lifetimes and `index.html` for every page route.
@@ -53,7 +53,7 @@ This site is deployed that way. The workflow builds the site, the shop's story g
 ```yaml
 - run: cargo run -q -p doxa-cli -- build --release -p site --out _site --base /doxa/
 - run: cargo run -q -p doxa-cli -- gallery -p shop-web --out _site/gallery --base /doxa/gallery/
-- run: cargo run -q -p shop-server --bin export-docs -- --base /doxa/api/ _site/api
+- run: cargo run -q -p shop-api --bin export-docs -- --base /doxa/api/ _site/api
 - uses: actions/upload-pages-artifact@v3
   with: { path: _site }
 - uses: actions/deploy-pages@v4

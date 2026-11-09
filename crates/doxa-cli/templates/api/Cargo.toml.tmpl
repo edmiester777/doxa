@@ -4,11 +4,24 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# The routes, declared: built for the server and for the browser.
+# The routes: served off wasm, and called from the browser.
 [dependencies]
 doxa = { version = "{{doxa_version}}", features = ["client"] }
 serde = { version = "1", features = ["derive"] }
 utoipa = "5"
 
+# What only the server builds. Code using it lives under `server_only` below.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+doxa = { version = "{{doxa_version}}", features = ["full"] }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+
 [build-dependencies]
 doxa-role = "{{doxa_version}}"
+
+[features]
+# Set by `doxa build`, which compiles the built web app into the binary.
+embed = ["doxa/embed"]
+
+[package.metadata.doxa]
+server_only = ["src/server"]

@@ -55,7 +55,6 @@ inventory::submit! {
         mount: Mount {
             module: module_path!(),
             handler: "capabilities",
-            declared: None,
             build,
             doc,
         },

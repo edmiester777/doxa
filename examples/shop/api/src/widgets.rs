@@ -59,37 +59,80 @@ pub enum WidgetEvent {
     Deleted,
 }
 
+/// Every widget route, behind the caller's role.
+#[doxa::service(layers = caller)]
+pub struct Widgets;
+
 /// One widget, by name.
 #[get("/api/widgets/{name}")]
-pub async fn get_widget(widget: Grant<Widget>) -> Json<Widget>;
+pub async fn get_widget(widget: Grant<Widget>) -> Json<Widget> {
+    Json(widget.into_inner().into())
+}
 
 /// Every widget the caller may see.
 #[get("/api/widgets")]
-pub async fn list_widgets(_: Grant<Many<Widget>>, filter: Query<Filter>) -> Json<Vec<Widget>>;
+pub async fn list_widgets(
+    _: Grant<Many<Widget>>,
+    State(catalog): State<Catalog>,
+    Query(filter): Query<Filter>,
+) -> Json<Vec<Widget>> {
+    Json(catalog.list(filter.contains.as_deref()))
+}
 
 /// Rename a widget.
 #[patch("/api/widgets/{name}")]
 pub async fn rename_widget(
     widget: Grant<Widget>,
-    rename: Valid<Json<Rename>>,
-) -> Result<Json<Widget>, WidgetError>;
+    State(catalog): State<Catalog>,
+    Valid(Json(rename)): Valid<Json<Rename>>,
+) -> Result<Json<Widget>, WidgetError> {
+    catalog.rename(widget.id, &rename.name).map(Json)
+}
 
 /// Suggest a name for a new widget. Anyone may, so nothing guards it.
 #[post("/api/suggestions")]
-pub async fn suggest_name(suggestion: Json<Rename>) -> StatusCode;
+pub async fn suggest_name(
+    State(catalog): State<Catalog>,
+    #[server] Caller(who): Caller,
+    Json(suggestion): Json<Rename>,
+) -> StatusCode {
+    catalog.suggest(format!("{} from {who}", suggestion.name));
+    StatusCode::ACCEPTED
+}
 
 /// A widget's label, as a file to save.
 #[get("/api/widgets/{name}/label")]
-pub async fn widget_label(widget: Grant<Widget>) -> Attachment;
+pub async fn widget_label(widget: Grant<Widget>) -> Attachment {
+    let name = widget.into_inner().name;
+    Attachment::new(format!("{name}\n"))
+        .content_type("text/plain")
+        .filename(format!("{name} label.txt"))
+}
 
 /// Upload a widget's photo; answers its size in bytes.
 #[put("/api/widgets/{name}/photo")]
-pub async fn upload_photo(widget: Grant<Widget>, photo: Bytes) -> Json<usize>;
+pub async fn upload_photo(_widget: Grant<Widget>, photo: Bytes) -> Json<usize> {
+    Json(photo.len())
+}
 
 /// Upload files; answers each field as `name=size`.
 #[post("/api/uploads")]
-pub async fn upload_files(form: Multipart) -> Json<Vec<String>>;
+pub async fn upload_files(form: Multipart) -> Json<Vec<String>> {
+    Json(field_sizes(form).await)
+}
 
 /// What happens to a widget, as it happens.
 #[get("/api/widgets/{name}/events")]
-pub async fn widget_events(widget: Grant<Widget>) -> SseStream<WidgetEvent>;
+pub async fn widget_events(
+    widget: Grant<Widget>,
+) -> SseStream<
+    WidgetEvent,
+    impl futures::Stream<Item = Result<WidgetEvent, std::convert::Infallible>>,
+> {
+    use futures::stream;
+    let name = widget.into_inner().name;
+    SseStream::new(stream::iter([
+        Ok(WidgetEvent::Renamed { name }),
+        Ok(WidgetEvent::Deleted),
+    ]))
+}

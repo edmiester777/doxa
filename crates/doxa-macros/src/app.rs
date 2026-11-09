@@ -27,22 +27,15 @@ pub fn derive_state(input: DeriveInput) -> Result<TokenStream> {
 }
 
 /// The `Mount` a handler submits, unless it said `mount = false`.
-pub fn mount(item_fn: &ItemFn, declared: Option<&TokenStream>) -> TokenStream {
+pub fn mount(item_fn: &ItemFn) -> TokenStream {
     let name = &item_fn.sig.ident;
     let handler = name.to_string();
     let key = crate_key();
-    let declared = match declared {
-        Some(r) => quote!(::core::option::Option::Some(
-            <#r as ::doxa::wire::contract::Declared>::SPEC
-        )),
-        None => quote!(::core::option::Option::None),
-    };
     quote! {
         ::doxa::__private::inventory::submit! {
             ::doxa::__private::Mount {
                 module: ::core::module_path!(),
                 handler: #handler,
-                declared: #declared,
                 build: |state| ::doxa::__private::mount::<_, #key>(::doxa::routes!(#name), state),
                 doc: || ::doxa::__private::describe::<_, #key>(::doxa::routes!(#name)),
             }
@@ -53,10 +46,10 @@ pub fn mount(item_fn: &ItemFn, declared: Option<&TokenStream>) -> TokenStream {
 /// `#[service]` / `#[service(layers = stack)]` on a unit struct.
 pub fn service(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let item: ItemStruct = syn::parse2(item)?;
-    if doxa_macro_support::is_client() || doxa_macro_support::is_api() {
+    if doxa_macro_support::is_client() {
         return Err(syn::Error::new_spanned(
             &item.ident,
-            "a service groups a server's handlers; this crate is a client half or an API crate",
+            "a service groups a server's handlers, and this crate is a client half",
         ));
     }
     let mut layers: Option<Path> = None;
@@ -76,19 +69,22 @@ pub fn service(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
         )),
         None => quote!(::core::option::Option::None),
     };
-    Ok(quote! {
-        // Only doxa reads it.
-        #[allow(dead_code)]
-        #item
+    Ok(doxa_macro_support::tag(
+        doxa_macro_support::Side::Server,
+        quote! {
+            // Only doxa reads it.
+            #[allow(dead_code)]
+            #item
 
-        ::doxa::__private::inventory::submit! {
-            ::doxa::__private::Service {
-                name: #name,
-                module: ::core::module_path!(),
-                layers: #layers,
+            ::doxa::__private::inventory::submit! {
+                ::doxa::__private::Service {
+                    name: #name,
+                    module: ::core::module_path!(),
+                    layers: #layers,
+                }
             }
-        }
-    })
+        },
+    ))
 }
 
 /// `#[layers(docs = [...])]` on `fn(Routes, &State) -> Routes`.

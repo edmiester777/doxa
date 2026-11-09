@@ -24,7 +24,7 @@ async fn main() {
     };
     let spec = format!("{base}openapi.json");
     let opts = MountOpts::default().spec_path(&spec).ui_path(&base);
-    let router = axum::Router::new().mount_docs(shop_server::api_doc(), opts);
+    let router = axum::Router::new().mount_docs(shop_api::server::api_doc(), opts);
 
     std::fs::create_dir_all(&out).unwrap();
     for (path, file) in [(&base, "index.html"), (&spec, "openapi.json")] {

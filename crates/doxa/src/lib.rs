@@ -35,15 +35,6 @@ extern crate self as doxa;
 #[cfg(any(feature = "garde", feature = "validator", feature = "serde-valid"))]
 mod valid;
 
-#[cfg(all(feature = "docs", feature = "client", not(target_arch = "wasm32")))]
-mod answer;
-#[cfg(all(feature = "docs", feature = "client", not(target_arch = "wasm32")))]
-pub use answer::Answer;
-#[cfg(all(feature = "docs", feature = "client", not(target_arch = "wasm32")))]
-#[doc(hidden)]
-pub mod __answer {
-    pub use crate::answer::{answers_as, Answering};
-}
 #[cfg(feature = "serde-valid")]
 pub use valid::serde_valid;
 #[cfg(feature = "validator")]
@@ -120,7 +111,7 @@ pub struct Internal(pub String);
 /// pub async fn n() -> axum::Json<u32> { axum::Json(1) }
 /// ```
 ///
-/// Without one it is a declaration, which only an API crate makes:
+/// A route without one doesn't compile:
 ///
 /// ```compile_fail
 /// # #[derive(Clone, doxa::State)] struct NoState;
@@ -166,8 +157,8 @@ pub mod server {
     pub mod prelude {
         pub use crate::{
             asset, capability, client, client_only, client_pub, delete, dto, entity, get,
-            implements, operation, patch, post, put, server, server_only, Actions, ApiError,
-            Attachment, Identity, IntoParams, PolicyResource, SseEvent, SseStream, ToSchema,
+            operation, patch, post, put, server, server_only, Actions, ApiError, Attachment,
+            Identity, IntoParams, PolicyResource, SseEvent, SseStream, ToSchema,
         };
         pub use axum::extract::{Extension, Form, Path, Query, State};
         pub use axum::http::StatusCode;
@@ -907,28 +898,41 @@ pub mod client {
     }
 }
 
-/// An API crate: route declarations both a server and its clients depend on, built by a
-/// `build.rs` that calls `doxa_role::api()`.
+/// An API crate: routes served off wasm and called everywhere, built by a `build.rs` that
+/// calls `doxa_role::api()`.
 #[cfg(all(feature = "client", feature = "macros"))]
 pub mod api {
-    /// Names an API crate's files use, on every target.
+    /// Names an API crate's files use: the server's extractors off wasm, the client's on it.
     pub mod prelude {
         pub use crate::__api_route_key as route_key;
         #[cfg(feature = "garde")]
         pub use crate::Valid;
-        #[cfg(not(target_arch = "wasm32"))]
-        pub use crate::{IntoParams, ToSchema};
-        pub use doxa_client::{
-            Attachment, Bytes, Form, Json, Multipart, Path, Query, SseStream, StatusCode,
-        };
         pub use doxa_macros::{
             capability, client, client_only, delete, dto, entity, get, patch, post, put, server,
             server_only, Actions, ApiError, Identity, SseEvent,
         };
-        #[cfg(target_arch = "wasm32")]
-        pub use doxa_macros::{ClientIntoParams as IntoParams, ClientToSchema as ToSchema};
         pub use doxa_wire::contract::{Cap, Grant, Many};
         pub use serde::{Deserialize, Serialize};
+
+        #[cfg(target_arch = "wasm32")]
+        pub use doxa_client::{
+            Attachment, Bytes, Form, Json, Multipart, Path, Query, SseStream, StatusCode,
+        };
+        #[cfg(target_arch = "wasm32")]
+        pub use doxa_macros::{ClientIntoParams as IntoParams, ClientToSchema as ToSchema};
+
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use crate::{asset, Attachment, IntoParams, PolicyResource, SseStream, ToSchema};
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use axum::body::Bytes;
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use axum::extract::{Extension, Form, Path, Query, State};
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use axum::http::StatusCode;
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use axum::Json;
+        #[cfg(all(feature = "auth", not(target_arch = "wasm32")))]
+        pub use doxa_auth::{Granted, One, Require};
     }
 }
 

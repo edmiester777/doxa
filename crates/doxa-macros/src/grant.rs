@@ -357,30 +357,10 @@ fn binding_name(pat: &Pat, index: usize) -> String {
     }
 }
 
-/// Where a handler's method and path come from.
-pub enum RouteIs<'a> {
-    /// Its own `#[get("/path")]`.
-    Literal {
-        method: &'a str,
-        path_names: &'a [String],
-    },
-    /// A declaration's `Route` marker, read through `Declared`.
-    Declared(&'a TokenStream),
-}
-
 /// Strip `#[grant(...)]` off every argument, generate a `GrantSite` impl
 /// per `Granted<…>` argument, and rewrite those arguments to name their
 /// action and their site. Returns the generated items.
 pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Result<TokenStream> {
-    rewrite_for(item_fn, &RouteIs::Literal { method, path_names })
-}
-
-/// [`rewrite`], for a route stated either way.
-pub fn rewrite_for(item_fn: &mut ItemFn, route: &RouteIs<'_>) -> Result<TokenStream> {
-    let (method, path_names) = match route {
-        RouteIs::Literal { method, path_names } => (*method, *path_names),
-        RouteIs::Declared(_) => ("", &[][..]),
-    };
     let fn_ident = item_fn.sig.ident.clone();
     let verb = verb_trait(method);
     let mut items = TokenStream::new();
@@ -511,17 +491,9 @@ pub fn rewrite_for(item_fn: &mut ItemFn, route: &RouteIs<'_>) -> Result<TokenStr
                      be resolved from the verb — name it with `#[grant(action = …)]`",
                 )
             })?;
-            Some(match route {
-                RouteIs::Literal { .. } => quote! {
-                    <<#asset as ::doxa::auth::Granting>::Actions
-                        as ::doxa::auth::verb::#verb>::Action
-                },
-                RouteIs::Declared(r) => quote! {
-                    <<#asset as ::doxa::auth::Granting>::Actions
-                        as ::doxa::auth::verb::ForVerb<
-                            <#r as ::doxa::wire::contract::Declared>::Verb,
-                        >>::Action
-                },
+            Some(quote! {
+                <<#asset as ::doxa::auth::Granting>::Actions
+                    as ::doxa::auth::verb::#verb>::Action
             })
         };
 
@@ -537,18 +509,9 @@ pub fn rewrite_for(item_fn: &mut ItemFn, route: &RouteIs<'_>) -> Result<TokenStr
         // One constant the guard and the OpenAPI parameter both read, so
         // a route documented `in: query` cannot be one that looks in the
         // path. `Path` is the default and stays unwritten.
-        let in_const = match (route, source) {
-            (RouteIs::Declared(r), _) if takes_key => quote! {
-                const IN: ::doxa::auth::KeyIn = if ::doxa::wire::contract::has_params(
-                    <#r as ::doxa::wire::contract::Declared>::SPEC.path,
-                ) {
-                    ::doxa::auth::KeyIn::Path
-                } else {
-                    ::doxa::auth::KeyIn::Query
-                };
-            },
-            (_, Source::Path) => quote! {},
-            (_, Source::Query) => {
+        let in_const = match source {
+            Source::Path => quote! {},
+            Source::Query => {
                 quote! { const IN: ::doxa::auth::KeyIn = ::doxa::auth::KeyIn::Query; }
             }
         };
@@ -557,45 +520,27 @@ pub fn rewrite_for(item_fn: &mut ItemFn, route: &RouteIs<'_>) -> Result<TokenStr
         // meet the template. Without it an asset keyed on a column the
         // route does not expose would be a 500 on the first request
         // instead of a build failure.
-        let route_check = match (route, source, takes_key) {
-            (RouteIs::Declared(r), _, true) => instance_asset(&pat_type.ty).map(|asset| {
-                quote! {
-                    const _: () = {
-                        let path = <#r as ::doxa::wire::contract::Declared>::SPEC.path;
-                        assert!(
-                            !::doxa::wire::contract::has_params(path)
-                                || ::doxa::wire::contract::params_include(
-                                    path,
-                                    <#asset as ::doxa::auth::Granting>::KEY_NAMES,
-                                ),
-                            "the declared route's path parameters don't include the ones this \
-                             asset's key is named after",
-                        );
-                    };
-                }
-            }),
-            (RouteIs::Literal { .. }, Source::Path, true) => {
-                instance_asset(&pat_type.ty).map(|asset| {
-                    let route_lits = path_names
-                        .iter()
-                        .map(|name| LitStr::new(name, Span::call_site()));
-                    let message = format!(
-                        "this route's path parameters ({}) do not include the ones this asset's \
+        let route_check = match (source, takes_key) {
+            (Source::Path, true) => instance_asset(&pat_type.ty).map(|asset| {
+                let route_lits = path_names
+                    .iter()
+                    .map(|name| LitStr::new(name, Span::call_site()));
+                let message = format!(
+                    "this route's path parameters ({}) do not include the ones this asset's \
                      key is named after — spell the segment the way the key spells its field, \
                      or rename the field with `#[resource(key = \"…\")]`",
-                        path_names.join(", "),
+                    path_names.join(", "),
+                );
+                quote! {
+                    const _: () = assert!(
+                        ::doxa::auth::names_within(
+                            <#asset as ::doxa::auth::Granting>::KEY_NAMES,
+                            &[#(#route_lits),*],
+                        ),
+                        #message,
                     );
-                    quote! {
-                        const _: () = assert!(
-                            ::doxa::auth::names_within(
-                                <#asset as ::doxa::auth::Granting>::KEY_NAMES,
-                                &[#(#route_lits),*],
-                            ),
-                            #message,
-                        );
-                    }
-                })
-            }
+                }
+            }),
             _ => None,
         };
 

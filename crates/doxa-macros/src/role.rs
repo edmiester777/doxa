@@ -8,8 +8,9 @@ use syn::{Data, DeriveInput, Fields, Ident, Type};
 
 use doxa_macro_support::{tag, Side};
 
-/// `doxa::prelude!()`: the glob for this crate's role.
-pub fn prelude(input: TokenStream) -> syn::Result<TokenStream> {
+/// `doxa::prelude!()` called from `file`: the glob for this crate's role, and in an API crate
+/// its one-sided modules.
+pub fn prelude(input: TokenStream, file: Option<std::path::PathBuf>) -> syn::Result<TokenStream> {
     if !input.is_empty() {
         return Err(syn::Error::new_spanned(
             input,
@@ -34,11 +35,56 @@ pub fn prelude(input: TokenStream) -> syn::Result<TokenStream> {
             }
         }
     });
+    let sided = (doxa_macro_support::Role::current() == doxa_macro_support::Role::Api)
+        .then(|| sided_modules(file.as_deref()));
     Ok(quote! {
         #[allow(unused_imports)]
         use ::doxa::#half::prelude::*;
         #service
+        #sided
     })
+}
+
+/// The `server_only` / `client_only` modules: declared at the crate root, imported everywhere.
+fn sided_modules(file: Option<&std::path::Path>) -> TokenStream {
+    let names = |env: &str| -> Vec<Ident> {
+        std::env::var(env)
+            .unwrap_or_default()
+            .split(',')
+            .filter(|n| !n.is_empty())
+            .map(|n| Ident::new(n, proc_macro2::Span::call_site()))
+            .collect()
+    };
+    let lib = std::env::var("DOXA_LIB").ok().map(std::path::PathBuf::from);
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+    let at_root = match (file.and_then(canonical), lib.as_deref().and_then(canonical)) {
+        (Some(file), Some(lib)) => file == lib,
+        _ => false,
+    };
+    let dir = lib.as_deref().and_then(std::path::Path::parent);
+    let mut out = TokenStream::new();
+    for (env, on) in [
+        ("DOXA_SERVER_ONLY", quote!(not(target_arch = "wasm32"))),
+        ("DOXA_CLIENT_ONLY", quote!(target_arch = "wasm32")),
+    ] {
+        for name in names(env) {
+            if let (true, Some(dir)) = (at_root, dir) {
+                let path = dir.join(name.to_string()).join("mod.rs");
+                let path = syn::LitStr::new(&path.to_string_lossy(), name.span());
+                out.extend(quote! {
+                    #[cfg(#on)]
+                    #[path = #path]
+                    pub mod #name;
+                });
+            }
+            out.extend(quote! {
+                #[cfg(#on)]
+                #[allow(unused_imports)]
+                use crate::#name::*;
+            });
+        }
+    }
+    out
 }
 
 /// `#[server]` / `#[client]` on any item: keep it only in that half.

@@ -3,6 +3,7 @@
 mod check;
 mod dev;
 mod new;
+mod view;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

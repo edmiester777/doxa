@@ -21,7 +21,7 @@ web-sys = { version = "0.3", features = ["AddEventListenerOptions", "CssStyleDec
 
 [package.metadata.doxa]
 role = "client"
-server = "shop-server"
+server = "shop-api"
 wasm_budget_kb = 450
 css = ["style/app.css"]
 library = { name = "@shop/kit", scope = ".shop-kit" }
@@ -31,7 +31,6 @@ react = "^19"
 react-dom = "^19"
 
 [dev-dependencies]
-shop-server = { path = "../server" }
 doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind", "client-router"] }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -19,7 +19,7 @@ fn serve(role: &str) {
     let s = shop_api::service();
     SERVED.with(|g| g.borrow_mut().take());
     s.end_session();
-    let router = shop_server::app(shop_server::seeded());
+    let router = shop_api::server::app(shop_api::server::seeded());
     let guard = s.layers().push_scoped(transport(
         RouterTransport::new(router).with_header("x-role", role),
     ));

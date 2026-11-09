@@ -1,10 +1,10 @@
 # Routes as functions
 
-This is the full-stack part. Put a route's *signature* in a crate both halves build. The server implements it, and the browser calls it like any `async fn`. The URL, method, query, body, response and error type are written once, and the compiler holds both sides to them.
+This is the full-stack part. Write a route in a crate both halves build. The server runs it, and the browser calls it like any `async fn`. The URL, method, query, body, response and error type are written once, so the two sides can't disagree.
 
-## Declare
+## Write
 
-An API crate holds declarations: signatures with no body. Its `build.rs` is one line:
+An API crate's `build.rs` is one line:
 
 ```rust
 // shop-api/build.rs
@@ -30,49 +30,22 @@ pub struct Rename {
 
 /// One widget, by name.
 #[get("/api/widgets/{name}")]
-pub async fn get_widget(widget: Grant<Widget>) -> Json<Widget>;
-
-/// Rename a widget.
-#[patch("/api/widgets/{name}")]
-pub async fn rename_widget(widget: Grant<Widget>, rename: Valid<Json<Rename>>)
-    -> Result<Json<Widget>, WidgetError>;
-```
-
-`#[dto]` derives serde both ways, `ToSchema`, `Debug`, `Clone` and `PartialEq` (`#[dto(query)]` adds `IntoParams`). The crate builds for wasm, so keep server-only dependencies under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`. `doxa check --wire -p shop-api` builds it for the browser and names whatever dependency gets in the way.
-
-## Implement
-
-```rust
-// shop-server/src/widgets.rs
-#[asset(row = WidgetRow, key = WidgetKey, profile = WidgetGrants,
-        actions = WidgetAction, entity = shop_api::widgets::Widget)]
-pub struct WidgetByName;
-
-#[implements(shop_api::widgets::get_widget)]
-async fn get_widget(widget: Granted<WidgetByName>) -> Json<Widget> {
+pub async fn get_widget(widget: Grant<Widget>) -> Json<Widget> {
     Json(widget.into_inner().into())
 }
 
-#[implements(shop_api::widgets::rename_widget)]
-async fn rename_widget(
-    widget: Granted<WidgetByName>,
-    State(catalog): State<Catalog>,          // server-only extractors go anywhere
+/// Rename a widget.
+#[patch("/api/widgets/{name}")]
+pub async fn rename_widget(
+    widget: Grant<Widget>,
+    State(catalog): State<Catalog>,
     Valid(Json(rename)): Valid<Json<Rename>>,
 ) -> Result<Json<Widget>, WidgetError> {
     catalog.rename(widget.id, &rename.name).map(Json)
 }
 ```
 
-`#[implements]` mounts the handler at the declared method and path, and fails to compile if it takes or returns something the declaration doesn't. The declaration's doc comment, tags and operation id become the operation's. Forget to implement a route and `doxa::app` tells you which one.
-
-A handler may fail with its own error as long as it converts into the declared one. Put the conversion beside the error, compiled for the server only:
-
-```rust
-#[server]
-impl From<sea_orm::DbErr> for OrderError {
-    fn from(e: sea_orm::DbErr) -> Self { OrderError::Internal(e.to_string()) }
-}
-```
+`#[dto]` derives serde both ways, `ToSchema`, `Debug`, `Clone` and `PartialEq` (`#[dto(query)]` adds `IntoParams`). `Catalog` and the `#[asset(…, entity = Widget)]` that guards `Grant<Widget>` live in `src/server/`, which `server_only` keeps out of the browser build. [Routes both halves build](02-routes.md#routes-both-halves-build) covers what goes where. `doxa check --wire -p shop-api` builds the crate for the browser and names whatever dependency gets in the way.
 
 ## Call
 
@@ -121,7 +94,7 @@ Across origins, add `.layer(doxa::Cors::allow([app_origin]))` to the server (fea
 
 ## Other ways to share routes
 
-**Compiled twice.** The routes *with* their bodies live in a shared crate, and a client crate is the same source with `[lib] path = "../api/src/lib.rs"` and `doxa_role::client()` in its `build.rs`. Server-only items take `#[server]` or `doxa::server_only! { … }`. Every dependency a handler touches has to be gated, which is why `doxa new` declares instead.
+**A separate client crate.** The server crate keeps its routes, and a client crate is the same source with `[lib] path = "../server/src/lib.rs"` and `doxa_role::client()` in its `build.rs`. Every server-only item then takes `#[server]` or `doxa::server_only! { … }`, one by one, which is what an API crate's `server_only` directories save you.
 
 **From an OpenAPI document.** For a server you don't control, generate the client crate from its spec at build time:
 
@@ -141,4 +114,4 @@ doxa::include_client!();
 
 A saved `openapi.json` goes through `doxa_build::openapi_from_json(&text)?` first. The calls are made by the same machinery, so they cache, invalidate, dry-run and stream the same way.
 
-The [shop example](../../shop) uses declarations throughout. Its tests call every route through the real router, in-process.
+The [shop example](../../shop) writes every route this way. Its tests call every route through the real router, in-process.

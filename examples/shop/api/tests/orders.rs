@@ -16,7 +16,7 @@ fn install(role: &str) {
     let s = shop_api::service();
     SERVED.with(|g| g.borrow_mut().take());
     s.end_session();
-    let router = RouterTransport::new(shop_server::app(shop_server::seeded()));
+    let router = RouterTransport::new(shop_api::server::app(shop_api::server::seeded()));
     let guard = s
         .layers()
         .push_scoped(transport(router.with_header("x-role", role)));
@@ -24,14 +24,14 @@ fn install(role: &str) {
 }
 
 #[tokio::test]
-async fn a_declared_route_is_called_by_its_key_and_answers_the_handlers_value() {
+async fn a_route_is_called_by_its_key_and_answers_the_bodys_value() {
     install("viewer");
     let order = get_order(OrderKey { id: 2 }).await.unwrap();
     assert_eq!(order.item, "gear");
 }
 
 #[tokio::test]
-async fn the_declared_error_comes_back_typed() {
+async fn the_routes_error_comes_back_typed() {
     install("clerk");
     let err = place_order(NewOrder {
         item: "unobtainium".into(),
@@ -88,7 +88,7 @@ async fn a_route_that_opts_out_is_never_asked() {
 }
 
 #[tokio::test]
-async fn the_servers_guard_answers_the_declarations_dry_run() {
+async fn the_servers_guard_answers_the_dry_run() {
     install("viewer");
     assert_eq!(
         cancel_order::can(OrderKey { id: 1 }).await,
@@ -102,7 +102,7 @@ async fn the_servers_guard_answers_the_declarations_dry_run() {
 }
 
 #[tokio::test]
-async fn a_declared_stream_streams() {
+async fn a_stream_streams() {
     install("viewer");
     let mut events = order_events().await.unwrap();
     assert!(matches!(
@@ -112,8 +112,8 @@ async fn a_declared_stream_streams() {
 }
 
 #[test]
-fn the_document_names_each_route_by_its_declaration() {
-    let api = doxa::__private::IntoSpec::into_spec(shop_server::api_doc());
+fn the_document_names_each_route_by_its_function() {
+    let api = doxa::__private::IntoSpec::into_spec(shop_api::server::api_doc());
     let op = api.paths.paths["/api/orders/{id}"].delete.as_ref().unwrap();
     assert_eq!(op.operation_id.as_deref(), Some("cancel_order"));
     assert_eq!(op.summary.as_deref(), Some("Cancel an order."));
@@ -170,15 +170,15 @@ async fn a_capability_only_route_answers_can_from_the_callers_capabilities() {
 }
 
 #[tokio::test]
-async fn a_declared_202_answers_with_the_return_types_body() {
+async fn a_202_answers_with_the_return_types_body() {
     install("viewer");
     let (status, count) = count_orders().await.unwrap();
     assert_eq!((status, count), (202, 2));
 }
 
 #[test]
-fn a_declarations_responses_reach_the_document() {
-    let api = doxa::__private::IntoSpec::into_spec(shop_server::api_doc());
+fn a_routes_responses_reach_the_document() {
+    let api = doxa::__private::IntoSpec::into_spec(shop_api::server::api_doc());
     let op = api.paths.paths["/api/orders/count"].post.as_ref().unwrap();
     let mut statuses: Vec<_> = op.responses.responses.keys().cloned().collect();
     statuses.sort();

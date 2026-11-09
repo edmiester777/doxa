@@ -33,7 +33,7 @@ jobs:
       run: rustup target add wasm32-unknown-unknown
     - name: Check the client half for the browser
       run: |
-        cargo check -p doxa-client -p doxa-ui -p shop-api -p shop-web -p site --target wasm32-unknown-unknown
+        cargo check -p doxa-client -p doxa-ui -p shop-api -p shop-web -p site --lib --target wasm32-unknown-unknown
         cargo check -p doxa --features react --target wasm32-unknown-unknown
 
   browser:
@@ -73,7 +73,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install 1.85
-      run: rustup toolchain install 1.85 --profile minimal
+    - name: Install 1.88
+      run: rustup toolchain install 1.88 --profile minimal
     - name: Check on the minimum supported Rust
-      run: cargo +1.85 check --workspace --all-features
+      run: cargo +1.88 check --workspace --all-features

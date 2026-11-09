@@ -74,30 +74,23 @@ doxa new hello && cd hello
 doxa dev
 ```
 
-`doxa new` writes three crates:
+`doxa new` writes two crates:
 
 | Crate | What it is |
 |---|---|
-| `hello-api` | The routes, declared: signatures and types, built for the server and the browser. |
-| `hello-server` | The axum app: implements each route and serves the built web app. |
+| `hello-api` | The routes and their types, built for the server and the browser, and the server binary that serves them with the built web app. |
 | `hello-web` | The pages, compiled to wasm. |
 
-The API crate declares the route, with no body:
+The API crate writes the route once:
 
 ```rust
 #[get("/api/greeting")]
-pub async fn greeting(who: Query<Who>) -> Json<Greeting>;
-```
-
-The server implements it:
-
-```rust
-#[implements(hello_api::greeting)]
-async fn greeting(Query(who): Query<Who>) -> Json<Greeting> {
-    let name = who.name.unwrap_or_else(|| "world".into());
-    Json(Greeting { message: format!("Hello, {name}!") })
+pub async fn greeting(Query(who): Query<Who>) -> Json<Greeting> {
+    Json(greet(who.name))
 }
 ```
+
+The server runs the body. `greet` is in `hello-api/src/server/`, which the crate's `Cargo.toml` lists as `server_only`, so the browser build never compiles it.
 
 `doxa dev` builds everything, runs the server at `http://127.0.0.1:3000` and patches each change to the web crate into the running page. The home page calls the route like this:
 
@@ -109,7 +102,7 @@ async fn Home(name: Option<String>) -> Result<View> {
 }
 ```
 
-`greeting` is the declared route, called like an `async fn`. The URL, query string, JSON and error type all come from its signature, and the compiler checks the server's implementation against it.
+In the browser, `greeting` is the same route, called like an `async fn`. The URL, query string, JSON and error type all come from its signature, so the call and the handler can't disagree.
 
 ## Pick features
 

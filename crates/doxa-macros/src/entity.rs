@@ -1,4 +1,4 @@
-//! `#[doxa::entity(key = OrderKey)]`: a type a declared route's `Grant<…>` guards.
+//! `#[doxa::entity(key = OrderKey)]`: a type a route's `Grant<…>` guards.
 
 use proc_macro2::TokenStream;
 use quote::quote;

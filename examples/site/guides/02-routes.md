@@ -14,6 +14,84 @@ async fn get_widget(Path(id): Path<u32>) -> Result<Json<Widget>, WidgetError> {
 
 `#[get]`, `#[post]`, `#[put]`, `#[patch]` and `#[delete]` read the signature: the path parameters, the query and body extractors, the success body and the error type. Each becomes part of the OpenAPI operation. The doc comment becomes its summary and description.
 
+## Routes both halves build
+
+In an API crate (one whose `build.rs` calls `doxa_role::api()`), every route is compiled twice. Off wasm it's the handler. On wasm the body is dropped and the same name becomes a typed call the browser makes. So the server's code has to stay out of the browser build without a `#[cfg]` on every line.
+
+### Server-only directories
+
+List them in the API crate's `Cargo.toml`:
+
+```toml
+[package.metadata.doxa]
+server_only = ["src/server"]   # stores, queries, assets, layers
+client_only = ["src/browser"]  # anything only the browser compiles
+
+# Their dependencies, likewise: wasm never builds these.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sqlx = { version = "0.8", features = ["postgres"] }
+```
+
+Each entry is a directory beside `lib.rs` with a `mod.rs`. You don't write `mod server;`: the crate root's `doxa::prelude!()` declares it, and every module's `doxa::prelude!()` imports its `pub` items on the side that compiles it. A route file can name `Catalog` from `src/server/` with no `use`, and the wasm build never opens a file in that directory. Editing one under `doxa dev` rebuilds only the server.
+
+### Keep the body thin
+
+The body is the one place in a shared file that can name anything server-side, because the browser never compiles it. Make it a wrapper that calls into `src/server/`:
+
+```rust
+// src/widgets.rs, shared
+#[patch("/api/widgets/{name}")]
+pub async fn rename_widget(
+    widget: Grant<Widget>,
+    State(catalog): State<Catalog>,
+    Valid(Json(rename)): Valid<Json<Rename>>,
+) -> Result<Json<Widget>, WidgetError> {
+    catalog.rename(widget.id, &rename.name).map(Json)
+}
+
+// src/server/widgets.rs, server only
+impl Catalog {
+    pub fn rename(&self, id: u32, name: &str) -> Result<Widget, WidgetError> { /* … */ }
+}
+```
+
+The logic, its tests and its dependencies sit where the browser never looks. The shared file holds what both halves agree on: the path, the arguments and the answer. `doxa dev` also hashes each shared file with its route bodies removed, so an edit that only touches a body skips the wasm rebuild too.
+
+### Imports go inside the body
+
+A `use` at the top of a shared file is compiled for both halves, so `use sqlx::PgPool;` there breaks the browser build. Put it in the body, which the browser drops:
+
+```rust
+#[get("/api/widgets/{name}/events")]
+pub async fn widget_events(widget: Grant<Widget>)
+    -> SseStream<WidgetEvent, impl futures::Stream<Item = Result<WidgetEvent, std::convert::Infallible>>>
+{
+    use futures::stream;
+    let name = widget.into_inner().name;
+    SseStream::new(stream::iter([Ok(WidgetEvent::Renamed { name })]))
+}
+```
+
+Server-only names can also be re-exported from `src/server/mod.rs` (`pub use axum::extract::Multipart;`), and they come in with the rest of it.
+
+### What a signature may name
+
+The browser reads the signature, so it names what both halves have: your `#[dto]` types, `Json`, `Query`, `Path`, `Form`, `Bytes`, `Multipart`, `SseStream`, `Attachment` and `StatusCode`, which `doxa::prelude!()` gives each half its own version of. The browser drops `State<…>`, `Extension<…>` and the other extractors only the server reads. For one doxa doesn't know, mark the argument `#[server]`:
+
+```rust
+pub async fn suggest_name(#[server] Caller(who): Caller, Json(s): Json<Rename>) -> StatusCode
+```
+
+### Guards by entity
+
+The browser knows entities, not the server's assets, so a route guards with `Grant<…>`. `Grant<Widget>` uses the asset whose `#[asset(…)]` says `entity = Widget`, and `Grant<Many<Widget>>` scopes a listing by it. When an entity has a second asset, give that one `default = false` and name it on the route that uses it:
+
+```rust
+pub async fn widget_by_id(widget: Grant<Widget, by = WidgetById>) -> Json<Widget> { /* … */ }
+```
+
+The browser sends the entity's key either way. `Grant<Cap<order_action::Place>>` asks for a capability instead.
+
 ## Typed errors, grouped by status
 
 Derive `ApiError` and each variant becomes a response. Variants that share a status merge into one response with an example each:
@@ -101,7 +179,7 @@ The body is plain `.layer()` calls. `docs = [...]` says what the stack adds to e
 
 ## One state, checked
 
-`#[derive(doxa::State)]` marks the crate's state. Every handler's `State<T>` is checked against it with `FromRef` at compile time, so there's no state type to name on each route. `doxa::app(&state)` and `doxa::spec()` stop with a clear message on a route under no service, two services in one module, two types claiming one schema name, or a declared route nothing implements.
+`#[derive(doxa::State)]` marks the crate's state. Every handler's `State<T>` is checked against it with `FromRef` at compile time, so there's no state type to name on each route. `doxa::app(&state)` and `doxa::spec()` stop with a clear message on a route under no service, two services in one module, or two types claiming one schema name.
 
 ## Putting it together
 

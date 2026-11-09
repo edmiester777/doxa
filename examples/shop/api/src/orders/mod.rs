@@ -1,4 +1,10 @@
-//! Orders for widgets.
+//! Orders for widgets: reads anyone may make, and changes that need a role.
+
+mod private;
+mod public;
+
+pub use private::*;
+pub use public::*;
 
 doxa::prelude!();
 
@@ -75,40 +81,3 @@ pub enum OrderEvent {
     Placed { id: u32 },
     Cancelled { id: u32 },
 }
-
-/// One order.
-#[get("/api/orders/{id}")]
-pub async fn get_order(order: Grant<Order>) -> Result<Json<Order>, OrderError>;
-
-/// Cancel an order.
-#[delete("/api/orders/{id}")]
-pub async fn cancel_order(order: Grant<Order>) -> Result<StatusCode, OrderError>;
-
-/// Refund an order, if its payment allows; the guard alone can't say, so `<Can>` doesn't ask.
-#[post("/api/orders/{id}/refund", dry_run = false)]
-pub async fn refund_order(order: Grant<Order>) -> Result<StatusCode, OrderError>;
-
-/// Every order, narrowed by `filter`.
-#[get("/api/orders")]
-pub async fn list_orders(_: Grant<Many<Order>>, filter: Query<OrderFilter>) -> Json<Vec<Order>>;
-
-/// Place an order.
-#[post("/api/orders")]
-pub async fn place_order(
-    _: Grant<Cap<order_action::Place>>,
-    order: Valid<Json<NewOrder>>,
-) -> Result<Json<Order>, OrderError>;
-
-/// Orders as they're placed and cancelled.
-#[get("/api/orders/events")]
-pub async fn order_events() -> SseStream<OrderEvent>;
-
-/// Count every order: at once while there are few, or queued once there are many.
-#[post(
-    "/api/orders/count",
-    responses(
-        (status = 200, description = "Counted"),
-        (status = 202, description = "Queued; this is the count so far"),
-    )
-)]
-pub async fn count_orders() -> (StatusCode, Json<usize>);

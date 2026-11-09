@@ -4,13 +4,10 @@ use doxa::ui::prelude::*;
 
 use crate::{highlight_all, outside, GuidePage, GuidesPage, VERSION};
 
-const HERO: &str = r#"// api: the contract, built for the server *and* the browser
+const HERO: &str = r#"// api: written once, built for the server *and* the browser.
+// The server runs the body; the guard, the OpenAPI entry and the audit trail come along.
 #[get("/api/widgets/{name}")]
-pub async fn get_widget(widget: Grant<Widget>) -> Json<Widget>;
-
-// server: implement it. The guard, the OpenAPI entry and the audit trail come along.
-#[implements(shop_api::widgets::get_widget)]
-async fn get_widget(widget: Granted<WidgetByName>) -> Json<Widget> {
+pub async fn get_widget(widget: Grant<Widget>) -> Json<Widget> {
     Json(widget.into_inner().into())
 }
 

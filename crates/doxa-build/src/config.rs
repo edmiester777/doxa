@@ -44,6 +44,12 @@ pub struct DoxaConfig {
     /// Path prefix to the upstream `doxa dev` forwards it to.
     #[serde(default)]
     pub proxy: BTreeMap<String, Upstream>,
+    /// In an API crate, directories beside the lib root that only the server compiles.
+    #[serde(default)]
+    pub server_only: Vec<String>,
+    /// In an API crate, directories beside the lib root that only the browser compiles.
+    #[serde(default)]
+    pub client_only: Vec<String>,
 }
 
 /// `"/dl" = { to = "http://localhost:3100", env = "LAKE_URL", strip = true }`.
@@ -164,7 +170,7 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, and npm, services, preprocess and proxy tables",
+                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, server_only, client_only, and npm, services, preprocess and proxy tables",
                 )
             }),
         }
@@ -288,6 +294,17 @@ impl Workspace {
         dirs.sort();
         dirs.dedup();
         dirs
+    }
+
+    /// Every member's `server_only` and `client_only` directories, absolute.
+    pub fn sided_dirs(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let (mut server, mut client) = (Vec::new(), Vec::new());
+        for p in &self.packages {
+            let Ok(Some(config)) = p.doxa() else { continue };
+            server.extend(config.server_only.iter().map(|d| p.dir().join(d)));
+            client.extend(config.client_only.iter().map(|d| p.dir().join(d)));
+        }
+        (server, client)
     }
 
     /// Where doxa keeps its outputs.

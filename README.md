@@ -13,9 +13,9 @@ doxa is a full-stack Rust framework. The server is [axum](https://github.com/tok
 
 ## One route, both sides
 
-A doxa app is three crates. This is the app `doxa new` writes.
+A doxa app is two crates. This is the app `doxa new` writes.
 
-**`api`** declares the route. No body, just the contract, built for the server and the browser:
+**`api`** holds the route, written once. The server runs its body, and the browser's build drops the body and keeps a typed call:
 
 ```rust
 doxa::prelude!();
@@ -32,18 +32,12 @@ pub struct Who {
 
 /// Say hello.
 #[get("/api/greeting")]
-pub async fn greeting(who: Query<Who>) -> Json<Greeting>;
-```
-
-**`server`** implements it. The compiler holds the handler to the declaration:
-
-```rust
-#[implements(hello_api::greeting)]
-async fn greeting(Query(who): Query<Who>) -> Json<Greeting> {
-    let name = who.name.unwrap_or_else(|| "world".into());
-    Json(Greeting { message: format!("Hello, {name}!") })
+pub async fn greeting(Query(who): Query<Who>) -> Json<Greeting> {
+    Json(greet(who.name))
 }
 ```
+
+`greet` lives in `api/src/server/`, which `server_only = ["src/server"]` in the crate's `Cargo.toml` keeps out of the browser build. That's where the database, the stores and anything else server-only go.
 
 **`web`** calls it. A page, compiled to wasm, awaiting the server like a local function:
 
@@ -131,7 +125,7 @@ Open `http://127.0.0.1:3000/docs`. Your route is there with its parameter, its b
 
 | | | |
 |---|---|---|
-| **Routes as functions** | Declare once, implement on the server, call from the browser | [Guide](https://edmiester777.github.io/doxa/guides/api-crates) |
+| **Routes as functions** | Write the route once, served by the server and called from the browser | [Guide](https://edmiester777.github.io/doxa/guides/api-crates) |
 | **Permissions in the UI** | A capability guards the route on the server; `<Can>` and `has()` ask the same question in the browser | [Guide](https://edmiester777.github.io/doxa/guides/api-crates#capabilities-in-the-browser) |
 
 **In the browser**
@@ -171,7 +165,7 @@ The `doxa` CLI (`cargo install doxa-cli`) scaffolds (`doxa new`), develops with 
 
 ## Examples
 
-- [`examples/shop`](https://github.com/edmiester777/doxa/tree/main/examples/shop): a full-stack widget shop in three crates (API, server, web), with page tests, stories, React interop and a Vite host app.
+- [`examples/shop`](https://github.com/edmiester777/doxa/tree/main/examples/shop): a full-stack widget shop in two crates (API and web), with page tests, stories, React interop and a Vite host app.
 - [`examples/site`](https://github.com/edmiester777/doxa/tree/main/examples/site): the website above, built with doxa and published by a GitHub Actions workflow.
 
 ## Why

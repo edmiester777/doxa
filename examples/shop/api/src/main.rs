@@ -2,7 +2,7 @@ use doxa::{dist, MountSpaExt, Spa};
 
 #[tokio::main]
 async fn main() {
-    let app = shop_server::app(shop_server::seeded())
+    let app = shop_api::server::app(shop_api::server::seeded())
         // The example has no sign-in: a browser that sends no `x-role` acts as an admin.
         .layer(axum::middleware::from_fn(
             |mut req: axum::extract::Request, next: axum::middleware::Next| async move {

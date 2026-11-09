@@ -19,7 +19,6 @@ members = [
     "crates/doxa-wasm-split",
     "crates/doxa-cli",
     "examples/shop/api",
-    "examples/shop/server",
     "examples/shop/web",
     "examples/site",
     "crates/doxa-fmt",
@@ -43,7 +42,7 @@ license = "Apache-2.0"
 authors = ["edmiester777"]
 repository = "https://github.com/edmiester777/doxa"
 homepage = "https://github.com/edmiester777/doxa"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Internal crates

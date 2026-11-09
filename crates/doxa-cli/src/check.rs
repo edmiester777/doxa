@@ -23,6 +23,7 @@ pub fn wire(package: &str) -> Result<(), Failure> {
             "check",
             "-p",
             package,
+            "--lib",
             "--target",
             TARGET,
             "--message-format=json",

@@ -1,10 +1,4 @@
-//! Where orders live, and the services that serve them.
-
-mod private;
-mod public;
-
-pub use private::OrdersPrivate;
-pub use public::OrdersPublic;
+//! Where orders live, and how a guard finds one.
 
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
@@ -13,7 +7,7 @@ use doxa::auth::{CapabilityContext, FromState, GrantProfile};
 use doxa::policy::{Fetch, FetchByKey, FetchSubset};
 use doxa::{asset, PolicyResource};
 
-use shop_api::orders::{Order, OrderAction, OrderError, OrderKey};
+use crate::orders::{NewOrder, Order, OrderAction, OrderError, OrderKey};
 
 /// An order as the server stores it.
 #[derive(Debug, Clone, serde::Serialize, PolicyResource)]
@@ -42,7 +36,7 @@ impl From<OrderRow> for Order {
     profile = OrderGrants,
     actions = OrderAction,
     list = tenant,
-    entity = shop_api::orders::Order
+    entity = Order
 )]
 pub struct OrderById;
 
@@ -65,7 +59,40 @@ impl Store {
         Self(Arc::new(RwLock::new(orders)))
     }
 
-    fn remove(&self, id: u32) -> Result<(), Gone> {
+    /// Every order, or those for `item`.
+    pub fn list(&self, item: Option<&str>) -> Vec<Order> {
+        let orders = self.0.read().unwrap();
+        orders
+            .iter()
+            .filter(|o| item.is_none_or(|i| o.item == i))
+            .cloned()
+            .map(Order::from)
+            .collect()
+    }
+
+    /// How many orders there are.
+    pub fn count(&self) -> usize {
+        self.0.read().unwrap().len()
+    }
+
+    /// Place `new` under the next id.
+    pub fn place(&self, new: NewOrder) -> Result<Order, OrderError> {
+        if new.item == "unobtainium" {
+            return Err(OrderError::OutOfStock(new.item));
+        }
+        let mut orders = self.0.write().unwrap();
+        let next = orders.iter().map(|o| u64::from(o.id)).max().unwrap_or(0) + 1;
+        let row = OrderRow {
+            id: u32::try_from(next)?,
+            item: new.item,
+            quantity: new.quantity,
+        };
+        orders.push(row.clone());
+        Ok(row.into())
+    }
+
+    /// Drop order `id`.
+    pub fn remove(&self, id: u32) -> Result<(), Gone> {
         let mut orders = self.0.write().unwrap();
         let at = orders.iter().position(|o| o.id == id).ok_or(Gone(id))?;
         orders.remove(at);

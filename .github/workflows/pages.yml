@@ -34,7 +34,7 @@ jobs:
     - name: Build the shop's story gallery
       run: cargo run -q -p doxa-cli -- gallery -p shop-web --out _site/gallery --base $BASE/gallery/
     - name: Write the shop's API reference
-      run: cargo run -q -p shop-server --bin export-docs -- --base $BASE/api/ _site/api
+      run: cargo run -q -p shop-api --bin export-docs -- --base $BASE/api/ _site/api
     - uses: actions/configure-pages@v5
     - uses: actions/upload-pages-artifact@v3
       with:

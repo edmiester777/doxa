@@ -1,9 +1,7 @@
 //! Handlers that mount themselves into services, under a state none of them names.
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet};
 
-use doxa_wire::RouteSpec;
 use utoipa::openapi::OpenApi;
 use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouter};
 
@@ -44,8 +42,6 @@ pub struct Mount {
     pub module: &'static str,
     /// The handler's name.
     pub handler: &'static str,
-    /// The declared route it implements, if any.
-    pub declared: Option<&'static RouteSpec>,
     /// The handler routed under the given state, or `None` when it's another type.
     pub build: fn(&dyn Any) -> Option<Routes>,
     /// The handler's operation and schemas.
@@ -206,7 +202,6 @@ impl Plan {
             }
         }
 
-        problems.extend(unimplemented(&mounts));
         for (name, types) in crate::schemas::duplicate_schemas() {
             problems.push(format!(
                 "the schema name `{name}` belongs to {}, and a document keeps only one: rename \
@@ -223,38 +218,6 @@ impl Plan {
     }
 }
 
-/// Declared routes no handler implements, in the API crates the app implements any route of.
-fn unimplemented(mounts: &[&'static Mount]) -> Vec<String> {
-    let done: Vec<&'static RouteSpec> = mounts.iter().filter_map(|m| m.declared).collect();
-    let packages: BTreeSet<&str> = done.iter().map(|s| s.package).collect();
-    let mut missing: BTreeMap<(&str, &str), &RouteSpec> = BTreeMap::new();
-    for d in inventory::iter::<crate::contract::Declared> {
-        let spec = d.0;
-        if packages.contains(spec.package)
-            && !done
-                .iter()
-                .any(|s| s.method == spec.method && s.path == spec.path)
-        {
-            missing.insert((spec.path, spec.method.as_str()), spec);
-        }
-    }
-    missing
-        .values()
-        .map(|s| {
-            format!(
-                "{} declares `{}` ({} {}), which no handler implements: add \
-                 `#[doxa::implements({}::{})]` to one",
-                s.package,
-                s.operation_id,
-                s.method.as_str(),
-                s.path,
-                s.package.replace('-', "_"),
-                s.operation_id
-            )
-        })
-        .collect()
-}
-
 fn within(module: &str, service: &str) -> bool {
     module == service
         || module
@@ -265,8 +228,8 @@ fn within(module: &str, service: &str) -> bool {
 /// Every mounted handler under `state`, each wrapped in its service's layers.
 ///
 /// Panics, naming each problem, on a handler under no service, two services in one module, a
-/// declared route nothing implements, a schema name two types claim, a route of doxa's own with
-/// no one service at a crate root to join, or a state the handlers weren't written for.
+/// schema name two types claim, a route of doxa's own with no one service at a crate root to
+/// join, or a state the handlers weren't written for.
 pub fn app<S: Any>(state: &S) -> Routes {
     let plan = Plan::new();
     let mut app = Routes::default();

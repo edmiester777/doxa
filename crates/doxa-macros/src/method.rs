@@ -25,95 +25,81 @@ use crate::{app, client_stub, grant, sig};
 
 /// Expand `#[get("/path", ...)]` and friends.
 pub fn expand(method: &str, args: TokenStream, item: TokenStream) -> Result<TokenStream> {
-    let parsed_args = parse_method_args(args)?;
-    let method_ident = syn::Ident::new(method, proc_macro2::Span::call_site());
-    let path_lit = parsed_args.path;
-    let (mount, extra) = take_mount_arg(parsed_args.extra)?;
-    let (client, extra) = take_client_arg(extra)?;
-    let (flags, extra) = take_route_flags(extra)?;
-    let (touches, extra) = take_touches(extra)?;
-    let mut item_fn = match routed(item)? {
-        Routed::Handler(f) => f,
-        Routed::Declaration(f) => {
-            return declaration(method, &path_lit, &extra, client, flags, &touches, &f)
-        }
-    };
-
-    if doxa_macro_support::is_client() {
-        return client_half(method, &path_lit, &extra, client, flags, &touches, &item_fn);
-    }
-    strip_server_params(&mut item_fn);
-    let meta = client_meta(method, client, flags, &touches, &item_fn);
-
-    // Rewrite `Granted<T>` arguments before inference runs, so the
-    // signature the doc probes see is the one that actually compiles.
-    let path_names = sig::parse_path_names(&path_lit.value());
-    let sites = grant::rewrite(&mut item_fn, method, &path_names)?;
-
-    let utoipa_attr = build_utoipa_attr(&method_ident, &path_lit, &extra, &item_fn)?;
-    let mount = mount.then(|| app::mount(&item_fn, None));
-    grant::stop_dry_runs(&mut item_fn);
-
-    Ok(quote! {
-        #meta
-        #sites
-        #utoipa_attr
-        #item_fn
-        #mount
-    })
+    let parsed = parse_method_args(args)?;
+    route(method, &parsed.path, parsed.extra, item)
 }
 
 /// Expand `#[operation(get, "/path", ...)]` — same as the shortcut but
 /// the method is the first positional argument.
 pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let parsed = parse_operation_args(args)?;
-    let (mount, extra) = take_mount_arg(parsed.extra)?;
+    route(&parsed.method.to_string(), &parsed.path, parsed.extra, item)
+}
+
+/// A route, as this crate's role builds it.
+fn route(method: &str, path: &LitStr, extra: Vec<Meta>, item: TokenStream) -> Result<TokenStream> {
+    let (mount, extra) = take_mount_arg(extra)?;
     let (client, extra) = take_client_arg(extra)?;
     let (flags, extra) = take_route_flags(extra)?;
     let (touches, extra) = take_touches(extra)?;
-    let parsed = OperationArgs { extra, ..parsed };
-    let mut item_fn = match routed(item)? {
-        Routed::Handler(f) => f,
-        Routed::Declaration(f) => {
-            let method = parsed.method.to_string();
-            return declaration(
-                &method,
-                &parsed.path,
-                &parsed.extra,
-                client,
-                flags,
-                &touches,
-                &f,
-            );
-        }
-    };
-
-    if doxa_macro_support::is_client() {
-        let method = parsed.method.to_string();
-        return client_half(
-            &method,
-            &parsed.path,
-            &parsed.extra,
-            client,
-            flags,
-            &touches,
-            &item_fn,
-        );
-    }
-    strip_server_params(&mut item_fn);
-    let meta = client_meta(
-        &parsed.method.to_string(),
+    let item_fn = handler(item)?;
+    let r = Parts {
+        method,
+        path,
+        extra: &extra,
+        mount,
         client,
         flags,
-        &touches,
-        &item_fn,
+        touches: &touches,
+    };
+    match doxa_macro_support::Role::current() {
+        doxa_macro_support::Role::Client => {
+            client_half(method, path, &extra, client, flags, &touches, &item_fn)
+        }
+        doxa_macro_support::Role::Server => serve(&r, item_fn),
+        doxa_macro_support::Role::Api => both_halves(&r, item_fn),
+    }
+}
+
+/// A route attribute's arguments, past the path.
+#[derive(Clone, Copy)]
+struct Parts<'a> {
+    method: &'a str,
+    path: &'a LitStr,
+    extra: &'a [Meta],
+    mount: bool,
+    client: bool,
+    flags: Flags,
+    touches: &'a [syn::Path],
+}
+
+fn handler(item: TokenStream) -> Result<ItemFn> {
+    let bodiless = matches!(
+        item.clone().into_iter().last(),
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ';'
     );
+    if bodiless {
+        return Err(syn::Error::new_spanned(
+            item,
+            "a route has a body: the server runs it, and the browser's call drops it",
+        ));
+    }
+    parse2(item)
+}
 
-    let path_names = sig::parse_path_names(&parsed.path.value());
-    let sites = grant::rewrite(&mut item_fn, &parsed.method.to_string(), &path_names)?;
+/// The server half: the handler, its docs, its guards' sites and its mount.
+fn serve(r: &Parts<'_>, mut item_fn: ItemFn) -> Result<TokenStream> {
+    let method_ident = syn::Ident::new(r.method, proc_macro2::Span::call_site());
+    strip_server_params(&mut item_fn);
+    let meta = client_meta(r.method, r.client, r.flags, r.touches, &item_fn);
 
-    let utoipa_attr = build_utoipa_attr(&parsed.method, &parsed.path, &parsed.extra, &item_fn)?;
-    let mount = mount.then(|| app::mount(&item_fn, None));
+    // Rewrite `Granted<T>` arguments before inference runs, so the
+    // signature the doc probes see is the one that actually compiles.
+    let path_names = sig::parse_path_names(&r.path.value());
+    let sites = grant::rewrite(&mut item_fn, r.method, &path_names)?;
+
+    let utoipa_attr = build_utoipa_attr(&method_ident, r.path, r.extra, &item_fn)?;
+    let mount = r.mount.then(|| app::mount(&item_fn));
     grant::stop_dry_runs(&mut item_fn);
 
     Ok(quote! {
@@ -125,370 +111,163 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     })
 }
 
-/// A route attribute's item: a handler, or in an API crate a declaration ending in `;`.
-enum Routed {
-    Handler(ItemFn),
-    /// The signature, with an empty body standing in for the missing one.
-    Declaration(ItemFn),
-}
+/// An API crate's route: the call on every target, and off wasm the handler beside it as
+/// `name::serve`, so the two can share the name.
+fn both_halves(r: &Parts<'_>, item_fn: ItemFn) -> Result<TokenStream> {
+    use doxa_macro_support::{tag, Side};
+    if let Some(granted) = typed_args(&item_fn).find(|t| grant::guarded_asset(t).is_some()) {
+        return Err(syn::Error::new_spanned(
+            granted,
+            "an API crate's route guards by entity, which the browser knows too: \
+             `Grant<Widget>`, or `Grant<Widget, by = WidgetById>` for an asset other than \
+             the entity's default",
+        ));
+    }
+    let mut server_fn = item_fn.clone();
+    let by = grant_for_server(&mut server_fn)?;
+    if !r.client {
+        let served = serve(r, server_fn)?;
+        return Ok(tag(Side::Server, quote!(#served #by)));
+    }
+    let name = &item_fn.sig.ident;
+    let mut extra = r.extra.to_vec();
+    if extra.iter().find_map(operation_id).is_none() {
+        let id = LitStr::new(&name.to_string(), name.span());
+        extra.push(syn::parse_quote!(operation_id = #id));
+    }
+    server_fn.sig.ident = syn::Ident::new("serve", name.span());
+    let served = serve(
+        &Parts {
+            extra: &extra,
+            ..*r
+        },
+        server_fn,
+    )?;
+    let server = tag(Side::Server, quote!(#served #by));
 
-fn routed(item: TokenStream) -> Result<Routed> {
-    let declares = matches!(
-        item.clone().into_iter().last(),
-        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ';'
-    );
-    let api = doxa_macro_support::is_api();
-    if !declares {
-        let item_fn: ItemFn = parse2(item)?;
-        if api {
-            return Err(syn::Error::new_spanned(
-                &item_fn.sig,
-                "an API crate declares routes rather than serving them: end the signature \
-                 with `;`, and serve it from the server with `#[doxa::implements(…)]`",
-            ));
-        }
-        return Ok(Routed::Handler(item_fn));
-    }
-    let parser = |input: syn::parse::ParseStream| -> Result<ItemFn> {
-        let attrs = input.call(syn::Attribute::parse_outer)?;
-        let vis: syn::Visibility = input.parse()?;
-        let sig: syn::Signature = input.parse()?;
-        input.parse::<Token![;]>()?;
-        Ok(ItemFn {
-            attrs,
-            vis,
-            sig,
-            block: Box::new(syn::parse_quote!({})),
-        })
-    };
-    let item_fn = parser.parse2(item)?;
-    if !api {
-        return Err(syn::Error::new_spanned(
-            &item_fn.sig,
-            "a route without a body is a declaration, which only an API crate makes: \
-             call `doxa_role::api()` from its `build.rs`",
-        ));
-    }
-    Ok(Routed::Declaration(item_fn))
-}
-
-/// A declared route: the call to it, and the `Route` marker a server implements it against.
-fn declaration(
-    method: &str,
-    path: &LitStr,
-    extra: &[Meta],
-    client: bool,
-    flags: Flags,
-    touches: &[syn::Path],
-    item_fn: &ItemFn,
-) -> Result<TokenStream> {
-    if !client {
-        return Err(syn::Error::new_spanned(
-            &item_fn.sig,
-            "a declared route is one clients call, so it can't take `client = false`",
-        ));
-    }
-    if let syn::Visibility::Inherited = item_fn.vis {
-        return Err(syn::Error::new_spanned(
-            &item_fn.sig,
-            "a declared route is part of the API: make it `pub`",
-        ));
-    }
-    let mut item_fn = item_fn.clone();
-    for arg in &mut item_fn.sig.inputs {
+    let mut client_fn = item_fn;
+    for arg in &mut client_fn.sig.inputs {
         if let syn::FnArg::Typed(pt) = arg {
             grant_as_granted(&mut pt.ty)?;
         }
     }
-    let mut tags = Vec::new();
-    let mut responses = Vec::new();
-    for meta in extra {
-        match meta {
-            Meta::NameValue(nv) if nv.path.is_ident("operation_id") => {}
-            Meta::NameValue(nv) if nv.path.is_ident("tag") => match &nv.value {
-                syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(lit),
-                    ..
-                }) => tags.push(lit.clone()),
-                other => return Err(syn::Error::new_spanned(other, "expected `tag = \"…\"`")),
-            },
-            Meta::List(_) if meta.path().is_ident("tags") => {
-                tags.extend(extract_tags_arg(std::slice::from_ref(meta))?.0);
-            }
-            Meta::List(list) if list.path.is_ident("responses") => {
-                responses.extend(declared_responses(list)?);
-            }
-            other => {
-                return Err(syn::Error::new_spanned(
-                    other,
-                    "a declaration takes `operation_id`, `tag`, `tags(…)`, `responses(…)`, \
-                     `touches = […]`, `dry_run = false` and `invalidates = false`; the rest of the operation is \
-                     documented by the server that implements it",
-                ))
-            }
-        }
-    }
-    let operation_id = extra.iter().find_map(operation_id);
     let route = client_stub::Route {
-        method,
-        path,
-        operation_id,
-        touches,
-        dry_run: flags.dry_run,
-        invalidates: flags.invalidates,
+        method: r.method,
+        path: r.path,
+        operation_id: extra.iter().find_map(operation_id),
+        touches: r.touches,
+        dry_run: r.flags.dry_run,
+        invalidates: r.flags.invalidates,
     };
-    let declared = client_stub::declared(&route, &item_fn, &tags, &responses)?;
-    client_stub::expand(&route, &item_fn, declared)
+    client_stub::expand(&route, &client_fn, server)
 }
 
-/// `responses((status = 202, description = "…"), …)`: success statuses, each with the body
-/// the return type answers.
-fn declared_responses(list: &syn::MetaList) -> Result<Vec<(u16, LitStr)>> {
-    let groups = list
-        .parse_args_with(syn::punctuated::Punctuated::<syn::Expr, Token![,]>::parse_terminated)?;
-    let mut out = Vec::new();
-    for group in groups {
-        let (mut status, mut description) = (None, None);
-        let pairs: Vec<&syn::Expr> = match &group {
-            syn::Expr::Tuple(t) => t.elems.iter().collect(),
-            syn::Expr::Paren(p) => vec![&*p.expr],
-            other => {
-                return Err(syn::Error::new_spanned(
-                    other,
-                    "expected `(status = 202, description = \"…\")`",
-                ))
-            }
-        };
-        for pair in pairs {
-            let syn::Expr::Assign(a) = pair else {
-                return Err(syn::Error::new_spanned(pair, "expected `name = value`"));
-            };
-            let key = a.left.to_token_stream().to_string();
-            if key != "status" && key != "description" {
-                return Err(syn::Error::new_spanned(
-                    pair,
-                    "a declared response takes `status` and `description`; its body is the \
-                     route's return type",
-                ));
-            }
-            let syn::Expr::Lit(syn::ExprLit { lit, .. }) = &*a.right else {
-                return Err(syn::Error::new_spanned(&a.right, "expected a literal"));
-            };
-            match (key.as_str(), lit) {
-                ("status", syn::Lit::Int(i)) => {
-                    status = Some((i.base10_parse::<u16>()?, i.clone()))
-                }
-                ("description", syn::Lit::Str(s)) => description = Some(s.clone()),
-                _ => {
-                    return Err(syn::Error::new_spanned(
-                        lit,
-                        "expected a status number or a string",
-                    ))
-                }
-            }
-        }
-        let Some((status, lit)) = status else {
-            return Err(syn::Error::new_spanned(&group, "add `status = …`"));
-        };
-        if !(200..300).contains(&status) {
-            return Err(syn::Error::new_spanned(
-                lit,
-                "a declared response is a success; an error's status is its \
-                 `#[api(status = …)]`",
-            ));
-        }
-        let description = description
-            .ok_or_else(|| syn::Error::new_spanned(&group, "add `description = \"…\"`"))?;
-        out.push((status, description));
-    }
-    Ok(out)
-}
-
-/// `#[doxa::implements(api::route)]`: the handler serving a declared route, at its method and
-/// path, held to its arguments and answers.
-pub fn expand_implements(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
-    let (declaration, mount) = implements_args(args)?;
-    let mut item_fn: ItemFn = parse2(item)?;
-    if doxa_macro_support::is_client() || doxa_macro_support::is_api() {
-        return Err(syn::Error::new_spanned(
-            &item_fn.sig,
-            "a server implements a declared route; this crate is a client half or an API crate",
-        ));
-    }
-    let r = quote!(#declaration::Route);
-    strip_server_params(&mut item_fn);
-    let path = syn::Ident::new(
-        &format!("__path_{}", item_fn.sig.ident),
-        item_fn.sig.ident.span(),
-    );
-    let checks = client_stub::implemented(&item_fn, &r);
-    fail_as_declared(&mut item_fn, &r);
-    let meta = client_stub::server_meta("", Some(&r), &[], Flags::default(), &item_fn, &path);
-    let sites = grant::rewrite_for(&mut item_fn, &grant::RouteIs::Declared(&r))?;
-    let operation = declared_operation(&item_fn, &r, &path);
-    let mount = mount.then(|| app::mount(&item_fn, Some(&r)));
-    grant::stop_dry_runs(&mut item_fn);
-    Ok(quote! {
-        #meta
-        #sites
-        #operation
-        #checks
-        // The guard's action is spelled through the declaration's verb.
-        #[allow(clippy::type_complexity)]
-        #item_fn
-        #mount
+fn typed_args(item_fn: &ItemFn) -> impl Iterator<Item = &Type> {
+    item_fn.sig.inputs.iter().filter_map(|a| match a {
+        syn::FnArg::Typed(pt) => Some(&*pt.ty),
+        syn::FnArg::Receiver(_) => None,
     })
 }
 
-/// `api::route` and an optional `, mount = false`.
-fn implements_args(args: TokenStream) -> Result<(syn::Path, bool)> {
-    let parser = |input: syn::parse::ParseStream| -> Result<(syn::Path, Vec<Meta>)> {
-        let path: syn::Path = input.parse()?;
-        let mut rest = Vec::new();
-        while input.parse::<Option<Token![,]>>()?.is_some() && !input.is_empty() {
-            rest.push(input.parse::<Meta>()?);
-        }
-        Ok((path, rest))
-    };
-    let (path, rest) = parser.parse2(args)?;
-    let (mount, rest) = take_mount_arg(rest)?;
-    if let Some(extra) = rest.first() {
-        return Err(syn::Error::new_spanned(
-            extra,
-            "`#[implements]` takes the declaration and `mount = false`",
-        ));
-    }
-    Ok((path, mount))
-}
-
-/// The handler's OpenAPI operation, written by `utoipa::path` on a stand-in with no
-/// arguments, at the declaration's method and path.
-fn declared_operation(item_fn: &ItemFn, r: &TokenStream, path: &syn::Ident) -> TokenStream {
-    let fn_ident = &item_fn.sig.ident;
-    let stand_in = syn::Ident::new(&format!("__doxa_op_{fn_ident}"), fn_ident.span());
-    let stand_in_path = syn::Ident::new(&format!("__path_{stand_in}"), fn_ident.span());
-    let mut inferred = sig::infer(item_fn);
-    inferred.declared_responses = Some(quote!(<#r as ::doxa::wire::contract::Declared>::RESPONSES));
-    let spec = quote!(<#r as ::doxa::wire::contract::Declared>::SPEC);
-    let sig::InferredTokens {
-        pre_items,
-        attr_additions,
-    } = inferred.into_tokens(fn_ident, &[], Some(&quote!(#spec.path)), &[]);
-    let docs = item_fn.attrs.iter().filter(|a| a.path().is_ident("doc"));
-    let op_id = LitStr::new(&fn_ident.to_string(), fn_ident.span());
-    let dev = quote!(::utoipa::__dev);
-    quote! {
-        #[doc(hidden)]
-        #[allow(non_camel_case_types)]
-        pub struct #path;
-
-        #pre_items
-
-        #[::utoipa::path(get, path = "/", operation_id = #op_id #attr_additions)]
-        #(#docs)*
-        #[doc(hidden)]
-        #[allow(dead_code, non_snake_case)]
-        fn #stand_in() {}
-
-        impl #dev::PathConfig for #path {
-            fn path() -> ::std::string::String {
-                ::std::string::ToString::to_string(#spec.path)
-            }
-
-            fn methods() -> ::std::vec::Vec<::utoipa::openapi::path::HttpMethod> {
-                ::std::vec![::doxa::__private::contract::method(#spec.method)]
-            }
-
-            fn tags_and_operation() -> (
-                ::std::vec::Vec<&'static str>,
-                ::utoipa::openapi::path::Operation,
-            ) {
-                let mut tags = ::std::vec::Vec::new();
-                let mut op = <#stand_in_path as ::utoipa::Path>::operation();
-                ::doxa::__private::contract::document(
-                    &mut op,
-                    #spec,
-                    <#r as ::doxa::wire::contract::Declared>::DOCS,
-                );
-                tags.extend_from_slice(<#r as ::doxa::wire::contract::Declared>::TAGS);
-                (tags, op)
-            }
-        }
-
-        impl<'t> #dev::Tags<'t> for #path {
-            fn tags() -> ::std::vec::Vec<&'t str> {
-                <#stand_in_path as #dev::Tags<'t>>::tags()
-            }
-        }
-
-        impl #dev::SchemaReferences for #path {
-            fn schemas(
-                schemas: &mut ::std::vec::Vec<(
-                    ::std::string::String,
-                    ::utoipa::openapi::RefOr<::utoipa::openapi::schema::Schema>,
-                )>,
-            ) {
-                <#stand_in_path as #dev::SchemaReferences>::schemas(schemas)
-            }
-        }
-    }
-}
-
-/// A handler failing with its own error answers the declared one it converts into.
-fn fail_as_declared(item_fn: &mut ItemFn, r: &TokenStream) {
-    let syn::ReturnType::Type(_, ty) = &item_fn.sig.output else {
-        return;
-    };
-    if item_fn.sig.asyncness.is_none() {
-        return;
-    }
-    let Type::Path(tp) = &**ty else { return };
+/// `Grant<S>` or `Grant<S, by = Asset>`: the subject and the asset it names, if any.
+fn parse_grant(ty: &Type) -> Result<Option<(Type, Option<Type>)>> {
+    let Type::Path(tp) = ty else { return Ok(None) };
     let Some(last) = tp.path.segments.last() else {
-        return;
-    };
-    if last.ident != "Result" && last.ident != "ApiResult" {
-        return;
-    }
-    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-        return;
-    };
-    let (Some(syn::GenericArgument::Type(ok)), 2) = (args.args.first(), args.args.len()) else {
-        return;
-    };
-    let own = ty.clone();
-    let declared: Type = syn::parse_quote!(::core::result::Result<#ok, <#r as ::doxa::wire::contract::Declared>::Error>);
-    item_fn.sig.output = syn::parse_quote!(-> #declared);
-    let body = &item_fn.block;
-    *item_fn.block = syn::parse_quote!({
-        let result: #own = async move #body.await;
-        result.map_err(::core::convert::Into::into)
-    });
-}
-
-/// `Grant<E>` as the client's `Granted<E>`: `E`'s key is the argument.
-fn grant_as_granted(ty: &mut Type) -> Result<()> {
-    let Type::Path(tp) = ty else { return Ok(()) };
-    let Some(last) = tp.path.segments.last() else {
-        return Ok(());
+        return Ok(None);
     };
     if last.ident != "Grant" {
-        return Ok(());
+        return Ok(None);
+    }
+    let shape = || {
+        syn::Error::new_spanned(
+            tp,
+            "`Grant` names the entity, and optionally its asset: `Grant<Order>`, \
+             `Grant<Many<Order>>`, `Grant<Order, by = OrderById>`",
+        )
+    };
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return Err(shape());
+    };
+    let mut args = args.args.iter();
+    let Some(syn::GenericArgument::Type(subject)) = args.next() else {
+        return Err(shape());
+    };
+    let by = match args.next() {
+        None => None,
+        Some(syn::GenericArgument::AssocType(a)) if a.ident == "by" && a.generics.is_none() => {
+            Some(a.ty.clone())
+        }
+        Some(_) => return Err(shape()),
+    };
+    if args.next().is_some() {
+        return Err(shape());
+    }
+    Ok(Some((subject.clone(), by)))
+}
+
+/// `Grant<E>` as the client's `Granted<E>`: `E`'s key is the argument, whichever asset guards it.
+fn grant_as_granted(ty: &mut Type) -> Result<()> {
+    if let Some((subject, _)) = parse_grant(ty)? {
+        *ty = syn::parse_quote!(::doxa::client::Granted<#subject>);
+    }
+    Ok(())
+}
+
+/// Each `Grant<…>` as the server's `Granted<…>` over the entity's asset, and a check that
+/// every `by = Asset` guards that entity.
+fn grant_for_server(item_fn: &mut ItemFn) -> Result<TokenStream> {
+    let mut checks = TokenStream::new();
+    for arg in &mut item_fn.sig.inputs {
+        let syn::FnArg::Typed(pt) = arg else { continue };
+        let Some((subject, by)) = parse_grant(&pt.ty)? else {
+            continue;
+        };
+        let (form, entity) =
+            match type_arg_of(&subject, "Many").or_else(|| type_arg_of(&subject, "Cap")) {
+                Some((form, inner)) => (Some(form), inner),
+                None => (None, subject.clone()),
+            };
+        if form.as_deref() == Some("Cap") {
+            if let Some(by) = by {
+                return Err(syn::Error::new_spanned(
+                    by,
+                    "`Grant<Cap<…>>` asks for a capability, which no asset guards",
+                ));
+            }
+            pt.ty = syn::parse_quote!(::doxa::auth::Granted<::doxa::auth::Cap<#entity>>);
+            continue;
+        }
+        let asset: Type = match &by {
+            Some(asset) => {
+                checks.extend(quote! {
+                    const _: fn() = ::doxa::wire::contract::guards::<#asset, #entity>;
+                });
+                asset.clone()
+            }
+            None => syn::parse_quote!(<#entity as ::doxa::auth::AssetFor>::Asset),
+        };
+        pt.ty = match form {
+            Some(_) => syn::parse_quote!(::doxa::auth::Granted<::doxa::auth::Many<#asset>>),
+            None => syn::parse_quote!(::doxa::auth::Granted<#asset>),
+        };
+    }
+    Ok(checks)
+}
+
+/// `(form, T)` when `ty` is `form<T>`.
+fn type_arg_of(ty: &Type, form: &str) -> Option<(String, Type)> {
+    let Type::Path(tp) = ty else { return None };
+    let last = tp.path.segments.last()?;
+    if last.ident != form {
+        return None;
     }
     let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-        return Err(syn::Error::new_spanned(
-            &*tp,
-            "`Grant` names the entity: `Grant<Order>`",
-        ));
+        return None;
     };
-    if args.args.len() != 1 {
-        return Err(syn::Error::new_spanned(
-            &*tp,
-            "`Grant` takes the entity alone; the server's guard names the action",
-        ));
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) if args.args.len() == 1 => Some((form.to_owned(), t.clone())),
+        _ => None,
     }
-    let entity = &args.args[0];
-    *ty = syn::parse_quote!(::doxa::client::Granted<#entity>);
-    Ok(())
 }
 
 fn operation_id(m: &Meta) -> Option<&LitStr> {
@@ -517,7 +296,7 @@ fn client_meta(
         item_fn.sig.ident.span(),
     );
     if client {
-        return client_stub::server_meta(method, None, touches, flags, item_fn, &path);
+        return client_stub::server_meta(method, touches, flags, item_fn, &path);
     }
     quote! {
         impl ::doxa::__private::ClientMeta for #path {
@@ -1002,35 +781,82 @@ fn merge_explicit_headers(inferred: &mut Vec<Type>, explicit: Vec<Type>) {
 mod tests {
     use super::*;
 
-    fn parse(tokens: TokenStream) -> Result<Vec<(u16, String)>> {
-        let list: syn::MetaList = syn::parse2(quote!(responses(#tokens)))?;
-        Ok(declared_responses(&list)?
-            .into_iter()
-            .map(|(s, d)| (s, d.value()))
-            .collect())
+    fn server(f: TokenStream) -> (String, String) {
+        let mut item: ItemFn = syn::parse2(f).unwrap();
+        let checks = grant_for_server(&mut item).unwrap();
+        (item.sig.to_token_stream().to_string(), checks.to_string())
     }
 
     #[test]
-    fn declared_responses_are_success_statuses_with_descriptions() {
-        let out = parse(quote!(
-            (status = 200, description = "Done"),
-            (description = "Queued", status = 202)
-        ))
-        .unwrap();
-        assert_eq!(out, [(200, "Done".into()), (202, "Queued".into())]);
-    }
-
-    #[test]
-    fn a_declared_response_is_a_success_without_a_body() {
-        let err = parse(quote!((status = 404, description = "Gone"))).unwrap_err();
-        assert!(err.to_string().contains("`#[api(status = …)]`"), "{err}");
-        let err = parse(quote!((status = 200, description = "Done", body = Foo))).unwrap_err();
+    fn a_grant_guards_with_the_entitys_asset_unless_it_names_one() {
+        let (sig, checks) = server(quote! { async fn f(w: Grant<Widget>) {} });
         assert!(
-            err.to_string()
-                .contains("its body is the route's return type"),
-            "{err}"
+            sig.contains(
+                ":: doxa :: auth :: Granted < < Widget as :: doxa :: auth :: AssetFor > :: Asset >"
+            ),
+            "{sig}"
         );
-        let err = parse(quote!((status = 200))).unwrap_err();
-        assert!(err.to_string().contains("add `description"), "{err}");
+        assert!(checks.is_empty());
+
+        let (sig, checks) = server(quote! { async fn f(w: Grant<Widget, by = WidgetById>) {} });
+        assert!(
+            sig.contains(":: doxa :: auth :: Granted < WidgetById >"),
+            "{sig}"
+        );
+        assert!(
+            checks.contains("guards :: < WidgetById , Widget >"),
+            "{checks}"
+        );
+    }
+
+    #[test]
+    fn a_list_grant_scopes_the_asset_and_a_capability_names_none() {
+        let (sig, _) = server(quote! { async fn f(_: Grant<Many<Order>, by = OrderById>) {} });
+        assert!(
+            sig.contains(":: doxa :: auth :: Granted < :: doxa :: auth :: Many < OrderById > >"),
+            "{sig}"
+        );
+        let (sig, _) = server(quote! { async fn f(_: Grant<Cap<Place>>) {} });
+        assert!(
+            sig.contains(":: doxa :: auth :: Granted < :: doxa :: auth :: Cap < Place > >"),
+            "{sig}"
+        );
+        let mut item: ItemFn =
+            syn::parse2(quote! { async fn f(_: Grant<Cap<Place>, by = A>) {} }).unwrap();
+        let err = grant_for_server(&mut item).unwrap_err();
+        assert!(err.to_string().contains("no asset guards"), "{err}");
+    }
+
+    #[test]
+    fn the_browser_sends_the_entitys_key_whichever_asset_guards_it() {
+        let mut ty: Type = syn::parse_quote!(Grant<Widget, by = WidgetById>);
+        grant_as_granted(&mut ty).unwrap();
+        assert_eq!(
+            ty.to_token_stream().to_string(),
+            ":: doxa :: client :: Granted < Widget >"
+        );
+    }
+
+    #[test]
+    fn a_grant_takes_an_entity_and_at_most_its_asset() {
+        for bad in [
+            quote!(Grant),
+            quote!(Grant<Widget, Other>),
+            quote!(Grant<Widget, with = A>),
+            quote!(Grant<Widget, by = A, by = B>),
+        ] {
+            let ty: Type = syn::parse2(bad).unwrap();
+            let err = parse_grant(&ty).unwrap_err();
+            assert!(
+                err.to_string().contains("`Grant` names the entity"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_route_has_a_body() {
+        let err = handler(quote! { pub async fn f() -> Json<u32>; }).unwrap_err();
+        assert!(err.to_string().contains("a route has a body"), "{err}");
     }
 }

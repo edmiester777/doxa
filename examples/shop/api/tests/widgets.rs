@@ -25,7 +25,7 @@ fn serve(router: RouterTransport, role: &str) -> Rc<Service> {
 }
 
 fn seeded() -> RouterTransport {
-    RouterTransport::new(shop_server::app(shop_server::seeded()))
+    RouterTransport::new(shop_api::server::app(shop_api::server::seeded()))
 }
 
 fn install(role: &str) -> Rc<Service> {
@@ -122,7 +122,7 @@ async fn an_invalid_body_is_refused_with_the_servers_fields_and_never_sent() {
     );
 
     // The server, reached without the client's check, answers with the same fields.
-    let server = shop_server::app(shop_server::seeded());
+    let server = shop_api::server::app(shop_api::server::seeded());
     let response = tower::ServiceExt::oneshot(
         server,
         axum::http::Request::patch("/api/widgets/sprocket")
@@ -231,9 +231,9 @@ async fn identical_streams_share_one_connection() {
 
 #[tokio::test]
 async fn a_probe_of_an_unguarded_route_is_unknown_and_never_runs_it() {
-    let shop = shop_server::seeded();
+    let shop = shop_api::server::seeded();
     let catalog = shop.widgets.clone();
-    serve(RouterTransport::new(shop_server::app(shop)), "viewer");
+    serve(RouterTransport::new(shop_api::server::app(shop)), "viewer");
     assert_eq!(suggest_name::can().await, Permission::Unknown);
     assert!(catalog.suggestions().is_empty());
     let status = suggest_name(Rename {

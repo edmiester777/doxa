@@ -153,27 +153,13 @@ fn dry_run(item_fn: &ItemFn, args: &[Arg]) -> bool {
 /// OpenAPI can't say. `path` is the handler's utoipa path struct.
 pub fn server_meta(
     method: &str,
-    declared: Option<&TokenStream>,
     touches: &[syn::Path],
     flags: Flags,
     item_fn: &ItemFn,
     path: &syn::Ident,
 ) -> TokenStream {
-    let invalidates = match declared {
-        Some(r) => quote!(<#r as ::doxa::wire::contract::Declared>::SPEC.invalidates),
-        None => {
-            let invalidates = flags.invalidates;
-            quote!(#invalidates)
-        }
-    };
-    // A declared route's clients read its declaration, so the stamp can't promise more.
-    let dry_run = match declared {
-        Some(r) if flags.dry_run && dry_run(item_fn, &args(item_fn)) => {
-            quote!(<#r as ::doxa::wire::contract::Declared>::SPEC.dry_run)
-        }
-        None if flags.dry_run && dry_run(item_fn, &args(item_fn)) => quote!(true),
-        _ => quote!(false),
-    };
+    let invalidates = flags.invalidates;
+    let dry_run = flags.dry_run && dry_run(item_fn, &args(item_fn));
     let typed = || {
         item_fn.sig.inputs.iter().filter_map(|arg| match arg {
             FnArg::Typed(pt) => Some(&*pt.ty),
@@ -206,12 +192,6 @@ pub fn server_meta(
         ReturnType::Type(_, ty) => Some(&**ty),
     };
     let stream = match ret.and_then(|t| find_named(t, "SseStream")) {
-        Some(_) if declared.is_some() => quote!((
-            match <#declared as ::doxa::wire::contract::Declared>::SPEC.method {
-                ::doxa::wire::Method::Get => "events",
-                _ => "once",
-            }
-        )),
         Some(_) if method == "get" => quote!("events"),
         Some(_) => quote!("once"),
         None => quote!(::doxa::__private::serde_json::Value::Null),
@@ -255,10 +235,6 @@ pub fn server_meta(
         }},
         None => quote!(::doxa::__private::serde_json::Value::Null),
     };
-    let declared_entities = match declared {
-        Some(r) => quote!(<#r as ::doxa::wire::contract::Declared>::SPEC.entities.iter().copied()),
-        None => quote!(::core::iter::empty()),
-    };
     quote! {
         impl ::doxa::__private::ClientMeta for #path {
             fn meta() -> ::doxa::__private::serde_json::Value {
@@ -271,7 +247,7 @@ pub fn server_meta(
                 use ::doxa::__private::{EntityKnown as _, EntityUnknown as _};
                 let found: &[::core::option::Option<&'static str>] = &[#(#entities),*];
                 let mut entities: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
-                for e in found.iter().flatten().copied().chain(#declared_entities) {
+                for e in found.iter().flatten().copied() {
                     if !entities.contains(&e) {
                         entities.push(e);
                     }
@@ -383,179 +359,6 @@ fn entity_type(ret: &Type) -> Option<&Type> {
     match last_ident(inner).as_deref() {
         Some("Vec") => first_type_arg(inner),
         _ => Some(inner),
-    }
-}
-
-/// The declared route's `Route` marker: what a server implementing it is held to.
-pub fn declared(
-    route: &Route<'_>,
-    item_fn: &ItemFn,
-    tags: &[LitStr],
-    responses: &[(u16, LitStr)],
-) -> syn::Result<TokenStream> {
-    let args: Vec<TokenStream> = args(item_fn)
-        .into_iter()
-        .filter_map(|a| match a {
-            Arg::Sent {
-                check: Some(check), ..
-            } => Some(check.wrapper),
-            Arg::Sent { ty, .. } => Some(ty),
-            Arg::Dropped | Arg::Server => None,
-        })
-        .collect();
-    let once = route.method != "get";
-    let (mut bad, mut unread) = (None, None);
-    let (ok, error) = match &item_fn.sig.output {
-        ReturnType::Default => (quote!(()), quote!(::doxa::wire::contract::NoError)),
-        ReturnType::Type(_, ty) => match (last_ident(ty).as_deref(), type_args(ty).as_slice()) {
-            (Some("Result" | "ApiResult"), [ok, err]) => {
-                (response_type(ok, once, &mut bad, &mut unread), quote!(#err))
-            }
-            _ => (
-                response_type(ty, once, &mut bad, &mut unread),
-                quote!(::doxa::wire::contract::NoError),
-            ),
-        },
-    };
-    if let Some(ty) = unread.or(bad) {
-        return Err(syn::Error::new_spanned(
-            ty,
-            format!(
-                "a declared route answers what the browser can decode, and `{}` isn't that\n\
-                 help: return `Json<…>`, `SseStream<…>`, `StatusCode`, `Attachment` or a `Result` of one",
-                type_text(ty)
-            ),
-        ));
-    }
-    let docs: Vec<String> = item_fn
-        .attrs
-        .iter()
-        .filter_map(|a| match &a.meta {
-            syn::Meta::NameValue(nv) if nv.path.is_ident("doc") => match &nv.value {
-                syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(s),
-                    ..
-                }) => Some(s.value().strip_prefix(' ').unwrap_or(&s.value()).to_owned()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    let docs = docs.join("\n");
-    let verb = format_ident!("{}", capitalize(route.method));
-    let many: Vec<&Type> = typed(item_fn).filter_map(|t| guard_of(t, "Many")).collect();
-    let caps = caps(item_fn);
-    let (statuses, descriptions): (Vec<u16>, Vec<&LitStr>) =
-        responses.iter().map(|(s, d)| (*s, d)).unzip();
-    Ok(quote! {
-        /// This route, as the server that implements it is held to it.
-        pub struct Route;
-
-        impl ::doxa::wire::contract::Declared for Route {
-            const SPEC: &'static ::doxa::wire::RouteSpec = &ROUTE;
-            const DOCS: &'static str = #docs;
-            const TAGS: &'static [&'static str] = &[#(#tags),*];
-            const MANY: &'static [&'static str] = &[#(<#many as ::doxa::wire::Keyed>::ENTITY_TYPE),*];
-            const CAPS: &'static [&'static str] = &[#(<#caps as ::doxa::wire::Capability>::NAME),*];
-            const RESPONSES: &'static [(u16, &'static str)] = &[#((#statuses, #descriptions)),*];
-            type Args = (#(#args,)*);
-            type Ok = #ok;
-            type Error = #error;
-            type Verb = ::doxa::wire::contract::verb::#verb;
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        ::doxa::__private::inventory::submit! {
-            ::doxa::__private::contract::Declared(&ROUTE)
-        }
-    })
-}
-
-/// What `#[doxa::implements(…)]` holds the handler to: its client arguments, success and
-/// error against those of the declaration `r` names.
-pub fn implemented(item_fn: &ItemFn, r: &TokenStream) -> TokenStream {
-    let guarded = |ty: TokenStream| quote!(<#ty as ::doxa::client::contract::Guarded>::Declared);
-    let args: Vec<TokenStream> = args(item_fn)
-        .into_iter()
-        .filter_map(|a| match a {
-            Arg::Sent {
-                kind: Kind::Foreign,
-                ..
-            } => None,
-            Arg::Sent {
-                kind: Kind::Guard,
-                ty,
-                ..
-            } => Some(guarded(ty)),
-            Arg::Sent {
-                check: Some(check), ..
-            } => Some(check.wrapper),
-            Arg::Sent { ty, .. } => Some(ty),
-            Arg::Dropped | Arg::Server => None,
-        })
-        .collect();
-    let error = match &item_fn.sig.output {
-        ReturnType::Type(_, ty) => match (last_ident(ty).as_deref(), type_args(ty).as_slice()) {
-            (Some("Result" | "ApiResult"), [_, err]) => Some(quote!(#err)),
-            _ => None,
-        },
-        ReturnType::Default => None,
-    };
-    let handler = &item_fn.sig.ident;
-    let ok = quote! {
-        ::doxa::__answer::answers_as::<<#r as ::doxa::wire::contract::Declared>::Ok, _, _>(&#handler);
-    };
-    let error = error.map(|err| {
-        quote!(::doxa::client::contract::fails::<#err, <#r as ::doxa::wire::contract::Declared>::Error>();)
-    });
-    let declaration = r.to_string().replace(' ', "");
-    let declaration = declaration.trim_end_matches("::Route");
-    let drift = typed(item_fn).filter_map(|t| guard_of(t, "Many")).map(|asset| {
-        let message = format!(
-            "`{}` guards a list of `{}`, which `{declaration}` doesn't declare: add \
-             `_: Grant<Many<…>>` to it so clients can dry-run and refresh it",
-            item_fn.sig.ident,
-            type_text(asset),
-        );
-        quote! {
-            const _: () = ::core::assert!(
-                ::doxa::wire::contract::declares(
-                    <#r as ::doxa::wire::contract::Declared>::MANY,
-                    <<#asset as ::doxa::wire::contract::OfEntity>::Entity as ::doxa::wire::Keyed>::ENTITY_TYPE,
-                ),
-                #message,
-            );
-        }
-    });
-    let held: Vec<TokenStream> = caps(item_fn)
-        .into_iter()
-        .map(|m| quote!(<#m as ::doxa::policy::Capable>::CAPABILITY.name))
-        .collect();
-    let message = format!(
-        "`{}` and `{declaration}` guard different capabilities: name the same `Cap<…>` in the \
-         declaration's `Grant<Cap<…>>` and the handler's `Granted<Cap<…>>`",
-        item_fn.sig.ident,
-    );
-    let cap_drift = quote! {
-        const _: () = ::core::assert!(
-            ::doxa::wire::contract::same_names(
-                <#r as ::doxa::wire::contract::Declared>::CAPS,
-                &[#(#held),*],
-            ),
-            #message,
-        );
-    };
-    quote! {
-        #cap_drift
-        const _: fn() = || {
-            ::doxa::client::contract::takes::<
-                (#(#args,)*),
-                <#r as ::doxa::wire::contract::Declared>::Args,
-            >();
-            #ok
-            #error
-        };
-        #(#drift)*
     }
 }
 

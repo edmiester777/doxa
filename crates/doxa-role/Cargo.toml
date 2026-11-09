@@ -10,3 +10,6 @@ rust-version.workspace = true
 description = "Build-script helper that marks a crate as the client or server half of a doxa app."
 keywords = ["doxa", "build"]
 categories = ["development-tools::build-utils"]
+
+[dependencies]
+toml = "0.9"

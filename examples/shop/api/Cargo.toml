@@ -4,16 +4,31 @@ version = "0.0.0"
 edition.workspace = true
 publish = false
 
-# The shop's routes as declarations, built for the server and for the browser.
+# The shop's routes: served off wasm, and called from the browser.
 [dependencies]
 doxa = { workspace = true, features = ["client", "garde"] }
+futures = { workspace = true }
 garde = { workspace = true, features = ["derive"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
 utoipa = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-doxa = { workspace = true, features = ["auth", "policy"] }
+doxa = { workspace = true, features = ["full"] }
+axum = { workspace = true, features = ["multipart"] }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+doxa = { workspace = true, features = ["client-router"] }
+serde_json = { workspace = true }
 
 [build-dependencies]
 doxa-role = { workspace = true }
+
+[features]
+embed = ["doxa/embed"]
+
+[package.metadata.doxa]
+server_only = ["src/server"]

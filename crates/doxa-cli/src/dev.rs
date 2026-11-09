@@ -20,6 +20,8 @@ use doxa_build::dist::Dist;
 use doxa_build::hot::Patched;
 use doxa_build::pipeline::note;
 use doxa_build::{BuildOptions, Pipeline};
+
+use crate::view::ClientViews;
 use notify_debouncer_mini::notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use tokio::sync::{broadcast, mpsc};
@@ -87,6 +89,10 @@ pub struct Watch {
     web_dir: PathBuf,
     wasm_dirs: Vec<PathBuf>,
     server_dirs: Vec<PathBuf>,
+    /// An API crate's `server_only` directories, which the wasm build never reads.
+    server_only: Vec<PathBuf>,
+    /// An API crate's `client_only` directories, which the server build never reads.
+    client_only: Vec<PathBuf>,
     extra_dirs: Vec<PathBuf>,
     public: Option<PathBuf>,
     /// Extensions a preprocessor turns into CSS.
@@ -122,7 +128,10 @@ impl Watch {
             .collect();
         let mut extra_dirs = extra_dirs;
         extra_dirs.extend(globs.iter().map(|g| glob_root(g)).filter(|d| d.is_dir()));
+        let (server_only, client_only) = ws.sided_dirs();
         Watch {
+            server_only: server_only.iter().map(|d| canonical(d)).collect(),
+            client_only: client_only.iter().map(|d| canonical(d)).collect(),
             styles: web.config.preprocess.keys().cloned().collect(),
             style_globs: globs
                 .iter()
@@ -149,6 +158,20 @@ impl Watch {
                 .map(|p| canonical(&web.dir.join(p))),
             root,
         }
+    }
+
+    /// The browser view of every shared file: those the wasm build reads beyond the web crate.
+    fn client_views(&self) -> ClientViews {
+        let shared: Vec<PathBuf> = self
+            .wasm_dirs
+            .iter()
+            .filter(|d| !d.starts_with(&self.web_dir))
+            .cloned()
+            .collect();
+        let mut skip = self.ignore.clone();
+        skip.extend(self.server_only.iter().chain(&self.client_only).cloned());
+        skip.push(self.web_dir.clone());
+        ClientViews::of(&shared, &skip)
     }
 
     /// Directories to watch recursively, outermost only, plus the root itself.
@@ -190,8 +213,13 @@ fn glob_root(glob: &str) -> PathBuf {
     }
 }
 
-/// Decide what to rebuild for a batch of changed paths.
-pub fn classify<'a>(paths: impl IntoIterator<Item = &'a Path>, w: &Watch) -> Plan {
+/// Decide what to rebuild for a batch of changed paths. A shared file whose browser view is
+/// unchanged rebuilds only the server.
+pub fn classify<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+    w: &Watch,
+    views: &mut ClientViews,
+) -> Plan {
     let mut plan = Plan::default();
     let mut unpatchable = false;
     let under = |p: &Path, dirs: &[PathBuf]| dirs.iter().any(|d| p.starts_with(d));
@@ -216,6 +244,14 @@ pub fn classify<'a>(paths: impl IntoIterator<Item = &'a Path>, w: &Watch) -> Pla
             continue;
         }
         match ext {
+            "rs" if under(p, &w.server_only) => plan.server = true,
+            "rs" if under(p, &w.client_only) => {
+                plan.wasm = true;
+                unpatchable = true;
+            }
+            "rs" if under(p, &w.wasm_dirs) && !p.starts_with(&w.web_dir) && views.unchanged(p) => {
+                plan.server |= under(p, &w.server_dirs);
+            }
             "rs" | "toml" if ext == "rs" || name == "Cargo.toml" => {
                 if p.parent() == Some(w.root.as_path()) && name == "Cargo.toml" {
                     plan.wasm = true;
@@ -312,6 +348,7 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
     let dist = canonical(&pipeline.dist_dir());
     let patches = pipeline.patch_dir();
     let watch = Watch::new(&pipeline.workspace, &pipeline.web, server_pkg.as_deref());
+    let mut views = watch.client_views();
     let mut server = match server_pkg {
         Some(package) => Some(Server {
             root: pipeline.workspace.workspace_root.clone(),
@@ -381,7 +418,7 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
         while let Ok(more) = changes.try_recv() {
             paths.extend(more);
         }
-        let plan = classify(paths.iter().map(PathBuf::as_path), &watch);
+        let plan = classify(paths.iter().map(PathBuf::as_path), &watch, &mut views);
         if plan.is_empty() {
             continue;
         }
@@ -943,6 +980,8 @@ mod tests {
                 "/app/api/src".into(),
             ],
             server_dirs: vec!["/app/server".into(), "/app/api".into()],
+            server_only: vec!["/app/api/src/server".into()],
+            client_only: vec!["/app/api/src/browser".into()],
             extra_dirs: vec!["/app/style".into()],
             public: Some("/app/web/public".into()),
             styles: vec!["scss".into()],
@@ -951,7 +990,58 @@ mod tests {
     }
 
     fn plan(paths: &[&str]) -> Plan {
-        classify(paths.iter().map(Path::new), &watch())
+        classify(
+            paths.iter().map(Path::new),
+            &watch(),
+            &mut ClientViews::default(),
+        )
+    }
+
+    #[test]
+    fn a_one_sided_directory_rebuilds_only_its_half() {
+        assert_eq!(
+            plan(&["/app/api/src/server/db.rs"]),
+            Plan {
+                server: true,
+                ..Plan::default()
+            }
+        );
+        assert_eq!(
+            plan(&["/app/api/src/browser/dom.rs"]),
+            Plan {
+                wasm: true,
+                ..Plan::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_shared_file_whose_browser_view_holds_rebuilds_only_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        let api = root.join("api/src");
+        std::fs::create_dir_all(&api).unwrap();
+        let routes = api.join("routes.rs");
+        let route = "#[get(\"/n\")]\npub async fn n() -> Json<u32> { Json(1) }\n";
+        std::fs::write(&routes, route).unwrap();
+        let mut w = watch();
+        w.root = root.clone();
+        w.web_dir = root.join("web");
+        w.wasm_dirs = vec![root.join("web"), api.clone()];
+        w.server_dirs = vec![root.join("api")];
+        let mut views = w.client_views();
+        std::fs::write(&routes, route.replace("Json(1)", "Json(2)")).unwrap();
+        let body = classify([routes.as_path()], &w, &mut views);
+        assert_eq!(
+            body,
+            Plan {
+                server: true,
+                ..Plan::default()
+            }
+        );
+        std::fs::write(&routes, route.replace("u32", "u64")).unwrap();
+        let sig = classify([routes.as_path()], &w, &mut views);
+        assert!(sig.wasm && sig.server && !sig.patch, "{sig:?}");
     }
 
     #[test]
@@ -1372,6 +1462,8 @@ mod tests {
                 root.join("target/x"),
             ],
             server_dirs: vec![root.join("server"), root.join("api")],
+            server_only: vec![],
+            client_only: vec![],
             extra_dirs: vec![],
             public: None,
             styles: vec![],

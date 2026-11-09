@@ -1112,30 +1112,17 @@ pub mod verb {
         /// The action this vocabulary deletes with.
         type Action: DeclaredAction<Table = Self>;
     }
+}
 
-    /// The action a declared route's method means, by its `doxa::wire::contract::verb` marker.
-    pub trait ForVerb<V> {
-        /// The action.
-        type Action: DeclaredAction<Table = Self>;
-    }
-
-    use doxa_wire::contract::verb::{Delete, Get, Patch, Post, Put};
-
-    impl<T: ReadAction> ForVerb<Get> for T {
-        type Action = <T as ReadAction>::Action;
-    }
-    impl<T: CreateAction> ForVerb<Post> for T {
-        type Action = <T as CreateAction>::Action;
-    }
-    impl<T: UpdateAction> ForVerb<Put> for T {
-        type Action = <T as UpdateAction>::Action;
-    }
-    impl<T: UpdateAction> ForVerb<Patch> for T {
-        type Action = <T as UpdateAction>::Action;
-    }
-    impl<T: DeleteAction> ForVerb<Delete> for T {
-        type Action = <T as DeleteAction>::Action;
-    }
+/// The asset a route's `Grant<Self>` guards with: the `#[asset(entity = Self)]` that doesn't
+/// say `default = false`.
+#[diagnostic::on_unimplemented(
+    message = "no asset guards `{Self}` by default",
+    note = "add `entity = {Self}` to its `#[doxa::asset(…)]`, or name one: `Grant<{Self}, by = …>`"
+)]
+pub trait AssetFor {
+    /// The asset.
+    type Asset;
 }
 
 /// `&str` equality in a const context, which `==` is not.

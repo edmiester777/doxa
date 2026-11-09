@@ -1,4 +1,4 @@
-//! `doxa new`: the api, server and web crates, from templates compiled into the binary.
+//! `doxa new`: the api and web crates, from templates compiled into the binary.
 
 use std::path::Path;
 
@@ -14,12 +14,12 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../templates/api/src/lib.rs"),
     ),
     (
-        "server/Cargo.toml",
-        include_str!("../templates/server/Cargo.toml.tmpl"),
+        "api/src/server/mod.rs",
+        include_str!("../templates/api/src/server/mod.rs"),
     ),
     (
-        "server/src/main.rs",
-        include_str!("../templates/server/src/main.rs"),
+        "api/src/main.rs",
+        include_str!("../templates/api/src/main.rs"),
     ),
     (
         "web/Cargo.toml",
@@ -99,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scaffolds_the_three_crates() {
+    fn scaffolds_the_two_crates() {
         let dir = tempfile::tempdir().unwrap();
         scaffold(dir.path(), "shop-app").unwrap();
         let root = dir.path().join("shop-app");
@@ -112,7 +112,7 @@ mod tests {
         assert!(web.contains("name = \"shop-app-web\""));
         assert!(web.contains("crate-type = [\"cdylib\", \"rlib\"]"));
         assert!(web.contains("role = \"client\""));
-        assert!(web.contains("server = \"shop-app-server\""));
+        assert!(web.contains("server = \"shop-app-api\""));
         assert!(web.contains(&format!(
             "wasm-bindgen = \"={}\"",
             doxa_build::bindgen::WASM_BINDGEN_VERSION
@@ -120,7 +120,9 @@ mod tests {
         assert!(web.contains("shop-app-api = { path = \"../api\" }"));
         assert!(read("web/src/lib.rs").contains("use shop_app_api::*;"));
         assert!(read("api/build.rs").contains("doxa_role::api()"));
-        assert!(read("server/src/main.rs").contains("#[implements(shop_app_api::greeting)]"));
+        assert!(read("api/Cargo.toml").contains("server_only = [\"src/server\"]"));
+        assert!(read("api/src/main.rs").contains("shop_app_api::server::app()"));
+        assert!(!root.join("server").exists());
         let settings: serde_json::Value =
             serde_json::from_str(&read(".vscode/settings.json")).unwrap();
         assert_eq!(
