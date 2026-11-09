@@ -5,7 +5,7 @@ A small widget shop, written once and compiled for both halves.
 | Crate | What it is |
 |---|---|
 | `api` | Every route with its DTOs and errors, built for the server and the browser. `src/server/` holds the stores, guards and layers only the server compiles, and the binary serves it all. |
-| `web` | The pages, `#[story]`s, React and npm interop, and the `--lib` kit `host/` embeds. |
+| `web` | The pages, `#[story]`s, React and npm interop, and a `--lib` kit any React app can embed. |
 
 ```sh
 cargo test -p shop-api -p shop-web                      # calls and pages, against the real router

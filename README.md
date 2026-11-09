@@ -165,7 +165,7 @@ The `doxa` CLI (`cargo install doxa-cli`) scaffolds (`doxa new`), develops with 
 
 ## Examples
 
-- [`examples/shop`](https://github.com/edmiester777/doxa/tree/main/examples/shop): a full-stack widget shop in two crates (API and web), with page tests, stories, React interop and a Vite host app.
+- [`examples/shop`](https://github.com/edmiester777/doxa/tree/main/examples/shop): a full-stack widget shop in two crates (API and web), with page tests, stories and React interop.
 - [`examples/site`](https://github.com/edmiester777/doxa/tree/main/examples/site): the website above, built with doxa and published by a GitHub Actions workflow.
 
 ## Why

@@ -92,7 +92,7 @@ configure({
 <WidgetPicker contains={filter} onOpen={setOpen} />
 ```
 
-`configure` routes doxa's `<Link>`s through the host's router and tells react-query when a doxa mutation made its data stale. The [shop's `host/`](../../shop/host) is a working Vite app doing exactly this.
+`configure` routes doxa's `<Link>`s through the host's router and tells react-query when a doxa mutation made its data stale.
 
 ## Talk to APIs elsewhere
 
