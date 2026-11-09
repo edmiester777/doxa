@@ -469,7 +469,13 @@ impl Pipeline {
             };
             dist::generated_html(title, &d.html_tags())
         };
-        dist::write(&self.dist_dir(), &d, &html, self.opts.compress)?;
+        let cache = self.layout.stage().join("compressed");
+        dist::write(
+            &self.dist_dir(),
+            &d,
+            &html,
+            self.opts.compress.then_some(cache.as_path()),
+        )?;
         note(format!("wrote {}", self.dist_dir().display()));
         Ok(d)
     }

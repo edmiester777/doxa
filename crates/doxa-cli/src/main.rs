@@ -120,7 +120,7 @@ fn main() -> ExitCode {
                 release,
                 package,
                 locked,
-                compress: !lib && out.is_none(),
+                compress: release && !lib && out.is_none(),
                 base,
                 ..BuildOptions::default()
             },

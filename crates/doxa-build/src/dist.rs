@@ -1,9 +1,11 @@
 //! The served output: hashed names, `manifest.json`, `index.html`, precompressed
 //! siblings, and the `embed.rs` table `dist!()` includes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -145,8 +147,8 @@ pub fn compressible(path: &str) -> bool {
 }
 
 /// Replace `dir` with `dist`, `index.html`, `manifest.json`, `services.json` and `embed.rs`.
-/// `compress` adds the precompressed siblings.
-pub fn write(dir: &Path, dist: &Dist, index_html: &str, compress: bool) -> Result<()> {
+/// `compress` adds the precompressed siblings, reused from that cache dir by content hash.
+pub fn write(dir: &Path, dist: &Dist, index_html: &str, compress: Option<&Path>) -> Result<()> {
     if dir.exists() {
         std::fs::remove_dir_all(dir).at(dir)?;
     }
@@ -159,15 +161,65 @@ pub fn write(dir: &Path, dist: &Dist, index_html: &str, compress: bool) -> Resul
     for (rel, bytes) in &files {
         put(dir, rel, bytes)?;
         written.push(rel.clone());
-        if compress && compressible(rel) {
-            put(dir, &format!("{rel}.br"), &brotli(bytes))?;
-            put(dir, &format!("{rel}.gz"), &gzip(bytes))?;
+    }
+    if let Some(cache) = compress {
+        let todo: Vec<_> = files.iter().filter(|(rel, _)| compressible(rel)).collect();
+        compress_all(dir, cache, &todo)?;
+        for (rel, _) in todo {
             written.push(format!("{rel}.br"));
             written.push(format!("{rel}.gz"));
         }
     }
     let dir = std::fs::canonicalize(dir).at(dir)?;
     put(&dir, "embed.rs", embed_rs(&dir, &written).as_bytes())
+}
+
+/// Write each file's `.br` and `.gz` siblings into `dir`, one worker per core, then drop
+/// cache entries this build didn't use.
+fn compress_all(dir: &Path, cache: &Path, todo: &[(&String, &Vec<u8>)]) -> Result<()> {
+    std::fs::create_dir_all(cache).at(cache)?;
+    let next = AtomicUsize::new(0);
+    let keys = Mutex::new(HashSet::new());
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers.min(todo.len()))
+            .map(|_| {
+                s.spawn(|| -> Result<()> {
+                    while let Some((rel, bytes)) = todo.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let key = hex::encode(Sha256::digest(bytes));
+                        for (ext, f) in [("br", brotli as fn(&[u8]) -> Vec<u8>), ("gz", gzip)] {
+                            let cached = cache.join(format!("{key}.{ext}"));
+                            if !cached.is_file() {
+                                // Renamed into place, so an interrupted build leaves no partial entry.
+                                let tmp = cache.join(format!("{key}.{ext}.tmp"));
+                                std::fs::write(&tmp, f(bytes)).at(&tmp)?;
+                                std::fs::rename(&tmp, &cached).at(&cached)?;
+                            }
+                            let out = dir.join(format!("{rel}.{ext}"));
+                            std::fs::copy(&cached, &out).at(&out)?;
+                        }
+                        keys.lock().expect("keys").insert(key);
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .try_for_each(|h| h.join().expect("compress worker"))
+    })?;
+    let keys = keys.into_inner().expect("keys");
+    for entry in std::fs::read_dir(cache).at(cache)? {
+        let path = entry.at(cache)?.path();
+        let stem = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split('.').next());
+        if !stem.is_some_and(|s| keys.contains(s)) {
+            std::fs::remove_file(&path).at(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Copy the written dist at `dist_dir` to `out` as a static site: no `embed.rs` or compressed
@@ -334,7 +386,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("dist");
         let d = sample();
-        write(&out, &d, "<html></html>", true).unwrap();
+        write(&out, &d, "<html></html>", Some(&dir.path().join("cache"))).unwrap();
         let js = hashed_name("app.js", b"js");
         let br = std::fs::read(out.join(format!("{js}.br"))).unwrap();
         let mut plain = Vec::new();
@@ -366,10 +418,45 @@ mod tests {
     }
 
     #[test]
+    fn compressed_siblings_come_from_the_cache_and_unused_entries_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, cache) = (dir.path().join("dist"), dir.path().join("cache"));
+        write(&out, &sample(), "<html></html>", Some(&cache)).unwrap();
+        let key = hex::encode(Sha256::digest(b"js"));
+        std::fs::write(cache.join(format!("{key}.br")), "cached").unwrap();
+        std::fs::write(cache.join("stale.br"), "x").unwrap();
+
+        write(&out, &sample(), "<html></html>", Some(&cache)).unwrap();
+        let js = hashed_name("app.js", b"js");
+        assert_eq!(
+            std::fs::read_to_string(out.join(format!("{js}.br"))).unwrap(),
+            "cached"
+        );
+        assert!(!cache.join("stale.br").exists());
+    }
+
+    #[test]
+    fn an_uncompressed_dist_has_no_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("dist");
+        write(&out, &sample(), "<html></html>", None).unwrap();
+        assert!(out.join("index.html").is_file());
+        assert!(!out.join("index.html.gz").exists());
+        let embed = std::fs::read_to_string(out.join("embed.rs")).unwrap();
+        assert!(!embed.contains(".gz\""), "{embed}");
+    }
+
+    #[test]
     fn an_export_is_plain_files_with_a_404_page() {
         let dir = tempfile::tempdir().unwrap();
         let (dist, out) = (dir.path().join("dist"), dir.path().join("site"));
-        write(&dist, &sample(), "<html></html>", true).unwrap();
+        write(
+            &dist,
+            &sample(),
+            "<html></html>",
+            Some(&dir.path().join("cache")),
+        )
+        .unwrap();
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("stale.txt"), "x").unwrap();
         export(&dist, &out).unwrap();
