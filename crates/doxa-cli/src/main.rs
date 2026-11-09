@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new app: api, client, server, and web crates.
+    /// Create a new app: api, server, and web crates.
     New {
         /// The app's name, used as the directory and package prefix.
         name: String,

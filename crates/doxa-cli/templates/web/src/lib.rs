@@ -1,7 +1,7 @@
 //! The browser app: pages that call the server's routes as functions.
 
 use doxa::ui::prelude::*;
-use {{crate}}_client::greeting::*;
+use {{crate}}_api::*;
 
 #[doxa::start]
 fn start() {

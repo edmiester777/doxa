@@ -1,4 +1,4 @@
-//! `doxa new`: the four-crate layout, from templates compiled into the binary.
+//! `doxa new`: the api, server and web crates, from templates compiled into the binary.
 
 use std::path::Path;
 
@@ -8,21 +8,10 @@ const FILES: &[(&str, &str)] = &[
         "api/Cargo.toml",
         include_str!("../templates/api/Cargo.toml.tmpl"),
     ),
+    ("api/build.rs", include_str!("../templates/api/build.rs")),
     (
         "api/src/lib.rs",
         include_str!("../templates/api/src/lib.rs"),
-    ),
-    (
-        "api/src/greeting.rs",
-        include_str!("../templates/api/src/greeting.rs"),
-    ),
-    (
-        "client/Cargo.toml",
-        include_str!("../templates/client/Cargo.toml.tmpl"),
-    ),
-    (
-        "client/build.rs",
-        include_str!("../templates/client/build.rs"),
     ),
     (
         "server/Cargo.toml",
@@ -110,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scaffolds_the_four_crates() {
+    fn scaffolds_the_three_crates() {
         let dir = tempfile::tempdir().unwrap();
         scaffold(dir.path(), "shop-app").unwrap();
         let root = dir.path().join("shop-app");
@@ -128,10 +117,10 @@ mod tests {
             "wasm-bindgen = \"={}\"",
             doxa_build::bindgen::WASM_BINDGEN_VERSION
         )));
-        assert!(read("client/Cargo.toml").contains("path = \"../api/src/lib.rs\""));
-        assert!(read("web/src/lib.rs").contains("#[doxa::start]"));
-        assert!(read("client/build.rs").contains("doxa_role::client()"));
-        assert!(read("server/src/main.rs").contains("doxa::app(&shop_app_api::NoState)"));
+        assert!(web.contains("shop-app-api = { path = \"../api\" }"));
+        assert!(read("web/src/lib.rs").contains("use shop_app_api::*;"));
+        assert!(read("api/build.rs").contains("doxa_role::api()"));
+        assert!(read("server/src/main.rs").contains("#[implements(shop_app_api::greeting)]"));
         let settings: serde_json::Value =
             serde_json::from_str(&read(".vscode/settings.json")).unwrap();
         assert_eq!(

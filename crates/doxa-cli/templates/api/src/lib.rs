@@ -1,13 +1,19 @@
-//! Routes and DTOs, shared by the server and the browser.
+//! Every route, declared once: the server implements them and the browser calls them.
 
-pub mod greeting;
+doxa::prelude!();
 
-doxa::server_only! {
-    /// The routes' state; this app has none yet.
-    #[derive(Clone, doxa::State)]
-    pub struct NoState;
-
-    /// Every route.
-    #[doxa::service]
-    pub struct App;
+/// What the server says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Greeting {
+    pub message: String,
 }
+
+/// Who to greet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, IntoParams)]
+pub struct Who {
+    pub name: Option<String>,
+}
+
+/// Say hello.
+#[get("/api/greeting")]
+pub async fn greeting(who: Query<Who>) -> Json<Greeting>;
