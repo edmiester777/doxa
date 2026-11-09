@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use doxa::ui::dom::{MemDom, NodeId};
-use doxa::ui::gallery::{Gallery, Initial, StoryMeta, Tab, Viewport};
+use doxa::ui::gallery::{Gallery, Initial, StoryMeta, Viewport};
 use doxa::ui::prelude::*;
 
 fn story(name: &str, module: &str) -> StoryMeta {
@@ -21,7 +21,6 @@ fn start() -> Initial {
         story: None,
         dark: false,
         viewport: Viewport::Fill,
-        tab: Tab::Actions,
     }
 }
 
@@ -99,12 +98,11 @@ fn a_search_keeps_only_matching_stories() {
 }
 
 #[test]
-fn the_url_picks_the_story_viewport_theme_and_panel() {
+fn the_url_picks_the_story_viewport_and_theme() {
     let dom = mount(Initial {
         story: Some("empty_list".into()),
         dark: true,
         viewport: Viewport::Phone,
-        tab: Tab::Source,
     });
     let src = frame_src(&dom);
     assert!(

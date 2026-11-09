@@ -1,8 +1,6 @@
 //! The gallery page's entry, called by the bundle `doxa gallery` builds: the gallery itself, or
 //! with `?story=` set, the one story its canvas frame shows.
 
-use std::cell::RefCell;
-
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -11,11 +9,6 @@ use super::model::{entries, Initial, Message, StoryMeta, FORWARDED};
 use crate::prelude::*;
 
 const PREFIX: &str = "__doxa_story_";
-
-thread_local! {
-    /// The story this frame shows; its components' calls are reported under it.
-    static STORY: RefCell<Option<String>> = const { RefCell::new(None) };
-}
 
 /// Show the gallery over `glue`'s `#[story]` exports, described by `stories` (JSON).
 #[wasm_bindgen(js_name = "__doxa_gallery")]
@@ -75,7 +68,6 @@ fn show_story(
     let body = document.body().ok_or_else(|| JsError::new("no <body>"))?;
     body.set_attribute("style", "margin: 0; padding: 1rem")
         .map_err(js_error)?;
-    STORY.with(|s| s.replace(Some(name.clone())));
     forward_keys();
 
     let host = document.create_element("div").map_err(js_error)?;
@@ -123,19 +115,6 @@ fn forward_keys() {
     });
     let _ = window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
     on_key.forget();
-}
-
-/// Tell the gallery a component in this frame's story called its `prop` with `args`.
-pub(crate) fn report(component: &str, prop: &str, args: Vec<String>) {
-    let Some(story) = STORY.with(|s| s.borrow().clone()) else {
-        return;
-    };
-    post(&Message::Action {
-        story,
-        component: component.to_owned(),
-        prop: prop.to_owned(),
-        args,
-    });
 }
 
 fn post(message: &Message) {

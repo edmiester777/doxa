@@ -124,7 +124,7 @@ pub mod __private {
     #[cfg(all(feature = "export", target_arch = "wasm32"))]
     pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
     pub use crate::icon::{svg_el, svg_root};
-    pub use crate::story::{action, story_meta, ShowDebug, ShowOpaque, Shown};
+    pub use crate::story::story_meta;
     pub use crate::view::{owner, FromChildren, IntoOptional, OptionOf, Owner};
     pub use futures_util::future::LocalBoxFuture;
     #[cfg(target_arch = "wasm32")]

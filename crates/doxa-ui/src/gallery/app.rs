@@ -1,12 +1,11 @@
-//! The gallery's page: the story tree, the canvas and its toolbar, and the actions and source panels.
+//! The gallery's page: the story tree, the canvas and its toolbar, and the source panel.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use super::highlight::highlight;
 use super::model::{
-    folders, human, log, story_url, tree_rows, visible, Initial, Logged, Message, Row, StoryMeta,
-    Tab, Viewport,
+    folders, human, story_url, tree_rows, visible, Initial, Message, Row, StoryMeta, Viewport,
 };
 use crate::clipboard::{self, Clip};
 use crate::prelude::*;
@@ -30,10 +29,8 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     let story = state(known.or(first));
     let dark = state(initial.dark);
     let viewport = state(initial.viewport);
-    let tab = state(initial.tab);
     let remount = state(0u64);
     let query = state(String::new());
-    let actions = state(Vec::<Logged>::new());
     let copied = state(false);
     let dragging = state(None::<Axis>);
     // The phone layout's drawers: the story tree, and the panel.
@@ -75,7 +72,6 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
         story: current.clone(),
         dark: dark.get(),
         viewport: viewport.get(),
-        tab: tab.get(),
     }
     .query();
     effect(&url, async move |url: &String| replace_url(url));
@@ -83,18 +79,11 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     let select = move |name: String| {
         menu.set(false);
         if story.get().as_ref() != Some(&name) {
-            actions.set(Vec::new());
             story.set(Some(name));
         }
     };
-    let flip_theme = move || {
-        actions.set(Vec::new());
-        dark.toggle();
-    };
-    let reload = move || {
-        actions.set(Vec::new());
-        remount.update(|n| *n += 1);
-    };
+    let flip_theme = move || dark.toggle();
+    let reload = move || remount.update(|n| *n += 1);
     let flip_panel = move || panel_open.set(!panel_open.get());
     let shut = move || {
         menu.set(false);
@@ -145,19 +134,8 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
         if !from_frame(frame, &e) {
             return;
         }
-        match message(&e) {
-            Some(Message::Key { key }) => {
-                shortcut(&key);
-            }
-            Some(Message::Action {
-                story: from,
-                component,
-                prop,
-                args,
-            }) if story.get().as_ref() == Some(&from) => {
-                actions.update(|list| log(list, component, prop, args, clock()));
-            }
-            _ => {}
+        if let Some(Message::Key { key }) = message(&e) {
+            shortcut(&key);
         }
     });
 
@@ -409,91 +387,49 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
         },
     };
 
-    let total: u32 = actions.with(|a| a.iter().map(|l| l.count).sum());
-    let body = match tab.get() {
-        Tab::Actions if total == 0 => view! {
+    let body = match meta.filter(|m| !m.source.is_empty()) {
+        None => view! {
             <div class="empty">
-                {icon("bolt")}
-                <b>"No actions yet"</b>
-                <span>
-                    "Calls to a component's "
-                    <code>"impl Fn"</code>
-                    " props show up here."
-                </span>
+                {icon("code")}
+                <b>"No source"</b>
+                <span>"The story's file couldn't be read at build time."</span>
             </div>
         },
-        Tab::Actions => actions.with(|list| list.iter().map(action_row).collect::<View>()),
-        Tab::Source => match meta.filter(|m| !m.source.is_empty()) {
-            None => view! {
-                <div class="empty">
-                    {icon("code")}
-                    <b>"No source"</b>
-                    <span>"The story's file couldn't be read at build time."</span>
+        Some(m) => {
+            let text = m.source.clone();
+            view! {
+                <div class="src-head">
+                    {icon("story")}
+                    {format!("{}:{}", m.file, m.line)}
+                    <span class="grow"/>
+                    <button
+                        class="tool"
+                        title="Copy the source"
+                        on:click={async move |_| {
+                            if clipboard::write(Clip::text(text.clone())).await.is_ok() {
+                                copied.set(true);
+                                sleep(Duration::from_millis(1400)).await;
+                                copied.set(false);
+                            }
+                        }}
+                    >
+                        {icon(if copied.get() { "check" } else { "copy" })}
+                        {if copied.get() { "Copied" } else { "Copy" }}
+                    </button>
                 </div>
-            },
-            Some(m) => {
-                let text = m.source.clone();
-                view! {
-                    <div class="src-head">
-                        {icon("story")}
-                        {format!("{}:{}", m.file, m.line)}
-                        <span class="grow"/>
-                        <button
-                            class="tool"
-                            title="Copy the source"
-                            on:click={async move |_| {
-                                if clipboard::write(Clip::text(text.clone())).await.is_ok() {
-                                    copied.set(true);
-                                    sleep(Duration::from_millis(1400)).await;
-                                    copied.set(false);
-                                }
-                            }}
-                        >
-                            {icon(if copied.get() { "check" } else { "copy" })}
-                            {if copied.get() { "Copied" } else { "Copy" }}
-                        </button>
-                    </div>
-                    <pre class="src">
-                        <code>{source_lines(&m.source)}</code>
-                    </pre>
-                }
+                <pre class="src">
+                    <code>{source_lines(&m.source)}</code>
+                </pre>
             }
-        },
+        }
     };
     let tabs = view! {
-        <div class="tabs" role="tablist">
-            <button
-                class="tab"
-                class:on={tab.get() == Tab::Actions}
-                role="tab"
-                aria-selected={(tab.get() == Tab::Actions).to_string()}
-                on:click={move || tab.set(Tab::Actions)}
-            >
-                {icon("bolt")}
-                "Actions"
-                {(total > 0).then(|| view! { <span class="badge">{total.to_string()}</span> })}
-            </button>
-            <button
-                class="tab"
-                class:on={tab.get() == Tab::Source}
-                role="tab"
-                aria-selected={(tab.get() == Tab::Source).to_string()}
-                on:click={move || tab.set(Tab::Source)}
-            >
+        <div class="tabs">
+            <span class="tab">
                 {icon("code")}
                 "Source"
-            </button>
+            </span>
             <span class="grow"/>
-            {(tab.get() == Tab::Actions && total > 0).then(|| view! {
-                <button
-                    class="tool"
-                    title="Clear actions"
-                    on:click={move || actions.set(Vec::new())}
-                >
-                    {icon("trash")}
-                    "Clear"
-                </button>
-            })}
             <button
                 class="tool close"
                 title="Close"
@@ -561,52 +497,6 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
                 {lower}
             </main>
             {mobile_bar}
-        </div>
-    }
-}
-
-fn action_row(a: &Logged) -> View {
-    let args = a
-        .args
-        .iter()
-        .enumerate()
-        .map(|(i, arg)| {
-            let class = if arg.starts_with(['"', '\'']) {
-                Some("v-str")
-            } else if arg.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
-                Some("v-num")
-            } else if matches!(arg.as_str(), "true" | "false" | "None" | "()") {
-                Some("v-kw")
-            } else {
-                None
-            };
-            let sep = if i > 0 { ", " } else { "" };
-            match class {
-                Some(c) => view! {
-                    {sep}
-                    <span class={c}>{arg}</span>
-                },
-                None => view! {
-                    {sep}
-                    {arg}
-                },
-            }
-        })
-        .collect::<View>();
-    view! {
-        <div key={a.id} class="act">
-            <span class="call">
-                <span class="who">{&a.component}</span>
-                "."
-                <span class="what">{&a.prop}</span>
-                "("
-                {args}
-                ")"
-                {(a.count > 1).then(|| view! {
-                    <span class="count">{format!("×{}", a.count)}</span>
-                })}
-            </span>
-            <time>{&a.at}</time>
         </div>
     }
 }
@@ -737,13 +627,6 @@ fn icon(name: &str) -> View {
                 </svg>
             }
         }
-        "trash" => {
-            view! {
-                <svg class="i" viewBox="0 0 24 24">
-                    <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>
-                </svg>
-            }
-        }
         "copy" => {
             view! {
                 <svg class="i" viewBox="0 0 24 24">
@@ -767,13 +650,6 @@ fn icon(name: &str) -> View {
                 <path d="M6 6l12 12M18 6 6 18"/>
             </svg>
         },
-        "bolt" => {
-            view! {
-                <svg class="i" viewBox="0 0 24 24">
-                    <path d="M13 2 4 14h7l-1 8 9-12h-7z"/>
-                </svg>
-            }
-        }
         _ => {
             view! {
                 <svg class="i" viewBox="0 0 24 24">
@@ -782,22 +658,6 @@ fn icon(name: &str) -> View {
             }
         }
     }
-}
-
-/// The time of day, `HH:MM:SS`.
-fn clock() -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let d = js_sys::Date::new_0();
-        format!(
-            "{:02}:{:02}:{:02}",
-            d.get_hours(),
-            d.get_minutes(),
-            d.get_seconds()
-        )
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    String::new()
 }
 
 fn replace_url(query: &str) {

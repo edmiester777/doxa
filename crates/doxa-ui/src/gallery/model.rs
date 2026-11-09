@@ -1,4 +1,4 @@
-//! What the gallery shows, apart from how: the story tree, the logged actions, the URL state.
+//! What the gallery shows, apart from how: the story tree and the URL state.
 
 use std::collections::BTreeMap;
 
@@ -43,13 +43,6 @@ pub fn entries(mut names: Vec<String>, meta: Vec<StoryMeta>) -> Vec<StoryMeta> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "doxa", rename_all = "lowercase")]
 pub(crate) enum Message {
-    /// A component called a function prop.
-    Action {
-        story: String,
-        component: String,
-        prop: String,
-        args: Vec<String>,
-    },
     /// A gallery shortcut pressed while the story had focus.
     Key { key: String },
 }
@@ -103,15 +96,6 @@ impl Viewport {
     }
 }
 
-/// The panel under the canvas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    /// Calls the story's components made to their function props.
-    Actions,
-    /// The story's source.
-    Source,
-}
-
 /// Where the gallery starts, from its URL.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Initial {
@@ -121,12 +105,10 @@ pub struct Initial {
     pub dark: bool,
     /// The canvas size.
     pub viewport: Viewport,
-    /// The open panel.
-    pub tab: Tab,
 }
 
 impl Initial {
-    /// From the query's pairs: `show`, `theme`, `viewport` and `panel`.
+    /// From the query's pairs: `show`, `theme` and `viewport`.
     pub fn from_query(pairs: &[(String, String)]) -> Self {
         let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
         Initial {
@@ -136,27 +118,17 @@ impl Initial {
                 .into_iter()
                 .find(|v| Some(v.key()) == get("viewport"))
                 .unwrap_or(Viewport::Fill),
-            tab: if get("panel") == Some("source") {
-                Tab::Source
-            } else {
-                Tab::Actions
-            },
         }
     }
 
     /// The query the gallery keeps its URL at.
     pub(crate) fn query(&self) -> String {
-        let tab = match self.tab {
-            Tab::Actions => "actions",
-            Tab::Source => "source",
-        };
         let story = self.story.as_deref().unwrap_or("");
         let theme = if self.dark { "dark" } else { "light" };
         let pairs = [
             ("show", story),
             ("theme", theme),
             ("viewport", self.viewport.key()),
-            ("panel", tab),
         ];
         format!(
             "?{}",
@@ -283,51 +255,6 @@ pub(crate) fn visible(rows: &[Row]) -> Vec<String> {
         .collect()
 }
 
-/// One logged call, newest first in the panel.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Logged {
-    pub id: u64,
-    pub component: String,
-    pub prop: String,
-    pub args: Vec<String>,
-    /// How many times in a row it was made.
-    pub count: u32,
-    pub at: String,
-}
-
-/// The most calls the panel keeps.
-const KEPT: usize = 500;
-
-/// Log a call at the front, folding it into the newest one when it repeats that exactly.
-pub(crate) fn log(
-    list: &mut Vec<Logged>,
-    component: String,
-    prop: String,
-    args: Vec<String>,
-    at: String,
-) {
-    if let Some(last) = list.first_mut() {
-        if last.component == component && last.prop == prop && last.args == args {
-            last.count += 1;
-            last.at = at;
-            return;
-        }
-    }
-    let id = list.iter().map(|l| l.id + 1).max().unwrap_or(0);
-    list.insert(
-        0,
-        Logged {
-            id,
-            component,
-            prop,
-            args,
-            count: 1,
-            at,
-        },
-    );
-    list.truncate(KEPT);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,43 +327,11 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_call_is_counted_on_the_newest_row() {
-        let mut list = Vec::new();
-        let call = |list: &mut Vec<Logged>, arg: &str, at: &str| {
-            log(
-                list,
-                "Picker".into(),
-                "on_open".into(),
-                vec![arg.into()],
-                at.into(),
-            )
-        };
-        call(&mut list, "\"gear\"", "1");
-        call(&mut list, "\"gear\"", "2");
-        call(&mut list, "\"cog\"", "3");
-        call(&mut list, "\"gear\"", "4");
-        let rows: Vec<_> = list
-            .iter()
-            .map(|l| (l.args[0].as_str(), l.count, l.at.as_str()))
-            .collect();
-        assert_eq!(
-            rows,
-            [
-                ("\"gear\"", 1, "4"),
-                ("\"cog\"", 1, "3"),
-                ("\"gear\"", 2, "2")
-            ]
-        );
-        assert_eq!(list.iter().map(|l| l.id).collect::<Vec<_>>(), [2, 1, 0]);
-    }
-
-    #[test]
     fn the_url_round_trips_and_unknown_values_fall_back() {
         let start = Initial {
             story: Some("picker three".into()),
             dark: true,
             viewport: Viewport::Phone,
-            tab: Tab::Source,
         };
         let pairs: Vec<(String, String)> =
             serde_urlencoded::from_str(start.query().trim_start_matches('?')).unwrap();

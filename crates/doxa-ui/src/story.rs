@@ -73,60 +73,12 @@ pub const fn story_meta<const N: usize>(s: &str) -> [u8; N] {
     out
 }
 
-/// An argument a gallery action shows: its `Debug`, else its type's name.
-#[doc(hidden)]
-pub struct Shown<'a, T: ?Sized>(pub &'a T);
-
-#[doc(hidden)]
-pub trait ShowDebug {
-    fn show(&self) -> String;
-}
-
-impl<T: std::fmt::Debug + ?Sized> ShowDebug for &Shown<'_, T> {
-    fn show(&self) -> String {
-        format!("{:?}", self.0)
-    }
-}
-
-#[doc(hidden)]
-pub trait ShowOpaque {
-    fn show(&self) -> String;
-}
-
-impl<T: ?Sized> ShowOpaque for Shown<'_, T> {
-    fn show(&self) -> String {
-        std::any::type_name::<T>().to_owned()
-    }
-}
-
-/// Tell the gallery that `component` called its `prop` with `args`.
-#[doc(hidden)]
-pub fn action(component: &str, prop: &str, args: Vec<String>) {
-    #[cfg(all(feature = "gallery", target_arch = "wasm32", not(test)))]
-    crate::gallery::report(component, prop, args);
-    #[cfg(not(all(feature = "gallery", target_arch = "wasm32", not(test))))]
-    let _ = (component, prop, args);
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
 
     use super::*;
     use crate::dom::MemDom;
-
-    struct Opaque;
-
-    // `#[component]` writes `&&Shown`, so the `Debug` impl is tried first.
-    #[allow(clippy::needless_borrow)]
-    #[test]
-    fn an_action_shows_debug_args_and_names_the_rest() {
-        let n = 3u8;
-        let s = "gear";
-        assert_eq!((&&Shown(&n)).show(), "3");
-        assert_eq!((&&Shown(&s)).show(), "\"gear\"");
-        assert_eq!((&&Shown(&Opaque)).show(), std::any::type_name::<Opaque>());
-    }
 
     #[test]
     fn story_meta_copies_the_text() {

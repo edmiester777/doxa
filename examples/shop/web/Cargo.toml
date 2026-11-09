@@ -12,6 +12,7 @@ shop-api = { path = "../api" }
 doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind"] }
 futures = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
