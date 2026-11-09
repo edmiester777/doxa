@@ -244,7 +244,10 @@ fn grant_for_server(item_fn: &mut ItemFn) -> Result<TokenStream> {
                 });
                 asset.clone()
             }
-            None => syn::parse_quote!(<#entity as ::doxa::auth::AssetFor>::Asset),
+            None => {
+                let krate = crate::role::asset_crate();
+                syn::parse_quote!(<#entity as ::doxa::auth::AssetFor<#krate>>::Asset)
+            }
         };
         pt.ty = match form {
             Some(_) => syn::parse_quote!(::doxa::auth::Granted<::doxa::auth::Many<#asset>>),
@@ -792,7 +795,7 @@ mod tests {
         let (sig, checks) = server(quote! { async fn f(w: Grant<Widget>) {} });
         assert!(
             sig.contains(
-                ":: doxa :: auth :: Granted < < Widget as :: doxa :: auth :: AssetFor > :: Asset >"
+                ":: doxa :: auth :: Granted < < Widget as :: doxa :: auth :: AssetFor < () > > :: Asset >"
             ),
             "{sig}"
         );

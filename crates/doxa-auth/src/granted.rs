@@ -1114,13 +1114,13 @@ pub mod verb {
     }
 }
 
-/// The asset a route's `Grant<Self>` guards with: the `#[asset(entity = Self)]` that doesn't
-/// say `default = false`.
+/// The asset a route's `Grant<Self>` guards with in the crate `C` marks: the
+/// `#[asset(entity = Self)]` there that doesn't say `default = false`.
 #[diagnostic::on_unimplemented(
     message = "no asset guards `{Self}` by default",
     note = "add `entity = {Self}` to its `#[doxa::asset(…)]`, or name one: `Grant<{Self}, by = …>`"
 )]
-pub trait AssetFor {
+pub trait AssetFor<C = ()> {
     /// The asset.
     type Asset;
 }

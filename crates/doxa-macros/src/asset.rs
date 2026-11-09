@@ -491,8 +491,9 @@ fn of_entity(name: &Ident, entity: Option<&Path>, default: bool) -> TokenStream 
         return TokenStream::new();
     };
     let asset_for = default.then(|| {
+        let krate = crate::role::asset_crate();
         quote! {
-            impl ::doxa::auth::AssetFor for #entity {
+            impl ::doxa::auth::AssetFor<#krate> for #entity {
                 type Asset = #name;
             }
         }
@@ -570,7 +571,7 @@ mod tests {
             item.clone(),
         );
         assert!(
-            default.contains("AssetFor for Order { type Asset = OrderById ; }"),
+            default.contains("AssetFor < () > for Order { type Asset = OrderById ; }"),
             "{default}"
         );
         let aside = expand_ok(

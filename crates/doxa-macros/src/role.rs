@@ -63,6 +63,12 @@ fn sided_modules(file: Option<&std::path::Path>) -> TokenStream {
     };
     let dir = lib.as_deref().and_then(std::path::Path::parent);
     let mut out = TokenStream::new();
+    if at_root {
+        out.extend(quote! {
+            #[doc(hidden)]
+            pub struct __DoxaCrate;
+        });
+    }
     for (env, on) in [
         ("DOXA_SERVER_ONLY", quote!(not(target_arch = "wasm32"))),
         ("DOXA_CLIENT_ONLY", quote!(target_arch = "wasm32")),
@@ -85,6 +91,16 @@ fn sided_modules(file: Option<&std::path::Path>) -> TokenStream {
         }
     }
     out
+}
+
+/// The `AssetFor` parameter: an API crate's root marker, so its assets may guard another crate's
+/// entities, and `()` elsewhere.
+pub fn asset_crate() -> TokenStream {
+    if std::env::var_os("DOXA_LIB").is_some() {
+        quote!(crate::__DoxaCrate)
+    } else {
+        quote!(())
+    }
 }
 
 /// `#[server]` / `#[client]` on any item: keep it only in that half.

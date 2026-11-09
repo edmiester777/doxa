@@ -84,7 +84,7 @@ pub async fn suggest_name(#[server] Caller(who): Caller, Json(s): Json<Rename>) 
 
 ### Guards by entity
 
-The browser knows entities, not the server's assets, so a route guards with `Grant<…>`. `Grant<Widget>` uses the asset whose `#[asset(…)]` says `entity = Widget`, and `Grant<Many<Widget>>` scopes a listing by it. When an entity has a second asset, give that one `default = false` and name it on the route that uses it:
+The browser knows entities, not the server's assets, so a route guards with `Grant<…>`. `Grant<Widget>` uses the asset whose `#[asset(…)]` says `entity = Widget`, even when `Widget` is defined in a lower crate, and `Grant<Many<Widget>>` scopes a listing by it. When an entity has a second asset, give that one `default = false` and name it on the route that uses it:
 
 ```rust
 pub async fn widget_by_id(widget: Grant<Widget, by = WidgetById>) -> Json<Widget> { /* … */ }
