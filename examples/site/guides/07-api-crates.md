@@ -91,8 +91,8 @@ match rename_widget("gear", Rename { name: "cog".into() }).await {
 
 What you get for free:
 
-- **Caching.** GETs are cached and deduplicated. A widget that arrived in a list is read from the cache without a request.
-- **Invalidation.** A mutation refreshes what it touches. Renaming a widget refetches each widget query once, however many components read it.
+- **Caching, when you ask.** `get_widget(&key).cache(Duration::from_secs(60))` keeps the answer for a minute, shared by every caller of that URL. Without `.cache`, every call asks the server.
+- **Invalidation.** A mutation drops the cached answers it touches. Components that read one re-render and fetch it once.
 - **Validation.** `Valid<Json<Rename>>` runs the same `garde` rules in the browser before sending. An invalid body never leaves, and the server answers `422` with the same fields if something else sends one.
 - **Dry runs.** `rename_widget::can("gear").await` runs the route's guards and stops before the handler. `<Can>` in a page uses it to show a button only to callers who may press it.
 - **Streams.** An `SseStream<T>` route is a stream you `.next().await`, and identical streams share one connection.

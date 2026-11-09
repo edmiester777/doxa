@@ -7,7 +7,7 @@ doxa's UI is Rust compiled to wasm: components are functions, markup is `view!`,
 ```rust
 use doxa::ui::prelude::*;
 
-#[page("/widgets/{name}", load = |p| get_widget(&p.name), lazy)]
+#[page("/widgets/{name}", lazy)]
 async fn WidgetPage(name: String) -> Result<View> {
     let key = WidgetKey { name };
     let widget = get_widget(&key).await?;
@@ -31,8 +31,7 @@ fn start() {
 }
 ```
 
-- `load` starts the page's request as soon as a link to it is hovered.
-- `lazy` splits the page into its own wasm chunk, fetched on first visit.
+- `lazy` splits the page into its own wasm chunk, fetched when a link to it is hovered or on first visit.
 - `<Can>` sends a [dry run](07-api-crates.md#call): the button appears only for callers the route would let through.
 - A layout (`Shell`) stays mounted while pages change inside its `<Outlet/>`, and `<Link>` navigates without a reload.
 

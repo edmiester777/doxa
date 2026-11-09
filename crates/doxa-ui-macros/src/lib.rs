@@ -42,7 +42,7 @@ pub fn component(args: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// A component reached at a path: `#[page("/widgets/{name}", load = |p| get_widget(&p.name))]`.
+/// A component reached at a path: `#[page("/widgets/{name}")]`.
 /// With `lazy`, `doxa build` splits its code into a wasm module fetched on hover or navigation.
 #[proc_macro_attribute]
 pub fn page(args: TokenStream, item: TokenStream) -> TokenStream {

@@ -418,6 +418,76 @@ async fn renaming_updates_the_page_and_the_url() {
 }
 
 #[tokio::test]
+async fn a_re_render_reuses_the_pages_answer() {
+    let dom = mount("editor");
+    navigate("/widgets/cog");
+    settle().await;
+    let before = shop_api::service().requests_sent();
+    dom.click(dom.find("class", "edit").unwrap());
+    settle().await;
+    assert!(dom.find("class", "name").is_some(), "the form opened");
+    assert_eq!(shop_api::service().requests_sent(), before);
+}
+
+#[tokio::test]
+async fn a_mutation_re_renders_a_page_that_read_its_entity() {
+    use shop_api::widgets::{rename_widget, Rename};
+
+    let dom = mount("editor");
+    settle().await;
+    let before = shop_api::service().requests_sent();
+    let to = Rename {
+        name: "flange".into(),
+    };
+    rename_widget("gear", to).await.unwrap();
+    settle().await;
+    assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "sprocketflangecog");
+    assert_eq!(
+        shop_api::service().requests_sent(),
+        before + 2,
+        "the rename, then the list"
+    );
+}
+
+#[tokio::test]
+async fn new_arguments_ask_again_and_unmounting_frees_the_slot() {
+    use doxa::ui::prelude::{state, view, App, Result, View};
+    use shop_api::widgets::{get_widget, WidgetKey};
+
+    #[doxa::ui::component]
+    async fn Named(name: String) -> Result<View> {
+        let w = get_widget(&WidgetKey { name }).await?;
+        Ok(view! { <b>{&w.name}</b> })
+    }
+
+    serve("viewer");
+    let dom = MemDom::new();
+    App::new(|| {
+        let name = state("gear".to_owned());
+        let shown = state(true);
+        view! {
+            <button class="cog" on:click={move |_| name.set("cog".into())}>"cog"</button>
+            <button class="hide" on:click={move |_| shown.set(false)}>"hide"</button>
+            {shown.get().then(|| view! { <Named name={name.get()}/> })}
+        }
+    })
+    .mount_on(Rc::new(dom.clone()), dom.body())
+    .keep();
+    settle().await;
+    let sent = || shop_api::service().requests_sent();
+    let first = sent();
+    assert_eq!(dom.text(dom.find_tag("b").unwrap()), "gear");
+    dom.click(dom.find("class", "cog").unwrap());
+    settle().await;
+    assert_eq!(dom.text(dom.find_tag("b").unwrap()), "cog");
+    assert_eq!(sent(), first + 1);
+    dom.click(dom.find("class", "hide").unwrap());
+    settle().await;
+    assert!(dom.find_tag("b").is_none());
+    assert_eq!(sent(), first + 1);
+}
+
+#[tokio::test]
 async fn an_empty_name_is_refused_before_it_is_sent() {
     let dom = mount("editor");
     navigate("/widgets/cog");

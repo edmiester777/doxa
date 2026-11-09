@@ -7,7 +7,6 @@ use doxa_wire::{Capability, RouteSpec};
 use futures_util::future::LocalBoxFuture;
 
 use crate::arg::{ArgFor, Outgoing};
-use crate::cache::Meta;
 use crate::service::{now, service};
 use crate::transport::Request;
 
@@ -102,7 +101,7 @@ impl IntoFuture for Probe {
             let client = service(route.package);
             let key = format!("CAN {} {url}", route.method.as_str());
             let permission = loop {
-                if let Some(v) = client.cache.fresh(&key, now()) {
+                if let Some(v) = client.cache.get(&key, now()) {
                     if let Some(p) = v.downcast_ref::<Permission>() {
                         return *p;
                     }
@@ -134,12 +133,8 @@ impl IntoFuture for Probe {
                 route,
                 self.out.first_key().cloned(),
                 Rc::new(permission),
-                Meta {
-                    now: now(),
-                    max_age: Some(std::time::Duration::from_secs(60)),
-                    etag: None,
-                    digest: None,
-                },
+                std::time::Duration::from_secs(60),
+                now(),
             );
             permission
         })

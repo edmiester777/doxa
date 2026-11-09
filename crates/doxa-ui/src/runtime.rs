@@ -66,6 +66,16 @@ impl doxa_client::cache::Observer for Observe {
             schedule(&inst);
         }
     }
+
+    fn slot(&self, at: &'static Location<'static>) -> Option<String> {
+        let inst = self.0.borrow().upgrade()?;
+        let rendering = current_instance().is_some_and(|c| Rc::ptr_eq(&c, &inst));
+        if !rendering {
+            return None;
+        }
+        let (_, i, _) = crate::hooks::slot_at("a route call", at, || crate::hooks::CallSlot);
+        Some(format!("render {}:{i}", inst.id))
+    }
 }
 
 impl Instance {

@@ -38,10 +38,6 @@ impl<T> Cached<T> {
     pub(crate) fn from_rc(rc: Rc<T>) -> Self {
         Self(rc)
     }
-
-    pub(crate) fn rc(this: &Self) -> &Rc<T> {
-        &this.0
-    }
 }
 
 impl<T> Clone for Cached<T> {

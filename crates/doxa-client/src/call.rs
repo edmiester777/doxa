@@ -5,14 +5,15 @@ use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::task::Poll;
+use std::time::Duration;
 
-use doxa_wire::{FieldErrors, Identity, Method, RouteSpec, Validates};
+use doxa_wire::{FieldErrors, Identity, RouteSpec, Validates};
 use futures_util::future::LocalBoxFuture;
 use serde_json::Value;
 
 use crate::arg::{ArgFor, ClientArg, Outgoing};
-use crate::cache::entity::Entity;
-use crate::cache::{map_items, max_age, Lookup, Meta, Outcome, Revalidated, Revalidation, Slot};
+use crate::cache::map_items;
+use crate::cached::Cached;
 use crate::fetch::Fetch;
 use crate::response::{widen, FromResponse};
 use crate::service::{now, service, Service};
@@ -31,17 +32,15 @@ enum Refused {
 /// A call to a route, built by the route's client stub. Await it.
 ///
 /// ```ignore
-/// let widget = get_widget(&key).await?; // a `Cached<Widget>`
+/// let widget = get_widget(&key).await?; // a `Widget`
 /// ```
 #[must_use = "a call does nothing until it is awaited"]
 pub struct Call<R> {
     route: &'static RouteSpec,
     out: Outgoing,
     refused: Option<Refused>,
-    fresh: bool,
     patch: Option<Patch>,
     settle: Option<Settle>,
-    entity: Option<Entity>,
     _response: PhantomData<fn() -> R>,
 }
 
@@ -52,28 +51,18 @@ impl<R> Call<R> {
             route,
             out: Outgoing::new(route.path),
             refused: None,
-            fresh: false,
             patch: None,
             settle: None,
-            entity: None,
             _response: PhantomData,
         }
     }
 
-    /// The entity this route answers, when its stub finds one; GETs are cached under it and
-    /// other methods invalidate it.
+    /// The entity this route answers, when its stub finds one; other methods invalidate it.
     #[doc(hidden)]
     pub fn answers(self, entity: Option<&'static str>) -> Self {
         if let Some(entity) = entity {
             crate::cache::answers(self.route, entity);
         }
-        self
-    }
-
-    /// How the cache files this route's response by identity; set by the stub.
-    #[doc(hidden)]
-    pub fn entity(mut self, entity: Option<Entity>) -> Self {
-        self.entity = entity;
         self
     }
 
@@ -109,10 +98,14 @@ impl<R> Call<R> {
         self
     }
 
-    /// Skip the cache and ask the server, storing what comes back.
-    pub fn fresh(mut self) -> Self {
-        self.fresh = true;
-        self
+    /// Answer from the cache for `ttl` after a response, sharing it with every caller
+    /// of the same URL; a mutation about its entity drops it sooner.
+    ///
+    /// ```ignore
+    /// let widget = get_widget(&key).cache(Duration::from_secs(60)).await?; // a `Cached<Widget>`
+    /// ```
+    pub fn cache(self, ttl: Duration) -> CachedCall<R> {
+        CachedCall { call: self, ttl }
     }
 
     /// The route this call goes to.
@@ -177,20 +170,45 @@ impl<R> Call<R> {
     }
 }
 
+/// A GET awaited in a component's render takes that component's next hook slot, and the
+/// next render gets the same answer back while the URL is unchanged.
 impl<R: FromResponse> IntoFuture for Call<R> {
     type Output = Result<R::Output, Fetch<R::Error>>;
     type IntoFuture = LocalBoxFuture<'static, Self::Output>;
 
+    #[track_caller]
     fn into_future(self) -> Self::IntoFuture {
         if R::STREAMS && self.route.method.is_safe() {
             Box::pin(subscribe(self))
         } else if R::STREAMS {
             Box::pin(open_once(self))
         } else if self.route.method.is_safe() {
-            Box::pin(query(self))
+            let slot = crate::cache::render_slot(std::panic::Location::caller());
+            Box::pin(query(self, slot))
         } else {
             Box::pin(owned(mutate(self)))
         }
+    }
+}
+
+/// A [`Call`] answered from the cache while its last response is fresh. Await it.
+#[must_use = "a call does nothing until it is awaited"]
+pub struct CachedCall<R> {
+    call: Call<R>,
+    ttl: Duration,
+}
+
+impl<R: FromResponse> IntoFuture for CachedCall<R> {
+    type Output = Result<Cached<R::Output>, Fetch<R::Error>>;
+    type IntoFuture = LocalBoxFuture<'static, Self::Output>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        let CachedCall { call, ttl } = self;
+        if R::STREAMS || !call.route.method.is_safe() {
+            // Streams and mutations aren't answers to keep.
+            return Box::pin(async move { call.await.map(Cached::new) });
+        }
+        Box::pin(cached_query(call, ttl))
     }
 }
 
@@ -232,21 +250,24 @@ impl<T: 'static> Drop for Owned<T> {
 }
 
 enum Sent<R: FromResponse> {
-    Value(R::Output, Meta, Vec<String>),
-    NotModified(Meta),
+    Value(R::Output, Vec<String>),
     Status(u16, Vec<u8>),
     Failed(Fetch),
 }
 
-/// What came back, and whether it still belongs to the current session.
-async fn send<R: FromResponse>(
-    client: &Service,
-    mut request: Request,
-    etag: Option<&str>,
-) -> (Sent<R>, bool) {
-    if let Some(etag) = etag {
-        request.headers.push(("if-none-match".into(), etag.into()));
+impl<R: FromResponse> Sent<R> {
+    fn into_result(self) -> Result<R::Output, Fetch<R::Error>> {
+        match self {
+            Sent::Value(v, _) => Ok(v),
+            Sent::Status(code, body) => Err(Fetch::from_status(code, &body)),
+            Sent::Failed(f) => Err(widen(f)),
+        }
     }
+}
+
+/// What came back, and whether it still belongs to the current session.
+async fn send<R: FromResponse>(client: &Service, request: Request) -> (Sent<R>, bool) {
+    client.cache.count_request();
     let session = client.session();
     let response = match client.send(request).await {
         Ok(r) => r,
@@ -260,27 +281,15 @@ async fn send<R: FromResponse>(
 }
 
 async fn decode<R: FromResponse>(response: crate::transport::Response) -> Sent<R> {
-    let mut meta = Meta {
-        now: now(),
-        max_age: max_age(response.header("cache-control")),
-        etag: response.header("etag").map(str::to_owned),
-        digest: None,
-    };
     let invalidates = invalidates(&response);
     let status = response.status;
-    if status == 304 {
-        return Sent::NotModified(meta);
-    }
     let headers = response.headers;
     match response.body.bytes().await {
         Ok(bytes) if status >= 400 => Sent::Status(status, bytes),
-        Ok(bytes) => {
-            meta.digest = Some(digest(&bytes));
-            match R::decode(status, &headers, bytes) {
-                Ok(v) => Sent::Value(v, meta, invalidates),
-                Err(e) => Sent::Failed(Fetch::Decode(e)),
-            }
-        }
+        Ok(bytes) => match R::decode(status, &headers, bytes) {
+            Ok(v) => Sent::Value(v, invalidates),
+            Err(e) => Sent::Failed(Fetch::Decode(e)),
+        },
         Err(e) => Sent::Failed(Fetch::Network(e)),
     }
 }
@@ -291,32 +300,6 @@ fn invalidates(response: &crate::transport::Response) -> Vec<String> {
         .header(doxa_wire::INVALIDATE_HEADER)
         .map(|h| h.split(',').map(|s| s.trim().to_owned()).collect())
         .unwrap_or_default()
-}
-
-fn digest(bytes: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
-}
-
-fn not_modified<E>() -> Fetch<E> {
-    Fetch::Status {
-        code: 304,
-        body: None,
-    }
-}
-
-fn out_of<R: FromResponse>(value: &Rc<dyn Any>) -> Result<R::Output, Fetch<R::Error>> {
-    R::load(value.clone()).ok_or_else(|| Fetch::Decode("cached value has another type".to_owned()))
-}
-
-fn from_outcome<R: FromResponse>(outcome: &Outcome) -> Result<R::Output, Fetch<R::Error>> {
-    match outcome {
-        Outcome::Value(v) => out_of::<R>(v),
-        Outcome::Status(code, body) => Err(Fetch::from_status(*code, body)),
-        Outcome::Failed(f) => Err(widen(f.clone())),
-    }
 }
 
 /// Join the open stream with the same route and arguments, or open it.
@@ -375,153 +358,86 @@ async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     Ok(R::stream(hub))
 }
 
-async fn query<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
+/// Resent when the session changes while it is in flight.
+async fn query<R: FromResponse>(
+    call: Call<R>,
+    slot: Option<String>,
+) -> Result<R::Output, Fetch<R::Error>> {
+    let client = service(call.route.package);
+    let url = call.url().map_err(widen)?;
+    let Some(slot) = slot else {
+        return send_current(&client, &call, &url).await.into_result();
+    };
+    let kept = client.cache.get_slot(&slot, &url);
+    if let Some(v) = kept.as_ref().and_then(|v| v.downcast_ref::<R::Output>()) {
+        if let Some(v) = R::copy(v) {
+            return Ok(v);
+        }
+    }
+    let (route, route_key) = (call.route, call.out.first_key().cloned());
+    let (pending, mine) = client.cache.pending(&slot, &url);
+    if mine {
+        // Its own task, so a re-render cancelling this one doesn't drop the request.
+        let (client, url, slot, pending) =
+            (client.clone(), url.clone(), slot.clone(), pending.clone());
+        crate::task::spawn(async move {
+            let sent = send_current(&client, &call, &url).await;
+            client.cache.end_pending(&slot, &pending);
+            pending.finish(Box::new(sent));
+        });
+    }
+    let taken = pending.take().await;
+    let Some(sent) = taken.and_then(|s| s.downcast::<Sent<R>>().ok()) else {
+        return Err(Fetch::Aborted);
+    };
+    if let Sent::Value(v, _) = &*sent {
+        if let Some(kept) = R::copy(v) {
+            client
+                .cache
+                .store_slot(slot, route, route_key, Rc::new(kept), url);
+        }
+    }
+    sent.into_result()
+}
+
+/// Send `call`, again whenever the session changes while it is in flight.
+async fn send_current<R: FromResponse>(client: &Service, call: &Call<R>, url: &str) -> Sent<R> {
+    loop {
+        let request = call.request(url.to_owned(), "application/json");
+        let (sent, current) = send::<R>(client, request).await;
+        if current {
+            return sent;
+        }
+    }
+}
+
+async fn cached_query<R: FromResponse>(
+    call: Call<R>,
+    ttl: Duration,
+) -> Result<Cached<R::Output>, Fetch<R::Error>> {
     let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
     let key = format!("GET {url}");
     loop {
-        if let Some(result) = query_once(&call, &client, &url, &key).await {
-            return result;
+        if let Some(found) = client.cache.get(&key, now()) {
+            return found
+                .downcast::<R::Output>()
+                .map(Cached::from_rc)
+                .map_err(|_| Fetch::Decode("cached value has another type".to_owned()));
         }
-    }
-}
-
-/// One attempt; `None` when the session changed while it was in flight.
-async fn query_once<R: FromResponse>(
-    call: &Call<R>,
-    client: &Rc<Service>,
-    url: &str,
-    key: &str,
-) -> Option<Result<R::Output, Fetch<R::Error>>> {
-    let request = call.request(url.to_owned(), "application/json");
-    if !call.fresh {
-        match client.cache.lookup(key, now()) {
-            Lookup::Fresh(v) => return Some(out_of::<R>(&v)),
-            Lookup::Revalidate(v, claim) => {
-                revalidate::<R>(client, key.to_owned(), request, claim);
-                return Some(out_of::<R>(&v));
-            }
-            Lookup::Pending(slot) => {
-                let outcome = slot.wait().await;
-                if !matches!(*outcome, Outcome::Failed(Fetch::Aborted)) {
-                    client.cache.watch(key);
-                    return Some(from_outcome::<R>(&outcome));
-                }
-                return None;
-            }
-            Lookup::Miss => {
-                if let Some(found) = from_store(call, client, key) {
-                    return Some(out_of::<R>(&found));
-                }
-            }
-        }
-    }
-
-    let slot = client.cache.begin(key);
-    let guard = Inflight {
-        client,
-        key,
-        slot: &slot,
-    };
-    let (sent, current) = send::<R>(client, request, None).await;
-    if !current {
-        return None;
-    }
-    let result = match sent {
-        Sent::Value(v, meta, _) => {
-            match R::store(&v) {
-                Some(stored) => {
-                    let route_key = call.out.first_key().cloned();
-                    client
-                        .cache
-                        .store(key.to_owned(), call.route, route_key, stored.clone(), meta);
-                    slot.finish(Outcome::Value(stored));
-                }
-                None => slot.finish(Outcome::Failed(Fetch::Decode("not cacheable".into()))),
-            }
-            Ok(v)
-        }
-        Sent::NotModified(_) => {
-            slot.finish(Outcome::Failed(not_modified()));
-            Err(not_modified())
-        }
-        Sent::Status(code, body) => {
-            let err = Fetch::from_status(code, &body);
-            slot.finish(Outcome::Status(code, body.into()));
-            Err(err)
-        }
-        Sent::Failed(f) => {
-            slot.finish(Outcome::Failed(f.clone()));
-            Err(widen(f))
-        }
-    };
-    drop(guard);
-    Some(result)
-}
-
-/// An instance route answered from a fresh list or response holding that instance,
-/// filed under `key` with the age of what it came from.
-fn from_store<R>(call: &Call<R>, client: &Service, key: &str) -> Option<Rc<dyn Any>> {
-    let entity = call.entity?;
-    let route_key = call.out.only_key()?;
-    let (value, at) = client.cache.find(now(), |v| (entity.find)(v, route_key))?;
-    let meta = Meta {
-        now: at,
-        max_age: None,
-        etag: None,
-        digest: None,
-    };
-    client.cache.store(
-        key.to_owned(),
-        call.route,
-        Some(route_key.clone()),
-        value.clone(),
-        meta,
-    );
-    Some(value)
-}
-
-/// Ends an in-flight entry even if the caller drops the call, so waiters retry
-/// rather than wait forever.
-struct Inflight<'a> {
-    client: &'a Service,
-    key: &'a str,
-    slot: &'a Slot,
-}
-
-impl Drop for Inflight<'_> {
-    fn drop(&mut self) {
-        if self.slot.outcome.borrow().is_none() {
-            self.slot.finish(Outcome::Failed(Fetch::Aborted));
-        }
-        self.client.cache.end(self.key, self.slot);
-    }
-}
-
-fn revalidate<R: FromResponse>(
-    client: &Rc<Service>,
-    key: String,
-    request: Request,
-    claim: Revalidation,
-) {
-    let client = client.clone();
-    crate::task::spawn(async move {
-        client.cache.count_request();
-        let (sent, current) = send::<R>(&client, request, claim.etag.as_deref()).await;
+        let request = call.request(url.clone(), "application/json");
+        let (sent, current) = send::<R>(&client, request).await;
         if !current {
-            return;
+            continue;
         }
-        let result = match sent {
-            Sent::Value(v, meta, _) => match R::store(&v) {
-                Some(stored) => Revalidated::Value(stored, meta),
-                None => Revalidated::Failed,
-            },
-            Sent::NotModified(meta) => Revalidated::NotModified(meta.now),
-            Sent::Status(401 | 403 | 404, _) => Revalidated::Gone,
-            Sent::Status(..) | Sent::Failed(_) => Revalidated::Failed,
-        };
-        client.cache.revalidated(&key, claim, result);
-    });
+        let value = Rc::new(sent.into_result()?);
+        let route_key = call.out.first_key().cloned();
+        let stored: Rc<dyn Any> = value.clone();
+        client
+            .cache
+            .store(key, call.route, route_key, stored, ttl, now());
+        return Ok(Cached::from_rc(value));
+    }
 }
 
 /// The entities a successful call to `route` marks stale, before any the response names.
@@ -535,50 +451,30 @@ fn affected(route: &'static RouteSpec) -> Vec<&'static str> {
 async fn mutate<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
-    let request = call.request(url.clone(), "application/json");
+    let request = call.request(url, "application/json");
     let key = call.out.first_key().cloned();
     let previous = call.patch.map(|p| p(&client, key.as_ref()));
-    client.cache.count_request();
     // A mutation that outlived its session still reports, but leaves the new cache alone.
-    let (sent, current) = send::<R>(&client, request, None).await;
+    let (sent, current) = send::<R>(&client, request).await;
     match sent {
-        Sent::Value(v, _, extra) => {
+        Sent::Value(v, extra) => {
             if !current {
                 return Ok(v);
             }
-            let stored = R::store(&v);
-            if let (Some(settle), Some(stored)) = (call.settle, &stored) {
-                settle(&client, &**stored, key.as_ref());
+            if let Some(settle) = call.settle {
+                settle(&client, &v, key.as_ref());
             }
             let mut entities: Vec<&str> = affected(call.route);
             entities.extend(extra.iter().map(String::as_str));
             client.cache.invalidate(&entities);
             crate::cache::report(&entities);
-            // Filed after the invalidation, so the next read of this instance needs no request.
-            if let (Some(entity), Some(stored)) = (call.entity, stored) {
-                if call.route.method != Method::Delete {
-                    let meta = Meta {
-                        now: now(),
-                        max_age: None,
-                        etag: None,
-                        digest: None,
-                    };
-                    let route_key = (entity.key)(&stored);
-                    let at = format!("{} {url}", call.route.method.as_str());
-                    client.cache.store(at, call.route, route_key, stored, meta);
-                }
-            }
             Ok(v)
         }
         other => {
             if let (Some(previous), true) = (previous, current) {
                 client.cache.restore(previous);
             }
-            Err(match other {
-                Sent::Status(code, body) => Fetch::from_status(code, &body),
-                Sent::Failed(f) => widen(f),
-                _ => not_modified(),
-            })
+            other.into_result()
         }
     }
 }

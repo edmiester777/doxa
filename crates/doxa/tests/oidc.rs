@@ -219,12 +219,8 @@ fn calls_carry_the_access_token_and_a_refresh_lands_before_it_expires() {
     let s = service("app");
     s.layers().push(oidc.bearer());
     s.layers().push(transport(RouterTransport::new(app)));
-    let seen = task::block_on(
-        Call::<doxa::client::Json<String>>::new(&ME)
-            .fresh()
-            .into_future(),
-    );
-    assert_eq!(*seen.unwrap(), "Bearer a0");
+    let seen = task::block_on(Call::<doxa::client::Json<String>>::new(&ME).into_future());
+    assert_eq!(seen.unwrap(), "Bearer a0");
 
     // A tenth of five minutes early, at most thirty seconds.
     clock.advance(Duration::from_secs(269));
@@ -234,12 +230,8 @@ fn calls_carry_the_access_token_and_a_refresh_lands_before_it_expires() {
     task::run_until_stalled();
     assert_eq!(shared.lock().unwrap().refreshes, 1);
     assert_eq!(oidc.session().tokens().unwrap().access_token(), "a1");
-    let seen = task::block_on(
-        Call::<doxa::client::Json<String>>::new(&ME)
-            .fresh()
-            .into_future(),
-    );
-    assert_eq!(*seen.unwrap(), "Bearer a1");
+    let seen = task::block_on(Call::<doxa::client::Json<String>>::new(&ME).into_future());
+    assert_eq!(seen.unwrap(), "Bearer a1");
 }
 
 #[test]

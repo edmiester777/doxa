@@ -48,14 +48,14 @@ async fn greeting(Query(who): Query<Who>) -> Json<Greeting> {
 **`web`** calls it. A page, compiled to wasm, awaiting the server like a local function:
 
 ```rust
-#[page("/", load = |p| greeting(Who { name: p.name.clone() }))]
+#[page("/")]
 async fn Home(name: Option<String>) -> Result<View> {
     let hello = greeting(Who { name }).await?;
     Ok(view! { <h1>{&hello.message}</h1> })
 }
 ```
 
-No client to generate, no URL strings, no JSON by hand. Rename a field and both sides stop compiling until they agree. The route shows up in the server's OpenAPI document, the page preloads its data before it renders, and the call is cached and deduplicated in the browser.
+No client to generate, no URL strings, no JSON by hand. Rename a field and both sides stop compiling until they agree. The route shows up in the server's OpenAPI document, and `.cache(ttl)` on a call keeps its answer in the browser.
 
 ## Quick start
 

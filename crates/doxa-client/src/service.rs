@@ -6,7 +6,7 @@ use std::rc::{Rc, Weak};
 
 use futures_util::future::{FutureExt, LocalBoxFuture, Shared};
 
-use crate::cache::{Cache, CacheConfig};
+use crate::cache::Cache;
 use crate::fetch::Fetch;
 use crate::layer::{layers, Layers, Next};
 use crate::sse::Hub;
@@ -144,11 +144,6 @@ impl Service {
     /// This service's layers; they run after the [global ones](crate::layers).
     pub fn layers(&self) -> Layers {
         self.layers.clone()
-    }
-
-    /// How long this service's responses stay fresh.
-    pub fn cache(&self, config: CacheConfig) {
-        *self.cache.config.borrow_mut() = config;
     }
 
     /// Run `f` whenever the server reports a new session (sign-in, sign-out, tenant switch).

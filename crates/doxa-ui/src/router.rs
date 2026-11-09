@@ -21,11 +21,7 @@ pub trait Page: Component {
     const PATH: &'static str;
     /// Props from the matched path, or `None` if a segment doesn't parse.
     fn parse(segments: &Segments) -> Option<Self::Props>;
-    /// The page's data, fetched ahead of navigation by `<Link>`.
-    fn load(_props: &Self::Props) -> Option<Prefetch> {
-        None
-    }
-    /// A `lazy` page's own wasm, fetched with its `load`.
+    /// A `lazy` page's own wasm, fetched ahead of navigation by `<Link>`.
     #[doc(hidden)]
     fn chunk() -> Option<Prefetch> {
         None
@@ -169,11 +165,11 @@ impl From<String> for Route {
     }
 }
 
-/// Data a page needs, fetched ahead of time.
+/// Code a page needs, fetched ahead of time.
 pub struct Prefetch(LocalBoxFuture<'static, ()>);
 
 impl Prefetch {
-    /// Prefetch by awaiting `call` and discarding the result; the cache keeps it.
+    /// Prefetch by awaiting `call` and discarding the result.
     pub fn of<F: IntoFuture + 'static>(call: F) -> Prefetch {
         let fut = call.into_future();
         Prefetch(Box::pin(async move {
@@ -207,13 +203,13 @@ enum Entry {
     Redirect(&'static str, Route),
 }
 
-/// What stays on screen while the next page's data loads.
+/// What stays on screen while the next page's code loads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Keep {
     /// Switch at once; the new page shows its own loading state.
     #[default]
     Nothing,
-    /// Keep the current page until the next page's `load` resolves; see [`navigation`].
+    /// Keep the current page until a `lazy` next page's wasm arrives; see [`navigation`].
     Previous,
 }
 
@@ -236,10 +232,9 @@ impl Router {
     pub fn page<P: Page>(mut self) -> Self {
         self.entries.push(Entry::Page(P::PATH, |s| {
             let props = P::parse(s)?;
-            let load = Prefetch::both(P::chunk(), P::load(&props));
             // Keyed by params too, so `/w/a` → `/w/b` remounts rather than keeping a's state.
             let key = (P::PATH, &s.params);
-            Some((comp::<P>(props).key(key).into_view(), load))
+            Some((comp::<P>(props).key(key).into_view(), P::chunk()))
         }));
         self
     }
@@ -260,10 +255,9 @@ impl Router {
             prefix: L::PATH,
             wrap: |s, child| {
                 let props = L::parse(s)?;
-                let load = Prefetch::both(L::chunk(), L::load(&props));
                 let inner = comp::<L>(props).into_view();
                 let host = comp::<LayoutHost>(HostProps { inner, child });
-                Some((host.key((L::PATH, &s.params)).into_view(), load))
+                Some((host.key((L::PATH, &s.params)).into_view(), L::chunk()))
             },
             inner,
         });
@@ -1105,7 +1099,7 @@ pub fn link_active(to: &Route, exact: bool) -> bool {
         || (!exact && (to.is_empty() || here.strip_prefix(to).is_some_and(|r| r.starts_with('/'))))
 }
 
-/// A link to a page that navigates without reloading and prefetches the page's data on hover.
+/// A link to a page that navigates without reloading and prefetches a `lazy` page's wasm on hover.
 /// While the location is at its page it carries `aria-current="page"` and `active_class`.
 pub struct Link;
 

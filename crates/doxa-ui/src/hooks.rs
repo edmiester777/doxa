@@ -1,6 +1,6 @@
 //! React's hooks: `state`, `memo`, `effect`, `action`, `provide` / `context`, and `Singleton`.
 //!
-//! Each hook claims the next slot of the component calling it. The call site is
+//! Each hook, and each GET awaited in a render, claims the next slot of the component. The call site is
 //! recorded, and in debug builds a render reaching a slot from a different call
 //! site panics naming both, which catches conditional hooks.
 
@@ -19,8 +19,18 @@ pub(crate) fn slot<T: 'static>(
     hook: &str,
     init: impl FnOnce() -> T,
 ) -> (Rc<Instance>, usize, Rc<T>) {
+    slot_at(hook, Location::caller(), init)
+}
+
+/// The hook slot a GET awaited in a render claims; its answer is kept in the client cache.
+pub(crate) struct CallSlot;
+
+pub(crate) fn slot_at<T: 'static>(
+    hook: &str,
+    at: &'static Location<'static>,
+    init: impl FnOnce() -> T,
+) -> (Rc<Instance>, usize, Rc<T>) {
     let inst = current_or_panic(hook);
-    let at = Location::caller();
     let i = inst.cursor.get();
     inst.cursor.set(i + 1);
     let mut hooks = inst.hooks.borrow_mut();

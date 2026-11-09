@@ -1,4 +1,4 @@
-//! What reaches the network: re-reads, revalidation, mutations, streams.
+//! What reaches the network: cached and uncached reads, mutations, streams.
 
 use std::cell::{Cell, RefCell};
 use std::future::IntoFuture;
@@ -10,7 +10,7 @@ use doxa_client::cache::{self, Observer};
 use doxa_client::layer::{bearer, layers, transport};
 use doxa_client::transport::{Body, MockTransport, Request, Response, Transport};
 use doxa_client::{
-    service, task, CacheConfig, Cached, Call, Granted, Json, Permission, Probe, Query, Service,
+    service, task, Cached, CachedCall, Call, Granted, Json, Permission, Probe, Query, Service,
     SseOnce, SseStream,
 };
 use doxa_wire::{Identity, Keyed, Method, RouteSpec};
@@ -67,6 +67,8 @@ static SEARCH: RouteSpec = RouteSpec {
     ..route(Method::Post, "/w/search")
 };
 
+const TTL: Duration = Duration::from_secs(60);
+
 #[derive(Default, Serialize)]
 struct Filter {}
 
@@ -74,8 +76,16 @@ fn get(name: &str) -> Call<Json<Widget>> {
     Call::new(&GET).arg::<Granted<WidgetByName>, _>(name)
 }
 
+fn cget(name: &str) -> CachedCall<Json<Widget>> {
+    get(name).cache(TTL)
+}
+
 fn list() -> Call<Json<Vec<Widget>>> {
     Call::new(&LIST).arg::<Query<Filter>, _>(Filter {})
+}
+
+fn clist() -> CachedCall<Json<Vec<Widget>>> {
+    list().cache(TTL)
 }
 
 fn rename(name: &str, to: &str) -> Call<Json<Widget>> {
@@ -91,12 +101,6 @@ fn widget(id: u32, name: &str) -> serde_json::Value {
 fn serve(t: impl Transport) -> Rc<Service> {
     let s = service("");
     s.layers().push(transport(t));
-    s
-}
-
-fn install(mock: &MockTransport, stale: Duration) -> Rc<Service> {
-    let s = serve(mock.clone());
-    s.cache(CacheConfig::default().stale_time(stale));
     s
 }
 
@@ -170,15 +174,14 @@ fn spawn<F: IntoFuture + 'static>(call: F) {
 fn a_late_response_from_the_old_session_is_dropped() {
     let manual = Manual::default();
     let client = serve(manual.clone());
-    client.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
     let changes = Rc::new(Cell::new(0));
     let c = changes.clone();
     client.on_session_change(move || c.set(c.get() + 1));
 
-    spawn(get("gear"));
+    spawn(cget("gear"));
     manual.answer(0, 200, Some("a"), widget(2, "gear"));
-    spawn(get("cog"));
-    spawn(list());
+    spawn(cget("cog"));
+    spawn(clist());
     manual.answer(2, 200, Some("b"), json!([]));
     assert_eq!(changes.get(), 1);
     manual.answer(1, 200, Some("a"), widget(1, "old"));
@@ -187,25 +190,10 @@ fn a_late_response_from_the_old_session_is_dropped() {
     // The dropped `cog` call is retried in the new session.
     assert_eq!(manual.urls(), ["/w/gear", "/w/cog", "/w", "/w/cog"]);
     manual.answer(3, 200, Some("b"), widget(1, "cog"));
-    assert_eq!(wait(get("cog")).unwrap().name, "cog");
-    wait(list()).unwrap();
+    assert_eq!(wait(cget("cog")).unwrap().name, "cog");
+    wait(clist()).unwrap();
     assert_eq!(changes.get(), 1);
     assert_eq!(manual.urls().len(), 4);
-}
-
-#[test]
-fn a_revalidation_from_before_a_clear_does_not_overwrite_the_new_entry() {
-    let manual = Manual::default();
-    let client = serve(manual.clone());
-    client.cache(CacheConfig::default().stale_time(Duration::ZERO));
-    spawn(get("cog"));
-    manual.answer(0, 200, None, widget(1, "v1"));
-    assert_eq!(wait(get("cog")).unwrap().name, "v1");
-    client.clear_cache();
-    spawn(get("cog"));
-    manual.answer(2, 200, None, widget(1, "v2"));
-    manual.answer(1, 200, None, widget(1, "old"));
-    assert_eq!(wait(get("cog")).unwrap().name, "v2");
 }
 
 fn session(name: &str) -> Vec<(String, String)> {
@@ -228,19 +216,19 @@ fn signing_in_and_out_clears_the_cache() {
         .respond(204, allowed, vec![])
         .respond(401, session("anonymous"), vec![])
         .respond(401, session("anonymous"), vec![]);
-    let client = install(&mock, Duration::from_secs(60));
+    let client = serve(mock.clone());
     let can = || Probe::new(&GET).arg::<Granted<WidgetByName>, _>("cog");
 
     assert_eq!(wait(can()), Permission::Denied);
-    wait(get("cog")).unwrap();
+    wait(cget("cog")).unwrap();
     assert_eq!(
         wait(can()),
         Permission::Allowed,
         "signing in kept the anonymous answer"
     );
-    assert!(wait(list()).is_err());
+    assert!(wait(clist()).is_err());
     assert!(
-        wait(get("cog")).is_err(),
+        wait(cget("cog")).is_err(),
         "signing out kept the user's data"
     );
     assert_eq!(client.requests_sent(), 5);
@@ -251,59 +239,17 @@ fn ending_the_session_clears_without_a_request() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))
         .json(200, &widget(1, "cog"));
-    let client = install(&mock, Duration::from_secs(60));
+    let client = serve(mock.clone());
     let reset = Rc::new(Cell::new(0));
     let r = reset.clone();
     client.on_session_change(move || r.set(r.get() + 1));
 
-    wait(get("cog")).unwrap();
+    wait(cget("cog")).unwrap();
     client.end_session();
     assert_eq!(reset.get(), 1, "singletons hear of it");
     assert_eq!(client.requests_sent(), 1, "nothing was sent to end it");
-    wait(get("cog")).unwrap();
+    wait(cget("cog")).unwrap();
     assert_eq!(client.requests_sent(), 2, "the cached widget is gone");
-}
-
-/// Read `cog`, let it go stale, and have its revalidation answer `status`.
-fn revalidate_with(status: u16) -> (MockTransport, Rc<Service>, Rc<Renders>) {
-    let mock = MockTransport::new();
-    mock.json(200, &widget(1, "cog")).json(status, &json!({}));
-    let client = install(&mock, Duration::from_millis(50));
-    let renders = Rc::new(Renders::default());
-    cache::set_observer(Some(renders.clone()));
-    wait(get("cog")).unwrap();
-    std::thread::sleep(Duration::from_millis(60));
-    assert_eq!(wait(get("cog")).unwrap().name, "cog");
-    cache::set_observer(None);
-    task::run_until_stalled();
-    (mock, client, renders)
-}
-
-#[test]
-fn a_revalidation_that_finds_nothing_or_is_refused_evicts_the_entry() {
-    for status in [404, 401, 403] {
-        // A thread of its own for a fresh service.
-        std::thread::spawn(move || {
-            let (mock, client, renders) = revalidate_with(status);
-            assert_eq!(renders.0.get(), 1, "{status}: readers were not told");
-            mock.json(status, &json!({}));
-            let err = wait(get("cog")).unwrap_err();
-            assert_eq!(err.status(), Some(status));
-            assert_eq!(client.requests_sent(), 3);
-        })
-        .join()
-        .unwrap();
-    }
-}
-
-#[test]
-fn a_failed_revalidation_leaves_the_entry_stale() {
-    let (mock, client, renders) = revalidate_with(500);
-    assert_eq!(renders.0.get(), 0);
-    mock.json(200, &widget(1, "cog"));
-    assert_eq!(wait(get("cog")).unwrap().name, "cog");
-    task::run_until_stalled();
-    assert_eq!(client.requests_sent(), 3, "the next read did not try again");
 }
 
 #[derive(Default)]
@@ -316,35 +262,51 @@ impl Observer for Renders {
 }
 
 #[test]
-fn re_reading_a_fresh_query_sends_nothing() {
+fn an_uncached_query_is_sent_every_time() {
+    let mock = MockTransport::new();
+    for _ in 0..3 {
+        mock.json(200, &widget(1, "cog"));
+    }
+    let client = serve(mock.clone());
+    task::block_on(async {
+        let w: Widget = get("cog").await.unwrap();
+        assert_eq!(w.name, "cog");
+        cget("cog").await.unwrap();
+        get("cog").await.unwrap();
+    });
+    assert_eq!(
+        client.requests_sent(),
+        3,
+        "only the cached call files its answer"
+    );
+}
+
+#[test]
+fn re_reading_a_fresh_cached_query_sends_nothing() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"));
     let client = serve(mock.clone());
     task::block_on(async {
         for _ in 0..5 {
-            assert_eq!(get("cog").await.unwrap().name, "cog");
+            assert_eq!(cget("cog").await.unwrap().name, "cog");
         }
     });
     assert_eq!(client.requests_sent(), 1);
 }
 
 #[test]
-fn a_stale_query_revalidates_once_per_stale_period() {
+fn an_expired_answer_is_fetched_again() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))
-        .json(200, &widget(1, "cog"));
-    let client = install(&mock, Duration::from_millis(20));
-    wait(get("cog")).unwrap();
+        .json(200, &widget(1, "cog2"));
+    let client = serve(mock.clone());
+    let short = || get("cog").cache(Duration::from_millis(20));
+    wait(short()).unwrap();
+    wait(short()).unwrap();
     std::thread::sleep(Duration::from_millis(30));
-    for _ in 0..5 {
-        wait(get("cog")).unwrap();
-    }
-    task::run_until_stalled();
-    for _ in 0..5 {
-        wait(get("cog")).unwrap();
-    }
+    assert_eq!(wait(short()).unwrap().name, "cog2");
+    wait(short()).unwrap();
     assert_eq!(client.requests_sent(), 2);
-    assert_eq!(mock.requests().len(), 2);
 }
 
 #[test]
@@ -352,20 +314,18 @@ fn a_cached_value_is_shared_until_it_changes() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))
         .json(200, &widget(1, "cog2"));
-    install(&mock, Duration::from_secs(60));
-    let a = wait(get("cog")).unwrap();
-    let b = wait(get("cog")).unwrap();
+    serve(mock.clone());
+    let a = wait(cget("cog")).unwrap();
+    let b = wait(cget("cog")).unwrap();
     assert!(Cached::ptr_eq(&a, &b));
     cache::invalidate_all::<WidgetByName>();
-    wait(get("cog")).unwrap();
-    task::run_until_stalled();
-    let c = wait(get("cog")).unwrap();
+    let c = wait(cget("cog")).unwrap();
     assert!(!Cached::ptr_eq(&a, &c));
     assert_eq!(c.name, "cog2");
 }
 
 #[test]
-fn a_mutation_refetches_each_affected_query_once() {
+fn a_mutation_refetches_each_affected_query_once_and_tells_readers() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))
         .json(200, &json!([widget(1, "cog"), widget(2, "gear")]))
@@ -376,22 +336,22 @@ fn a_mutation_refetches_each_affected_query_once() {
     let renders = Rc::new(Renders::default());
     cache::set_observer(Some(renders.clone()));
     task::block_on(async {
-        get("cog").await.unwrap();
-        list().await.unwrap();
+        cget("cog").await.unwrap();
+        clist().await.unwrap();
         rename("cog", "sprocket").await.unwrap();
     });
     assert_eq!(client.requests_sent(), 3);
+    assert_eq!(renders.0.get(), 1);
     // Every re-render after the mutation reads both queries again.
     for _ in 0..4 {
         task::block_on(async {
-            get("cog").await.unwrap();
-            list().await.unwrap();
+            cget("cog").await.unwrap();
+            clist().await.unwrap();
         });
-        task::run_until_stalled();
     }
     cache::set_observer(None);
     assert_eq!(client.requests_sent(), 5);
-    let names: Vec<String> = wait(list())
+    let names: Vec<String> = wait(clist())
         .unwrap()
         .iter()
         .map(|w| w.name.clone())
@@ -408,13 +368,16 @@ fn a_post_that_only_reads_leaves_cached_answers_fresh_and_is_sent_each_time() {
     let client = serve(mock.clone());
     let search = || Call::<Json<Widget>>::new(&SEARCH);
     task::block_on(async {
-        get("cog").await.unwrap();
+        cget("cog").await.unwrap();
+        search().cache(TTL).await.unwrap();
         search().await.unwrap();
-        search().await.unwrap();
-        get("cog").await.unwrap();
+        cget("cog").await.unwrap();
     });
-    task::run_until_stalled();
-    assert_eq!(client.requests_sent(), 3);
+    assert_eq!(
+        client.requests_sent(),
+        3,
+        "a POST is never answered from the cache"
+    );
 }
 
 #[test]
@@ -422,22 +385,21 @@ fn a_host_hears_of_mutations_and_its_own_invalidations_stay_quiet() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))
         .json(200, &widget(1, "sprocket"))
-        .json(200, &widget(1, "sprocket"));
+        .json(200, &widget(1, "cog"));
     let client = serve(mock.clone());
     let heard = Rc::new(RefCell::new(Vec::new()));
     let log = heard.clone();
     cache::on_invalidated(move |e| log.borrow_mut().push(e.join(",")));
-    wait(get("cog")).unwrap();
+    wait(cget("cog")).unwrap();
     wait(rename("cog", "sprocket")).unwrap();
     assert_eq!(*heard.borrow(), ["Widget"]);
     cache::invalidate_entities(&["Widget"]);
     assert_eq!(*heard.borrow(), ["Widget"]);
-    wait(get("sprocket")).unwrap();
-    task::run_until_stalled();
+    wait(cget("cog")).unwrap();
     assert_eq!(
         client.requests_sent(),
         3,
-        "the host's invalidation refetched"
+        "the mutation dropped the cached cog"
     );
 }
 
@@ -449,14 +411,13 @@ fn invalidating_one_key_leaves_other_instances_fresh() {
         .json(200, &json!([]))
         .json(200, &widget(1, "cog"))
         .json(200, &json!([]));
-    let client = install(&mock, Duration::from_secs(60));
+    let client = serve(mock.clone());
     let read_all = || {
         task::block_on(async {
-            get("cog").await.unwrap();
-            get("gear").await.unwrap();
-            list().await.unwrap();
+            cget("cog").await.unwrap();
+            cget("gear").await.unwrap();
+            clist().await.unwrap();
         });
-        task::run_until_stalled();
     };
     read_all();
     cache::invalidate::<WidgetByName>("cog");
@@ -472,78 +433,22 @@ fn apply_patches_instances_and_lists_and_tells_readers() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))
         .json(200, &json!([widget(1, "cog"), widget(2, "gear")]));
-    let client = install(&mock, Duration::from_secs(60));
+    let client = serve(mock.clone());
     let renders = Rc::new(Renders::default());
     cache::set_observer(Some(renders.clone()));
     task::block_on(async {
-        get("cog").await.unwrap();
-        list().await.unwrap();
+        cget("cog").await.unwrap();
+        clist().await.unwrap();
     });
     cache::set_observer(None);
     cache::apply::<Widget>(&WidgetKey { name: "cog".into() }, |w| w.id = 9);
     assert_eq!(renders.0.get(), 1);
     task::block_on(async {
-        assert_eq!(get("cog").await.unwrap().id, 9);
-        assert_eq!(list().await.unwrap()[0].id, 9);
-        assert_eq!(list().await.unwrap()[1].id, 2);
+        assert_eq!(cget("cog").await.unwrap().id, 9);
+        assert_eq!(clist().await.unwrap()[0].id, 9);
+        assert_eq!(clist().await.unwrap()[1].id, 2);
     });
     assert_eq!(client.requests_sent(), 2);
-}
-
-/// What a route's stub does: look the response type's identity up by autoref.
-fn by_identity<R: 'static>(call: Call<R>) -> Call<R>
-where
-    for<'a> &'a doxa_client::__private::EntityOf<R>: doxa_client::__private::IsEntity,
-{
-    use doxa_client::__private::{EntityOf, IsEntity as _};
-    call.entity((&EntityOf::<R>::new()).entity())
-}
-
-#[test]
-fn only_a_response_with_an_identity_is_filed_by_it() {
-    use doxa_client::__private::{EntityOf, IsEntity as _, NotEntity as _};
-    assert!((&EntityOf::<Json<Widget>>::new()).entity().is_some());
-    assert!(EntityOf::<Json<String>>::new().entity().is_none());
-}
-
-#[test]
-fn an_instance_in_a_fresh_list_is_read_without_a_request() {
-    let mock = MockTransport::new();
-    mock.json(200, &json!([widget(1, "cog"), widget(2, "gear")]))
-        .json(200, &widget(3, "flange"));
-    let client = install(&mock, Duration::from_secs(60));
-    task::block_on(async {
-        list().await.unwrap();
-        assert_eq!(by_identity(get("gear")).await.unwrap().id, 2);
-        assert_eq!(by_identity(get("flange")).await.unwrap().id, 3);
-    });
-    let urls: Vec<String> = mock.requests().into_iter().map(|r| r.url).collect();
-    assert_eq!(urls, ["/w", "/w/flange"]);
-    assert_eq!(client.requests_sent(), 2);
-}
-
-#[test]
-fn a_stale_list_does_not_answer_an_instance() {
-    let mock = MockTransport::new();
-    mock.json(200, &json!([widget(2, "gear")]))
-        .json(200, &widget(2, "gear"));
-    let client = install(&mock, Duration::from_secs(60));
-    wait(list()).unwrap();
-    cache::invalidate_all::<WidgetByName>();
-    wait(by_identity(get("gear"))).unwrap();
-    assert_eq!(client.requests_sent(), 2);
-}
-
-#[test]
-fn a_mutation_response_answers_the_renamed_instance() {
-    let mock = MockTransport::new();
-    mock.json(200, &widget(1, "sprocket"));
-    let client = install(&mock, Duration::from_secs(60));
-    task::block_on(async {
-        by_identity(rename("cog", "sprocket")).await.unwrap();
-        assert_eq!(by_identity(get("sprocket")).await.unwrap().id, 1);
-    });
-    assert_eq!(client.requests_sent(), 1);
 }
 
 #[test]
@@ -551,8 +456,8 @@ fn a_failed_optimistic_update_rolls_back() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))
         .json(409, &json!({ "error": "taken" }));
-    install(&mock, Duration::from_secs(60));
-    wait(get("cog")).unwrap();
+    serve(mock.clone());
+    wait(cget("cog")).unwrap();
     let renamed = rename("cog", "gear").optimistic(|w: &mut Widget| w.name = "gear".into());
     let pending = Rc::new(RefCell::new(None));
     let out = pending.clone();
@@ -561,25 +466,7 @@ fn a_failed_optimistic_update_rolls_back() {
     });
     task::run_until_stalled();
     assert_eq!(*pending.borrow(), Some(true));
-    assert_eq!(wait(get("cog")).unwrap().name, "cog");
-}
-
-#[test]
-fn a_stale_query_sends_its_etag_and_keeps_its_value_on_304() {
-    let mock = MockTransport::new();
-    let tagged = vec![("etag".to_owned(), "\"v1\"".to_owned())];
-    mock.respond(200, tagged, serde_json::to_vec(&widget(1, "cog")).unwrap())
-        .respond(304, Vec::new(), Vec::new());
-    let client = install(&mock, Duration::from_millis(20));
-    let first = wait(get("cog")).unwrap();
-    std::thread::sleep(Duration::from_millis(30));
-    wait(get("cog")).unwrap();
-    task::run_until_stalled();
-    let again = wait(get("cog")).unwrap();
-    let sent = mock.requests();
-    assert_eq!(sent[1].header("if-none-match"), Some("\"v1\""));
-    assert!(Cached::ptr_eq(&first, &again));
-    assert_eq!(client.requests_sent(), 2);
+    assert_eq!(wait(cget("cog")).unwrap().name, "cog");
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -598,7 +485,7 @@ fn identical_streams_share_one_connection() {
     let body = "data: {\"event\":\"renamed\",\"data\":{\"name\":\"x\"}}\n\n";
     mock.respond(200, vec![], body.into())
         .respond(200, vec![], body.into());
-    install(&mock, Duration::from_secs(60));
+    serve(mock.clone());
     task::block_on(async {
         let mut a = events("cog").await.unwrap();
         let mut b = events("cog").await.unwrap();
@@ -740,15 +627,19 @@ fn a_reconnect_reports_its_session() {
     let changes = Rc::new(Cell::new(0));
     let c = changes.clone();
     client.on_session_change(move || c.set(c.get() + 1));
-    wait(get("gear")).unwrap();
+    wait(cget("gear")).unwrap();
     task::block_on(async {
         let mut s = events("cog").await.unwrap().reconnect(fast());
         s.next().await.unwrap();
         assert!(s.next().await.is_err());
     });
     assert_eq!(changes.get(), 1);
-    wait(get("gear")).unwrap();
-    assert_eq!(script.seen.borrow().len(), 4);
+    wait(cget("gear")).unwrap();
+    assert_eq!(
+        script.seen.borrow().len(),
+        4,
+        "the new session dropped the cached gear"
+    );
 }
 
 /// Ends the session from inside the second send, as a sign-out on a 401 would.
@@ -801,10 +692,10 @@ fn a_post_stream_invalidates_its_entities() {
     mock.json(200, &widget(1, "cog"))
         .respond(200, vec![], RENAMED.into())
         .json(200, &widget(1, "cog"));
-    install(&mock, Duration::from_secs(60));
-    wait(get("cog")).unwrap();
+    serve(mock.clone());
+    wait(cget("cog")).unwrap();
     wait(turn("cog")).unwrap();
-    wait(get("cog")).unwrap();
+    wait(cget("cog")).unwrap();
     assert_eq!(mock.requests().len(), 3);
 }
 

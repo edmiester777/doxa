@@ -1,40 +1,35 @@
-//! `#[page("/path/{param}", load = …)]`: a component reachable at a path.
+//! `#[page("/path/{param}", lazy)]`: a component reachable at a path.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Expr, LitStr, Token};
+use syn::{LitStr, Token};
 
 use crate::component::{self, Options, Parsed};
 
 pub(crate) struct Args {
     path: LitStr,
-    load: Option<Expr>,
     lazy: bool,
 }
 
 impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let path: LitStr = input.parse()?;
-        let (mut load, mut lazy) = (None, false);
+        let mut lazy = false;
         while input.parse::<Option<Token![,]>>()?.is_some() && !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             match key.to_string().as_str() {
                 "lazy" => lazy = true,
-                "load" => {
-                    input.parse::<Token![=]>()?;
-                    load = Some(input.parse()?)
-                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown option `{other}`; expected `load` or `lazy`"),
+                        format!("unknown option `{other}`; expected `lazy`"),
                     ))
                 }
             }
         }
-        Ok(Args { path, load, lazy })
+        Ok(Args { path, lazy })
     }
 }
 
@@ -107,14 +102,6 @@ pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
             ));
         }
     }
-    let load = args.load.as_ref().map(|l| {
-        quote! {
-            fn load(p: &#props_ty) -> ::core::option::Option<::doxa::ui::Prefetch> {
-                let load: fn(&#props_ty) -> _ = #l;
-                ::core::option::Option::Some(::doxa::ui::Prefetch::of(load(p)))
-            }
-        }
-    });
     let opts = Options {
         lazy: args.lazy,
         ..Options::default()
@@ -138,7 +125,6 @@ pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
             fn parse(segments: &::doxa::ui::Segments) -> ::core::option::Option<#props_ty> {
                 ::core::option::Option::Some(#props_ty { #(#fields),* })
             }
-            #load
             #chunk
         }
 

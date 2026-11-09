@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
-use doxa::client::{CacheConfig, Fetch, Permission};
+use doxa::client::{Fetch, Permission};
 use shop_api::orders::*;
 
 thread_local! {
@@ -123,8 +123,8 @@ fn the_document_names_each_route_by_its_declaration() {
 async fn placing_an_order_refreshes_the_cached_list() {
     install("clerk");
     let s = shop_api::service();
-    s.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
-    assert_eq!(list_orders(OrderFilter::default()).await.unwrap().len(), 2);
+    let list = || list_orders(OrderFilter::default()).cache(Duration::from_secs(60));
+    assert_eq!(list().await.unwrap().len(), 2);
     place_order(NewOrder {
         item: "cog".into(),
         quantity: 1,
@@ -132,10 +132,8 @@ async fn placing_an_order_refreshes_the_cached_list() {
     .await
     .unwrap();
     let before = s.requests_sent();
-    list_orders(OrderFilter::default()).await.unwrap();
-    doxa::client::task::run_until_stalled();
-    assert!(s.requests_sent() > before);
-    assert_eq!(list_orders(OrderFilter::default()).await.unwrap().len(), 3);
+    assert_eq!(list().await.unwrap().len(), 3);
+    assert_eq!(s.requests_sent(), before + 1);
 }
 
 #[tokio::test]
@@ -175,7 +173,7 @@ async fn a_capability_only_route_answers_can_from_the_callers_capabilities() {
 async fn a_declared_202_answers_with_the_return_types_body() {
     install("viewer");
     let (status, count) = count_orders().await.unwrap();
-    assert_eq!((status, *count), (202, 2));
+    assert_eq!((status, count), (202, 2));
 }
 
 #[test]

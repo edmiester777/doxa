@@ -796,7 +796,7 @@ pub mod export_diagnostics {}
 /// }
 /// async fn page() -> Result<(), doxa::client::Fetch> {
 ///     let n = count().await?;
-///     assert_eq!(*n, 3);
+///     assert_eq!(n, 3);
 ///     Ok(())
 /// }
 /// ```

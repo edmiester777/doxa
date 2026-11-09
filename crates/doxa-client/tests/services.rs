@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use doxa_client::layer::{layer_fn, layers, transport, Next};
 use doxa_client::transport::{MockTransport, Request};
-use doxa_client::{service, task, CacheConfig, Call, Json, Query};
+use doxa_client::{service, task, CachedCall, Call, Json, Query};
 use doxa_wire::{Keyed, Method, RouteSpec};
 use serde::Serialize;
 use serde_json::json;
@@ -41,8 +41,12 @@ static THREADS: RouteSpec = route("chat-client", Method::Get, "/orders");
 #[derive(Default, Serialize)]
 struct Filter {}
 
-fn orders() -> Call<Json<serde_json::Value>> {
-    Call::new(&ORDERS).arg::<Query<Filter>, _>(Filter {})
+const TTL: Duration = Duration::from_secs(60);
+
+fn orders() -> CachedCall<Json<serde_json::Value>> {
+    Call::new(&ORDERS)
+        .arg::<Query<Filter>, _>(Filter {})
+        .cache(TTL)
 }
 
 fn cancel() -> Call<Json<serde_json::Value>> {
@@ -50,8 +54,10 @@ fn cancel() -> Call<Json<serde_json::Value>> {
 }
 
 /// A route of another crate that happens to share the path and entity name.
-fn threads() -> Call<Json<serde_json::Value>> {
-    Call::new(&THREADS).arg::<Query<Filter>, _>(Filter {})
+fn threads() -> CachedCall<Json<serde_json::Value>> {
+    Call::new(&THREADS)
+        .arg::<Query<Filter>, _>(Filter {})
+        .cache(TTL)
 }
 
 fn wait<F: IntoFuture>(f: F) -> F::Output {
@@ -63,7 +69,6 @@ fn two_servers() -> (MockTransport, MockTransport) {
     for (pkg, mock) in [("orders-client", &o), ("chat-client", &c)] {
         let s = service(pkg);
         s.layers().push(transport(mock.clone()));
-        s.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
     }
     (o, c)
 }

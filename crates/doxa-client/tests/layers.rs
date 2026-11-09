@@ -168,8 +168,8 @@ fn a_scoped_layer_is_gone_once_its_guard_drops() {
     let local = MockTransport::new();
     local.json(200, &json!({ "from": "scoped" }));
     let guard = layers().push_scoped(transport(local.clone()));
-    assert_eq!(wait(get().fresh()).unwrap()["from"], "scoped");
+    assert_eq!(wait(get()).unwrap()["from"], "scoped");
     drop(guard);
-    assert_eq!(wait(get().fresh()).unwrap()["from"], "mock");
+    assert_eq!(wait(get()).unwrap()["from"], "mock");
     assert_eq!(mock.requests().len(), 1);
 }

@@ -102,7 +102,7 @@ async fn greeting(Query(who): Query<Who>) -> Json<Greeting> {
 `doxa dev` builds everything, runs the server at `http://127.0.0.1:3000` and patches each change to the web crate into the running page. The home page calls the route like this:
 
 ```rust
-#[page("/", load = |p| greeting(Who { name: p.name.clone() }))]
+#[page("/")]
 async fn Home(name: Option<String>) -> Result<View> {
     let hello = greeting(Who { name }).await?;
     Ok(view! { <h1>{&hello.message}</h1> })

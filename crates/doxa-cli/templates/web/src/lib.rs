@@ -8,7 +8,7 @@ fn start() {
     App::new(Router::new().page::<Home>()).mount("#app");
 }
 
-#[page("/", load = |p| greeting(Who { name: p.name.clone() }))]
+#[page("/")]
 async fn Home(name: Option<String>) -> Result<View> {
     let hello = greeting(Who { name }).await?;
     Ok(view! { <h1>{&hello.message}</h1> })

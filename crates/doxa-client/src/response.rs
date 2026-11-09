@@ -1,12 +1,10 @@
 //! Decoding a route's response into what the call returns.
 
-use std::any::Any;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
 use serde::de::DeserializeOwned;
 
-use crate::cached::Cached;
 use crate::fetch::{Fetch, NoError};
 use crate::sse::{EventStream, Hub, Once};
 
@@ -36,12 +34,11 @@ pub trait FromResponse: 'static {
     fn stream(_hub: Rc<Hub>) -> Self::Output {
         unreachable!("only streaming responses are decoded as streams")
     }
-    /// The output as the cache holds it, or `None` if it can't be cached.
+    /// A copy for a render slot to hand the next render; `None` if it can't be reused.
     #[doc(hidden)]
-    fn store(value: &Self::Output) -> Option<Rc<dyn Any>>;
-    /// The output back from what [`store`](Self::store) kept.
-    #[doc(hidden)]
-    fn load(value: Rc<dyn Any>) -> Option<Self::Output>;
+    fn copy(_value: &Self::Output) -> Option<Self::Output> {
+        None
+    }
 }
 
 /// `axum::http::StatusCode`: the call yields the status.
@@ -73,35 +70,14 @@ pub(crate) fn widen<E>(f: Fetch<NoError>) -> Fetch<E> {
     }
 }
 
-fn store_cached<T: 'static>(value: &Cached<T>) -> Option<Rc<dyn Any>> {
-    Some(Cached::rc(value).clone())
-}
-
-fn load_cached<T: 'static>(value: Rc<dyn Any>) -> Option<Cached<T>> {
-    value.downcast::<T>().ok().map(Cached::from_rc)
-}
-
-fn store_copy<T: Clone + 'static>(value: &T) -> Option<Rc<dyn Any>> {
-    Some(Rc::new(value.clone()))
-}
-
-fn load_copy<T: Clone + 'static>(value: Rc<dyn Any>) -> Option<T> {
-    value.downcast_ref::<T>().cloned()
-}
-
 impl<T: DeserializeOwned + Clone + 'static> FromResponse for crate::arg::Json<T> {
-    type Output = Cached<T>;
+    type Output = T;
     type Error = NoError;
-    fn decode(_: u16, _: &[(String, String)], body: Vec<u8>) -> Result<Cached<T>, String> {
-        serde_json::from_slice(&body)
-            .map(Cached::new)
-            .map_err(|e| e.to_string())
+    fn decode(_: u16, _: &[(String, String)], body: Vec<u8>) -> Result<T, String> {
+        serde_json::from_slice(&body).map_err(|e| e.to_string())
     }
-    fn store(value: &Cached<T>) -> Option<Rc<dyn Any>> {
-        store_cached(value)
-    }
-    fn load(value: Rc<dyn Any>) -> Option<Cached<T>> {
-        load_cached(value)
+    fn copy(value: &T) -> Option<T> {
+        Some(value.clone())
     }
 }
 
@@ -118,11 +94,8 @@ macro_rules! forward {
         fn stream(hub: Rc<Hub>) -> Self::Output {
             R::stream(hub)
         }
-        fn store(value: &Self::Output) -> Option<Rc<dyn Any>> {
-            R::store(value)
-        }
-        fn load(value: Rc<dyn Any>) -> Option<Self::Output> {
-            R::load(value)
+        fn copy(value: &Self::Output) -> Option<Self::Output> {
+            R::copy(value)
         }
     };
 }
@@ -161,13 +134,8 @@ impl<R: FromResponse> FromResponse for (StatusCode, R) {
     fn stream(hub: Rc<Hub>) -> Self::Output {
         (200, R::stream(hub))
     }
-    fn store(value: &Self::Output) -> Option<Rc<dyn Any>> {
-        let body = R::store(&value.1)?;
-        Some(Rc::new((value.0, body)))
-    }
-    fn load(value: Rc<dyn Any>) -> Option<Self::Output> {
-        let (status, body) = value.downcast_ref::<(u16, Rc<dyn Any>)>()?.clone();
-        Some((status, R::load(body)?))
+    fn copy(value: &Self::Output) -> Option<Self::Output> {
+        Some((value.0, R::copy(&value.1)?))
     }
 }
 
@@ -177,11 +145,8 @@ impl FromResponse for StatusCode {
     fn decode(status: u16, _: &[(String, String)], _: Vec<u8>) -> Result<u16, String> {
         Ok(status)
     }
-    fn store(value: &u16) -> Option<Rc<dyn Any>> {
-        store_copy(value)
-    }
-    fn load(value: Rc<dyn Any>) -> Option<u16> {
-        load_copy(value)
+    fn copy(value: &u16) -> Option<u16> {
+        Some(*value)
     }
 }
 
@@ -191,27 +156,19 @@ impl FromResponse for () {
     fn decode(_: u16, _: &[(String, String)], _: Vec<u8>) -> Result<(), String> {
         Ok(())
     }
-    fn store(value: &()) -> Option<Rc<dyn Any>> {
-        store_copy(value)
-    }
-    fn load(value: Rc<dyn Any>) -> Option<()> {
-        load_copy(value)
+    fn copy(_: &()) -> Option<()> {
+        Some(())
     }
 }
 
 impl FromResponse for String {
-    type Output = Cached<String>;
+    type Output = String;
     type Error = NoError;
-    fn decode(_: u16, _: &[(String, String)], body: Vec<u8>) -> Result<Cached<String>, String> {
-        String::from_utf8(body)
-            .map(Cached::new)
-            .map_err(|e| e.to_string())
+    fn decode(_: u16, _: &[(String, String)], body: Vec<u8>) -> Result<String, String> {
+        String::from_utf8(body).map_err(|e| e.to_string())
     }
-    fn store(value: &Cached<String>) -> Option<Rc<dyn Any>> {
-        store_cached(value)
-    }
-    fn load(value: Rc<dyn Any>) -> Option<Cached<String>> {
-        load_cached(value)
+    fn copy(value: &String) -> Option<String> {
+        Some(value.clone())
     }
 }
 
@@ -225,12 +182,6 @@ impl<E: DeserializeOwned + 'static> FromResponse for SseStream<E> {
     fn stream(hub: Rc<Hub>) -> EventStream<E> {
         EventStream::subscribe(hub)
     }
-    fn store(_: &EventStream<E>) -> Option<Rc<dyn Any>> {
-        None
-    }
-    fn load(_: Rc<dyn Any>) -> Option<EventStream<E>> {
-        None
-    }
 }
 
 impl<E: DeserializeOwned + 'static> FromResponse for SseOnce<E> {
@@ -242,12 +193,6 @@ impl<E: DeserializeOwned + 'static> FromResponse for SseOnce<E> {
     }
     fn stream(hub: Rc<Hub>) -> Once<E> {
         Once::subscribe(hub)
-    }
-    fn store(_: &Once<E>) -> Option<Rc<dyn Any>> {
-        None
-    }
-    fn load(_: Rc<dyn Any>) -> Option<Once<E>> {
-        None
     }
 }
 
@@ -278,11 +223,8 @@ impl FromResponse for Attachment {
             filename: header("content-disposition").and_then(filename),
         })
     }
-    fn store(_: &Download) -> Option<Rc<dyn Any>> {
-        None
-    }
-    fn load(_: Rc<dyn Any>) -> Option<Download> {
-        None
+    fn copy(value: &Download) -> Option<Download> {
+        Some(value.clone())
     }
 }
 
@@ -309,12 +251,6 @@ impl FromResponse for Unsupported {
     fn decode(_: u16, _: &[(String, String)], _: Vec<u8>) -> Result<Unsupported, String> {
         Err("this route's response isn't client-callable".to_owned())
     }
-    fn store(_: &Unsupported) -> Option<Rc<dyn Any>> {
-        None
-    }
-    fn load(_: Rc<dyn Any>) -> Option<Unsupported> {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -324,10 +260,8 @@ mod status_tests {
     type Counted = (StatusCode, crate::arg::Json<u32>);
 
     #[test]
-    fn a_status_and_body_decode_and_cache_together() {
+    fn a_status_and_body_decode_together() {
         let out = Counted::decode(202, &[], b"7".to_vec()).unwrap();
-        assert_eq!((out.0, *out.1), (202, 7));
-        let back = Counted::load(Counted::store(&out).unwrap()).unwrap();
-        assert_eq!((back.0, *back.1), (202, 7));
+        assert_eq!(out, (202, 7));
     }
 }

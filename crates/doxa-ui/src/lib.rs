@@ -164,5 +164,5 @@ pub mod prelude {
         Resource, Result, Route, Router, SafeUrl, Scroll, Singleton, Slot, Slots, StableCallback,
         State, Suspense, Theme, Thrown, View,
     };
-    pub use doxa_client::{layers, service, CacheConfig};
+    pub use doxa_client::{layers, service};
 }

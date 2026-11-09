@@ -127,31 +127,6 @@ fn a_page_redirect_beats_the_nearest_catch() {
     assert!(dom.find("class", "err").is_none());
 }
 
-#[page("/slow", load = |_| sleep(Duration::from_secs(2)))]
-fn SlowPage() -> View {
-    view! { <p>"slow"</p> }
-}
-
-#[test]
-fn keep_previous_holds_the_old_page_until_the_next_loads() {
-    let dom = mount(
-        Router::new()
-            .page::<HomePage>()
-            .page::<SlowPage>()
-            .transitions(Keep::Previous),
-    );
-    navigate(HomePage::route());
-    settle();
-    assert_eq!(dom.text(dom.body()), "home");
-    navigate(SlowPage::route());
-    settle();
-    dom.advance(Duration::from_secs(1));
-    assert_eq!(dom.text(dom.body()), "home");
-    assert_eq!(here(), "/home");
-    dom.advance(Duration::from_secs(1));
-    assert_eq!(dom.text(dom.body()), "slow");
-}
-
 #[test]
 fn set_query_edits_the_current_url() {
     let _dom = mount(Router::new().page::<OrdersPage>());

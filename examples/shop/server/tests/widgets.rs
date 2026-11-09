@@ -2,7 +2,7 @@
 
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
-use doxa::client::{CacheConfig, Cached, Fetch, Permission, Service};
+use doxa::client::{Cached, Fetch, Permission, Service};
 use shop_api::widgets::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,10 +29,10 @@ fn seeded() -> RouterTransport {
 }
 
 fn install(role: &str) -> Rc<Service> {
-    let s = serve(seeded(), role);
-    s.cache(CacheConfig::default().stale_time(Duration::from_secs(60)));
-    s
+    serve(seeded(), role)
 }
+
+const TTL: Duration = Duration::from_secs(60);
 
 #[tokio::test]
 async fn a_route_is_called_like_a_function() {
@@ -56,7 +56,7 @@ async fn a_route_is_called_like_a_function() {
 async fn a_route_with_no_arguments_is_called_too() {
     install("viewer");
     let version = shop_api::version().await.unwrap();
-    assert_eq!(*version, "0.0.0");
+    assert_eq!(version, "0.0.0");
 }
 
 #[tokio::test]
@@ -152,36 +152,19 @@ async fn a_refused_mutation_is_forbidden() {
 }
 
 #[tokio::test]
-async fn repeated_reads_are_served_from_the_cache() {
+async fn repeated_cached_reads_are_served_from_the_cache() {
     let client = install("viewer");
-    get_widget("cog").await.unwrap();
-    get_widget("cog").await.unwrap();
+    get_widget("cog").cache(TTL).await.unwrap();
+    get_widget("cog").cache(TTL).await.unwrap();
     assert_eq!(client.requests_sent(), 1);
+    get_widget("cog").await.unwrap();
+    assert_eq!(client.requests_sent(), 2, "an uncached read always asks");
 }
 
 #[tokio::test]
-async fn a_listed_or_renamed_widget_is_read_without_a_request() {
+async fn a_mutation_drops_its_cached_entity() {
     let client = install("editor");
-    list_widgets(Filter::default()).await.unwrap();
-    assert_eq!(get_widget("gear").await.unwrap().id, 2);
-    assert_eq!(client.requests_sent(), 1);
-
-    rename_widget(
-        "gear",
-        Rename {
-            name: "flange".into(),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(get_widget("flange").await.unwrap().id, 2);
-    assert_eq!(client.requests_sent(), 2);
-}
-
-#[tokio::test]
-async fn a_mutation_marks_its_entity_stale() {
-    let client = install("editor");
-    get_widget("cog").await.unwrap();
+    get_widget("cog").cache(TTL).await.unwrap();
     let renamed = rename_widget(
         "cog",
         Rename {
@@ -192,18 +175,15 @@ async fn a_mutation_marks_its_entity_stale() {
     .unwrap();
     assert_eq!(renamed.name, "cog2");
     let before = client.requests_sent();
-    // Stale: served at once, revalidated in the background.
-    get_widget("cog").await.ok();
-    doxa::client::task::run_until_stalled();
-    assert!(client.requests_sent() > before);
+    get_widget("cog").cache(TTL).await.ok();
+    assert_eq!(client.requests_sent(), before + 1);
 }
 
 #[tokio::test]
-async fn a_mutation_refetches_each_query_once_however_often_it_is_read() {
-    let client = serve(seeded(), "editor");
-    // The default stale time, and the server's `Cache-Control: private, no-cache`.
-    get_widget("cog").await.unwrap();
-    list_widgets(Filter::default()).await.unwrap();
+async fn a_mutation_refetches_each_cached_query_once_however_often_it_is_read() {
+    let client = install("editor");
+    get_widget("cog").cache(TTL).await.unwrap();
+    list_widgets(Filter::default()).cache(TTL).await.unwrap();
     rename_widget(
         "gear",
         Rename {
@@ -214,12 +194,12 @@ async fn a_mutation_refetches_each_query_once_however_often_it_is_read() {
     .unwrap();
     let before = client.requests_sent();
     for _ in 0..3 {
-        get_widget("cog").await.unwrap();
-        list_widgets(Filter::default()).await.unwrap();
-        doxa::client::task::run_until_stalled();
+        get_widget("cog").cache(TTL).await.unwrap();
+        list_widgets(Filter::default()).cache(TTL).await.unwrap();
     }
     assert_eq!(client.requests_sent(), before + 2);
     let names: Vec<String> = list_widgets(Filter::default())
+        .cache(TTL)
         .await
         .unwrap()
         .iter()
@@ -231,8 +211,8 @@ async fn a_mutation_refetches_each_query_once_however_often_it_is_read() {
 #[tokio::test]
 async fn a_read_returns_the_cached_value_itself() {
     install("viewer");
-    let a = get_widget("cog").await.unwrap();
-    let b = get_widget("cog").await.unwrap();
+    let a = get_widget("cog").cache(TTL).await.unwrap();
+    let b = get_widget("cog").cache(TTL).await.unwrap();
     assert!(Cached::ptr_eq(&a, &b));
 }
 
@@ -301,7 +281,7 @@ async fn an_attachment_arrives_with_its_type_and_name() {
 #[tokio::test]
 async fn bytes_and_multipart_bodies_reach_the_route() {
     install("editor");
-    assert_eq!(*upload_photo("gear", vec![0u8; 512]).await.unwrap(), 512);
+    assert_eq!(upload_photo("gear", vec![0u8; 512]).await.unwrap(), 512);
     let form = doxa::client::Multipart::new().text("title", "Q3").bytes(
         "sheet",
         "q3.csv",
@@ -309,5 +289,5 @@ async fn bytes_and_multipart_bodies_reach_the_route() {
         b"a,b\n1,2\n".to_vec(),
     );
     let fields = upload_files(form).await.unwrap();
-    assert_eq!(*fields, ["title=2", "sheet:q3.csv=8"]);
+    assert_eq!(fields, ["title=2", "sheet:q3.csv=8"]);
 }

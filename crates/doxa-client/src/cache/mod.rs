@@ -1,12 +1,13 @@
-//! The request cache: one entry per GET, shared by every caller, revalidated
-//! in the background at most once per stale period, and cleared when the
-//! session changes.
+//! Responses kept by calls that opt in with [`Call::cache`](crate::Call::cache), and by GETs
+//! awaited in a render for that component's next render, until they expire, a mutation
+//! invalidates them, or the session changes.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::panic::Location;
 use std::rc::{Rc, Weak};
-use std::task::Waker;
+use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use doxa_wire::{Identity, Keyed, RouteSpec};
@@ -16,12 +17,21 @@ use serde_json::Value;
 use crate::arg::Arg;
 use crate::service::service;
 
-pub(crate) mod entity;
-
-/// Something that re-renders when a query it read changes.
+/// Something that re-renders when a cached value it read changes.
 pub trait Observer {
-    /// A query this observer read has a new value, or went stale.
+    /// A value this observer read was replaced, patched or invalidated.
     fn changed(&self);
+
+    /// The render's next hook slot for a call made at `at`, as a key unique to it;
+    /// `None` when the observer isn't rendering.
+    fn slot(&self, _at: &'static Location<'static>) -> Option<String> {
+        None
+    }
+}
+
+/// The slot a GET awaited now, during a render, keeps its answer in.
+pub(crate) fn render_slot(at: &'static Location<'static>) -> Option<String> {
+    current_observer()?.slot(at)
 }
 
 thread_local! {
@@ -155,228 +165,115 @@ pub(crate) fn map_items<T: Clone + 'static>(
     None
 }
 
-/// How long data stays fresh, globally and per route.
-#[derive(Debug, Clone)]
-pub struct CacheConfig {
-    stale_time: Duration,
-    gc_time: Duration,
-    routes: Vec<(&'static RouteSpec, Duration)>,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            stale_time: Duration::from_secs(30),
-            gc_time: Duration::from_secs(300),
-            routes: Vec::new(),
-        }
-    }
-}
-
-impl CacheConfig {
-    /// How long a response is served without asking the server again. Default: 30 seconds.
-    pub fn stale_time(mut self, d: Duration) -> Self {
-        self.stale_time = d;
-        self
-    }
-
-    /// How long an unread response is kept.
-    pub fn gc_time(mut self, d: Duration) -> Self {
-        self.gc_time = d;
-        self
-    }
-
-    /// A different stale time for one route: `.route(&get_widget::ROUTE, …)`.
-    pub fn route(mut self, route: &'static RouteSpec, stale_time: Duration) -> Self {
-        self.routes.push((route, stale_time));
-        self
-    }
-
-    fn stale_time_for(&self, route: &'static RouteSpec) -> Duration {
-        self.routes
-            .iter()
-            .find(|(r, _)| std::ptr::eq(*r, route))
-            .map_or(self.stale_time, |(_, d)| *d)
-    }
-}
-
 pub(crate) struct Entry {
     value: Rc<dyn Any>,
     route: &'static RouteSpec,
     /// The guard key the call sent; `None` for a list.
     key: Option<Value>,
+    /// Milliseconds, from [`now`](crate::service::now).
     at: f64,
+    ttl: Duration,
     stale: bool,
-    /// Renewed by every store and invalidation, unique across clears, so a
-    /// revalidation that started before one is discarded.
-    generation: u64,
-    max_age: Option<Duration>,
-    etag: Option<String>,
-    digest: Option<u64>,
     observers: Vec<Weak<dyn Observer>>,
+    /// A render slot's entry, which answers only this URL and lives while its component does.
+    slot_url: Option<String>,
 }
 
-/// What a waiter on an in-flight request gets.
-pub(crate) enum Outcome {
-    Value(Rc<dyn Any>),
-    Status(u16, Rc<[u8]>),
-    Failed(crate::fetch::Fetch),
+impl Entry {
+    fn expired(&self, now: f64) -> bool {
+        self.stale || now - self.at >= self.ttl.as_secs_f64() * 1000.0
+    }
 }
 
+/// A render slot's request in flight, outliving the render that sent it.
 #[derive(Default)]
-pub(crate) struct Slot {
-    pub outcome: RefCell<Option<Rc<Outcome>>>,
+pub(crate) struct Pending {
+    outcome: RefCell<Option<Box<dyn Any>>>,
+    done: Cell<bool>,
     wakers: RefCell<Vec<Waker>>,
 }
 
-impl Slot {
-    pub fn finish(&self, outcome: Outcome) {
-        *self.outcome.borrow_mut() = Some(Rc::new(outcome));
-        for w in self.wakers.borrow_mut().drain(..) {
-            w.wake();
-        }
+impl Pending {
+    pub fn finish(&self, outcome: Box<dyn Any>) {
+        *self.outcome.borrow_mut() = Some(outcome);
+        self.done.set(true);
+        self.wakers.borrow_mut().drain(..).for_each(Waker::wake);
     }
 
-    pub async fn wait(self: Rc<Self>) -> Rc<Outcome> {
-        std::future::poll_fn(|cx| match self.outcome.borrow().clone() {
-            Some(o) => std::task::Poll::Ready(o),
-            None => {
-                self.wakers.borrow_mut().push(cx.waker().clone());
-                std::task::Poll::Pending
+    /// The outcome, for the first render to ask once it lands; `None` if another took it.
+    pub async fn take(&self) -> Option<Box<dyn Any>> {
+        std::future::poll_fn(|cx| {
+            if self.done.get() {
+                return Poll::Ready(self.outcome.borrow_mut().take());
             }
+            self.wakers.borrow_mut().push(cx.waker().clone());
+            Poll::Pending
         })
         .await
     }
 }
 
-/// What a read found.
-pub(crate) enum Lookup {
-    Fresh(Rc<dyn Any>),
-    /// Stale, and this caller now owns its one revalidation.
-    Revalidate(Rc<dyn Any>, Revalidation),
-    Pending(Rc<Slot>),
-    Miss,
-}
-
-/// A claimed background revalidation of one entry.
-pub(crate) struct Revalidation {
-    pub etag: Option<String>,
-    generation: u64,
-}
-
-/// How a revalidation ended.
-pub(crate) enum Revalidated {
-    Value(Rc<dyn Any>, Meta),
-    NotModified(f64),
-    /// `401`, `403` or `404`: readers should see the error, not the old value.
-    Gone,
-    Failed,
-}
-
 #[derive(Default)]
 pub(crate) struct Cache {
-    pub config: RefCell<CacheConfig>,
     entries: RefCell<HashMap<String, Entry>>,
-    inflight: RefCell<HashMap<String, Rc<Slot>>>,
-    /// Each claimed revalidation, by the generation it claimed.
-    revalidating: RefCell<HashMap<String, u64>>,
-    generations: Cell<u64>,
+    pending: RefCell<HashMap<String, (String, Rc<Pending>)>>,
     requests: Cell<u64>,
 }
 
 impl Cache {
-    /// Read `key`. A stale entry is stamped fresh as its revalidation is claimed,
-    /// so it is asked for again only once the stale time passes once more.
-    pub fn lookup(&self, key: &str, now: f64) -> Lookup {
-        let observer = current_observer();
-        let mut entries = self.entries.borrow_mut();
-        if let Some(entry) = entries.get_mut(key) {
-            observe(entry, observer.as_ref());
-            if !self.is_stale(entry, now) || self.revalidating.borrow().contains_key(key) {
-                return Lookup::Fresh(entry.value.clone());
+    /// The request slot `slot` has in flight for `url`, or a new one for the caller to send.
+    pub fn pending(&self, slot: &str, url: &str) -> (Rc<Pending>, bool) {
+        let mut pending = self.pending.borrow_mut();
+        if let Some((u, p)) = pending.get(slot) {
+            if u == url {
+                return (p.clone(), false);
             }
-            self.revalidating
-                .borrow_mut()
-                .insert(key.to_owned(), entry.generation);
-            entry.at = now;
-            entry.stale = false;
-            return Lookup::Revalidate(
-                entry.value.clone(),
-                Revalidation {
-                    etag: entry.etag.clone(),
-                    generation: entry.generation,
-                },
-            );
         }
-        drop(entries);
-        match self.inflight.borrow().get(key) {
-            Some(slot) => Lookup::Pending(slot.clone()),
-            None => Lookup::Miss,
+        let p = Rc::new(Pending::default());
+        pending.insert(slot.to_owned(), (url.to_owned(), p.clone()));
+        (p, true)
+    }
+
+    /// Retire `p`, unless a newer request for the slot replaced it.
+    pub fn end_pending(&self, slot: &str, p: &Rc<Pending>) {
+        let mut pending = self.pending.borrow_mut();
+        if pending.get(slot).is_some_and(|(_, q)| Rc::ptr_eq(p, q)) {
+            pending.remove(slot);
         }
     }
 
-    /// The value at `key` if it is fresh, without claiming a revalidation.
-    pub fn fresh(&self, key: &str, now: f64) -> Option<Rc<dyn Any>> {
+    /// The value at `key` while it is fresh, recording the current observer as its reader.
+    pub fn get(&self, key: &str, now: f64) -> Option<Rc<dyn Any>> {
         let observer = current_observer();
         let mut entries = self.entries.borrow_mut();
         let entry = entries.get_mut(key)?;
         observe(entry, observer.as_ref());
-        (!self.is_stale(entry, now)).then(|| entry.value.clone())
+        (!entry.expired(now) && entry.slot_url.is_none()).then(|| entry.value.clone())
     }
 
-    fn is_stale(&self, entry: &Entry, now: f64) -> bool {
-        let fresh_for = entry
-            .max_age
-            .unwrap_or_else(|| self.config.borrow().stale_time_for(entry.route));
-        entry.stale || now - entry.at >= fresh_for.as_secs_f64() * 1000.0
-    }
-
-    /// What `pick` finds in the first fresh entry it matches, and when that entry was fetched.
-    pub fn find(
-        &self,
-        now: f64,
-        pick: impl Fn(&Rc<dyn Any>) -> Option<Rc<dyn Any>>,
-    ) -> Option<(Rc<dyn Any>, f64)> {
-        let entries = self.entries.borrow();
-        entries
-            .values()
-            .filter(|e| !self.is_stale(e, now))
-            .find_map(|e| Some((pick(&e.value)?, e.at)))
-    }
-
-    /// Record the current observer as a reader of `key` without reading it.
-    pub fn watch(&self, key: &str) {
+    /// What render slot `slot` last kept for `url`, unless an invalidation dropped it.
+    pub fn get_slot(&self, slot: &str, url: &str) -> Option<Rc<dyn Any>> {
         let observer = current_observer();
-        if let Some(e) = self.entries.borrow_mut().get_mut(key) {
-            observe(e, observer.as_ref());
-        }
+        let mut entries = self.entries.borrow_mut();
+        let entry = entries.get_mut(slot)?;
+        observe(entry, observer.as_ref());
+        (!entry.stale && entry.slot_url.as_deref() == Some(url)).then(|| entry.value.clone())
+    }
+
+    pub fn store_slot(
+        &self,
+        slot: String,
+        route: &'static RouteSpec,
+        route_key: Option<Value>,
+        value: Rc<dyn Any>,
+        url: String,
+    ) {
+        let now = crate::service::now();
+        self.insert(slot, route, route_key, value, Duration::MAX, now, Some(url));
     }
 
     pub fn count_request(&self) {
         self.requests.set(self.requests.get() + 1);
-    }
-
-    pub fn begin(&self, key: &str) -> Rc<Slot> {
-        self.count_request();
-        let slot = Rc::new(Slot::default());
-        self.inflight
-            .borrow_mut()
-            .insert(key.to_owned(), slot.clone());
-        slot
-    }
-
-    /// Retire `slot`, unless a clear already replaced it.
-    pub fn end(&self, key: &str, slot: &Slot) {
-        let mut inflight = self.inflight.borrow_mut();
-        if inflight.get(key).is_some_and(|s| std::ptr::eq(&**s, slot)) {
-            inflight.remove(key);
-        }
-    }
-
-    fn next_generation(&self) -> u64 {
-        let g = self.generations.get() + 1;
-        self.generations.set(g);
-        g
     }
 
     pub fn store(
@@ -385,7 +282,22 @@ impl Cache {
         route: &'static RouteSpec,
         route_key: Option<Value>,
         value: Rc<dyn Any>,
-        meta: Meta,
+        ttl: Duration,
+        now: f64,
+    ) {
+        self.insert(key, route, route_key, value, ttl, now, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert(
+        &self,
+        key: String,
+        route: &'static RouteSpec,
+        route_key: Option<Value>,
+        value: Rc<dyn Any>,
+        ttl: Duration,
+        now: f64,
+        slot_url: Option<String>,
     ) {
         let observer = current_observer();
         let mut entries = self.entries.borrow_mut();
@@ -397,64 +309,16 @@ impl Cache {
             value,
             route,
             key: route_key,
-            at: meta.now,
+            at: now,
+            ttl,
             stale: false,
-            generation: self.next_generation(),
-            max_age: meta.max_age,
-            etag: meta.etag,
-            digest: meta.digest,
             observers,
+            slot_url,
         };
         observe(&mut entry, observer.as_ref());
         entries.insert(key, entry);
         drop(entries);
-        self.collect(meta.now);
-    }
-
-    /// Finish the revalidation `claim` of `key`, telling readers if the value changed.
-    pub fn revalidated(&self, key: &str, claim: Revalidation, result: Revalidated) {
-        {
-            let mut revalidating = self.revalidating.borrow_mut();
-            if revalidating.get(key) == Some(&claim.generation) {
-                revalidating.remove(key);
-            }
-        }
-        let observers = {
-            let mut entries = self.entries.borrow_mut();
-            let Some(e) = entries.get_mut(key) else {
-                return;
-            };
-            if e.generation != claim.generation {
-                // Invalidated meanwhile: what came back may predate the change.
-                e.observers.clone()
-            } else {
-                match result {
-                    Revalidated::Value(value, meta) => {
-                        e.at = meta.now;
-                        e.max_age = meta.max_age;
-                        e.etag = meta.etag;
-                        if e.digest.is_some() && e.digest == meta.digest {
-                            return;
-                        }
-                        e.value = value;
-                        e.digest = meta.digest;
-                        e.observers.clone()
-                    }
-                    Revalidated::NotModified(now) => {
-                        e.at = now;
-                        return;
-                    }
-                    Revalidated::Gone => {
-                        entries.remove(key).map(|e| e.observers).unwrap_or_default()
-                    }
-                    Revalidated::Failed => {
-                        e.stale = true;
-                        return;
-                    }
-                }
-            }
-        };
-        notify(&observers);
+        self.collect(now);
     }
 
     /// Mark stale every query about any of `entities`, and tell their readers.
@@ -470,7 +334,6 @@ impl Cache {
                 .filter(|e| hit(e))
                 .flat_map(|e| {
                     e.stale = true;
-                    e.generation = self.next_generation();
                     e.observers.clone()
                 })
                 .collect()
@@ -518,8 +381,7 @@ impl Cache {
 
     /// Forget everything, e.g. on a new session.
     pub fn clear(&self) {
-        self.inflight.borrow_mut().clear();
-        self.revalidating.borrow_mut().clear();
+        self.pending.borrow_mut().clear();
         let observers: Vec<_> = self
             .entries
             .borrow_mut()
@@ -529,12 +391,12 @@ impl Cache {
         notify(&observers);
     }
 
-    /// Drop entries nobody has read for longer than the gc time.
+    /// Drop expired entries nobody mounted still reads, and slots whose component is gone;
+    /// a reader keeps its entry so an invalidation still reaches it.
     fn collect(&self, now: f64) {
-        let gc = self.config.borrow().gc_time.as_secs_f64() * 1000.0;
         self.entries.borrow_mut().retain(|_, e| {
             e.observers.retain(|w| w.strong_count() > 0);
-            !e.observers.is_empty() || now - e.at < gc
+            !e.observers.is_empty() || (e.slot_url.is_none() && !e.expired(now))
         });
     }
 
@@ -542,14 +404,6 @@ impl Cache {
     pub fn requests(&self) -> u64 {
         self.requests.get()
     }
-}
-
-pub(crate) struct Meta {
-    pub now: f64,
-    pub max_age: Option<Duration>,
-    pub etag: Option<String>,
-    /// A hash of the body, so an identical refetch doesn't re-render readers.
-    pub digest: Option<u64>,
 }
 
 fn observe(entry: &mut Entry, observer: Option<&Rc<dyn Observer>>) {
@@ -573,17 +427,4 @@ fn notify(observers: &[Weak<dyn Observer>]) {
             o.changed();
         }
     }
-}
-
-/// `max-age` from a `Cache-Control` header. `no-cache` is left to the stale time:
-/// `ETagLayer` sends it for the browser's cache, which this one replaces.
-pub(crate) fn max_age(cache_control: Option<&str>) -> Option<Duration> {
-    let cc = cache_control?;
-    if cc.contains("no-store") {
-        return Some(Duration::ZERO);
-    }
-    cc.split(',')
-        .find_map(|d| d.trim().strip_prefix("max-age="))
-        .and_then(|s| s.parse().ok())
-        .map(Duration::from_secs)
 }

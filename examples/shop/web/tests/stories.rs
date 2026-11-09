@@ -57,6 +57,11 @@ async fn the_loading_story_holds_its_fallback_until_the_slow_answer() {
     settle().await;
     assert!(dom.find("class", "skeleton").is_none());
     assert!(dom.find("class", "picker").is_some());
+    assert_eq!(
+        shop_api::service().requests_sent(),
+        1,
+        "the boundary's re-render joined the request in flight"
+    );
 }
 
 #[tokio::test]

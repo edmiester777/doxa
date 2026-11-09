@@ -52,11 +52,11 @@ async fn none_sends_no_body_and_some_is_checked_first() {
     let s = service("doxa");
     s.layers().push(transport(RouterTransport::new(router())));
 
-    assert_eq!(*client::add(None).await.unwrap(), "none");
+    assert_eq!(client::add(None).await.unwrap(), "none");
     let note = Note { text: "hi".into() };
-    assert_eq!(*client::add(Some(note.clone())).await.unwrap(), "hi");
-    assert_eq!(*client::plain(None).await.unwrap(), "none");
-    assert_eq!(*client::plain(Some(note)).await.unwrap(), "hi");
+    assert_eq!(client::add(Some(note.clone())).await.unwrap(), "hi");
+    assert_eq!(client::plain(None).await.unwrap(), "none");
+    assert_eq!(client::plain(Some(note)).await.unwrap(), "hi");
 
     let before = s.requests_sent();
     let refused = client::add(Some(Note {

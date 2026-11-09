@@ -165,13 +165,14 @@ impl Component for Suspense {
                 },
             )
             .child(props.children);
+        // Children first: a fallback ahead of them would shift their place and remount them.
         RenderFuture::ready(Ok(View::fragment([
+            children.into_view(),
             if loading {
                 props.fallback
             } else {
                 View::empty()
             },
-            children.into_view(),
         ])))
     }
 }

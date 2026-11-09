@@ -25,9 +25,9 @@ pub mod task;
 pub mod transport;
 
 pub use arg::{Arg, ArgFor, Bytes, ClientArg, Foreign, Form, Granted, Json, Outgoing, Path, Query};
-pub use cache::{invalidate, invalidate_all, CacheConfig};
+pub use cache::{invalidate, invalidate_all};
 pub use cached::Cached;
-pub use call::Call;
+pub use call::{CachedCall, Call};
 pub use can::{has, Permission, Probe};
 pub use fetch::{Fetch, NoError};
 pub use layer::{layer_fn, layers, Layer, Next};
@@ -42,11 +42,6 @@ pub use doxa_wire::{FieldError, FieldErrors, Validates};
 
 #[doc(hidden)]
 pub use doxa_wire as __wire;
-
-#[doc(hidden)]
-pub mod __private {
-    pub use crate::cache::entity::{CachedEntity, Entity, EntityOf, IsEntity, NotEntity};
-}
 
 /// Declare a route key shared by server and client.
 ///
