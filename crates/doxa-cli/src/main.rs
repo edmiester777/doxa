@@ -11,6 +11,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use doxa_build::{BuildOptions, Pipeline};
 
+/// The system allocator holds what bindgen frees, so the split's parses stack on top of it.
+#[cfg(not(windows))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "doxa",

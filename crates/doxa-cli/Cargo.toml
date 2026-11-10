@@ -35,5 +35,9 @@ thiserror = { workspace = true }
 syn = { workspace = true }
 quote = { workspace = true }
 
+# jemalloc doesn't build for MSVC.
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
