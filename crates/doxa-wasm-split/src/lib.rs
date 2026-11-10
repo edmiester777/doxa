@@ -1,5 +1,6 @@
 //! wasm-split-cli 0.7.0 from Dioxus, keeping what its main module loses: callees of table entries
 //! nothing reaches, targets of aliased symbols, and bytes of constants merged with a split's.
+//! Split modules are re-encoded from the bytes, not re-parsed, so memory stays one module's.
 //! Drop this crate once upstream does the same.
 
 use anyhow::{Context, Result};
@@ -13,19 +14,17 @@ use std::{
 };
 use walrus::{
     ir::{self, dfs_in_order, Visitor},
-    ConstExpr, DataKind, ElementItems, ElementKind, ExportId, ExportItem, FunctionBuilder,
-    FunctionId, FunctionKind, GlobalKind, ImportId, ImportKind, Module, ModuleConfig, RefType,
-    TableId, TypeId,
+    ConstExpr, ElementItems, ElementKind, ExportId, ExportItem, FunctionBuilder, FunctionId,
+    FunctionKind, ImportId, ImportKind, Module, ModuleConfig, RefType, TableId, TypeId,
 };
 use wasmparser::{
     BinaryReader, Linking, LinkingSectionReader, Payload, RelocSectionReader, RelocationEntry,
     SymbolInfo,
 };
 
-pub const MAKE_LOAD_JS: &str = include_str!("./__wasm_split.js");
+mod emit;
 
-/// Each emission re-parses the whole module, so peak memory is this many parsed copies.
-const EMIT_THREADS: usize = 4;
+pub const MAKE_LOAD_JS: &str = include_str!("./__wasm_split.js");
 
 /// A parsed wasm module with additional metadata and functionality for splitting and patching.
 ///
@@ -46,7 +45,7 @@ pub struct Splitter<'a> {
     // with old FunctionIds but the underlying IndexMap actually checks that a key belongs to a particular
     // arena.
     fns_to_ids: HashMap<FunctionId, usize>,
-    _ids_to_fns: Vec<FunctionId>,
+    ids_to_fns: Vec<FunctionId>,
 
     shared_symbols: BTreeSet<Node>,
     split_points: Vec<SplitPoint>,
@@ -103,7 +102,7 @@ impl<'a> Splitter<'a> {
             bindgened,
             split_points,
             data_symbols: raw_data.data_symbols,
-            _ids_to_fns: ids,
+            ids_to_fns: ids,
             fns_to_ids,
             main_graph: Default::default(),
             chunks: Default::default(),
@@ -129,23 +128,30 @@ impl<'a> Splitter<'a> {
     pub fn emit(self) -> Result<OutputModules> {
         tracing::info!("Emitting split modules.");
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(EMIT_THREADS)
-            .build()
-            .context("building the split emission thread pool")?;
-        let (chunks, modules) = pool.install(|| {
-            let chunks = (0..self.chunks.len())
-                .into_par_iter()
-                .map(|idx| self.emit_split_chunk(idx))
-                .collect::<Result<Vec<SplitModule>>>()?;
-            let modules = (0..self.split_points.len())
-                .into_par_iter()
-                .map(|idx| self.emit_split_module(idx))
-                .collect::<Result<Vec<SplitModule>>>()?;
-            anyhow::Ok((chunks, modules))
-        })?;
+        let tables: Vec<_> = self
+            .source_module
+            .tables
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let memories: Vec<_> = self
+            .source_module
+            .memories
+            .iter()
+            .map(|m| m.name.clone())
+            .collect();
+        let extra = (self.split_points.len() + self.shared_symbols.len()) as u64;
+        let src = emit::Source::new(self.bindgened, &tables, &memories, extra)?;
+        let slots = self.shared_slots(src.slots_start);
+        let chunks = (0..self.chunks.len())
+            .into_par_iter()
+            .map(|idx| self.emit_split_chunk(&src, &slots, idx))
+            .collect::<Result<Vec<SplitModule>>>()?;
+        let modules = (0..self.split_points.len())
+            .into_par_iter()
+            .map(|idx| self.emit_split_module(&src, &slots, idx))
+            .collect::<Result<Vec<SplitModule>>>()?;
 
-        // Emit the main module, consuming self since we're going to
         let main = self.emit_main_module()?;
 
         Ok(OutputModules {
@@ -205,8 +211,13 @@ impl<'a> Splitter<'a> {
     }
 
     /// Write the contents of the split modules to the output
-    fn emit_split_module(&self, split_idx: usize) -> Result<SplitModule> {
-        let split = self.split_points[split_idx].clone();
+    fn emit_split_module(
+        &self,
+        src: &emit::Source,
+        slots: &HashMap<FunctionId, u32>,
+        split_idx: usize,
+    ) -> Result<SplitModule> {
+        let split = &self.split_points[split_idx];
 
         // These are the symbols that will only exist in this module and not in the main module.
         let mut unique_symbols = split
@@ -253,52 +264,16 @@ impl<'a> Splitter<'a> {
             relies_on_chunks
         );
 
-        let (mut out, ids_to_fns, _fns_to_ids) = parse_module_with_ids(self.bindgened)?;
-
-        // Remap the graph to our module's IDs
-        let shared_funcs = self
-            .shared_symbols
-            .iter()
-            .map(|f| self.remap_id(&ids_to_fns, f))
-            .collect::<Vec<_>>();
-
-        let unique_symbols = self.remap_ids(&unique_symbols, &ids_to_fns);
-        let symbols_to_delete = self.remap_ids(&symbols_to_delete, &ids_to_fns);
-        let symbols_to_import = self.remap_ids(&symbols_to_import, &ids_to_fns);
-        let split_export_func = ids_to_fns[self.fns_to_ids[&split.export_func]];
-
-        // Do some basic cleanup of the module to make it smaller
-        // This removes exports, imports, and the start function
-        self.prune_split_module(&mut out);
-
-        // Clear away the data segments
-        self.clear_data_segments(&mut out, &unique_symbols);
-
-        // Clear out the element segments and then add in the initializers for the shared imports
-        self.create_ifunc_initializers(&mut out, &unique_symbols);
-
-        // Convert our split module's functions to real functions that call the indirect function
-        self.add_split_imports(
-            &mut out,
-            split.index,
-            split_export_func,
-            split.export_name,
-            &symbols_to_import,
-            &shared_funcs,
+        let slot = src.slots_start + split.index as u32;
+        let plan = self.plan(
+            &split.module_name,
+            Some((&split.export_name, split.export_func, slot)),
+            [&unique_symbols, &symbols_to_import, &symbols_to_delete],
+            slots,
         );
 
-        // Delete all the functions that are not reachable from the main module
-        self.delete_main_funcs_from_split(&mut out, &symbols_to_delete);
-
-        // Remove the reloc and linking custom sections
-        self.remove_custom_sections(&mut out);
-
-        // Run the gc to remove unused functions - also validates the module to ensure we can emit it properly
-        // todo(jon): prefer to delete the items as we go so we don't need to run a gc pass. it/it's quite slow
-        walrus::passes::gc::run(&mut out);
-
         Ok(SplitModule {
-            bytes: out.emit_wasm(),
+            bytes: src.emit(&plan, |i| self.func_name(i))?,
             module_name: split.module_name.clone(),
             component_name: Some(split.component_name.clone()),
             relies_on_chunks,
@@ -307,7 +282,12 @@ impl<'a> Splitter<'a> {
     }
 
     /// Write a split chunk - this is a chunk with no special functions, just exports + initializers
-    fn emit_split_chunk(&self, idx: usize) -> Result<SplitModule> {
+    fn emit_split_chunk(
+        &self,
+        src: &emit::Source,
+        slots: &HashMap<FunctionId, u32>,
+        idx: usize,
+    ) -> Result<SplitModule> {
         tracing::info!("emitting chunk {}", idx);
 
         let unique_symbols = &self.chunks[idx];
@@ -325,51 +305,15 @@ impl<'a> Splitter<'a> {
             .cloned()
             .collect();
 
-        // Make sure to remap any ids from the main module to this module
-        let (mut out, ids_to_fns, _fns_to_ids) = parse_module_with_ids(self.bindgened)?;
-
-        // Remap the graph to our module's IDs
-        let shared_funcs = self
-            .shared_symbols
-            .iter()
-            .map(|f| self.remap_id(&ids_to_fns, f))
-            .collect::<Vec<_>>();
-
-        let unique_symbols = self.remap_ids(unique_symbols, &ids_to_fns);
-        let symbols_to_import = self.remap_ids(&symbols_to_import, &ids_to_fns);
-        let symbols_to_delete = self.remap_ids(&symbols_to_delete, &ids_to_fns);
-
-        self.prune_split_module(&mut out);
-
-        // Clear away the data segments
-        self.clear_data_segments(&mut out, &unique_symbols);
-
-        // Clear out the element segments and then add in the initializers for the shared imports
-        self.create_ifunc_initializers(&mut out, &unique_symbols);
-
-        // We have to make sure our table matches that of the other tables even though we don't call them.
-        let ifunc_table_id = self.load_funcref_table(&mut out);
-        let segment_start = self
-            .expand_ifunc_table_max(
-                &mut out,
-                ifunc_table_id,
-                self.split_points.len() + shared_funcs.len(),
-            )
-            .unwrap();
-
-        self.convert_shared_to_imports(&mut out, segment_start, &shared_funcs, &symbols_to_import);
-
-        // Make sure we haven't deleted anything important....
-        self.delete_main_funcs_from_split(&mut out, &symbols_to_delete);
-
-        // Remove the reloc and linking custom sections
-        self.remove_custom_sections(&mut out);
-
-        // Run the gc to remove unused functions - also validates the module to ensure we can emit it properly
-        walrus::passes::gc::run(&mut out);
+        let plan = self.plan(
+            "split chunk",
+            None,
+            [unique_symbols, &symbols_to_import, &symbols_to_delete],
+            slots,
+        );
 
         Ok(SplitModule {
-            bytes: out.emit_wasm(),
+            bytes: src.emit(&plan, |i| self.func_name(i))?,
             module_name: "split".to_string(),
             component_name: None,
             relies_on_chunks: Default::default(),
@@ -377,29 +321,63 @@ impl<'a> Splitter<'a> {
         })
     }
 
-    /// Convert functions coming in from outside the module to indirect calls to the ifunc table created in the main module
-    fn convert_shared_to_imports(
+    /// Each shared function's slot in main's funcref table, after one per split point.
+    fn shared_slots(&self, start: u32) -> HashMap<FunctionId, u32> {
+        let funcs = self.shared_symbols.iter().filter_map(|n| match n {
+            Node::Function(id) => Some(*id),
+            Node::DataSymbol(_) => None,
+        });
+        let first = start + self.split_points.len() as u32;
+        funcs.zip(first..).collect()
+    }
+
+    /// `sets` are the part's unique symbols, the ones it calls in main, and the ones it drops.
+    fn plan<'p>(
         &self,
-        out: &mut Module,
-        segment_start: usize,
-        ifuncs: &Vec<Node>,
-        symbols_to_import: &HashSet<Node>,
-    ) {
-        let ifunc_table_id = self.load_funcref_table(out);
-
-        let mut idx = self.split_points.len();
-        for node in ifuncs {
-            if let Node::Function(ifunc) = node {
-                if symbols_to_import.contains(node) {
-                    let ty_id = out.funcs.get(*ifunc).ty();
-                    let stub = (idx + segment_start) as _;
-                    out.funcs.get_mut(*ifunc).kind =
-                        self.make_stub_funcs(out, ifunc_table_id, ty_id, stub);
-                }
-
-                idx += 1;
-            }
+        label: &'p str,
+        export: Option<(&'p str, FunctionId, u32)>,
+        [unique, import, delete]: [&HashSet<Node>; 3],
+        slots: &HashMap<FunctionId, u32>,
+    ) -> emit::Plan<'p> {
+        let idx = |id: &FunctionId| self.fns_to_ids[id] as u32;
+        let funcs = |set: &HashSet<Node>| -> HashSet<u32> {
+            set.iter()
+                .filter_map(|n| match n {
+                    Node::Function(id) => Some(idx(id)),
+                    Node::DataSymbol(_) => None,
+                })
+                .collect()
+        };
+        let stubs = import
+            .iter()
+            .filter_map(|n| match n {
+                Node::Function(id) => Some((idx(id), *slots.get(id)?)),
+                Node::DataSymbol(_) => None,
+            })
+            .collect();
+        let mut data: Vec<_> = unique
+            .iter()
+            .filter_map(|n| match n {
+                Node::DataSymbol(i) => self.data_symbols.get(i),
+                Node::Function(_) => None,
+            })
+            .filter(|s| s.which_data_segment == 0)
+            .map(|s| (s.segment_offset, s.symbol_size))
+            .collect();
+        data.sort_unstable();
+        emit::Plan {
+            label,
+            export: export.map(|(name, func, slot)| (name, idx(&func), slot)),
+            table_funcs: funcs(unique),
+            stubs,
+            deleted: funcs(delete),
+            data,
         }
+    }
+
+    fn func_name(&self, idx: u32) -> Option<String> {
+        let id = self.ids_to_fns[idx as usize];
+        self.source_module.funcs.get(id).name.clone()
     }
 
     /// Convert split import functions to local functions that call an indirect function that will
@@ -581,230 +559,10 @@ impl<'a> Splitter<'a> {
         }
     }
 
-    /// Creates the jump points
-    fn create_ifunc_initializers(&self, out: &mut Module, unique_symbols: &HashSet<Node>) {
-        let ifunc_table = self.load_funcref_table(out);
-
-        let mut initializers = HashMap::new();
-        for segment in out.elements.iter_mut() {
-            let ElementKind::Active { offset, .. } = &mut segment.kind else {
-                continue;
-            };
-
-            let ConstExpr::Value(ir::Value::I32(offset)) = offset else {
-                continue;
-            };
-
-            match &segment.items {
-                ElementItems::Functions(vec) => {
-                    for (idx, id) in vec.iter().enumerate() {
-                        if unique_symbols.contains(&Node::Function(*id)) {
-                            initializers
-                                .insert(*offset + idx as i32, ElementItems::Functions(vec![*id]));
-                        }
-                    }
-                }
-
-                ElementItems::Expressions(ref_type, const_exprs) => {
-                    for (idx, expr) in const_exprs.iter().enumerate() {
-                        if let ConstExpr::RefFunc(id) = expr {
-                            if unique_symbols.contains(&Node::Function(*id)) {
-                                initializers.insert(
-                                    *offset + idx as i32,
-                                    ElementItems::Expressions(
-                                        *ref_type,
-                                        vec![ConstExpr::RefFunc(*id)],
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Wipe away references to these segments
-        for table in out.tables.iter_mut() {
-            table.elem_segments.clear();
-        }
-
-        // Wipe away the element segments themselves
-        let segments_to_delete: Vec<_> = out.elements.iter().map(|e| e.id()).collect();
-        for id in segments_to_delete {
-            out.elements.delete(id);
-        }
-
-        // Add in our new segments
-        let ifunc_table_ = out.tables.get_mut(ifunc_table);
-        for (offset, items) in initializers {
-            let kind = ElementKind::Active {
-                table: ifunc_table,
-                offset: ConstExpr::Value(ir::Value::I32(offset)),
-            };
-
-            ifunc_table_
-                .elem_segments
-                .insert(out.elements.add(kind, items));
-        }
-    }
-
-    fn add_split_imports(
-        &self,
-        out: &mut Module,
-        split_idx: usize,
-        split_export_func: FunctionId,
-        split_export_name: String,
-        symbols_to_import: &HashSet<Node>,
-        ifuncs: &Vec<Node>,
-    ) {
-        let ifunc_table_id = self.load_funcref_table(out);
-        let segment_start = self
-            .expand_ifunc_table_max(out, ifunc_table_id, self.split_points.len() + ifuncs.len())
-            .unwrap();
-
-        // Make sure to re-export the split func
-        out.exports.add(&split_export_name, split_export_func);
-
-        // Add the elements back to the table
-        out.tables
-            .get_mut(ifunc_table_id)
-            .elem_segments
-            .insert(out.elements.add(
-                ElementKind::Active {
-                    table: ifunc_table_id,
-                    offset: ConstExpr::Value(ir::Value::I32((segment_start + split_idx) as i32)),
-                },
-                ElementItems::Functions(vec![split_export_func]),
-            ));
-
-        self.convert_shared_to_imports(out, segment_start, ifuncs, symbols_to_import);
-    }
-
-    fn delete_main_funcs_from_split(&self, out: &mut Module, symbols_to_delete: &HashSet<Node>) {
-        for node in symbols_to_delete {
-            if let Node::Function(id) = *node {
-                // if out.exports.get_exported_func(id).is_none() {
-                out.funcs.delete(id);
-                // }
-            }
-        }
-    }
-
-    /// Remove un-needed stuff and then hoist
-    fn prune_split_module(&self, out: &mut Module) {
-        // Clear the module's start/main
-        if let Some(start) = out.start.take() {
-            if let Some(export) = out.exports.get_exported_func(start) {
-                out.exports.delete(export.id());
-            }
-        }
-
-        // We're going to import the funcref table, so wipe it altogether
-        for table in out.tables.iter_mut() {
-            table.elem_segments.clear();
-        }
-
-        // Wipe all our imports - we're going to use a different set of imports
-        let all_imports: HashSet<_> = out.imports.iter().map(|i| i.id()).collect();
-        for import_id in all_imports {
-            out.imports.delete(import_id);
-        }
-
-        // Wipe away memories
-        let all_memories: Vec<_> = out.memories.iter().map(|m| m.id()).collect();
-        for memory_id in all_memories {
-            out.memories.get_mut(memory_id).data_segments.clear();
-        }
-
-        // Add exports that call the corresponding import
-        let exports = out.exports.iter().map(|e| e.id()).collect::<Vec<_>>();
-        for export_id in exports {
-            out.exports.delete(export_id);
-        }
-
-        // Convert the tables to imports.
-        // Should be as simple as adding a new import and then writing the `.import` field
-        for (idx, table) in out.tables.iter_mut().enumerate() {
-            let name = table.name.clone().unwrap_or_else(|| {
-                if table.element_ty == RefType::Funcref {
-                    "__indirect_function_table".to_string()
-                } else {
-                    format!("__imported_table_{}", idx)
-                }
-            });
-            let import = out.imports.add("__wasm_split", &name, table.id());
-            table.import = Some(import);
-        }
-
-        // Convert the memories to imports
-        // Should be as simple as adding a new import and then writing the `.import` field
-        for (idx, memory) in out.memories.iter_mut().enumerate() {
-            let name = memory
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("__memory_{}", idx));
-            let import = out.imports.add("__wasm_split", &name, memory.id());
-            memory.import = Some(import);
-        }
-
-        // Convert the globals to imports
-        // We might not use the global, so if we don't, we can just get
-        let global_ids: Vec<_> = out.globals.iter().map(|t| t.id()).collect();
-        for (idx, global_id) in global_ids.into_iter().enumerate() {
-            let global = out.globals.get_mut(global_id);
-            let global_name = format!("__global__{idx}");
-            let import = out.imports.add("__wasm_split", &global_name, global.id());
-            global.kind = GlobalKind::Import(import);
-        }
-    }
-
     fn make_dummy_func(&self, out: &mut Module) -> FunctionId {
         let mut b = FunctionBuilder::new(&mut out.types, &[], &[]);
         b.name("dummy".into()).func_body().unreachable();
         b.finish(vec![], &mut out.funcs)
-    }
-
-    fn clear_data_segments(&self, out: &mut Module, unique_symbols: &HashSet<Node>) {
-        // Preserve the data symbols for this module and then clear them away
-        let data_ids: Vec<_> = out.data.iter().map(|t| t.id()).collect();
-        for (idx, data_id) in data_ids.into_iter().enumerate() {
-            let data = out.data.get_mut(data_id);
-
-            // Take the data out of the vec - zeroing it out unless we patch it in manually
-            let contents = data.value.split_off(0);
-
-            // Zero out the non-primary data segments
-            if idx != 0 {
-                continue;
-            }
-
-            let DataKind::Active { memory, offset } = data.kind else {
-                continue;
-            };
-
-            let ConstExpr::Value(ir::Value::I32(data_offset)) = offset else {
-                continue;
-            };
-
-            // And then assign chunks of the data to new data entries that will override the individual slots
-            for unique in unique_symbols {
-                if let Node::DataSymbol(id) = unique {
-                    if let Some(symbol) = self.data_symbols.get(id) {
-                        if symbol.which_data_segment == idx {
-                            let range =
-                                symbol.segment_offset..symbol.segment_offset + symbol.symbol_size;
-                            let offset = ConstExpr::Value(ir::Value::I32(
-                                data_offset + symbol.segment_offset as i32,
-                            ));
-                            out.data.add(
-                                DataKind::Active { memory, offset },
-                                contents[range].to_vec(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Load the funcref table from the main module. This *should* exist for all modules created by
@@ -1194,24 +952,6 @@ impl<'a> Splitter<'a> {
         }
 
         roots
-    }
-
-    /// Convert this set of nodes to reference the new module
-    fn remap_ids(&self, set: &HashSet<Node>, ids_to_fns: &[FunctionId]) -> HashSet<Node> {
-        let mut out = HashSet::with_capacity(set.len());
-        for node in set {
-            out.insert(self.remap_id(ids_to_fns, node));
-        }
-        out
-    }
-
-    fn remap_id(&self, ids_to_fns: &[id_arena::Id<walrus::Function>], node: &Node) -> Node {
-        match node {
-            // Remap the function IDs
-            Node::Function(id) => Node::Function(ids_to_fns[self.fns_to_ids[id]]),
-            // data symbols don't need remapping
-            Node::DataSymbol(id) => Node::DataSymbol(*id),
-        }
     }
 }
 

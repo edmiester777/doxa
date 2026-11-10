@@ -18,4 +18,5 @@ itertools = "0.14.0"
 rayon = "1.10.0"
 tracing = "0.1.41"
 walrus = { version = "=0.23.3", features = ["parallel"] }
+wasm-encoder = { version = "=0.235.0", features = ["wasmparser"] }
 wasmparser = "0.235.0"

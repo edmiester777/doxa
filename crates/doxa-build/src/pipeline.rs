@@ -199,12 +199,20 @@ impl Pipeline {
             std::fs::write(&wasm, prepared).at(&wasm)?;
             self.hot = Some(base);
         }
-        let original = std::fs::read(&wasm).at(&wasm)?;
+        let mut original = std::fs::read(&wasm).at(&wasm)?;
         if self.opts.gallery {
             self.stories = stories::stories(&original, &self.workspace.workspace_root);
         }
         let splits = split::has_split_points(&original);
-        bindgen::generate(&wasm, &out, self.opts.release, splits, self.opts.hot)?;
+        let mut input = wasm.clone();
+        if splits && self.hot.is_none() {
+            original = split::strip_debug_sections(&original);
+            let stage = self.layout.stage();
+            std::fs::create_dir_all(&stage).at(&stage)?;
+            input = stage.join("linked.wasm");
+            std::fs::write(&input, &original).at(&input)?;
+        }
+        bindgen::generate(&input, &out, self.opts.release, splits, self.opts.hot)?;
         let app_wasm = out.join("app_bg.wasm");
         self.split_files.clear();
         if let Some(base) = &mut self.hot {

@@ -16,6 +16,19 @@ pub fn has_split_points(original: &[u8]) -> bool {
 
 /// `wasm` without the linker's relocation sections, and without its names unless `names`.
 pub fn strip_link_sections(wasm: &[u8], names: bool) -> Vec<u8> {
+    strip_custom_sections(wasm, |name| {
+        name.starts_with(b"reloc.") || name == b"linking" || (!names && name == b"name")
+    })
+}
+
+/// `wasm` without its DWARF and the relocations into it, which a split drops anyway.
+pub fn strip_debug_sections(wasm: &[u8]) -> Vec<u8> {
+    strip_custom_sections(wasm, |name| {
+        name.starts_with(b".debug_") || name.starts_with(b"reloc..debug_")
+    })
+}
+
+fn strip_custom_sections(wasm: &[u8], drop: impl Fn(&[u8]) -> bool) -> Vec<u8> {
     let Some(body) = wasm.get(8..).filter(|_| wasm.starts_with(b"\0asm")) else {
         return wasm.to_vec();
     };
@@ -35,11 +48,7 @@ pub fn strip_link_sections(wasm: &[u8], names: bool) -> Vec<u8> {
         at = end;
         if id == 0 {
             if let Some((n, l)) = leb128(&body[payload..end]) {
-                let name = body.get(payload + l..payload + l + n).unwrap_or_default();
-                let drop = name.starts_with(b"reloc.")
-                    || name == b"linking"
-                    || (!names && name == b"name");
-                if drop {
+                if drop(body.get(payload + l..payload + l + n).unwrap_or_default()) {
                     continue;
                 }
             }

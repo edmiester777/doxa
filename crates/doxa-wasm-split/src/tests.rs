@@ -1,4 +1,4 @@
-use walrus::{FunctionBuilder, Module, RefType};
+use walrus::{DataKind, FunctionBuilder, Module, RefType};
 
 use super::*;
 
@@ -46,7 +46,7 @@ fn splitter(module: Module, call_graph: HashMap<Node, HashSet<Node>>) -> Splitte
         original: &[],
         bindgened: &[],
         fns_to_ids: HashMap::new(),
-        _ids_to_fns: Vec::new(),
+        ids_to_fns: Vec::new(),
         shared_symbols: BTreeSet::new(),
         split_points,
         chunks: Vec::new(),
@@ -148,4 +148,102 @@ fn a_table_entry_a_split_reaches_leaves_main() {
     assert!(!splitter.main_graph.contains(&Node::Function(callee)));
     let main = splitter.emit_main_module().unwrap();
     Module::from_buffer(&main.bytes).unwrap();
+}
+
+/// A split point calling `unique` and `shared`, which main's `kept` also calls, and data at 16.
+fn split_with_shared_callee() -> &'static [u8] {
+    let mut module = Module::default();
+    let ty = module.types.add(&[], &[]);
+    module.add_import_func("./__wasm_split.js", IMPORT, ty);
+    let named = |module: &mut Module, name: &str, callees: &[FunctionId]| {
+        let mut builder = FunctionBuilder::new(&mut module.types, &[], &[]);
+        builder.name(name.into());
+        let mut body = builder.func_body();
+        for callee in callees {
+            body.call(*callee);
+        }
+        builder.finish(Vec::new(), &mut module.funcs)
+    };
+    let shared = named(&mut module, "shared", &[]);
+    let unique = named(&mut module, "unique", &[]);
+    let split = named(&mut module, "split", &[unique, shared]);
+    let kept = named(&mut module, "kept", &[shared]);
+    module.exports.add(EXPORT, split);
+    module.exports.add("kept", kept);
+    module.tables.add_local(false, 1, Some(1), RefType::Funcref);
+    let memory = module.memories.add_local(false, false, 1, None, None);
+    module.data.add(
+        DataKind::Active {
+            memory,
+            offset: ConstExpr::Value(ir::Value::I32(16)),
+        },
+        vec![1, 2, 3, 4, 5, 6],
+    );
+    module.emit_wasm().leak()
+}
+
+#[test]
+fn a_split_module_holds_its_own_functions_and_stubs_the_ones_main_keeps() {
+    let bytes = split_with_shared_callee();
+    let (module, ids, fns_to_ids) = parse_module_with_ids(bytes).unwrap();
+    let f = |name| Node::Function(module.funcs.by_name(name).unwrap());
+    let graph = [
+        (
+            f("split"),
+            [f("unique"), f("shared"), Node::DataSymbol(1)].into(),
+        ),
+        (f("kept"), [f("shared")].into()),
+    ]
+    .into();
+    let Node::Function(shared) = f("shared") else {
+        unreachable!()
+    };
+    let mut splitter = splitter(module, graph);
+    splitter.bindgened = bytes;
+    splitter.fns_to_ids = fns_to_ids;
+    splitter.ids_to_fns = ids;
+    splitter.data_symbols = [(
+        1,
+        DataSymbol {
+            index: 1,
+            range: 0..0,
+            segment_offset: 1,
+            symbol_size: 2,
+            which_data_segment: 0,
+        },
+    )]
+    .into();
+    let slot = splitter.shared_slots(1)[&shared];
+
+    let out = splitter.emit().unwrap();
+    Module::from_buffer(&out.main.bytes).unwrap();
+    let part = Module::from_buffer(&out.modules[0].bytes).unwrap();
+    let mut names: Vec<_> = part
+        .funcs
+        .iter()
+        .filter_map(|f| f.name.as_deref())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["shared", "split", "unique"]);
+    assert!(part.exports.get_func(EXPORT).is_ok());
+    let imports: Vec<_> = part.imports.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(imports, ["__indirect_function_table", "__memory_0"]);
+
+    let stub = part.funcs.by_name("shared").unwrap();
+    let FunctionKind::Local(stub) = &part.funcs.get(stub).kind else {
+        panic!("the stub has no body")
+    };
+    let calls = &stub.block(stub.entry_block()).instrs;
+    assert!(matches!(
+        calls[0].0,
+        ir::Instr::Const(ir::Const { value: ir::Value::I32(s) }) if s as u32 == slot
+    ));
+    assert!(matches!(calls[1].0, ir::Instr::CallIndirect(_)));
+
+    let data: Vec<_> = part.data.iter().map(|d| d.value.as_slice()).collect();
+    assert_eq!(data, [&[][..], &[2, 3]]);
+    let DataKind::Active { offset, .. } = part.data.iter().nth(1).unwrap().kind else {
+        panic!("the split's data isn't active")
+    };
+    assert!(matches!(offset, ConstExpr::Value(ir::Value::I32(17))));
 }

@@ -71,7 +71,7 @@ pub fn generate(wasm: &Path, out_dir: &Path, release: bool, split: bool, hot: bo
         .out_name("app")
         .typescript(false)
         .debug(!release)
-        .keep_debug(!release)
+        .keep_debug(!release && (hot || !split))
         .demangle(!split && !hot)
         .keep_lld_exports(hot);
     b.web(true)
