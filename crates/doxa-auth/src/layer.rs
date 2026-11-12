@@ -67,10 +67,7 @@ mod audit_support {
                 return Self(Some(existing.clone()));
             }
 
-            // Fallback: create from AuthState's logger (backward compat
-            // when AuditLayer is not in the middleware stack). Without the
-            // layer nothing else stamps HTTP context, so do it here — auth
-            // failures emit from this builder before any handler runs.
+            // No `AuditLayer`: build from AuthState's logger and stamp HTTP context here.
             Self(auth.audit.as_ref().map(|logger| {
                 let builder = AuditEventBuilder::new(logger.clone());
                 builder.set_request_metadata(request.headers());
@@ -101,9 +98,7 @@ mod audit_support {
         pub fn take_with_actor<C: Claims>(&mut self, claims: &C) -> Option<AuditEventBuilder> {
             let builder = self.0.take()?;
             builder.set_actor(Some(claims.sub()), claims.roles(), claims.audit_attrs());
-            // Same partition key the policy evaluator scopes by, so an
-            // audit trail can be filtered to exactly the tenant whose
-            // policies decided the request.
+            // The partition key the policy evaluator scopes by.
             builder.set_tenant(claims.scope());
             Some(builder)
         }
@@ -186,9 +181,8 @@ impl<S: Clone + Send + Sync + 'static, C: Claims> AuthLayer<S, C> {
         }
     }
 
-    /// Also accept the token from cookie `name` when there is no `Authorization`
-    /// header. Cookie-authenticated mutations and dry runs must carry
-    /// `x-doxa-csrf`, which a cross-site form can't set.
+    /// Also accept the token from cookie `name` when there is no `Authorization` header;
+    /// cookie-authenticated mutations then need `x-doxa-csrf`, which a cross-site form can't set.
     pub fn with_cookie(mut self, name: impl Into<Arc<str>>) -> Self {
         self.cookie = Some(name.into());
         self
@@ -322,12 +316,7 @@ where
     }
 }
 
-/// Status the pipeline is about to reject with.
-///
-/// Read off the error rather than assumed, so a `PolicyFailed` is
-/// recorded as the 500 it renders as and not as another 401. Only ever
-/// used when no [`AuditLayer`](doxa_audit::AuditLayer) is in the stack to
-/// take the status off the real response.
+/// The status a rejection renders as, for recording without an [`AuditLayer`](doxa_audit::AuditLayer).
 fn rejection_status(error: &AuthError) -> u16 {
     doxa::__private::HasApiMetadata::api_status(error)
 }
@@ -371,9 +360,7 @@ fn epoch<C: Claims>(claims: &C) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Body of the auth pipeline. Returns the modified [`Request<Body>`] (with
-/// [`AuthContext`] injected into extensions) and the session epoch on
-/// success; the caller is responsible for invoking the inner service.
+/// The auth pipeline: the request with [`AuthContext`] in its extensions, and the session epoch.
 #[tracing::instrument(skip_all, name = "auth")]
 async fn run_auth_pipeline<S, C>(
     auth: &AuthState<S, C>,
@@ -459,14 +446,8 @@ where
     #[cfg(not(feature = "audit"))]
     let _ = audit.take_with_actor(&claims);
 
-    // 5. Insert AuthContext into request extensions so handlers and
-    //    permission extractors can reach it.
-    //
-    //    Also stamp a type-erased `CapabilityContext` so the ship-ready
-    //    `Require<M>` extractor can read tenant + roles without being
-    //    generic over the consumer's `S` / `C`. The typed
-    //    `AuthContext<S, C>` stays available for handlers that want
-    //    claim-level access. Behind an `Arc`: every guard takes it by value.
+    // 5. The typed context behind an `Arc`, and a `CapabilityContext` for extractors not
+    //    generic over `S` / `C`.
     let cap_ctx = CapabilityContext {
         tenant_id: claims.scope().map(str::to_owned),
         roles: claims.roles().to_vec(),
@@ -476,10 +457,11 @@ where
         request.extensions_mut().insert(checker);
     }
     let epoch = epoch(&claims);
+    let is_admin = claims.roles().iter().any(|r| auth.policy.is_admin_role(r));
     request.extensions_mut().insert(Arc::new(AuthContext {
         claims,
         session,
-        is_admin: false,
+        is_admin,
     }));
 
     Ok((request, epoch))
@@ -588,6 +570,43 @@ mod tests {
             req = req.header(doxa_wire::CSRF_HEADER, "1");
         }
         svc.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_role_the_policy_names_admin_makes_the_caller_admin() {
+        struct AdminReaders;
+        #[async_trait]
+        impl Policy<()> for AdminReaders {
+            async fn resolve(&self, _: Option<&str>, _: &[String]) -> Result<(), AuthError> {
+                Ok(())
+            }
+            fn is_admin_role(&self, role: &str) -> bool {
+                role == "reader"
+            }
+        }
+        for (policy, admin) in [
+            (Box::new(AdminReaders) as Box<dyn Policy<()>>, true),
+            (Box::new(StubPolicy), false),
+        ] {
+            let state = Arc::new(AuthState {
+                validator: Arc::new(StubValidator { accept: "good" }),
+                resolver: Arc::new(StubResolver),
+                policy,
+                #[cfg(feature = "audit")]
+                audit: None,
+            });
+            let svc = build_service(state, move |req| {
+                let ctx = req.extensions().get::<Arc<AuthContext<(), OidcClaims>>>();
+                assert_eq!(ctx.unwrap().is_admin, admin);
+                Response::builder().body(Body::empty()).unwrap()
+            });
+            let req = Request::builder()
+                .uri("/x")
+                .header("authorization", "Bearer good")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(svc.oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
     }
 
     #[tokio::test]

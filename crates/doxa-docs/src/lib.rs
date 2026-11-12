@@ -314,9 +314,7 @@ pub mod __private {
     /// attribute map, so consumers need not depend on `serde_json`.
     pub use serde_json;
 
-    /// Audit outcome a response carries in its extensions, which the
-    /// `AuditLayer` maps to `doxa_audit::Outcome`. Lives here so macros can
-    /// name it without depending on `doxa-audit`.
+    /// The audit outcome a response carries, here so macros need not depend on `doxa-audit`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ResponseAuditOutcome {
         Allowed,
@@ -335,14 +333,8 @@ pub mod __private {
         fn audit_outcome(&self) -> ResponseAuditOutcome;
     }
 
-    /// Trait for error types that can report their own status and code
-    /// as data, rather than only as a rendered response.
-    ///
-    /// `#[derive(ApiError)]` generates this impl automatically, and
-    /// `#[api(transparent)]` reads it off the nested value — `IntoResponse`
-    /// alone is not enough to delegate from, since it yields a `Response`
-    /// and the outer impl needs the status and code as values. A
-    /// hand-written error type can implement this to become nestable.
+    /// An error's status and code as values, which `#[api(transparent)]` reads off the nested
+    /// error; `#[derive(ApiError)]` implements it.
     pub trait HasApiMetadata {
         /// HTTP status this value renders with.
         fn api_status(&self) -> u16;
@@ -379,13 +371,8 @@ pub mod __private {
     // caller crate to declare `utoipa-axum` as a direct dependency.
     pub use utoipa_axum::routes as utoipa_axum_routes;
 
-    /// Rewrites every `#/components/schemas/{from}` reference to
-    /// `#/components/schemas/{to}` within `schema`, recursively.
-    ///
-    /// `#[derive(SseEvent)]` uses this so two monomorphizations of the same
-    /// generic payload base (e.g. `Wrap<A>` and `Wrap<B>`) reference distinct
-    /// components: utoipa emits the inner `$ref` under the base ident
-    /// (`Wrap`), which would otherwise collapse both onto one component.
+    /// Rewrites `#/components/schemas/{from}` refs to `{to}`, so `Wrap<A>` and `Wrap<B>`
+    /// payloads don't collapse onto utoipa's one `Wrap` component.
     pub fn rewrite_schema_refs(
         schema: &mut ::utoipa::openapi::RefOr<::utoipa::openapi::schema::Schema>,
         from: &str,

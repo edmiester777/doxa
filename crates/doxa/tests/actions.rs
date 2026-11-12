@@ -1,10 +1,4 @@
-//! `#[derive(Actions)]`: one enum, and the asset's whole vocabulary.
-//!
-//! What this file is really testing is how little is written above the
-//! line — the enum below replaces three `#[capability]` blocks, a
-//! `capability(action)` match, an `event_type(action)` match and a
-//! catalog entry per action, and none of those can now disagree with
-//! each other because there is only one of them.
+//! `#[derive(Actions)]`: one enum is the asset's whole vocabulary.
 
 #![cfg(feature = "full")]
 
@@ -34,18 +28,10 @@ use serde::Serialize;
 )]
 pub struct SourcesArchive;
 
-/// The whole declaration. `Source` comes off the enum name, the Cedar
-/// action off each variant, the capability off the two together, and the
-/// description off the doc comment.
 #[derive(Debug, Clone, Copy, Actions)]
 #[actions(prefix = "sources")]
 pub enum SourceAction {
     /// List and view data source definitions.
-    // The category is a const expression rather than a string, so a
-    // misspelling is a resolution error instead of an audit row filed
-    // under a category nothing reads. Not a doc comment: that is the
-    // capability's description, which `the_description_comes_off_the_doc_comment`
-    // pins.
     #[action(event = EventType::DataAccess.as_static())]
     #[action(verb = get)]
     Read,
@@ -122,9 +108,7 @@ fn the_action_names_come_off_the_variants() {
     assert_eq!(SourceAction::ALL.len(), 5);
 }
 
-/// `capable` gates on a marker that already exists. The row points at
-/// that very constant — not a copy, and not a second declaration that
-/// would sit in the catalog looking enforced while no route named it.
+/// `capable` points at the existing constant, not a copy.
 #[test]
 fn an_existing_capability_is_referenced_rather_than_redeclared() {
     let archive = SourceAction::ACTIONS
@@ -155,11 +139,6 @@ fn the_description_comes_off_the_doc_comment() {
     );
 }
 
-/// The check's entity is the collection, defaulted from the resource
-/// noun — which is what a coarse gate asks about, there being no instance
-/// yet. `ResourceId::Tenant` is the other form, for an asset whose
-/// collections are per-tenant; doxa resolves it against the request
-/// rather than passing a marker to the consumer's UID builder.
 #[test]
 fn the_check_defaults_to_the_collection() {
     let check = source_action::Delete::CAPABILITY.checks[0];
@@ -192,22 +171,12 @@ fn the_table_carries_the_capability_and_the_category() {
     assert_eq!(read.event_type, Some(EventType::DataAccess.as_static()));
 }
 
-/// The table the derive produced names each action once, which is what
-/// makes the gate's "first row wins" lookup unambiguous. Routes are held
-/// to it — `Subject::SITE_DECLARED` asserts the same thing at build time
-/// for every asset a route guards.
 #[test]
 fn the_generated_table_declares_each_action_once() {
     assert!(doxa::auth::distinct(SourceAction::ACTIONS));
 }
 
-/// The vocabulary is reachable without naming the enum, which is what the
-/// bound is for: a startup seeding Cedar's action entities, or anything
-/// else downstream of an asset it was handed rather than one it imports.
-///
-/// The inherent const is the same table and not a copy — `assert!(ptr::eq)`
-/// rather than `assert_eq!`, because two arrays holding equal rows would
-/// let a generic caller and a direct one disagree later.
+/// `ptr::eq`, not `assert_eq!`: the inherent const must be the same table, not a copy.
 #[test]
 fn the_vocabulary_is_reachable_through_the_bound() {
     fn names<A: ActionTable>() -> Vec<&'static str> {
@@ -226,9 +195,6 @@ fn the_vocabulary_is_reachable_through_the_bound() {
     ));
 }
 
-/// The same check on a hand-written table, which no derive vets. Two
-/// rows over one Cedar action leave the second's capability declared and
-/// never checked — enforcement that reads as real and is not.
 #[test]
 fn a_table_that_repeats_an_action_is_not_distinct() {
     const REPEATED: &[Action] = &[
@@ -241,24 +207,7 @@ fn a_table_that_repeats_an_action_is_not_distinct() {
     assert!(doxa::auth::distinct(&REPEATED[..2]));
 }
 
-/// Every generated marker is a capability declaration like any other, so
-/// it reaches the catalog without being listed anywhere.
-///
-/// `sources.archive` appears exactly once despite an action gating on it:
-/// `capable` references the marker rather than minting a second one. A
-/// duplicate here would be a catalog entry advertised to clients that no
-/// route ever checks.
-/// Every variant reaches the action catalog, whether or not it declared
-/// a capability — which is the point, because the capability catalog
-/// cannot see all of them.
-///
-/// `Ping` declares none at all, so `capabilities()` has no row naming
-/// `ping`. `Archive` gates on `SourcesArchive`, declared by
-/// `#[capability]` elsewhere, so its action is reachable through that
-/// capability's checks but only by knowing to look. A startup seeding
-/// Cedar action entities from the capability catalog would miss `ping`
-/// outright — and miss it silently, since a policy naming an entity
-/// Cedar does not have simply never matches.
+/// `Ping` has no capability and `Archive` borrows one; both still reach the action catalog.
 #[test]
 fn every_action_reaches_the_catalog() {
     let names: Vec<_> = doxa::auth::actions()
@@ -273,9 +222,6 @@ fn every_action_reaches_the_catalog() {
     );
 }
 
-/// The row in the catalog is the row `ACTIONS` points at, not a copy —
-/// so the capability and the audit category the guard reads are the ones
-/// a startup seeding Cedar sees.
 #[test]
 fn the_catalogued_row_is_the_declared_row() {
     let read = doxa::auth::actions()
@@ -301,6 +247,7 @@ fn the_catalogued_row_is_the_declared_row() {
     );
 }
 
+/// `sources.archive` appears once though an action gates on it: `capable` references the marker.
 #[test]
 fn the_generated_capabilities_reach_the_catalog() {
     let names: Vec<_> = doxa::policy::capabilities()
@@ -355,9 +302,6 @@ fn parts(roles: &[&str]) -> axum::http::request::Parts {
 
 use source_action::{Delete as Purging, Read as Listing};
 
-/// The generated capability is the one the coarse gate actually asks
-/// about — a caller holding `sources.read` may list, and the same caller
-/// is refused a delete because that action's row names a different one.
 #[tokio::test]
 async fn the_generated_capability_is_what_the_gate_checks() {
     let mut listing = parts(&["sources.read"]);

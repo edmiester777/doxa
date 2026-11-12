@@ -191,6 +191,15 @@ fn asset_beside(modules: &[PathBuf], url: &str) -> Result<Option<Vec<u8>>> {
         if !path.is_file() {
             continue;
         }
+        let Some(root) = dir.ancestors().find(|a| a.ends_with("node_modules")) else {
+            continue;
+        };
+        if !crate::dist::within(&path, &[root]) {
+            return Err(Error::config(
+                format!("`{url}` in {} reaches outside node_modules", dir.display()),
+                "an npm package may only ship files from its own install",
+            ));
+        }
         let bytes = std::fs::read(&path).at(&path)?;
         match &found {
             Some((first, seen)) if *seen != bytes => {
@@ -416,9 +425,8 @@ pub fn rewrite_npm(glue: &str, web_root: &Path) -> (String, ReactModules) {
     (out, modules)
 }
 
-/// `lazy:toString,parse:cronstrue` as async proxies over a dynamic import; `types:` names only
-/// types, over a static one. `new$C` constructs the export `C`, `get$x` answers the export `x`,
-/// `ns$` the module, and `type$C` is an `instanceof` target.
+/// `lazy:toString,parse:cronstrue` as async proxies over a dynamic import, `types:` over a static
+/// one. `new$C` constructs `C`, `get$x` reads `x`, `ns$` is the module, `type$C` an `instanceof` target.
 fn npm_js(spec: &str, web_root: &Path) -> String {
     let (lazy, rest) = match spec.strip_prefix("types:") {
         Some(rest) => (false, rest),
@@ -501,9 +509,8 @@ fn island_js(spec: &str, web_root: &Path) -> String {
     }
 }
 
-/// The generated entry: load the glue and islands, read `services.json`, start the wasm.
-/// A missing file, or a server answering it with `index.html`, means no overrides.
-/// A `split` wasm's loader instantiates each part against the main module through `initSync`.
+/// The entry: load glue and islands, read `services.json` (missing or `index.html` means no
+/// overrides), start the wasm; a `split` loader `initSync`s each part against the main module.
 pub fn entry_js(glue: &Path, islands: &[PathBuf], wasm_file: &str, split: bool) -> String {
     let lit = |p: &Path| serde_json::to_string(&js_path(p)).expect("json");
     let mut js = if split {
@@ -752,6 +759,19 @@ mod tests {
         assert_eq!(
             chunk,
             format!(r#"let u = new URL("../{shipped}", import.meta.url);"#)
+        );
+    }
+
+    #[test]
+    fn a_url_reaching_outside_node_modules_fails_the_build() {
+        let js = r#"new URL("../../secret.txt", import.meta.url);"#;
+        let (root, meta) = bundled(js, &[]);
+        std::fs::write(root.path().join("secret.txt"), b"key").unwrap();
+        let out_dir = root.path().join("out");
+        let error = ship_npm_assets(&meta, &out_dir, &mut BundleOutput::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("outside node_modules"),
+            "{error}"
         );
     }
 

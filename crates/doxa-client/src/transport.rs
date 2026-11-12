@@ -196,9 +196,8 @@ pub struct Scripted {
     every: std::time::Duration,
 }
 
-/// Replay `jsonl`, one `E` per line, as the answer to every request, on the doxa
-/// [clock](crate::clock): a manual clock in tests, real time in the browser. A line that
-/// isn't an `E` panics, naming the line.
+/// Replay `jsonl`, one `E` per line, as every request's answer, on the doxa [clock](crate::clock).
+/// A line that isn't an `E` panics, naming it.
 ///
 /// ```
 /// # #[derive(serde::Deserialize)] struct Delta { text: String }

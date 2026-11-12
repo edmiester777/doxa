@@ -22,17 +22,23 @@ pub fn document_rejections(op: &mut Operation) {
             "message": { "type": "string" },
         },
     });
+    // The inner extractor's own status is `malformed` too: axum's `Json` answers 415 and 422.
+    let null = || json!({ "type": "null" });
     let responses = [
-        ("400", MALFORMED, json!({ "type": "null" })),
+        ("400", MALFORMED, null()),
+        ("415", MALFORMED, null()),
+        ("422", MALFORMED, null()),
         ("422", INVALID, json!({ "type": "array", "items": field })),
-    ]
-    .into_iter()
-    .filter_map(|(status, code, error)| {
-        let response = serde_json::from_value::<DocResponse>(envelope_doc(code, error)).ok()?;
-        Some((status.to_string(), RefOr::T(response)))
-    })
-    .collect();
-    crate::error_responses::merge_response_maps(&mut op.responses.responses, responses);
+    ];
+    for (status, code, error) in responses {
+        let Ok(response) = serde_json::from_value::<DocResponse>(envelope_doc(code, error)) else {
+            continue;
+        };
+        let one = [(status.to_string(), RefOr::T(response))]
+            .into_iter()
+            .collect();
+        crate::error_responses::merge_response_maps(&mut op.responses.responses, one);
+    }
 }
 
 fn envelope_doc(code: &str, error: Value) -> Value {
@@ -119,12 +125,17 @@ mod tests {
     fn a_validating_route_documents_its_field_errors() {
         let mut op = Operation::new();
         document_rejections(&mut op);
-        assert_eq!(codes(&op), json!(["invalid"]));
+        assert_eq!(codes(&op), json!(["malformed", "invalid"]));
         assert_eq!(codes_at(&op, "400"), json!(["malformed"]));
+        assert_eq!(codes_at(&op, "415"), json!(["malformed"]));
         let doc = serde_json::to_value(&op).unwrap();
         let error = &doc["responses"]["422"]["content"]["application/json"]["schema"]["properties"]
             ["error"];
-        assert_eq!(error["oneOf"][0]["type"], "array");
+        assert!(error["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "array"));
     }
 
     #[test]
@@ -146,11 +157,11 @@ mod tests {
             .insert("422".to_string(), RefOr::T(own));
         document_rejections(&mut op);
         document_rejections(&mut op);
-        assert_eq!(codes(&op), json!(["config_error", "invalid"]));
+        assert_eq!(codes(&op), json!(["config_error", "malformed", "invalid"]));
         let doc = serde_json::to_value(&op).unwrap();
         let error = &doc["responses"]["422"]["content"]["application/json"]["schema"]["properties"]
             ["error"];
-        assert_eq!(error["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(error["oneOf"].as_array().unwrap().len(), 3);
     }
 
     #[tokio::test]

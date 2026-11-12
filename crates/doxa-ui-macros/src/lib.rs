@@ -13,6 +13,7 @@ mod icons;
 mod npm;
 mod page;
 mod react;
+mod ty;
 mod view;
 
 /// Markup: `view! { <p class="x">{&name}</p> <Row widget={w}/> }`.
@@ -93,9 +94,8 @@ pub fn icons(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// One `Field` per struct field, for `form(value).fields()`; `#[form(nested)]` for a struct
-/// that derives `Form` too, `#[form(list)]` for a `Vec` of them. On an enum: a `variant` field
-/// and a method per variant, `Some` while it is chosen; its payloads must be `Default`.
+/// A `Field` per struct field for `form(value).fields()`, with `#[form(nested)]` and `#[form(list)]`.
+/// On an enum, a `variant` field and a method per variant, `Some` while chosen; payloads are `Default`.
 #[proc_macro_derive(Form, attributes(form))]
 pub fn derive_form(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::DeriveInput);
@@ -110,7 +110,11 @@ pub fn derive_form(item: TokenStream) -> TokenStream {
 pub fn story(_args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
     let name = &item.sig.ident;
-    let export = format!("__doxa_story_{name}");
+    // Keyed by place too: two modules may each have a `#[story] fn empty`.
+    let at = name.span().unwrap();
+    let place = format!("{}:{}:{}", at.file(), at.line(), at.column());
+    let key = format!("{name}_{:08x}", fnv1a(place.as_bytes()));
+    let export = format!("__doxa_story_{key}");
     let name_str = name.to_string();
     quote! {
         #item
@@ -130,7 +134,7 @@ pub fn story(_args: TokenStream, item: TokenStream) -> TokenStream {
             // Read by `doxa gallery` for the story's place in the tree and its source.
             #[cfg(all(doxa_gallery, target_arch = "wasm32"))]
             const __DOXA_STORY_META: &str =
-                concat!(#name_str, "\t", module_path!(), "\t", file!(), "\t", line!(), "\n");
+                concat!(#key, "\t", #name_str, "\t", module_path!(), "\t", file!(), "\t", line!(), "\n");
             #[cfg(all(doxa_gallery, target_arch = "wasm32"))]
             #[used]
             #[unsafe(link_section = "doxa_stories")]
@@ -139,6 +143,12 @@ pub fn story(_args: TokenStream, item: TokenStream) -> TokenStream {
         };
     }
     .into()
+}
+
+fn fnv1a(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5, |h, b| {
+        (h ^ u32::from(*b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// The wasm entry point: runs once the module loads, except in a `doxa build --lib` package or `doxa gallery`.

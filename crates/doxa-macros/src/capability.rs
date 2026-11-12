@@ -11,13 +11,7 @@ struct CapabilityArgs {
     checks: Vec<CheckArgs>,
 }
 
-/// The id half of a check, as written.
-///
-/// A coarse gate has no object to name, so the id is a constant or the
-/// tenant — and the tenant is spelled as a bare `tenant` rather than as
-/// the string `"tenant"`, because it is not an id at all. It is a
-/// instruction to substitute one, and doxa carries it out before the
-/// consumer's UID builder is reached.
+/// The id half of a check: a literal, or bare `tenant` for the caller's tenant.
 #[derive(Clone)]
 pub(crate) enum EntityId {
     Literal(LitStr),
@@ -61,9 +55,7 @@ pub(crate) fn parse_entity_id(input: ParseStream) -> syn::Result<EntityId> {
     }
 }
 
-/// One `(action, entity_type, entity_id)` triple. Shared with the
-/// `Actions` derive, which builds them from defaults rather than
-/// parsing them.
+/// One `(action, entity_type, entity_id)` triple.
 pub(crate) struct CheckArgs {
     pub action: LitStr,
     pub entity_type: LitStr,
@@ -176,13 +168,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// The capability half of a declaration: the const, the [`Capable`] impl
-/// binding it to `marker`, and the catalog registration.
-///
-/// Shared by `#[capability]` and `#[derive(Actions)]` so a capability
-/// means the same thing however it was declared — in particular so that
-/// both land in the catalog, which is the whole point of registering at
-/// the declaration rather than in a list somewhere else.
+/// The capability const, its `Capable` impl on `marker`, and its catalog registration.
 pub(crate) fn declare(
     marker: &Ident,
     name: &LitStr,
@@ -208,9 +194,6 @@ pub(crate) fn declare(
         .collect();
 
     quote! {
-        // The const is named after the marker, which is `CamelCase` by
-        // convention and would otherwise trip `non_upper_case_globals`
-        // in every crate that declares a capability.
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
         const #const_name: ::doxa::policy::Capability = ::doxa::policy::Capability {
@@ -223,10 +206,7 @@ pub(crate) fn declare(
             const CAPABILITY: &'static ::doxa::policy::Capability = &#const_name;
         }
 
-        // Declaring a capability is what puts it in the catalog, so
-        // `doxa::policy::capabilities()` can answer without anyone
-        // maintaining a list. Expands to nothing without the `catalog`
-        // feature.
+        // For `doxa::policy::capabilities()`; nothing without the `catalog` feature.
         ::doxa::policy::inventory::submit! { &#const_name }
     }
 }

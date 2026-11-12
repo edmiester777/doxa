@@ -376,7 +376,9 @@ where
         let pending: Option<Pending> = host
             .load(PENDING)
             .and_then(|p| serde_json::from_str(&p).ok());
-        if let (Some(state), Some(pending)) = (get("state"), pending) {
+        let without_query = |u: &str| u.split(['?', '#']).next().unwrap_or_default().to_owned();
+        let at_callback = without_query(&url) == without_query(&self.0.redirect_uri);
+        if let (true, Some(state), Some(pending)) = (at_callback, get("state"), pending) {
             host.forget(PENDING);
             // Back where sign-in started, without the callback's query.
             host.replace(&pending.return_to);
@@ -517,6 +519,8 @@ where
             .clone()
             .tokens(crate::clock::now(), None, previous)
             .map_err(|_| Failed::Rejected)?;
+        // With the ID token kept from before, so another tab can check whose tokens these are.
+        response.id_token = tokens.id_token().map(str::to_owned);
         self.0
             .host
             .post(&encode(&Message::Tokens { tokens: response }));
@@ -537,11 +541,16 @@ where
         match message {
             Message::Claim { tab } => self.0.claims.borrow_mut().push((tab, crate::clock::now())),
             Message::Tokens { tokens } => {
-                let previous = self.session().tokens().cloned();
-                // A tab that never signed in doesn't sign in on another's word.
-                if previous.is_none() {
+                // A tab takes another's tokens only when it is signed in as the same subject.
+                let Some(previous) = self.session().tokens().cloned() else {
+                    return;
+                };
+                let theirs = tokens.id_token.as_deref().and_then(session::subject);
+                let ours = previous.id_token().and_then(session::subject);
+                if theirs.is_none() || theirs != ours {
                     return;
                 }
+                let previous = Some(previous);
                 if let Ok(fresh) = tokens.tokens(crate::clock::now(), None, previous.as_ref()) {
                     self.signed_in(fresh);
                 }

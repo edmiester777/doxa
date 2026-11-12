@@ -28,15 +28,7 @@
 //! └───────────┘
 //! ```
 //!
-//! Only the middle two columns are the application's to write, and the
-//! guard's column is written by the guard — so a handler on the happy
-//! path has nothing to do at all. See [`decision`] for why a guard
-//! deposits rather than sets, and [`builder`] for how the fold arbitrates
-//! between the two.
-//!
-//! `actor_attrs` is a consumer-defined JSON map — the audit crate has
-//! no built-in notion of tenant, project, or any other identity
-//! dimension beyond `sub` and `roles`.
+//! A handler on the happy path writes nothing; the guard's [`decision`] fills the blanks.
 
 pub mod builder;
 pub mod decision;

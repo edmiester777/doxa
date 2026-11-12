@@ -227,8 +227,8 @@ impl Dom for WebDom {
     }
 
     fn query(&self, selector: &str) -> Option<NodeId> {
-        let el = self.doc.query_selector(selector).ok()??;
-        Some(self.add(el.into()))
+        let el: web_sys::Node = self.doc.query_selector(selector).ok()??.into();
+        Some(self.id_of(&el).unwrap_or_else(|| self.add(el)))
     }
 
     fn listen_global(

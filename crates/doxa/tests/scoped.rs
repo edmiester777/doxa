@@ -1,11 +1,5 @@
 //! `#[derive(PolicyResource)]` over a SeaORM model: Cedar identity and
 //! the lookup that loads it, from one declaration.
-//!
-//! The entity below is the shape this exists for — a control-plane row
-//! reached by a name within a tenant. What used to be a descriptor
-//! per table (an entity type, an id, an attribute map, a scoped `find`,
-//! and a scoped `Select`) is here five field annotations, and the two
-//! halves cannot drift apart because there is only one declaration.
 
 #![cfg(feature = "full")]
 
@@ -75,9 +69,7 @@ fn the_entity_type_and_id_come_off_the_annotations() {
     assert_eq!(row().resource_id(), "primary");
 }
 
-/// The parent is what makes a policy written `resource in Tenant::"acme"`
-/// hold for a loaded row, and it comes off the row's own owning column
-/// rather than the caller's claim about who they are.
+/// The parent comes off the row's owning column, not the caller's claim.
 #[test]
 fn the_scope_column_doubles_as_the_cedar_parent() {
     assert_eq!(row().cedar_parents(), vec![("Tenant", "acme".to_owned())]);
@@ -95,9 +87,29 @@ fn computed_attributes_join_the_field_attributes() {
     assert_eq!(attrs.len(), 3, "`replicas` was never exposed: {attrs:?}");
 }
 
-/// A column the struct did not mark is not reachable from a policy. The
-/// default is closed: exposing one is a deliberate annotation, so a new
-/// column cannot quietly widen what `when { resource.… }` can read.
+#[derive(PolicyResource)]
+#[resource(entity_type = "Clash", attrs_with = clashing_attrs)]
+struct Clash {
+    #[resource(id, attr)]
+    name: String,
+}
+
+impl Clash {
+    fn clashing_attrs(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::from_iter([("name".to_owned(), serde_json::json!("other"))])
+    }
+}
+
+#[test]
+#[should_panic(expected = "`Clash::clashing_attrs` returned `name`")]
+fn a_computed_attribute_may_not_shadow_a_field() {
+    let _ = Clash {
+        name: "a".to_owned(),
+    }
+    .cedar_attrs();
+}
+
+/// An unmarked column is not reachable from a policy.
 #[test]
 fn an_unmarked_column_is_not_an_attribute() {
     assert!(!row().cedar_attrs().contains_key("replicas"));
@@ -106,9 +118,7 @@ fn an_unmarked_column_is_not_an_attribute() {
 
 // ---- the loader -------------------------------------------------------------
 
-/// `SeaORM`'s `Column` is not `PartialEq`, so these compare the column
-/// name each variant stands for — which is the thing that has to be right
-/// anyway.
+/// `Column` is not `PartialEq`, so these compare column names.
 #[test]
 fn the_columns_come_off_the_field_names() {
     assert_eq!(<Model as ScopedRow>::KEY_COLUMN.as_str(), "name");
@@ -142,9 +152,7 @@ async fn a_row_in_scope_is_found() {
     assert_eq!(found, Some(row()));
 }
 
-/// The whole point of the scope column: the tenant is in the `WHERE`
-/// clause, so a caller naming another tenant's row gets `None` from the
-/// database rather than a row the handler is then trusted to reject.
+/// The tenant is in the `WHERE` clause, so another tenant's row never loads.
 #[tokio::test]
 async fn the_lookup_filters_on_both_the_key_and_the_scope() {
     let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -155,9 +163,7 @@ async fn the_lookup_filters_on_both_the_key_and_the_scope() {
         .await
         .expect("query runs");
 
-    // Pinned whole rather than probed: the scope predicate being present
-    // is the security property, and an assertion that only looked for a
-    // substring would still pass if it moved into an `OR`.
+    // Pinned whole: a substring check would pass with the scope inside an `OR`.
     assert_eq!(
         db.into_transaction_log(),
         [Transaction::from_sql_and_values(
@@ -168,9 +174,7 @@ async fn the_lookup_filters_on_both_the_key_and_the_scope() {
     );
 }
 
-/// A miss and a row owned by someone else are the same answer, which is
-/// what stops a route reporting 403 where it would otherwise report 404
-/// and thereby confirming the row exists.
+/// A miss and another tenant's row are the same answer, so a 403 cannot confirm existence.
 #[tokio::test]
 async fn a_row_out_of_scope_is_indistinguishable_from_a_miss() {
     let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -190,10 +194,7 @@ async fn a_row_out_of_scope_is_indistinguishable_from_a_miss() {
 
 // ---- the error --------------------------------------------------------------
 
-/// A loader shaped as `Granting::load` is, so the `?` below is the one an
-/// asset actually writes. Its whole body is the conversion this section is
-/// about: without [`DbLoadError`] the application supplies its own error
-/// and this line is a `map_err`.
+/// Shaped like `Granting::load`, so the `?` is the one an asset writes.
 async fn load(
     name: &str,
     db: &DatabaseConnection,
@@ -217,9 +218,7 @@ async fn a_query_that_fails_converts_on_the_question_mark() {
     assert!(matches!(error, DbLoadError::Failed));
 }
 
-/// The 500 branch is the one nobody reviews, so what it says is pinned
-/// here. A `DbErr` names the statement and the columns in it; none of that
-/// may reach the client, and the type holds nothing that could.
+/// A `DbErr` names the statement; none of it may reach the client in the 500.
 #[tokio::test]
 async fn the_failure_tells_the_client_nothing_about_the_database() {
     let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -321,14 +320,10 @@ async fn a_renamed_key_still_queries_its_own_column() {
     assert!(sql.contains("acme"), "{sql}");
 }
 
-/// The route's key and the Cedar id answer different questions. Here the
-/// row is reached by its uuid but still names itself by its name, so a
-/// policy written against `Connection::"primary"` covers both routes.
+/// Reached by uuid but named by its name, so `Connection::"primary"` covers both routes.
 #[test]
 fn the_key_need_not_be_the_id() {
-    // `KEY_COLUMN` is `name` above; this asserts only that the two are
-    // separately declared, which is what lets a second descriptor key the
-    // same table on `id` without changing what a policy names.
+    // The key and the id are declared separately.
     assert_eq!(<Model as ScopedRow>::KEY_COLUMN.as_str(), "name");
     assert_eq!(row().resource_id(), row().name);
 }

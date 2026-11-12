@@ -245,6 +245,18 @@ async fn a_probe_of_an_unguarded_route_is_unknown_and_never_runs_it() {
     assert_eq!(catalog.suggestions(), ["bolt from viewer"]);
 }
 
+#[test]
+fn only_the_latest_suggestions_are_kept() {
+    use shop_api::server::KEPT_SUGGESTIONS;
+    let catalog = shop_api::server::seeded().widgets;
+    for n in 0..=KEPT_SUGGESTIONS {
+        catalog.suggest(n.to_string());
+    }
+    let kept = catalog.suggestions();
+    assert_eq!(kept.len(), KEPT_SUGGESTIONS);
+    assert_eq!(kept[0], "1");
+}
+
 #[tokio::test]
 async fn sse_events_arrive_decoded() {
     install("viewer");

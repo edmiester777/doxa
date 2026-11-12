@@ -35,15 +35,8 @@ use utoipa::openapi::{Object, RefOr, Required, Schema, Type};
 /// }
 /// ```
 ///
-/// Credentials are not headers in this sense. `Authorization` — and
-/// `Accept` and `Content-Type` with it — is a name OpenAPI reserves for
-/// its own keywords, and [`crate::ApiDocBuilder::try_build`] refuses a
-/// document declaring one as a parameter. Describe a credential with
-/// [`ApiDocBuilder::bearer_security`](crate::ApiDocBuilder::bearer_security)
-/// or [`security_scheme`](crate::ApiDocBuilder::security_scheme) instead,
-/// including custom key headers: an `apiKey` scheme names the header
-/// itself, and unlike a parameter it wires up to a doc UI's authorize
-/// control and a generated client's auth config.
+/// Not for credentials: [`crate::ApiDocBuilder::try_build`] refuses `Authorization`, `Accept`
+/// and `Content-Type`; use [`security_scheme`](crate::ApiDocBuilder::security_scheme).
 ///
 /// All accessors are runtime functions (not associated consts) so a
 /// future blanket impl can adapt foreign traits whose names are only

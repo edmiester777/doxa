@@ -21,13 +21,13 @@
 //! | [`extension`] | [`PolicyExtension`] trait + [`ResourceAccess`] / [`ResourceGrants`](extension::ResourceGrants) |
 //! | [`store`] | [`PolicyStore`] trait — pluggable storage backend |
 //! | [`router`] | [`PolicyRouter`] — centralized slow-path PEP |
-//! | [`session`] | [`SessionChecker`] — the router bound to one caller's assembled session, so a guard's check can be answered from it |
+//! | [`session`] | [`SessionChecker`] — the router bound to one caller's session |
 //! | [`error`] | [`AuthError`] enum (no HTTP response mapping) |
 //! | [`uid`] | Cedar entity UID builder with input validation |
 //! | [`resource`] | [`PolicyResource`] — instance-level resource identity |
-//! | [`fetch`] | [`Fetch`] / [`FetchByKey`] / [`FetchById`] / [`FetchSubset`] — the scoped lookups a route needs, in terms no backend owns — plus [`Lookup`], for the row that has more ways in than those |
-//! | `scoped` | `ScopedTable` / `ScopedRow` — the column a SeaORM query is confined to, and the key a route reaches one row by, plus `DbLoadError` for when the lookup fails (needs `sea-orm`; not linked, as the module is absent without it) |
-//! | `residual` | `condition_from_residual` — a policy's leftover `when` clause as a SeaORM `Condition`, so a grant is one query rather than a query and a loop (needs `sea-orm`) |
+//! | [`fetch`] | [`Fetch`] / [`FetchByKey`] / [`FetchById`] / [`FetchSubset`] / [`Lookup`] — backend-neutral scoped lookups |
+//! | `scoped` | `ScopedTable` / `ScopedRow` / `DbLoadError` — SeaORM loaders (needs `sea-orm`) |
+//! | `residual` | `condition_from_residual` — a residual as a SeaORM `Condition` (needs `sea-orm`) |
 
 pub mod capability;
 pub mod cedar_core;
@@ -59,9 +59,7 @@ mod test_support;
 #[doc(hidden)]
 pub use inventory;
 
-/// Stand-in for the above when the `catalog` feature is off, so
-/// `#[capability]` expands to the same tokens either way and the
-/// registration simply evaporates.
+/// Without `catalog`, `#[capability]`'s registration expands to nothing.
 #[cfg(not(feature = "catalog"))]
 #[doc(hidden)]
 pub mod inventory {
@@ -93,9 +91,7 @@ pub use scoped::{DbLoadError, PrimaryKeyOf, ScopedRow, ScopedTable};
 pub use session::SessionChecker;
 pub use store::{PolicyStore, SharedPolicyStore};
 
-/// Re-exported so `#[derive(PolicyResource)]`'s generated [`ScopedRow`]
-/// impl can name SeaORM's traits without assuming the deriving crate
-/// spells the dependency `sea_orm`.
+/// For derived impls, whatever the deriving crate calls its SeaORM dependency.
 #[cfg(feature = "sea-orm")]
 #[doc(hidden)]
 pub mod __private {

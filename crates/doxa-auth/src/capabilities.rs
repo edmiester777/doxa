@@ -23,13 +23,16 @@ use crate::granted::{caller_and_checker, Denial, FromAuthExtensions};
 async fn capabilities(parts: Parts) -> Result<Json<Vec<&'static str>>, Denial> {
     let (ctx, checker) = caller_and_checker::<CapabilityContext>(&parts.extensions)?;
     let tenant = ctx.tenant().unwrap_or("");
-    let mut held = Vec::new();
-    for cap in doxa_policy::capabilities() {
-        if checker.check(tenant, ctx.roles(), cap).await? {
-            held.push(cap.name);
-        }
-    }
-    Ok(Json(held))
+    let caps = doxa_policy::capabilities();
+    let allowed = checker
+        .check_capabilities(tenant, ctx.roles(), &caps)
+        .await?;
+    let held = caps
+        .iter()
+        .zip(allowed)
+        .filter(|(_, ok)| *ok)
+        .map(|(cap, _)| cap.name);
+    Ok(Json(held.collect()))
 }
 
 fn doc() -> OpenApi {

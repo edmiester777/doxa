@@ -278,9 +278,6 @@ fn wrapper_and_inner(ty: &Type) -> Option<(&'static str, &Type)> {
     Some((wrapper, inner))
 }
 
-/// Walk through single-generic wrappers (Valid, Authenticated, …) to
-/// find the inner type of the first `Json<T>` reached. Returns `None`
-/// if no `Json` is present in the type tree.
 /// Whether the `Json<T>` in `ty` is under an `Option`, so the body may be left out.
 fn optional_json(ty: &Type) -> bool {
     let Type::Path(TypePath { path, .. }) = ty else {
@@ -302,6 +299,7 @@ fn optional_json(ty: &Type) -> bool {
     }
 }
 
+/// The `T` of the first `Json<T>` under single-generic wrappers (`Valid`, …), if any.
 fn find_json_inner(ty: &Type) -> Option<&Type> {
     // Direct Json<T>?
     if let Some(("Json", inner)) = wrapper_and_inner(ty) {

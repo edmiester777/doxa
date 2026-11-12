@@ -36,7 +36,8 @@ impl<C: DeserializeOwned + Clone + 'static> SignInGuard for Oidc<C> {
                 // The page is leaving; nothing behind the guard shows meanwhile.
                 std::future::pending::<()>().await;
             }
-            oidc.take_return().map(|to| Route::raw(path_of(&to)))
+            oidc.take_return()
+                .map(|to| Route::raw(crate::router::app_url(&path_of(&to))))
         }
     }
 }

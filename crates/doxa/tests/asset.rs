@@ -1,11 +1,5 @@
-//! `#[asset]`: the whole of an application's authorization wiring.
-//!
-//! What this file is really testing is what is *not* written below. An
-//! asset used to declare a key, a caller shape, a state type, an error, a
-//! vocabulary and a loader — six items, of which three were the same in
-//! every asset of the service and two were the lookup the row had already
-//! declared. Here the profile is stated once and each asset names its
-//! vocabulary, and there is no other wiring.
+//! `#[asset]`: the profile is stated once, each asset names its vocabulary, and the key and
+//! loader come off the row's own lookup.
 
 #![cfg(all(feature = "full", feature = "policy-sea-orm"))]
 
@@ -69,33 +63,14 @@ impl GrantProfile for AppGrants {
 
 // ---- the assets -------------------------------------------------------------
 
-/// The whole declaration. The key and the loader come off the row's
-/// `ScopedRow`; the caller, state and error come off the profile. `list`
-/// adds the collection route's `Scoping`, confined to the tenant.
 #[asset(row = Model, profile = AppGrants, actions = WidgetAction, list = tenant)]
 pub struct WidgetByName;
 
-/// The same row on a second route key: a unit struct, not a newtype.
-///
-/// `key = pk` rather than `key = Uuid, load_with = …`, and the difference
-/// is not brevity. Written out, a primary-key lookup is
-/// `Entity::find_by_id(id).one(db)` — which drops the tenant filter, and
-/// nothing in the type system asks for it back.
+/// The same row by primary key; `key = pk` keeps the tenant filter `find_by_id` would drop.
 #[asset(row = Model, key = pk, profile = AppGrants, actions = WidgetAction)]
 pub struct WidgetById;
 
-// `Row` defaulting to `Self` — the attribute written on the row itself —
-// is covered by the macro's own tests. It needs the row and the profile to
-// be able to see each other, which is exactly what a separate entity crate
-// prevents, so the descriptor form above is the one worth exercising here.
-
-/// The row the two traits were split for: an owner, and no key column.
-///
-/// Its name route resolves through logic — a bare `orders` tried against
-/// every namespace — so there is nothing to mark `#[resource(key)]` with.
-/// Marking `name` anyway would generate a lookup that silently picks one
-/// of several rows. So it has `ScopedTable` and no `ScopedRow`, and the
-/// asset below is what that has to leave reachable.
+/// A row with an owner and no key column: `ScopedTable` without `ScopedRow`.
 pub mod keyless {
     use super::*;
 
@@ -130,13 +105,7 @@ pub mod keyless {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-/// `key = pk` and `list = tenant` on a row with no key column.
-///
-/// This declaration is the regression test. `load_by_id` reads the scope
-/// column and the primary key and nothing else, so it belongs to
-/// `ScopedTable`; were it on `ScopedRow`, this line would not compile and
-/// the id route here would go back to a hand-written
-/// `find_by_id().filter(tenant_id)` — the one `key = pk` exists to stop.
+/// `key = pk` and `list = tenant` compile on a row with no key column.
 #[asset(
     row = keyless::Model,
     key = pk,
@@ -170,13 +139,7 @@ fn the_profile_supplies_the_caller_state_and_error() {
     same::<<WidgetByName as Granting>::Error, <AppGrants as GrantProfile>::Error>();
 }
 
-/// The key is the one the row declared through `#[resource(key)]`, so the
-/// route and the lookup cannot disagree about what addresses the object.
-///
-/// It arrives as the struct the derive wrote around the key column rather
-/// than as the column type itself. A `String` is what the segment parses
-/// *into*; the field name is what says which segment, and only a struct
-/// has one to offer.
+/// The key is the struct the derive wrote around the `#[resource(key)]` column.
 #[test]
 fn the_key_comes_off_the_row() {
     fn key_is_the_generated_one<A>()
@@ -209,13 +172,7 @@ fn both_descriptors_carry_the_same_vocabulary() {
     ));
 }
 
-/// The reason `Row` is a separate associated type rather than `Self`.
-///
-/// Both routes reach one row, so there is one `PolicyResource` impl and
-/// one Cedar identity. Were `WidgetById` a newtype it would carry its own
-/// forwarding, and a policy granting on `Widget::"primary"` could silently
-/// fail to govern the route that reached the same row by id — a grant that
-/// does not apply, with nothing to see in the logs.
+/// Both routes reach one row, so one Cedar identity governs both.
 #[test]
 fn one_row_reached_two_ways_has_one_cedar_identity() {
     fn entity_type<A: Granting>() -> &'static str {
@@ -250,9 +207,6 @@ fn caller(tenant: &str) -> CapabilityContext {
     }
 }
 
-/// The generated loader is the scoped one: the caller's tenant reaches the
-/// `WHERE` clause, so a name owned by another tenant is a miss rather than
-/// a row the handler is trusted to reject.
 #[tokio::test]
 async fn the_generated_loader_confines_the_lookup_to_the_caller_s_tenant() {
     let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -279,14 +233,6 @@ async fn the_generated_loader_confines_the_lookup_to_the_caller_s_tenant() {
     );
 }
 
-/// `key = pk` is scoped too, which is the whole reason it exists as an
-/// option rather than as three lines in the application.
-///
-/// The tenant predicate is asserted rather than the whole statement,
-/// because what matters is that it is there at all: without it a caller
-/// naming another tenant's id reaches that tenant's row, and the route
-/// answers 403 where it would have answered 404 — which confirms the row
-/// exists.
 #[tokio::test]
 async fn the_primary_key_lookup_is_confined_to_the_tenant_too() {
     let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -327,9 +273,6 @@ async fn a_row_with_no_key_column_still_has_a_scoped_id_route() {
     assert!(sql.contains("acme"), "{sql}");
 }
 
-/// `list = tenant` yields the listing `Select`, filtered the same way the
-/// instance lookup is — so what a caller may page and what they may fetch
-/// one of are the same set.
 #[test]
 fn the_generated_listing_is_confined_to_the_same_tenant() {
     use doxa::auth::Scoping;
@@ -343,12 +286,7 @@ fn the_generated_listing_is_confined_to_the_same_tenant() {
     assert!(sql.contains(r#""widgets"."tenant_id" = 'acme'"#), "{sql}");
 }
 
-/// A caller with no tenant has no scope to be confined to, so the answer
-/// is that nothing is there — without a query being issued at all.
-///
-/// The alternative is defaulting the scope to the empty string, which runs
-/// a real `WHERE tenant_id = ''`. That finds nothing on any sane schema,
-/// and is a row somebody could create on the wrong one.
+/// No tenant means no query, rather than `WHERE tenant_id = ''`.
 #[tokio::test]
 async fn a_caller_without_a_tenant_reaches_nothing() {
     // Deliberately empty: an appended result would let a query pass
@@ -373,9 +311,6 @@ async fn a_caller_without_a_tenant_reaches_nothing() {
     assert_eq!(found, None);
 }
 
-/// The same for the listing half: no tenant is no scope, which the
-/// collection guard turns into a refusal rather than a page of whatever
-/// sits under the empty string.
 #[test]
 fn a_listing_without_a_tenant_grants_no_scope() {
     use doxa::auth::Scoping;
@@ -491,10 +426,7 @@ where
     .unwrap()
 }
 
-/// End to end through the guard: the coarse capability the vocabulary
-/// names, then the loader the attribute wrote, then the instance check
-/// against the row's own parents. The handler receives the *row*, not the
-/// descriptor.
+/// End to end through the guard; the handler receives the row, not the descriptor.
 #[tokio::test]
 async fn a_route_guards_the_asset_the_attribute_wired() {
     let db = MockDatabase::new(DatabaseBackend::Postgres)

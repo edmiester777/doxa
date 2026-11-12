@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use super::highlight::highlight;
 use super::model::{
-    folders, human, story_url, tree_rows, visible, Initial, Message, Row, StoryMeta, Viewport,
+    find_story, folders, human, story_url, tree_rows, visible, Initial, Message, Row, StoryMeta,
+    Viewport,
 };
 use crate::clipboard::{self, Clip};
 use crate::prelude::*;
@@ -22,10 +23,9 @@ enum Axis {
 #[component]
 pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     let first = visible(&tree_rows(&entries, "", &[])).into_iter().next();
-    let known = initial
-        .story
-        .clone()
-        .filter(|s| entries.iter().any(|e| &e.name == s));
+    let known = (initial.story.as_deref())
+        .and_then(|s| find_story(&entries, s))
+        .map(|e| e.name.clone());
     let story = state(known.or(first));
     let dark = state(initial.dark);
     let viewport = state(initial.viewport);
@@ -52,7 +52,7 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     // The phone bar's label: the folders too, while that stays short.
     let full_name = match &meta {
         Some(m) => {
-            let name = human(&m.name);
+            let name = human(m.title());
             let mut parts: Vec<String> = folders(m, &entries).iter().map(|p| human(p)).collect();
             parts.push(name.clone());
             let full = parts.join(" / ");
@@ -64,8 +64,8 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
         }
         None => "No story".to_owned(),
     };
-    title(match &current {
-        Some(n) => format!("{} · Stories", human(n)),
+    title(match &meta {
+        Some(m) => format!("{} · Stories", human(m.title())),
         None => "Stories".to_owned(),
     });
     let url = Initial {
@@ -285,7 +285,7 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
                 {human(&p)}
                 <span>"/"</span>
             }).collect::<View>()}
-            <b>{current.as_deref().map_or_else(|| "No story".to_owned(), human)}</b>
+            <b>{meta.as_ref().map_or_else(|| "No story".to_owned(), |m| human(m.title()))}</b>
         </div>
     };
     let size = viewport.get().size();

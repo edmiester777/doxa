@@ -48,8 +48,7 @@ pub mod granted;
 pub mod layer;
 #[cfg(feature = "axum")]
 pub mod middleware;
-/// Requires `audit`: the door exists to guarantee a verdict is recorded,
-/// which is not a promise it could keep with the audit half compiled out.
+/// Requires `audit`, since its guarantee is that every verdict is recorded.
 #[cfg(all(feature = "axum", feature = "audit"))]
 pub mod off_request;
 #[cfg(feature = "axum")]
@@ -57,15 +56,12 @@ pub mod openapi;
 #[cfg(feature = "axum")]
 pub(crate) mod record;
 
-/// Re-exported so `#[derive(Actions)]`'s output can register itself
-/// without the declaring crate taking a direct dependency on `inventory`.
+/// For `#[derive(Actions)]`'s registration, so the declaring crate needn't depend on `inventory`.
 #[cfg(feature = "catalog")]
 #[doc(hidden)]
 pub use inventory;
 
-/// Stand-in for the above when the `catalog` feature is off, so the
-/// derive expands to the same tokens either way and the registration
-/// simply evaporates.
+/// Without `catalog`, the derive's registration expands to nothing.
 #[cfg(not(feature = "catalog"))]
 #[doc(hidden)]
 pub mod inventory {

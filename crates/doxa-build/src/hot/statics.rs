@@ -51,16 +51,10 @@ struct Section {
 }
 
 fn read_u32(bytes: &[u8], at: &mut usize) -> Result<u32> {
-    let mut value = 0_u32;
-    for shift in (0..35).step_by(7) {
-        let byte = *bytes.get(*at).context("a truncated integer in a module")?;
-        *at += 1;
-        value |= u32::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-    }
-    bail!("an overlong integer in a module")
+    let rest = bytes.get(*at..).unwrap_or_default();
+    let (value, len) = crate::split::leb128(rest).context("a truncated integer in a module")?;
+    *at += len;
+    u32::try_from(value).context("an overlong integer in a module")
 }
 
 fn write_u32(out: &mut Vec<u8>, mut value: u32) {

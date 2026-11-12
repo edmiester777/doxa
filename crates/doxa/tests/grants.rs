@@ -1,16 +1,11 @@
-//! A guard knows what it authorized, so the handler behind it should not
-//! have to say so again.
-//!
-//! [`denials`](../denials.rs) covers the refusal half of the same
-//! mechanism. This is the grant half: every handler here takes the guard
-//! and nothing else — no audit extension, no `set_event`, no
-//! `set_resource`, no terminal call — and the trail still names the
-//! action, the object and the category, with the status, outcome and
-//! duration supplied by the layer after the response.
+//! The grant half of `denials.rs`: handlers take only the guard, and the trail still names
+//! the action, object and category, with status and outcome from the layer.
+
+mod common;
+use common::AllowAll;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde::Serialize;
@@ -19,7 +14,7 @@ use tower::ServiceExt;
 use doxa::audit::{AuditEvent, AuditLayer, AuditLogger, EventType, Outcome};
 use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceId,
 };
 use doxa::{delete, get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -67,9 +62,6 @@ impl Granting for Widget {
     type Source = FromState<()>;
     type Error = StatusCode;
 
-    /// Declared once for the asset, so every route guarding a widget
-    /// files under the same vocabulary and no verb can disagree with the
-    /// category it was recorded as.
     type Actions = WidgetActions;
 
     async fn load(
@@ -92,18 +84,9 @@ impl Scoping for Widget {
     }
 }
 
-// ---- routes -----------------------------------------------------------------
-//
-// Every one of these takes the guard and nothing else. That is the whole
-// point of the file: the audit event below is written by code none of
-// them contain.
+// ---- routes: the guard and nothing else -------------------------------------
 
-/// Reads the subject straight through the guard, and the caller through
-/// the inherent accessor that outranks it.
-///
-/// These live in a separate crate from `doxa-auth` on purpose: what a
-/// consumer can reach differs from what an in-crate test can, and the
-/// documented ergonomics are the consumer's.
+/// The subject through `Deref`, the caller through the inherent accessor that outranks it.
 #[get("/widgets/{id}", tag = "Widgets")]
 async fn get_widget(widget: Granted<Widget>) -> &'static str {
     // Deref: no unwrapping to read a field.
@@ -120,9 +103,7 @@ async fn list_widgets(widgets: Granted<Many<Widget>>) -> &'static str {
     "ok"
 }
 
-/// Both halves by value, which `caller()` + `into_inner()` cannot do
-/// without cloning one of them. The guard is a pair, so the pattern is
-/// the whole of it.
+/// Both halves by value, through the pattern, with no clone.
 #[delete("/widgets/{id}", tag = "Widgets")]
 async fn delete_widget(Granted(caller, widget): Granted<Widget>) -> &'static str {
     assert_eq!(caller.tenant_id.as_deref(), Some("acme"));
@@ -161,18 +142,14 @@ enum WidgetError {
     NotFound,
 }
 
-/// A guarded route whose own error declares itself benign. The guard
-/// deposited a grant on the way in; the annotation must still be what
-/// lands on the event.
+/// Its error declares itself benign, and that must outlast the guard's deposit.
 #[get("/widgets/{id}/missing", tag = "Widgets")]
 async fn missing_widget(widget: Granted<Widget>) -> Result<&'static str, WidgetError> {
     let _ = widget.into_inner();
     Err(WidgetError::NotFound)
 }
 
-/// The pattern that used to cost an endpoint its `http_status` on every
-/// single request, and misreport any failure after the emit as a success.
-/// Written here deliberately, to prove it no longer can.
+/// Emits from inside the handler; the layer must still set the status.
 #[get("/widgets/{id}/eager", tag = "Widgets")]
 async fn eager_emit(
     widget: Granted<Widget>,
@@ -188,26 +165,6 @@ async fn eager_emit(
 }
 
 // ---- policy stub ------------------------------------------------------------
-
-/// Allows everything, so every route here takes its grant path.
-struct AllowAll;
-
-#[async_trait]
-impl CapabilityChecker for AllowAll {
-    async fn check(&self, _: &str, _: &[String], _: &Capability) -> Result<bool, AuthError> {
-        Ok(true)
-    }
-
-    async fn check_instance(
-        &self,
-        _: &str,
-        _: &[String],
-        _: &str,
-        _: &ResourceEntity,
-    ) -> Result<bool, AuthError> {
-        Ok(true)
-    }
-}
 
 // ---- harness ----------------------------------------------------------------
 
@@ -277,9 +234,7 @@ async fn an_instance_grant_names_the_object_the_policy_saw() {
     assert!(event.error_message.is_none());
 }
 
-/// The verb picks the category out of the asset's own mapping, so a
-/// delete cannot end up filed as a read the way a hand-written
-/// `set_event` in each handler can.
+/// The verb picks the category from the asset's own mapping.
 #[tokio::test]
 async fn the_verb_picks_the_category() {
     let (_, event) = call("DELETE", "/widgets/7").await;
@@ -319,9 +274,7 @@ async fn a_capability_grant_names_the_capability_check() {
     );
 }
 
-/// The deposit fills blanks; it never overwrites. A handler with its own
-/// view of the event keeps it, and did not have to run in any particular
-/// order to do so.
+/// The deposit fills blanks and never overwrites, whatever the order.
 #[tokio::test]
 async fn a_handler_that_names_the_event_itself_wins() {
     let (status, event) = call("GET", "/widgets/7/rename").await;
@@ -333,10 +286,7 @@ async fn a_handler_that_names_the_event_itself_wins() {
     assert_eq!(event.resource_id.as_deref(), Some("sprocket"));
 }
 
-/// A handler that emits from inside the request used to take the builder
-/// with it, so the layer's `set_http_status` hit a spent builder and the
-/// event went out claiming a success the handler had not yet earned. The
-/// terminal now defers, so the layer still gets to tell the truth.
+/// An emit inside the request defers, so the layer still sets the real status.
 #[tokio::test]
 async fn an_eager_emit_no_longer_costs_the_status_or_the_outcome() {
     let (status, event) = call("GET", "/widgets/7/eager").await;
@@ -359,9 +309,7 @@ async fn an_eager_emit_no_longer_costs_the_status_or_the_outcome() {
     );
 }
 
-/// `outcome = "allowed"` says this failure is not audit-worthy, and it is
-/// the last word on the event. A grant deposited by the guard on the way
-/// in must not get in its way.
+/// `outcome = "allowed"` is the last word, whatever the guard deposited.
 #[tokio::test]
 async fn an_allowed_annotation_reaches_the_event() {
     let (status, event) = call("GET", "/widgets/7/missing").await;

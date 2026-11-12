@@ -1,28 +1,15 @@
-//! `#[asset]` over a backend that is not a database.
-//!
-//! The attribute used to write its loader from `ScopedRow` and its listing
-//! from `ScopedTable`, both SeaORM traits, so a row living anywhere else
-//! got one of two things: a `load_with` function and a hand-written
-//! `Scoping`, or nothing. This file is the same declarations over an
-//! in-memory catalog, and the point is that they are the *same*
-//! declarations — `profile`, `actions`, `list = tenant`, and no loader.
-//!
-//! What that buys is not brevity. A hand-written loader takes the caller
-//! context and is free to ignore it, and one that does compiles, passes
-//! its tests, and serves one tenant's rows to another. The generated one
-//! reads the tenant and confines the fetch to it, and there is no way to
-//! ask for it not to. Everything below that looks like a routing test is
-//! really a test of that.
-//!
-//! Nothing here names SeaORM, and the file builds with `policy-sea-orm`
-//! off.
+//! `#[asset]` over an in-memory catalog through the `fetch` traits: the same declarations as
+//! over SeaORM, with the generated loader confining every fetch to the caller's tenant.
+//! Builds with `policy-sea-orm` off.
 
 #![cfg(all(feature = "auth", feature = "macros", feature = "policy"))]
+
+mod common;
+use common::AllowAll;
 
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::FromRef;
 use axum::http::{Request, StatusCode};
@@ -31,16 +18,12 @@ use serde::Serialize;
 use tower::ServiceExt;
 
 use doxa::auth::{CapabilityContext, FromState, GrantProfile, Granted, Many, One, Scoped};
-use doxa::policy::{
-    AuthError, Capability, CapabilityChecker, Fetch, FetchByKey, FetchSubset, ResourceEntity,
-};
+use doxa::policy::{CapabilityChecker, Fetch, FetchByKey, FetchSubset};
 use doxa::{asset, get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- the row ----------------------------------------------------------------
 
-/// No `#[resource(key)]`, no `#[resource(scope)]` — those are the SeaORM
-/// roles, and this row has no table. Cedar identity is all the derive is
-/// asked for; the lookups are the impls below.
+/// Cedar identity only; the lookups are the impls below.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema, PolicyResource)]
 #[resource(entity_type = "Widget")]
 pub struct Widget {
@@ -71,9 +54,7 @@ impl Catalog {
                 name: "alpha".into(),
                 tenant: "acme".into(),
             },
-            // Same name, different owner. The row a tenant-confined fetch
-            // must not reach, and the one an unconfined fetch returns
-            // first if the vector is scanned in order.
+            // Same name, another owner: what an unconfined fetch would return.
             Widget {
                 name: "alpha".into(),
                 tenant: "globex".into(),
@@ -91,10 +72,7 @@ impl Fetch<Catalog> for Widget {
 }
 
 doxa::auth::route_key!(
-    /// The key a route hands the lookup, as a struct rather than a bare
-    /// `String`. A `String` cannot say what it is called, and the route
-    /// reads its segment by name — so the name lives on a field, and
-    /// `Deserialize` does the reading.
+    /// A struct, so the route binds its segment by field name.
     pub WidgetKey { name: String }
 );
 
@@ -112,9 +90,7 @@ impl FetchByKey<Catalog> for Widget {
     }
 }
 
-/// A subset is a description of rows, not the rows: the handler applies it
-/// to whatever it is holding at the time. Here that is a tenant name,
-/// which is all this backend needs to say "these ones".
+/// Here a subset is just the tenant name.
 impl FetchSubset for Widget {
     type Filter = String;
 
@@ -141,9 +117,7 @@ pub struct WidgetByName;
 
 // ---- a request-scoped source ------------------------------------------------
 
-/// A handle that exists for the duration of one request — the shape of an
-/// open transaction, which is the case a `FromRef` state cannot serve: a
-/// pool does not see rows the request has written and not committed.
+/// A per-request handle, shaped like an open transaction.
 #[derive(Clone)]
 pub struct Snapshot(Catalog);
 
@@ -222,25 +196,6 @@ impl FromRef<AppState> for Catalog {
     }
 }
 
-struct AllowAll;
-
-#[async_trait]
-impl CapabilityChecker for AllowAll {
-    async fn check(&self, _: &str, _: &[String], _: &Capability) -> Result<bool, AuthError> {
-        Ok(true)
-    }
-
-    async fn check_instance(
-        &self,
-        _: &str,
-        _: &[String],
-        _: &str,
-        _: &ResourceEntity,
-    ) -> Result<bool, AuthError> {
-        Ok(true)
-    }
-}
-
 /// `tenant` is an `Option` so the no-tenant case is reachable: a caller
 /// the layer resolved without one is not a caller with an empty one.
 async fn call(uri: &str, tenant: Option<&str>) -> (StatusCode, String) {
@@ -298,10 +253,7 @@ async fn a_generated_loader_reaches_a_row_that_is_not_in_a_database() {
     assert_eq!(body, "alpha@acme");
 }
 
-/// The property the whole design is for. `alpha` exists in `globex` too,
-/// and is the row a lookup that forgot its scope would return — the
-/// catalog is scanned in order and `acme`'s copy is first, so this passes
-/// for the wrong reason unless the caller is the *second* tenant.
+/// The caller is the second tenant, since an unscoped scan finds `acme`'s `alpha` first.
 #[tokio::test]
 async fn a_key_owned_by_another_tenant_is_absent_rather_than_refused() {
     let (status, body) = call("/widgets/beta", Some("acme")).await;
@@ -325,9 +277,6 @@ async fn one_key_resolves_per_tenant() {
     assert_eq!(globex, "alpha@globex");
 }
 
-/// A caller with no tenant has no scope to be confined to, so the answer
-/// is that nothing is there — not a fetch against the empty string, which
-/// would match whatever a misconfigured seed put under it.
 #[tokio::test]
 async fn no_tenant_is_no_row() {
     let (status, _) = call("/widgets/alpha", None).await;
@@ -346,9 +295,6 @@ async fn a_generated_listing_is_confined_to_the_tenant() {
     assert_eq!(body, "alpha,beta", "globex's two rows and not acme's");
 }
 
-/// No tenant, no scope — and `Scoping::empty_scope` defaults to refusing
-/// rather than answering with an empty page, so a misconfigured caller is
-/// visible instead of looking like an empty catalog.
 #[tokio::test]
 async fn a_listing_without_a_tenant_is_refused() {
     let (status, _) = call("/widgets", None).await;
@@ -367,11 +313,7 @@ async fn the_scoped_extractor_reaches_the_generated_subset() {
 
 // ---- and the request-scoped source ------------------------------------------
 
-/// `source = Extension<Snapshot>` hands the loader a handle the *request*
-/// owns. Before this, `Granting::State` was reached through `FromRef`, so
-/// the only thing a loader could be given was a slice of the router state
-/// — and a lookup that had to run inside the request's open transaction
-/// could not be expressed at all.
+/// `source = Extension<Snapshot>` hands the loader a handle the request owns.
 #[tokio::test]
 async fn a_loader_can_be_handed_a_request_scoped_source() {
     let (status, body) = call("/snapshot/alpha", Some("acme")).await;
@@ -390,12 +332,7 @@ async fn a_request_scoped_source_is_confined_like_any_other() {
 
 // ---- what the declarations say ----------------------------------------------
 
-/// The source override moves the state with it, so this asset's loader is
-/// handed a `Snapshot` while the rest of the application keeps `Catalog`.
-///
-/// Worth asserting rather than leaving to the loader tests above: the two
-/// could be set apart, and an asset whose `State` no `Source` produces is
-/// a mismatch stated in two places instead of one.
+/// Overriding `source` moves `State` with it.
 #[test]
 fn a_source_override_carries_the_state_with_it() {
     fn same<A, B>()

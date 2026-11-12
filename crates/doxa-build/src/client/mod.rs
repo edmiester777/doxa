@@ -79,14 +79,13 @@ pub enum GenerateError {
     },
 }
 
-/// A document in JSON, such as a server's `/openapi.json`, read for [`ClientSpec::from_server`].
-///
-/// utoipa can't read back an any-value schema (`{}`), a 3.2 document, or 3.2's `itemSchema`, so
-/// these are rewritten to the 3.1 forms it reads first.
+/// A JSON document such as `/openapi.json`, for [`ClientSpec::from_server`]. `{}` schemas, 3.2 and
+/// `itemSchema` are rewritten to 3.1 forms first, since utoipa can't read them back.
 pub fn openapi_from_json(json: &str) -> Result<utoipa::openapi::OpenApi, GenerateError> {
     let mut doc: serde_json::Value =
         serde_json::from_str(json).map_err(|e| GenerateError::Unreadable(e.to_string()))?;
     readable::document(&mut doc);
+    spec::inline(&mut doc);
     serde_json::from_value(doc).map_err(|e| GenerateError::Unreadable(e.to_string()))
 }
 
@@ -101,7 +100,7 @@ impl ClientSpec {
     /// The document a server's `#[doxa::spec]` function builds, read as `__doxa_spec()`.
     pub fn from_server(spec: utoipa::openapi::OpenApi) -> Self {
         let parsed = serde_json::to_value(&spec)
-            .and_then(serde_json::from_value)
+            .and_then(spec::parse)
             .map_err(|e| e.to_string());
         ClientSpec {
             spec: parsed,
@@ -194,6 +193,117 @@ mod tests {
         spec["paths"]["/orders"]["post"]["x-doxa"]["invalidates"] = false.into();
         let out = client(spec).unwrap();
         assert!(out.contains("invalidates = false"), "{out}");
+    }
+
+    #[test]
+    fn a_tag_that_is_a_keyword_names_a_raw_module() {
+        let mut spec = doc(
+            serde_json::json!({ "type": "string" }),
+            serde_json::json!({}),
+        );
+        spec["paths"]["/orders"]["post"]["tags"] = serde_json::json!(["type"]);
+        let out = client(spec).unwrap();
+        assert!(out.contains("pub mod r#type"), "{out}");
+    }
+
+    #[test]
+    fn names_that_normalise_alike_stay_apart() {
+        let spec = doc(
+            serde_json::json!({ "$ref": "#/components/schemas/foo_bar" }),
+            serde_json::json!({
+                "foo_bar": {
+                    "type": "object",
+                    "required": ["createdAt", "created_at", "other", "id"],
+                    "properties": {
+                        "createdAt": { "type": "string" },
+                        "created_at": { "type": "string" },
+                        "other": { "$ref": "#/components/schemas/FooBar" },
+                        "id": { "type": "string", "format": "uuid" }
+                    }
+                },
+                "FooBar": { "type": "string", "enum": ["a-b", "a_b"] }
+            }),
+        );
+        let out = ClientSpec::from_server(openapi_from_json(&spec.to_string()).unwrap())
+            .types(|t| t.format("uuid", ":: std :: string :: String"))
+            .render()
+            .unwrap();
+        for item in [
+            "pub struct FooBar",
+            "pub enum FooBar2",
+            "pub created_at :",
+            "pub created_at2 :",
+            "AB ,",
+            "AB2 ,",
+        ] {
+            assert!(out.contains(item), "{item} in {out}");
+        }
+        assert_eq!(
+            out.matches("impl __Constraints for :: std :: string :: String")
+                .count(),
+            1,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn path_level_parameters_and_component_refs_reach_each_operation() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "t", "version": "0" },
+            "paths": { "/orders/{id}": {
+                "parameters": [{ "$ref": "#/components/parameters/Id" }],
+                "get": {
+                    "operationId": "get_order",
+                    "responses": { "200": { "$ref": "#/components/responses/Order" } }
+                },
+                "put": {
+                    "operationId": "put_order",
+                    "requestBody": { "$ref": "#/components/requestBodies/Order" },
+                    "responses": { "204": { "description": "ok" } }
+                }
+            } },
+            "components": {
+                "parameters": { "Id": {
+                    "name": "id", "in": "path", "required": true, "schema": { "type": "integer" }
+                } },
+                "requestBodies": { "Order": { "content": { "application/json": {
+                    "schema": { "$ref": "#/components/schemas/Order" }
+                } } } },
+                "responses": { "Order": { "description": "one", "content": { "application/json": {
+                    "schema": { "$ref": "#/components/schemas/Order" }
+                } } } },
+                "schemas": { "Order": {
+                    "type": "object", "required": ["note"],
+                    "properties": { "note": { "anyOf": [{ "type": "string" }, { "type": "integer" }] } }
+                } }
+            }
+        });
+        let parsed = spec::parse(spec.clone()).unwrap();
+        let item = &parsed.paths["/orders/{id}"];
+        for (_, op) in item.operations() {
+            assert_eq!(op.parameters.len(), 1, "{op:?}");
+        }
+        assert!(
+            item.put
+                .as_ref()
+                .unwrap()
+                .request_body
+                .as_ref()
+                .unwrap()
+                .content
+                .len()
+                == 1
+        );
+        assert!(item.get.as_ref().unwrap().responses["200"].content.len() == 1);
+        assert_eq!(
+            parsed.components.schemas["Order"].properties["note"]
+                .one_of
+                .len(),
+            2
+        );
+        let out = client(spec).unwrap();
+        assert!(out.contains("Json < Order >"), "{out}");
     }
 
     #[test]

@@ -218,7 +218,7 @@ impl<T: Serialize + 'static> Stored<T> {
     /// Change the value in place, store it and re-render.
     pub fn update(&self, f: impl FnOnce(&mut T)) {
         self.state.update(f);
-        self.state.with(|v| self.store(v));
+        self.state.update_silently(|v| self.store(v));
     }
 
     fn store(&self, v: &T) {

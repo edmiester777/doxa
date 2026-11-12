@@ -1,23 +1,6 @@
-//! Authorizing several rows at once, as a filter rather than a loop.
-//!
-//! A request body naming three widgets is three authorization questions
-//! only if you insist on asking them one at a time. Each instance check
-//! rebuilds the policy's entity set before it evaluates, so a body naming
-//! twenty references costs twenty rebuilds — and the rows have to be loaded
-//! before any of them can be refused.
-//!
-//! The other way round is what this file is about. Cedar answers a
-//! `when` clause it cannot finish with a **residual**; the residual is a
-//! condition over the row's attributes; the row's attributes are columns.
-//! So the policy becomes a `WHERE` clause, the database never returns what
-//! the caller may not see, and the whole thing is one query the handler
-//! runs inside its own transaction.
-//!
-//! Three pieces have to line up for that, and all three are here: the
-//! translation a consumer's `PolicyExtension` performs
-//! ([`condition_from_residual`]), the `Scoping` impl that composes the
-//! result with the tenant confinement, and the door that hands a handler
-//! the filter without asking the coarse listing question.
+//! Authorizing several rows at once as one query: the policy's residual becomes a `WHERE`
+//! clause ([`condition_from_residual`]), `Scoping` adds the tenant, and `Scoped` hands the
+//! handler the filter without the coarse listing question.
 
 #![cfg(all(feature = "full", feature = "policy-sea-orm"))]
 
@@ -44,10 +27,7 @@ use serde_json::{json, Value};
 
 // ---- the row ----------------------------------------------------------------
 
-/// `region` is the attribute the policy conditions on, and therefore the
-/// column the residual has to resolve to. That correspondence is the
-/// derive's: one `#[resource(attr)]` produces both the Cedar attribute a
-/// policy may name and the column `column_for_attr` hands back.
+/// `region` is both the Cedar attribute the policy names and the column it resolves to.
 #[derive(
     Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize, PolicyResource,
 )]
@@ -82,13 +62,7 @@ pub enum WidgetAction {
 
 // ---- what the consumer's extension assembles --------------------------------
 
-/// The session a `PolicyExtension` hands back, which for this service is
-/// one filter per asset.
-///
-/// This is the half doxa deliberately does not ship. What a session holds
-/// — hidden fields, rate limits, a filter per entity type — is the
-/// application's shape, and fixing it here would mean every consumer
-/// needing one field more had to abandon the whole thing.
+/// The application's session: here, one filter per asset.
 #[derive(Clone)]
 pub struct Grants {
     /// The condition the policy left on widgets, or `None` where it granted
@@ -97,13 +71,7 @@ pub struct Grants {
 }
 
 impl Grants {
-    /// What `PolicyExtension::extract_residual_attrs` does, in the one line
-    /// that is doxa's rather than the consumer's.
-    ///
-    /// The extension receives the residual's `when` body as Cedar JSON EST
-    /// and owes its own predicate type back. For a SeaORM row that
-    /// translation is mechanical and identical in every consumer, which is
-    /// why it ships — and why it refuses rather than approximates.
+    /// What `PolicyExtension::extract_residual_attrs` does with the `when` body.
     fn from_residual(body: &Value) -> Result<Self, AuthError> {
         Ok(Grants {
             widgets: Some(condition_from_residual::<Model>(body)?),
@@ -149,22 +117,10 @@ impl GrantProfile for AppGrants {
     type Error = DbLoadError;
 }
 
-/// The caller shape is the profile's here, but `ctx = …` is what makes that
-/// a choice rather than a constraint: an application whose other assets
-/// need only tenant + roles can leave the profile on `CapabilityContext`
-/// and let this one asset ask for the assembled session, which is where a
-/// residual lives.
 #[asset(row = Model, profile = AppGrants, actions = WidgetAction)]
 pub struct WidgetByName;
 
-/// The composition, and the reason `list = tenant` stops short of writing
-/// it: the tenant is a column the row declares, and the rest is a condition
-/// only the policy knows.
-///
-/// Both halves matter and they fail differently. Drop the tenant and a
-/// caller reaches another tenant's rows; drop the residual and they reach
-/// every row of their own tenant, which is the failure that looks like
-/// working software.
+/// The tenant column and the policy's residual; dropping either widens the listing.
 impl Scoping for WidgetByName {
     type Filter = Select<Entity>;
 
@@ -178,16 +134,7 @@ impl Scoping for WidgetByName {
             .map(|condition| Model::scoped(tenant).filter(condition)))
     }
 
-    /// What "everything" is, for the one caller the policy resolved as
-    /// unrestricted.
-    ///
-    /// This is the door that never asks the capability checker — the whole
-    /// point of a filter is that the verdict already happened — so it is
-    /// also the only one where an administrator would otherwise be handed
-    /// the same policy condition as anybody else, while every other route
-    /// gave them everything. An asset whose scope is only tenancy needs no
-    /// answer here; one carrying a policy condition does, and only it can
-    /// say what dropping the condition means.
+    /// An unrestricted caller's subset: this door never asks the checker, so it can't see admin.
     fn unscoped() -> Option<Self::Filter> {
         Some(Entity::find())
     }
@@ -302,10 +249,6 @@ fn the_scope_composes_the_tenant_and_the_policys_own_condition() {
     assert!(sql.contains(r#""region" = 'us'"#), "{sql}");
 }
 
-/// The admin seat. Every other door reaches the capability checker, which
-/// applies whatever admin rule the policy has; this one is a function of
-/// the context alone, so without [`Scoping::unscoped`] an administrator
-/// would get the filtered subset here and everything everywhere else.
 #[test]
 fn an_admin_is_scoped_to_everything_rather_than_to_the_policys_condition() {
     let (parts, _rx) = parts_as(&[], granted(), true);
@@ -339,9 +282,6 @@ fn an_ordinary_caller_is_unaffected_by_the_admin_seat() {
     assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
 }
 
-/// An admin whose policy granted nothing is still unrestricted: the seat
-/// is consulted *before* the scope, so an empty grant map cannot refuse
-/// them where the instance doors would have let them through.
 #[test]
 fn an_admin_is_not_refused_by_an_empty_grant() {
     let (parts, _rx) = parts_as(&[], Grants::none(), true);
@@ -352,11 +292,7 @@ fn an_admin_is_not_refused_by_an_empty_grant() {
     );
 }
 
-/// The request the whole path exists for: several names from a body,
-/// resolved in one query, with the policy already inside it.
-///
-/// Note what is not here — no loop, no instance check (the stub panics on
-/// one), and no second round trip per name.
+/// Several names in one query, with no instance check (the stub panics on one).
 #[test]
 fn several_names_resolve_in_one_query_the_policy_has_already_narrowed() {
     let (parts, _rx) = parts(&[], granted());
@@ -385,10 +321,6 @@ fn the_scoped_plural_lookup_is_one_statement() {
 
 // ---- the door ---------------------------------------------------------------
 
-/// The dependency form asks no coarse question. A caller holding nothing
-/// still gets their subset, because whether they may *list* widgets is a
-/// different question from whether this request may resolve the widgets it
-/// names.
 #[test]
 fn a_dependency_skips_the_coarse_gate() {
     let (parts, _rx) = parts(&[], granted());
@@ -425,17 +357,7 @@ async fn the_gated_form_passes_with_the_capability() {
     );
 }
 
-/// The listing route, which is the other way to the same subset. It has
-/// to answer as the dependency door does, and the seat is where the two
-/// would part company: the capability the route gates on says whether the
-/// caller may list widgets at all, and nothing about which rows come
-/// back, so passing it cannot be what hands an administrator everything.
-///
-/// A route consulting only [`Scoping::scope`] would filter the listing by
-/// the policy's row condition while a handler resolving names through
-/// `Scoped` on the same asset saw every row — one caller, one asset, two
-/// answers, and the narrow one is the one that looks like working
-/// software.
+/// The listing route must answer an admin as the `Scoped` door does.
 #[tokio::test]
 async fn the_listing_route_seats_an_admin_the_way_the_dependency_does() {
     let (mut parts, _rx) = parts_as(&["widgets.read"], granted(), true);
@@ -453,9 +375,6 @@ async fn the_listing_route_seats_an_admin_the_way_the_dependency_does() {
     );
 }
 
-/// And the mirror, so the seat cannot be read as "a listing ignores the
-/// scope": the caller the policy did not mark is filtered exactly as the
-/// dependency door filters them.
 #[tokio::test]
 async fn the_listing_route_scopes_an_ordinary_caller() {
     let (mut parts, _rx) = parts(&["widgets.read"], granted());
@@ -471,10 +390,7 @@ async fn the_listing_route_scopes_an_ordinary_caller() {
     assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
 }
 
-/// A caller the policy granted nothing is refused rather than handed an
-/// empty page — the asset said so by leaving `empty_scope` at its default.
-/// A misconfigured policy should look like a refusal, not like an empty
-/// table.
+/// The default `empty_scope` refuses rather than handing back an empty page.
 #[test]
 fn a_caller_granted_nothing_is_refused() {
     let (parts, _rx) = parts(&[], Grants::none());
@@ -488,9 +404,6 @@ fn a_caller_granted_nothing_is_refused() {
     assert_eq!(reason, "no authorized scope");
 }
 
-/// A route reaching this without an `AuthLayer` above it fails the way
-/// every other door fails, rather than quietly filtering against a session
-/// nobody assembled.
 #[test]
 fn an_unauthenticated_request_reaches_no_verdict() {
     let extensions = axum::http::Extensions::new();
@@ -503,9 +416,7 @@ fn an_unauthenticated_request_reaches_no_verdict() {
 
 // ---- the trail --------------------------------------------------------------
 
-/// A subset is recorded like every other verdict, and under the same
-/// resource a listing would use — so a filtered dependency and a listing
-/// over one asset sit together in the trail.
+/// Recorded under the resource a listing would use.
 #[test]
 fn the_subset_is_recorded() {
     let (parts, mut rx) = parts(&[], granted());
@@ -531,14 +442,10 @@ fn a_refusal_is_recorded_too() {
 
 // ---- the extractor ----------------------------------------------------------
 
-/// The same door in the signature, for the handler that knows before it
-/// runs which asset its body will name.
-///
-/// It mounts on `()` — there is no loader on this path, so nothing is read
-/// out of the router state and no `FromRef` bound applies.
+/// It mounts on `()`: there is no loader on this path, so no `FromRef` bound applies.
 #[tokio::test]
 async fn the_extractor_hands_over_the_filter() {
-    let (mut parts, _rx) = parts(&[], granted());
+    let (mut parts, _rx) = parts(&["widgets.read"], granted());
 
     let scoped = Scoped::<WidgetByName, widget_action::Read>::from_request_parts(&mut parts, &())
         .await
@@ -552,7 +459,7 @@ async fn the_extractor_hands_over_the_filter() {
 /// for a second extractor to read back what this one already had.
 #[tokio::test]
 async fn the_extractor_carries_the_caller() {
-    let (mut parts, _rx) = parts(&[], granted());
+    let (mut parts, _rx) = parts(&["widgets.read"], granted());
 
     let scoped = Scoped::<WidgetByName, widget_action::Read>::from_request_parts(&mut parts, &())
         .await
@@ -561,15 +468,24 @@ async fn the_extractor_carries_the_caller() {
     assert_eq!(FromAuthExtensions::tenant(scoped.caller()), Some("acme"));
 }
 
+/// Unlike the dependency door, the extractor asks the capability first.
+#[tokio::test]
+async fn the_extractor_refuses_a_caller_without_the_capability() {
+    let (mut parts, mut rx) = parts(&[], granted());
+
+    let Err(Denial::Denied { action, reason, .. }) =
+        Scoped::<WidgetByName, widget_action::Read>::from_request_parts(&mut parts, &()).await
+    else {
+        panic!("does not hold widgets.read");
+    };
+    assert_eq!(action, "widgets.read");
+    assert_eq!(reason, "capability denied");
+    assert!(emitted(&parts, &mut rx).error_message.is_some());
+}
+
 // ---- at a route -------------------------------------------------------------
 
-/// The extractor through the real `#[get]` / `routes!` path, which is
-/// where the documentation half is exercised.
-///
-/// A published spec that understated a route's permissions would be wrong
-/// in the direction nobody notices: the route still refuses, but the
-/// generated client and the reviewer reading the document both believe it
-/// asks for less than it does.
+/// Through the real `#[get]` / `routes!` path, for the OpenAPI half.
 #[get("/widgets", tag = "Widgets")]
 async fn list_widgets(widgets: Scoped<WidgetByName, widget_action::Read>) -> &'static str {
     widgets.into_inner();
@@ -609,10 +525,7 @@ fn the_route_documents_the_permission_a_dependency_needs() {
 
 // ---- what the translation refuses -------------------------------------------
 
-/// The property the whole approach rests on. A residual the translator
-/// cannot express is an error, never a filter with that clause left out —
-/// which would be a query returning rows the policy meant to exclude, and
-/// nothing about the result would look wrong.
+/// An untranslatable residual is an error, never a filter missing that clause.
 #[test]
 fn an_untranslatable_residual_is_an_error_rather_than_a_wider_filter() {
     let unsupported = json!({"like": {
@@ -623,10 +536,6 @@ fn an_untranslatable_residual_is_an_error_rather_than_a_wider_filter() {
     assert!(Grants::from_residual(&unsupported).is_err());
 }
 
-/// And an attribute with no column behind it is the same answer. A policy
-/// may condition on anything the row exposes to Cedar; only the columns can
-/// become a `WHERE` clause, and the gap between the two is refused rather
-/// than ignored.
 #[test]
 fn an_attribute_that_is_not_a_column_is_refused() {
     let computed = json!({"==": {

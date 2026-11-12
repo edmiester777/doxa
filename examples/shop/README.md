@@ -17,4 +17,4 @@ cargo run -p shop-api --bin export-docs -- out/api      # the API reference as s
 
 The server reads the caller's role from an `x-role` header in place of a real token:
 `viewer` reads, `editor` renames widgets, `clerk` places and cancels orders, and `admin` does
-anything. A browser that sends none is an `admin`.
+anything. A browser that sends none is a `viewer`.

@@ -40,6 +40,8 @@ react = "^19"
 react-dom = "^19"
 ```
 
+A dependency crate can list packages too, but they install only once the web crate lists them as well; until then the build names each one.
+
 (This site colours its code that way: [highlight.js](https://highlightjs.org) bound with `#[npm]`.)
 
 ## Use a React component
@@ -101,5 +103,5 @@ A web crate whose APIs live on other servers lists them, and `doxa dev` forwards
 ```toml
 [package.metadata.doxa.proxy]
 "/api" = { to = "http://localhost:8080", env = "ORDERS_URL" }
-"/lake" = { to = "http://localhost:3100", env = "LAKE_URL", strip = true }
+"/reports" = { to = "http://localhost:3100", env = "REPORTS_URL", strip = true }
 ```

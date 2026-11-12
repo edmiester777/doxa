@@ -3,10 +3,8 @@
 #[allow(unused_imports)]
 use crate::{FieldError, FieldErrors};
 
-/// A validating extractor wrapper, such as `Valid<Json<T>>`: the rules its `Value` must pass.
-///
-/// The server answers `422` with these [`FieldErrors`]; the client refuses the call with the
-/// same ones, without sending it.
+/// The rules a validating wrapper's `Value` must pass, such as `Valid<Json<T>>`'s. The server
+/// answers `422` with these [`FieldErrors`]; the client refuses the call with them unsent.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` doesn't say how to check its value",
     note = "implement `doxa::wire::Validates` for it in code both halves compile, and \

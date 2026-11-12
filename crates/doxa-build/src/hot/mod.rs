@@ -17,6 +17,16 @@ const RUSTC_FILE: &str = "DOXA_HOT_RUSTC";
 const RUSTC_CRATE: &str = "DOXA_HOT_CRATE";
 /// Set on rustc's linker: where to record the link arguments.
 const LINK_FILE: &str = "DOXA_HOT_LINK";
+/// The names of doxa's own environment variables, one per line, which the record leaves out.
+const INHERITED: &str = "DOXA_HOT_INHERITED";
+/// Inherited variables cargo may change for rustc, so recorded anyway.
+const LIBRARY_PATHS: [&str; 5] = [
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "LIBPATH",
+];
 
 /// How the web crate's rustc ran under cargo.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,9 +64,16 @@ fn wrap_rustc(rustc: &[String]) -> ExitCode {
         .and_then(|i| rustc.get(i + 1));
     let wanted = std::env::var(RUSTC_CRATE).ok();
     if name.is_some() && name == wanted.as_ref() {
+        let inherited = std::env::var(INHERITED).unwrap_or_default();
+        let inherited: std::collections::HashSet<&str> = inherited.split('\n').collect();
         let record = Rustc {
             args: rustc.to_vec(),
-            envs: std::env::vars().collect(),
+            // What doxa's own environment already holds stays out of the file; replay restores it.
+            envs: std::env::vars()
+                .filter(|(k, _)| {
+                    !inherited.contains(k.as_str()) || LIBRARY_PATHS.contains(&k.as_str())
+                })
+                .collect(),
             cwd: std::env::current_dir().unwrap_or_default(),
         };
         let file = std::env::var_os(RUSTC_FILE).expect("checked by intercept");
@@ -146,11 +163,15 @@ impl Records {
         for f in [self.rustc(), self.link()] {
             let _ = std::fs::remove_file(&f);
         }
+        let inherited: Vec<String> = std::env::vars_os()
+            .filter_map(|(k, _)| k.into_string().ok())
+            .collect();
         cargo
             .env("RUSTC_WRAPPER", &doxa)
             .env(RUSTC_FILE, self.rustc())
             .env(RUSTC_CRATE, lib_name)
-            .env(LINK_FILE, self.link());
+            .env(LINK_FILE, self.link())
+            .env(INHERITED, inherited.join("\n"));
         cargo.arg(format!("-Clinker={}", doxa.display()));
         cargo.args(["-Csave-temps=true", "-Clink-dead-code", "--cfg", "doxa_hot"]);
         for a in [
@@ -242,7 +263,7 @@ pub struct Base {
 
 impl Base {
     /// Remember the module wasm-bindgen wrote, which patches resolve against.
-    pub(crate) fn set_bindgened(&mut self, bytes: Vec<u8>) -> Result<()> {
+    pub(crate) fn set_bindgened(&mut self, bytes: &[u8]) -> Result<()> {
         self.cache = Some(wasm::Cache::new(bytes).map_err(patch_error)?);
         Ok(())
     }
@@ -258,7 +279,6 @@ impl Base {
         let mut cmd = Command::new(&self.rustc.args[0]);
         cmd.args(&self.rustc.args[1..])
             .arg("-Crelocation-model=pic")
-            .env_clear()
             .envs(
                 self.rustc
                     .envs
@@ -269,6 +289,7 @@ impl Base {
                             RUSTC_FILE
                                 | RUSTC_CRATE
                                 | LINK_FILE
+                                | INHERITED
                                 | "RUSTC_WRAPPER"
                                 | "RUSTC_WORKSPACE_WRAPPER"
                                 // Cargo's jobserver pipes are gone once cargo exits.
@@ -387,23 +408,55 @@ fn linker_args(recorded: &[String]) -> Vec<String> {
 
 /// One archive holding every codegen object of `rlibs`, which wasm-ld loads whole.
 fn whole_archive(rlibs: &[String], out: &Path) -> Result<()> {
-    let mut builder = ar::Builder::new(Vec::new());
+    let invalid = |e: object::read::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+    let mut archive = ar_start();
     for rlib in rlibs {
         let path = Path::new(rlib);
         let bytes = std::fs::read(path).at(path)?;
-        let mut archive = ar::Archive::new(bytes.as_slice());
-        while let Some(entry) = archive.next_entry() {
-            let mut entry = entry.at(path)?;
-            let id = String::from_utf8_lossy(entry.header().identifier()).into_owned();
-            if !id.ends_with(".rcgu.o") || entry.header().size() == 0 {
+        let file = object::read::archive::ArchiveFile::parse(bytes.as_slice())
+            .map_err(invalid)
+            .at(path)?;
+        for member in file.members() {
+            let member = member.map_err(invalid).at(path)?;
+            if !member.name().ends_with(b".rcgu.o") || member.size() == 0 {
                 continue;
             }
-            let header = entry.header().clone();
-            builder.append(&header, &mut entry).at(out)?;
+            let data = member.data(bytes.as_slice()).map_err(invalid).at(path)?;
+            ar_append(&mut archive, member.name(), data);
         }
     }
-    let bytes = builder.into_inner().at(out)?;
-    std::fs::write(out, bytes).at(out)
+    std::fs::write(out, archive).at(out)
+}
+
+/// An empty `ar` archive.
+fn ar_start() -> Vec<u8> {
+    b"!<arch>\n".to_vec()
+}
+
+/// Append a member, its name in a BSD `#1/len` header when it won't fit the 16-byte field.
+fn ar_append(archive: &mut Vec<u8>, name: &[u8], data: &[u8]) {
+    let inline = name.len() <= 16 && !name.contains(&b' ');
+    let (field, extra) = if inline {
+        (String::from_utf8_lossy(name).into_owned(), 0)
+    } else {
+        (format!("#1/{}", name.len()), name.len())
+    };
+    let header = format!(
+        "{field:<16}{:<12}{:<6}{:<6}{:<8o}{:<10}`\n",
+        0,
+        0,
+        0,
+        0o644,
+        extra + data.len()
+    );
+    archive.extend_from_slice(header.as_bytes());
+    if !inline {
+        archive.extend_from_slice(name);
+    }
+    archive.extend_from_slice(data);
+    if archive.len() % 2 == 1 {
+        archive.push(b'\n');
+    }
 }
 
 /// rustc's bundled lld, which links wasm as `-flavor wasm`.
@@ -564,27 +617,36 @@ mod tests {
     fn the_whole_archive_keeps_only_codegen_objects() {
         let dir = tempfile::tempdir().unwrap();
         let rlib = dir.path().join("libx.rlib");
-        let mut b = ar::Builder::new(Vec::new());
+        let long = "a-long-crate-name.a1b2c3d4e5-cgu.0.rcgu.o";
+        let mut rlib_bytes = ar_start();
         for (name, body) in [
             ("lib.rmeta", &b"meta"[..]),
             ("x.x.rcgu.o", b"obj"),
             ("e.rcgu.o", b""),
+            (long, b"odd"),
         ] {
-            b.append(
-                &ar::Header::new(name.as_bytes().to_vec(), body.len() as u64),
-                body,
-            )
-            .unwrap();
+            ar_append(&mut rlib_bytes, name.as_bytes(), body);
         }
-        std::fs::write(&rlib, b.into_inner().unwrap()).unwrap();
+        std::fs::write(&rlib, rlib_bytes).unwrap();
         let out = dir.path().join("libdeps.a");
         whole_archive(&[rlib.display().to_string()], &out).unwrap();
+
         let bytes = std::fs::read(&out).unwrap();
-        let mut a = ar::Archive::new(bytes.as_slice());
-        let mut names = Vec::new();
-        while let Some(e) = a.next_entry() {
-            names.push(String::from_utf8(e.unwrap().header().identifier().to_vec()).unwrap());
-        }
-        assert_eq!(names, ["x.x.rcgu.o"]);
+        let file = object::read::archive::ArchiveFile::parse(bytes.as_slice()).unwrap();
+        let members: Vec<_> = file
+            .members()
+            .map(|m| {
+                let m = m.unwrap();
+                let name = String::from_utf8(m.name().to_vec()).unwrap();
+                (name, m.data(bytes.as_slice()).unwrap().to_vec())
+            })
+            .collect();
+        assert_eq!(
+            members,
+            [
+                ("x.x.rcgu.o".to_owned(), b"obj".to_vec()),
+                (long.to_owned(), b"odd".to_vec())
+            ]
+        );
     }
 }

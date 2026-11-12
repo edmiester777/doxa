@@ -444,12 +444,19 @@ fn take_answers(extra: Vec<Meta>) -> Result<(Option<Type>, Vec<Meta>)> {
     for meta in extra {
         match &meta {
             Meta::NameValue(nv) if nv.path.is_ident("answers") => {
+                if answers.is_some() {
+                    return Err(twice(&nv.path, "answers"));
+                }
                 answers = Some(parse2::<Type>(nv.value.to_token_stream())?);
             }
             _ => rest.push(meta),
         }
     }
     Ok((answers, rest))
+}
+
+fn twice(at: &syn::Path, name: &str) -> syn::Error {
+    syn::Error::new_spanned(at, format!("`{name}` is given twice"))
 }
 
 /// `item_fn` as the browser and the document see it: returning `answers` when given.
@@ -489,6 +496,7 @@ fn take_mount_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
 /// Each named boolean flag, `true` unless given as `false`, and the remaining arguments.
 fn take_flags(extra: Vec<Meta>, names: &[&str]) -> Result<(Vec<bool>, Vec<Meta>)> {
     let mut flags = vec![true; names.len()];
+    let mut given = vec![false; names.len()];
     let mut rest = Vec::with_capacity(extra.len());
     for meta in extra {
         let at = match &meta {
@@ -499,6 +507,9 @@ fn take_flags(extra: Vec<Meta>, names: &[&str]) -> Result<(Vec<bool>, Vec<Meta>)
             rest.push(meta);
             continue;
         };
+        if std::mem::replace(&mut given[at], true) {
+            return Err(twice(&nv.path, names[at]));
+        }
         match &nv.value {
             syn::Expr::Lit(syn::ExprLit {
                 lit: syn::Lit::Bool(b),
@@ -635,10 +646,29 @@ impl syn::parse::Parse for MethodArg {
             let lit: LitStr = input.parse()?;
             Ok(MethodArg::Path(lit))
         } else {
-            let meta: Meta = input.parse()?;
-            Ok(MethodArg::Meta(Box::new(meta)))
+            Ok(MethodArg::Meta(Box::new(parse_meta(input)?)))
         }
     }
+}
+
+/// A `Meta`, except that `answers = T` reads `T` as a type: `Json<Widget>` isn't an expression.
+fn parse_meta(input: syn::parse::ParseStream) -> Result<Meta> {
+    let answers = input.peek2(Token![=])
+        && input
+            .fork()
+            .parse::<syn::Ident>()
+            .is_ok_and(|i| i == "answers");
+    if !answers {
+        return input.parse();
+    }
+    let path: syn::Path = input.parse()?;
+    let eq_token: Token![=] = input.parse()?;
+    let ty: Type = input.parse()?;
+    Ok(Meta::NameValue(syn::MetaNameValue {
+        path,
+        eq_token,
+        value: syn::Expr::Verbatim(ty.to_token_stream()),
+    }))
 }
 
 /// One argument inside `#[operation(...)]`. The first should be a bare
@@ -670,7 +700,7 @@ impl syn::parse::Parse for OperationArg {
         {
             Ok(OperationArg::Method(input.parse()?))
         } else {
-            Ok(OperationArg::Meta(Box::new(input.parse()?)))
+            Ok(OperationArg::Meta(Box::new(parse_meta(input)?)))
         }
     }
 }
@@ -848,6 +878,38 @@ mod tests {
                 .to_string(),
             "-> Prometheus"
         );
+    }
+
+    #[test]
+    fn a_repeated_route_option_is_an_error() {
+        let flags = take_route_flags(vec![
+            syn::parse_quote!(dry_run = false),
+            syn::parse_quote!(dry_run = true),
+        ]);
+        let answers = take_answers(vec![
+            syn::parse_quote!(answers = String),
+            syn::parse_quote!(answers = u32),
+        ]);
+        for error in [flags.err(), answers.err()] {
+            assert!(error.unwrap().to_string().contains("is given twice"));
+        }
+    }
+
+    #[test]
+    fn answers_takes_a_generic_type() {
+        for args in [
+            quote::quote!("/x", answers = Json<Vec<Widget>>, tag = "W"),
+            quote::quote!(get, "/x", answers = Json<Vec<Widget>>, tag = "W"),
+        ] {
+            let extra = match parse_method_args(args.clone()) {
+                Ok(m) => m.extra,
+                Err(_) => parse_operation_args(args).unwrap().extra,
+            };
+            let (answers, rest) = take_answers(extra).unwrap();
+            let answers = answers.unwrap().to_token_stream().to_string();
+            assert_eq!(answers, "Json < Vec < Widget > >");
+            assert_eq!(rest.len(), 1);
+        }
     }
 
     #[test]

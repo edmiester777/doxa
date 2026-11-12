@@ -64,7 +64,9 @@ async fn WidgetsPage(contains: Option<String>) -> Result<View> {
         <Count total={widgets.len()} on_pick={move |_: bool| picks.update(|n| *n += 1)}/>
         <p class="picks">{picks.get()}</p>
         <ul>
-            {widgets.iter().map(|w| view! { <WidgetRow key={w.id} widget={w.clone()}/> }).collect::<View>()}
+            {widgets.iter().map(|w| view! {
+                <WidgetRow key={w.id} widget={w.clone()}/>
+            }).collect::<View>()}
         </ul>
     })
 }

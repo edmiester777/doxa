@@ -3,10 +3,8 @@
 use std::fmt;
 use std::rc::Rc;
 
-/// An error raised by a component, effect or action, caught by the nearest `<Catch>`.
-///
-/// Like `anyhow::Error`, it is not itself an `Error`, which is what lets `?`
-/// convert any error into it.
+/// An error raised by a component, effect or action, caught by the nearest `<Catch>`. Like
+/// `anyhow::Error` it is not itself an `Error`, so `?` converts any error into it.
 #[derive(Clone)]
 pub struct Thrown(Rc<dyn std::error::Error>);
 

@@ -94,7 +94,7 @@ pub async fn rename_widget(
 pub async fn suggest_name(
     State(catalog): State<Catalog>,
     #[server] Caller(who): Caller,
-    Json(suggestion): Json<Rename>,
+    Valid(Json(suggestion)): Valid<Json<Rename>>,
 ) -> StatusCode {
     catalog.suggest(format!("{} from {who}", suggestion.name));
     StatusCode::ACCEPTED

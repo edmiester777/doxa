@@ -90,9 +90,8 @@ const LOCKFILES: [&str; 4] = [
 const APPLIED_PATCHES: &str = ".doxa-patches";
 
 impl Source {
-    /// The app's `package.json` beside the web crate or at the workspace root, which must list
-    /// everything `needed` names; or else `needed`, the graph's merged
-    /// `[package.metadata.doxa.npm]`, written to one.
+    /// The `package.json` beside the web crate or workspace root, which must list all of `needed`
+    /// (the merged `[package.metadata.doxa.npm]`); or else `needed`, written to one.
     pub fn for_app(
         web: &WebCrate,
         workspace_root: &Path,
@@ -172,7 +171,7 @@ pub fn install(source: &Source, locked: bool) -> Result<()> {
             if std::fs::read_to_string(&path).ok().as_deref() != Some(body.as_str()) {
                 std::fs::write(&path, body).at(&path)?;
             }
-            if !copy_lockfiles(lock_dir, dir)? && frozen {
+            if !mirror_lockfiles(lock_dir, dir)? && frozen {
                 return Err(Error::config(
                     format!("no npm lockfile in {}", lock_dir.display()),
                     "run `doxa build` once without --locked, then commit the lockfile it writes there",
@@ -197,6 +196,17 @@ pub fn install(source: &Source, locked: bool) -> Result<()> {
         copy_lockfiles(dir, lock_dir)?;
     }
     Ok(())
+}
+
+/// [`copy_lockfiles`], also removing from `to` the lockfiles `from` doesn't have.
+fn mirror_lockfiles(from: &Path, to: &Path) -> Result<bool> {
+    for name in LOCKFILES {
+        let (kept, copy) = (from.join(name), to.join(name));
+        if !kept.exists() && copy.exists() {
+            std::fs::remove_file(&copy).at(&copy)?;
+        }
+    }
+    copy_lockfiles(from, to)
 }
 
 /// Copy whichever lockfiles `from` has into `to`, where they differ; whether there were any.
@@ -279,6 +289,18 @@ mod tests {
         assert_eq!(Manager::detect(dir.path()), Manager::Pnpm);
         std::fs::write(dir.path().join("bun.lock"), "").unwrap();
         assert_eq!(Manager::detect(dir.path()), Manager::Bun);
+    }
+
+    #[test]
+    fn a_lockfile_deleted_from_the_web_crate_is_not_brought_back() {
+        let (web, js) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(js.path().join("package-lock.json"), "old").unwrap();
+        std::fs::write(web.path().join("bun.lock"), "new").unwrap();
+        assert!(mirror_lockfiles(web.path(), js.path()).unwrap());
+        assert!(!js.path().join("package-lock.json").exists());
+        assert_eq!(Manager::detect(js.path()), Manager::Bun);
+        copy_lockfiles(js.path(), web.path()).unwrap();
+        assert!(!web.path().join("package-lock.json").exists());
     }
 
     #[test]

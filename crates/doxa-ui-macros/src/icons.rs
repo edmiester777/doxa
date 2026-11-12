@@ -302,8 +302,13 @@ fn file_name(ident: &str, case: Case) -> String {
                     || (c.is_uppercase()
                         && p.is_uppercase()
                         && next.is_some_and(|n| n.is_lowercase()))
-                    || (c.is_ascii_digit() && !p.is_ascii_digit())
-                    || (!c.is_ascii_digit() && p.is_ascii_digit())
+                    // `Grid3x3` is `grid-3x3`: a word that began with a digit keeps its digits.
+                    || (c.is_ascii_digit()
+                        && !p.is_ascii_digit()
+                        && !words
+                            .last()
+                            .and_then(|w| w.chars().next())
+                            .is_some_and(|f| f.is_ascii_digit()))
             }
         };
         if c == '_' {
@@ -562,6 +567,23 @@ fn attributes(
                 node.tag_name().name()
             )));
         }
+        let name = a.name().to_ascii_lowercase();
+        let value: String = a
+            .value()
+            .chars()
+            .filter(|c| !c.is_whitespace() && !c.is_control())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let scripted_url = ["javascript:", "vbscript:", "data:"]
+            .iter()
+            .any(|s| value.starts_with(s));
+        if name.starts_with("on") || (name == "href" && scripted_url) {
+            return Err(fail(format!(
+                "attribute `{}` on `<{}>` runs script, which an inlined icon must not",
+                a.name(),
+                node.tag_name().name()
+            )));
+        }
         out.push((a.name().to_owned(), a.value().to_owned()));
     }
     Ok(out)
@@ -575,6 +597,14 @@ fn children(
     for c in node.children() {
         if c.is_element() {
             let tag = c.tag_name().name();
+            if matches!(
+                tag.to_ascii_lowercase().as_str(),
+                "script" | "foreignobject"
+            ) {
+                return Err(fail(format!(
+                    "`<{tag}>` can run script or hold HTML, which an inlined icon must not"
+                )));
+            }
             let attrs = attributes(c, fail)?
                 .into_iter()
                 .map(|(k, v)| quote!(.attr(#k, #v)));
@@ -603,6 +633,8 @@ mod tests {
     fn variants_name_their_files() {
         assert_eq!(file_name("ChevronDown", Case::Kebab), "chevron-down");
         assert_eq!(file_name("Trash2", Case::Kebab), "trash-2");
+        assert_eq!(file_name("Move3d", Case::Kebab), "move-3d");
+        assert_eq!(file_name("Grid3x3", Case::Kebab), "grid-3x3");
         assert_eq!(file_name("HTMLFile", Case::Kebab), "html-file");
         assert_eq!(file_name("ChevronDown", Case::Snake), "chevron_down");
         assert_eq!(file_name("ChevronDown", Case::Camel), "chevronDown");
@@ -667,5 +699,18 @@ mod tests {
         assert!(body.contains("svg_el (\"circle\")"), "{body}");
         let err = svg_tokens("<div/>", Span::call_site(), Path::new("x.svg")).unwrap_err();
         assert!(err.to_string().contains("not `<svg>`"), "{err}");
+    }
+
+    #[test]
+    fn an_svg_that_runs_script_is_refused() {
+        for svg in [
+            r#"<svg onload="go()"><path/></svg>"#,
+            r#"<svg><script>go()</script></svg>"#,
+            r#"<svg><foreignObject><div/></foreignObject></svg>"#,
+            r#"<svg><a href=" javascript:go()"><path/></a></svg>"#,
+        ] {
+            let err = svg_tokens(svg, Span::call_site(), Path::new("x.svg")).unwrap_err();
+            assert!(err.to_string().contains("script"), "{svg}: {err}");
+        }
     }
 }

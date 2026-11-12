@@ -81,7 +81,7 @@ pub(crate) fn ts(ty: &Type) -> String {
         | "f64" => "number".into(),
         "Vec" | "VecDeque" | "HashSet" | "BTreeSet" => format!("{}[]", wrap(&arg(0))),
         "HashMap" | "BTreeMap" => format!("Record<string, {}>", arg(1)),
-        "Option" => format!("{} | null", arg(0)),
+        "Option" => format!("{} | null", wrap(&arg(0))),
         _ => "unknown".into(),
     }
 }
@@ -108,9 +108,15 @@ pub(crate) fn expand(parsed: &Parsed) -> syn::Result<TokenStream> {
                 "an exported component's props come from JS, which can't pass a `View`",
             ));
         }
-        let js = camel(&n.to_string());
+        let js = camel(&syn::ext::IdentExt::unraw(n).to_string());
         let ty = &p.ty;
-        let (value, optional) = if let Some(sig) = crate::callback::signature(ty) {
+        let (inner, read) = match segment(ty) {
+            Some((outer, args)) if outer == "Option" && args.len() == 1 => {
+                (args[0], quote!(optional_callback))
+            }
+            _ => (ty, quote!(callback)),
+        };
+        let (value, optional) = if let Some(sig) = crate::callback::signature(inner) {
             if !matches!(sig.output, syn::ReturnType::Default) {
                 return Err(syn::Error::new(
                     n.span(),
@@ -119,7 +125,7 @@ pub(crate) fn expand(parsed: &Parsed) -> syn::Result<TokenStream> {
             }
             let inputs = &sig.inputs;
             (
-                quote! { ::doxa::ui::__private::callback::<dyn Fn(#(#inputs),*)>(calls, props, #js)? },
+                quote! { ::doxa::ui::__private::#read::<dyn Fn(#(#inputs),*)>(calls, props, #js)? },
                 true,
             )
         } else if p.optional {
@@ -209,6 +215,7 @@ mod tests {
         );
         assert_eq!(ts_of("Rc<str>"), "string");
         assert_eq!(ts_of("Order"), "unknown");
+        assert_eq!(ts_of("Option<Callback<dyn Fn()>>"), "(() => void) | null");
     }
 
     #[test]

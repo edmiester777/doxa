@@ -59,9 +59,8 @@ pub fn check_lock(lock: &str, path: &Path) -> Result<()> {
     }
 }
 
-/// Generate `--target web` bindings for `wasm` into `out_dir` as `app.js` and
-/// `app_bg.wasm`. A wasm to be split or hot-patched keeps its symbols as the linker
-/// wrote them; a hot one also keeps the exports a patch links against.
+/// `--target web` bindings into `out_dir` as `app.js` and `app_bg.wasm`. A split or hot wasm keeps
+/// the linker's symbols; a hot one also the exports a patch links against.
 pub fn generate(wasm: &Path, out_dir: &Path, release: bool, split: bool, hot: bool) -> Result<()> {
     if out_dir.exists() {
         std::fs::remove_dir_all(out_dir).at(out_dir)?;

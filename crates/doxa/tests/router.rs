@@ -87,6 +87,27 @@ fn a_guard_sends_a_navigation_elsewhere_and_shows_it_pending() {
     assert_eq!(dom.text(dom.body()), "orders");
 }
 
+#[test]
+fn a_navigation_overtaking_a_guarded_one_ends_the_pending_state() {
+    let router = Router::new().layout::<Shell>(|r| {
+        r.page::<SignInPage>().layout::<OrdersArea>(|r| {
+            r.guard(async |_| {
+                sleep(Duration::from_secs(1)).await;
+                None
+            })
+            .page::<OrdersPage>()
+        })
+    });
+    let dom = mount(router);
+    navigate(OrdersPage::route());
+    settle();
+    navigate(SignInPage::route());
+    settle();
+    assert_eq!(dom.text(dom.body()), "sign in", "nothing pending");
+    dom.advance(Duration::from_secs(1));
+    assert_eq!(here(), "/sign-in");
+}
+
 /// Shows navigation state above every page.
 #[page("/")]
 fn Shell() -> View {

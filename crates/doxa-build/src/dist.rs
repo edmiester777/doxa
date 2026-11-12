@@ -16,6 +16,23 @@ pub fn hash8(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))[..8].to_owned()
 }
 
+/// Whether `path`, symlinks resolved, lies under one of `roots`.
+pub(crate) fn within(path: &Path, roots: &[&Path]) -> bool {
+    relative(path, roots).is_some()
+}
+
+/// `path` relative to the first of `roots` it lies under, `/`-separated.
+pub(crate) fn relative(path: &Path, roots: &[&Path]) -> Option<String> {
+    let path = path.canonicalize().ok()?;
+    roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .find_map(|r| {
+            let rel = path.strip_prefix(r).ok()?;
+            Some(rel.to_string_lossy().replace('\\', "/"))
+        })
+}
+
 /// `app.js` becomes `app-<hash8>.js`.
 pub fn hashed_name(logical: &str, bytes: &[u8]) -> String {
     let hash = hash8(bytes);
@@ -146,6 +163,9 @@ pub fn compressible(path: &str) -> bool {
         .any(|e| path.ends_with(e))
 }
 
+/// The files [`write()`] adds beside the dist's own.
+pub const GENERATED: [&str; 3] = ["index.html", "manifest.json", "services.json"];
+
 /// Replace `dir` with `dist`, `index.html`, `manifest.json`, `services.json` and `embed.rs`.
 /// `compress` adds the precompressed siblings, reused from that cache dir by content hash.
 pub fn write(dir: &Path, dist: &Dist, index_html: &str, compress: Option<&Path>) -> Result<()> {
@@ -185,13 +205,18 @@ fn compress_all(dir: &Path, cache: &Path, todo: &[(&String, &Vec<u8>)]) -> Resul
         let handles: Vec<_> = (0..workers.min(todo.len()))
             .map(|_| {
                 s.spawn(|| -> Result<()> {
-                    while let Some((rel, bytes)) = todo.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    loop {
+                        let n = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((rel, bytes)) = todo.get(n) else {
+                            break;
+                        };
                         let key = hex::encode(Sha256::digest(bytes));
                         for (ext, f) in [("br", brotli as fn(&[u8]) -> Vec<u8>), ("gz", gzip)] {
                             let cached = cache.join(format!("{key}.{ext}"));
                             if !cached.is_file() {
-                                // Renamed into place, so an interrupted build leaves no partial entry.
-                                let tmp = cache.join(format!("{key}.{ext}.tmp"));
+                                // Unique per file and process, since two may share content.
+                                let pid = std::process::id();
+                                let tmp = cache.join(format!("{key}.{ext}.{pid}-{n}.tmp"));
                                 std::fs::write(&tmp, f(bytes)).at(&tmp)?;
                                 std::fs::rename(&tmp, &cached).at(&cached)?;
                             }
@@ -225,6 +250,24 @@ fn compress_all(dir: &Path, cache: &Path, todo: &[(&String, &Vec<u8>)]) -> Resul
 /// Copy the written dist at `dist_dir` to `out` as a static site: no `embed.rs` or compressed
 /// siblings, and `index.html` again as `404.html` so a static host serves deep links.
 pub fn export(dist_dir: &Path, out: &Path) -> Result<()> {
+    let cwd = std::env::current_dir().at(Path::new("."))?;
+    // The deepest existing ancestor resolved, so a path not made yet compares like one that is.
+    let abs = |p: &Path| {
+        let p = cwd.join(p);
+        p.ancestors()
+            .find_map(|a| Some((a.canonicalize().ok()?, p.strip_prefix(a).ok()?)))
+            .map_or_else(|| p.clone(), |(real, rest)| real.join(rest))
+    };
+    let (here, dist, to) = (abs(&cwd), abs(dist_dir), abs(out));
+    if here.starts_with(&to) || dist.starts_with(&to) || to.starts_with(&dist) {
+        return Err(crate::error::Error::config(
+            format!(
+                "exporting to {} would delete or copy into the project or its build",
+                out.display()
+            ),
+            "export to a directory of its own, like `site`",
+        ));
+    }
     if out.exists() {
         std::fs::remove_dir_all(out).at(out)?;
     }
@@ -475,5 +518,17 @@ mod tests {
         ] {
             assert!(!out.join(&gone).exists(), "{gone}");
         }
+    }
+
+    #[test]
+    fn an_export_over_its_own_build_or_an_ancestor_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let dist = dir.path().join("target/dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        for out in [dir.path().to_owned(), dist.clone(), dist.join("site")] {
+            let error = export(&dist, &out).unwrap_err().to_string();
+            assert!(error.contains("would delete or copy into"), "{error}");
+        }
+        assert!(dist.is_dir());
     }
 }

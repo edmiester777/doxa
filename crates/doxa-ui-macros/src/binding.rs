@@ -138,7 +138,9 @@ fn fn_opts(f: &ForeignItemFn) -> syn::Result<FnOpts> {
         })?;
     }
     Ok(FnOpts {
-        js: name.unwrap_or_else(|| camel(&f.sig.ident.to_string())),
+        js: name.unwrap_or_else(|| {
+            crate::export::camel(&syn::ext::IdentExt::unraw(&f.sig.ident).to_string())
+        }),
         constructor,
     })
 }
@@ -157,22 +159,6 @@ fn type_name(t: &syn::ForeignItemType) -> syn::Result<String> {
         })?;
     }
     Ok(name.unwrap_or_else(|| t.ident.to_string()))
-}
-
-fn camel(name: &str) -> String {
-    let mut out = String::new();
-    let mut up = false;
-    for c in name.chars() {
-        if c == '_' {
-            up = true;
-        } else if up {
-            out.extend(c.to_uppercase());
-            up = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 pub(crate) fn expand(args: Args, block: ItemForeignMod) -> syn::Result<TokenStream> {

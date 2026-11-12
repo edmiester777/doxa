@@ -204,6 +204,7 @@ struct HubState {
     body: Option<Body>,
     reopening: Option<LocalBoxFuture<'static, Reopened>>,
     buffer: Vec<u8>,
+    scanned: usize,
     last_id: Option<String>,
     backoff: Option<(Backoff, Duration)>,
     done: bool,
@@ -220,6 +221,7 @@ impl Hub {
                 body: Some(body),
                 reopening: None,
                 buffer: Vec::new(),
+                scanned: 0,
                 last_id: None,
                 backoff: None,
                 done: false,
@@ -284,6 +286,7 @@ impl Hub {
                 Ok(resp) if resp.status < 400 => {
                     s.body = Some(resp.body);
                     s.buffer.clear();
+                    s.scanned = 0;
                     if let Some((policy, delay)) = s.backoff.as_mut() {
                         *delay = policy.initial;
                     }
@@ -318,11 +321,24 @@ impl Hub {
         match chunk {
             Some(Ok(bytes)) => {
                 s.buffer.extend_from_slice(&bytes);
-                while let Some(frame) = take_frame(&mut s.buffer) {
+                let HubState {
+                    buffer, scanned, ..
+                } = &mut *s;
+                let mut frames = Vec::new();
+                while let Some(frame) = take_frame(buffer, scanned) {
+                    frames.push(frame);
+                }
+                for frame in frames {
                     if let Some(id) = &frame.id {
                         s.last_id = Some(id.clone());
                     }
                     broadcast(&mut s, Item::Frame(Rc::new(frame)));
+                }
+                if s.buffer.len() > MAX_FRAME {
+                    let error = format!("an event ran past {MAX_FRAME} bytes");
+                    broadcast(&mut s, Item::Failed(Fetch::Stream(error)));
+                    s.body = None;
+                    s.done = true;
                 }
             }
             Some(Err(e)) if s.backoff.is_none() => {
@@ -374,14 +390,23 @@ fn broadcast(s: &mut HubState, item: Item) {
     });
 }
 
-fn take_frame(buffer: &mut Vec<u8>) -> Option<Frame> {
-    let (end, skip) = find_boundary(buffer)?;
+/// The longest event the stream buffers before giving up on it.
+const MAX_FRAME: usize = 1 << 20;
+
+/// The next whole frame; `scanned` is how far `buffer` is known to hold no boundary.
+fn take_frame(buffer: &mut Vec<u8>, scanned: &mut usize) -> Option<Frame> {
+    // A boundary is up to 4 bytes, so one may straddle the last scan's end.
+    let Some((end, skip)) = find_boundary(buffer, scanned.saturating_sub(3)) else {
+        *scanned = buffer.len();
+        return None;
+    };
+    *scanned = 0;
     let raw: Vec<u8> = buffer.drain(..end + skip).take(end).collect();
     Some(Frame::parse(&String::from_utf8_lossy(&raw)))
 }
 
-fn find_boundary(buf: &[u8]) -> Option<(usize, usize)> {
-    (0..buf.len()).find_map(|i| {
+fn find_boundary(buf: &[u8], from: usize) -> Option<(usize, usize)> {
+    (from..buf.len()).find_map(|i| {
         if buf[i..].starts_with(b"\r\n\r\n") {
             Some((i, 4))
         } else if buf[i..].starts_with(b"\n\n") {
@@ -454,6 +479,26 @@ mod tests {
 
     fn stream(raw: &str) -> EventStream<Ev> {
         EventStream::subscribe(hub(raw, MockTransport::new()))
+    }
+
+    #[test]
+    fn a_boundary_split_across_chunks_is_found_without_rescanning() {
+        let (mut buffer, mut scanned) = (b"data: a\r\n".to_vec(), 0);
+        assert!(take_frame(&mut buffer, &mut scanned).is_none());
+        assert_eq!(scanned, buffer.len());
+        buffer.extend_from_slice(b"\r\ndata: b");
+        let frame = take_frame(&mut buffer, &mut scanned).unwrap();
+        assert_eq!(frame.data, "a");
+        assert_eq!((buffer.as_slice(), scanned), (&b"data: b"[..], 0));
+    }
+
+    #[test]
+    fn an_event_that_never_ends_fails_the_stream() {
+        let raw = format!("data: {}", "x".repeat(MAX_FRAME + 1));
+        let mut s = stream(&raw);
+        crate::task::block_on(async {
+            assert!(matches!(s.next().await, Err(Fetch::Stream(_))));
+        });
     }
 
     #[test]

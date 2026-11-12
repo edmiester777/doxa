@@ -59,6 +59,7 @@ impl Element {
     pub fn spread(mut self, rest: Attrs) -> Self {
         for (name, value) in rest.attrs {
             if !self.attrs.iter().any(|(n, _)| *n == name) {
+                let value = self.checked(name, value);
                 self.attrs.push((name, value));
             }
         }
@@ -134,6 +135,7 @@ macro_rules! html_attrs {
 html_attrs!(
     accept => "accept", alt => "alt", autocomplete => "autocomplete", autofocus => "autofocus",
     checked => "checked", class => "class", dir => "dir", disabled => "disabled",
+    download => "download",
     draggable => "draggable", r#for => "for", form => "form", height => "height",
     hidden => "hidden", id => "id", inert => "inert", lang => "lang",
     max => "max", min => "min", multiple => "multiple", name => "name",

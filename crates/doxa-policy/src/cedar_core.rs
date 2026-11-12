@@ -30,31 +30,8 @@ use crate::uid::{action_uid, principal_uid};
 // Cached store: pre-parsed Cedar artifacts loaded from a PolicyStore
 // ---------------------------------------------------------------------------
 
-/// Pre-parsed Cedar artifacts loaded from a
-/// [`PolicyStore`](crate::store::PolicyStore) for a single tenant.
-///
-/// The [`policy_set`](CedarStore::policy_set) contains only policies belonging
-/// to this tenant. The [`resources`](CedarStore::resources) map enumerates the
-/// tenant's resources grouped by Cedar entity type, driving the per-session
-/// evaluation loop.
-///
-/// ## Why the entities are held twice
-///
-/// [`entities`](CedarStore::entities) is the tenant's entity set already
-/// parsed. Every check has to add a synthetic principal — and an instance
-/// check its resource — so the set an evaluation runs against is never
-/// exactly this one; but Cedar holds its entities behind [`Arc`], so
-/// cloning this and adding two is a hash-map copy and a refcount bump per
-/// entity, where re-parsing is a JSON deserialize plus an expression parse
-/// per attribute. Building it once per tenant rather than once per check is
-/// the difference between a lookup and a load.
-///
-/// [`entity_jsons`](CedarStore::entity_jsons) is kept for the one case that
-/// cannot use the parsed set: a consumer that persists an entity for a
-/// resource it *also* loads live has two entries for one UID, which Cedar
-/// refuses. Folding them together is a merge of the raw JSON, so that path
-/// still parses from scratch — and [`stored_uids`](CedarStore::stored_uids)
-/// is what tells the two apart without a scan.
+/// One tenant's pre-parsed Cedar artifacts. `entities` is cloned per check; `entity_jsons`
+/// is kept for merging a live entity whose UID is also stored (see `stored_uids`).
 pub(crate) struct CedarStore {
     pub(crate) policy_set: PolicySet,
     pub(crate) entity_jsons: Vec<Value>,
@@ -67,57 +44,18 @@ pub(crate) struct CedarStore {
 pub const DEFAULT_TENANT_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Default number of tenants held at once.
-///
-/// Generous enough that a typical deployment never reaches it, and a
-/// ceiling either way: a tenant's artifacts are held by the cache, so an
-/// unbounded one grows with every tenant the process has ever served
-/// rather than with the ones it is serving.
 pub const DEFAULT_TENANT_CACHE_CAPACITY: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Tenant store cache — shareable between CedarPolicy and PolicyRouter
 // ---------------------------------------------------------------------------
 
-/// Shareable cache of per-tenant Cedar artifacts, bounded by both age and
-/// count.
-///
-/// Construct via [`TenantStoreCache::with_ttl`],
-/// [`with_capacity_and_ttl`](TenantStoreCache::with_capacity_and_ttl), or
-/// [`Default`] for [`DEFAULT_TENANT_CACHE_TTL`] and
-/// [`DEFAULT_TENANT_CACHE_CAPACITY`]. Cheap to clone — the inner state is
-/// an [`Arc`], so a single cache can be shared across both
-/// [`CedarPolicy`](crate::policy::cedar::CedarPolicy) and
-/// [`PolicyRouter`](crate::router::PolicyRouter) to avoid double-loading
-/// the same tenant through two different entry points.
-///
-/// Misses load through the supplied [`SharedPolicyStore`]; only successful
-/// loads are cached so transient store errors are retried on the next
-/// request.
-///
-/// ## What the bound is for
-///
-/// Expiry alone does not reclaim anything: nothing sweeps, so an entry is
-/// only dropped when its key is next touched. A tenant seen once and
-/// never again would be held for the life of the process. The count bound
-/// evicts least-recently-used entries, so memory tracks the working set.
-///
-/// [`len`](Self::len) against [`capacity`](Self::capacity) is how you tell
-/// whether the bound is biting — a cache pinned at capacity is evicting
-/// tenants it is about to be asked for again, and wants raising.
-///
-/// ## One load per tenant
-///
-/// Concurrent misses for the same tenant wait for the first rather than
-/// each running their own. A load is three round-trips to the store, so
-/// without this a TTL expiry under load costs a burst of identical
-/// queries — worst exactly when the process is busiest. Different tenants
-/// still load concurrently.
+/// Per-tenant Cedar artifacts, LRU-bounded by count (expiry alone never sweeps) and by age.
+/// Concurrent misses for one tenant share a load; failed loads aren't cached.
 #[derive(Clone)]
 pub struct TenantStoreCache {
     inner: Arc<Mutex<TimedSizedCache<String, Arc<CedarStore>>>>,
-    /// One gate per tenant currently being loaded, dropped as soon as
-    /// nobody is waiting on it — so this tracks concurrent misses, not
-    /// tenants.
+    /// One gate per tenant mid-load, dropped once nobody waits on it.
     loading: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     ttl: Duration,
     capacity: usize,
@@ -129,12 +67,7 @@ impl TenantStoreCache {
         Self::with_capacity_and_ttl(DEFAULT_TENANT_CACHE_CAPACITY, ttl)
     }
 
-    /// Build a cache holding at most `capacity` tenants, each for `ttl`.
-    ///
-    /// # Panics
-    ///
-    /// If `capacity` is zero. A cache that can hold nothing would reload
-    /// the tenant on every request, which is never what was meant.
+    /// Build a cache holding at most `capacity` tenants, each for `ttl`. Panics on zero.
     pub fn with_capacity_and_ttl(capacity: usize, ttl: Duration) -> Self {
         assert!(
             capacity > 0,
@@ -181,9 +114,7 @@ impl TenantStoreCache {
         self.inner.lock().await.cache_remove(&tenant_id.to_string());
     }
 
-    /// A live entry, if there is one. Never holds the lock across an
-    /// await — a single mutex in front of every policy check must not be
-    /// held over I/O.
+    /// A live entry, if there is one; never holds the lock across I/O.
     async fn get(&self, tenant_id: &str) -> Option<Arc<CedarStore>> {
         self.inner
             .lock()
@@ -237,12 +168,8 @@ impl TenantStoreCache {
         result
     }
 
-    /// Drop a tenant's gate once nobody else holds it, so the map tracks
-    /// in-flight loads rather than growing with every tenant ever seen.
-    ///
-    /// The count is only meaningful under the lock, which is also the
-    /// only place a new reference can be taken: two means the map's and
-    /// ours, so no waiter is left to hand it to.
+    /// Drop a tenant's gate once only the map and we hold it; counted under the lock, the
+    /// only place a new reference can be taken.
     async fn retire(&self, gate: &Arc<Mutex<()>>, tenant_id: &str) {
         let mut loading = self.loading.lock().await;
         if Arc::strong_count(gate) <= 2 {
@@ -270,10 +197,7 @@ pub(crate) async fn load_tenant_store(
     let entity_jsons = store.load_entity_jsons(tenant_id).await?;
     let resources = store.list_resources(tenant_id).await?;
 
-    // Parsed here rather than per check. `.partial()` so an absent entity
-    // dereferences to a residual — see the note in `new_with_resources`,
-    // which re-applies it after adding, so the property does not depend on
-    // `add_entities` preserving the mode.
+    // `.partial()` so an absent entity dereferences to a residual.
     let entities = Entities::from_json_value(Value::Array(entity_jsons.clone()), None)
         .map_err(|e| AuthError::PolicyFailed(format!("entity parse error: {e}")))?
         .partial();
@@ -332,11 +256,6 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
     }
 
     /// Build an evaluator with one ad-hoc resource entity in scope.
-    ///
-    /// The entity's UID is resolved through
-    /// [`build_resource_uid`](PolicyExtension::build_resource_uid) — the
-    /// same call the check itself makes — so the attributes land on
-    /// exactly the UID the policy is evaluated against.
     pub(crate) fn new_with_resource(
         store: &'a CedarStore,
         tenant_id: &str,
@@ -348,13 +267,7 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
         Self::new_with_resources(store, tenant_id, roles, extension, &resources)
     }
 
-    /// Build an evaluator with several ad-hoc resource entities in scope.
-    ///
-    /// One entity set serves every one of them: a request naming twenty
-    /// objects asks twenty questions of the *same* hierarchy, and building
-    /// it per question is the cost that made a body-named reference
-    /// expensive. Each check still names its own resource UID, so what the
-    /// caller gets back is one decision per resource, not one for the set.
+    /// Build an evaluator with several ad-hoc resource entities in one shared entity set.
     pub(crate) fn new_with_resources(
         store: &'a CedarStore,
         tenant_id: &str,
@@ -378,14 +291,7 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
             .map(|resource| resource_entity_json(extension, tenant_id, resource))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Cedar refuses two entries for one UID, so a UID that appears
-        // twice has to be folded into one entry rather than added beside
-        // itself — and folding is a merge of the raw JSON. Two sources of a
-        // collision, and both have to be caught: the store already persists
-        // an entity for a resource being injected live, or the caller named
-        // one object twice, which a request body does whenever two names
-        // resolve to one row. That is the only case that re-parses;
-        // everything else clones the set the tenant load already parsed.
+        // A UID that's stored, or named twice, must be merged as raw JSON; only that re-parses.
         let mut seen: HashSet<String> = HashSet::with_capacity(injected.len());
         let overlaps = injected.iter().any(|entity| {
             entity_uid_of(entity).is_ok_and(|uid| {
@@ -394,14 +300,8 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
             })
         });
 
-        // `.partial()` makes an absent resource entity dereference to a Cedar
-        // residual instead of erroring, so a `when { resource.<field> == … }`
-        // clause survives partial evaluation as a residual the consumer can
-        // translate into a row filter. Without it the residual branch of
-        // `evaluate_resource` is unreachable — a missing entity errors and the
-        // policy is dropped, collapsing every conditional grant to a denial.
-        // Applied here rather than relied on from the cached set, so the
-        // property holds however the set was assembled.
+        // `.partial()` turns an absent entity's attribute into a residual (a row filter) rather
+        // than an error that drops the policy. Reapplied here whatever the cached set's mode.
         let entities = if overlaps {
             let mut all_entities = store.entity_jsons.clone();
             all_entities.push(user_entity_json);
@@ -467,26 +367,8 @@ impl<'a, E: PolicyExtension> CedarEvaluator<'a, E> {
                 Ok(ResourceAccess::Allowed(merged))
             }
             None => {
-                // Cedar answers `None` for two different reasons and only
-                // one of them is a grant waiting on a condition. A `forbid`
-                // whose `when` clause could not be finished lands here too
-                // — no verdict is possible while a denial is still open —
-                // and `nontrivial_residuals` hands permits and forbids back
-                // in one undifferentiated stream, so the effect has to be
-                // read off each policy.
-                //
-                // A forbid's condition is not a filter. Translated as one it
-                // is the precise inverse of what was written: the rows the
-                // policy excluded become the rows the caller is served, and
-                // the resource joins the session besides. Negating it is no
-                // better — `region != "EU"` is not the complement of
-                // `region == "EU"` once the column is nullable, and a forbid
-                // the consumer cannot translate has no safe filter at all.
-                //
-                // So the resource is refused, which is what everything else
-                // this path cannot express already gets. Narrower than
-                // Cedar's own "cannot say", and narrow is the direction to
-                // be wrong in.
+                // An unfinished `forbid` also lands here. Its condition is no filter (as one it
+                // serves exactly the excluded rows), so the resource is refused.
                 let residuals: Vec<_> = response.nontrivial_residuals().collect();
                 if residuals
                     .iter()
@@ -623,14 +505,7 @@ fn extract_condition_body(policy: &cedar_policy::Policy) -> Result<Option<Value>
 // Role helpers
 // ---------------------------------------------------------------------------
 
-/// Build Cedar parent entity references for the user's roles, delegating UID
-/// construction to the extension so consumers can choose their own role
-/// hierarchy (per-tenant prefixed, flat namespace, etc.).
-/// Render a [`ResourceEntity`] as Cedar entity JSON.
-///
-/// UIDs round-trip through [`EntityUid::to_json_value`] rather than
-/// being rebuilt from `(type, id)` strings, so a namespaced type or an
-/// id the extension rewrote still names the entity the check queries.
+/// A [`ResourceEntity`] as Cedar entity JSON, its UIDs built by the extension.
 fn resource_entity_json<E: PolicyExtension>(
     extension: &E,
     tenant_id: &str,
@@ -656,13 +531,7 @@ fn resource_entity_json<E: PolicyExtension>(
     }))
 }
 
-/// Add `injected` to `entities`, folding it into any stored entity that
-/// already claims the same UID.
-///
-/// Cedar rejects two entries for one UID, so a consumer that persists an
-/// entity for a resource it also loads live would otherwise get a policy
-/// error instead of a decision. Live attributes win; parents are unioned
-/// so the stored hierarchy (tenant membership, groups) still applies.
+/// Add `injected`, folding it into a stored entity with the same UID, which Cedar would reject.
 fn merge_resource_entity(entities: &mut Vec<Value>, injected: Value) -> Result<(), AuthError> {
     let uid = entity_uid_of(&injected)?;
     let stored = entities
@@ -685,9 +554,7 @@ fn entity_uid_of(entity: &Value) -> Result<cedar_policy::EntityUid, AuthError> {
         .map_err(|e| AuthError::PolicyFailed(format!("entity uid parse error: {e}")))
 }
 
-/// Overlay `injected` onto `stored`: attributes are merged key-wise with
-/// `injected` winning, parents are concatenated (Cedar collects them into
-/// a set, so repeats collapse).
+/// Overlay `injected` onto `stored`: its attributes win, and parents are unioned.
 fn merge_entity_json(stored: &Value, injected: &Value) -> Value {
     let object = |v: &Value, key: &str| {
         v.get(key)
@@ -715,6 +582,7 @@ fn merge_entity_json(stored: &Value, injected: &Value) -> Value {
     })
 }
 
+/// Cedar parent references for the user's roles, with UIDs built by the extension.
 fn build_role_parents<E: PolicyExtension>(
     extension: &E,
     tenant_id: &str,
@@ -861,9 +729,6 @@ mod cache_tests {
         assert_eq!(store.loads(), 2);
     }
 
-    /// A load is three round-trips to the store. Without the gate, a TTL
-    /// expiry under load costs one burst of those per concurrent
-    /// request — worst exactly when the process is busiest.
     #[tokio::test]
     async fn concurrent_misses_load_once() {
         let store = CountingStore::slow(Duration::from_millis(50));
@@ -913,9 +778,6 @@ mod cache_tests {
         );
     }
 
-    /// The gate map tracks in-flight loads. If it were keyed by tenant
-    /// for the life of the process it would be the unbounded growth the
-    /// capacity bound exists to prevent, moved one map across.
     #[tokio::test]
     async fn the_gate_map_does_not_grow_with_tenants() {
         let store = CountingStore::new();
@@ -979,12 +841,7 @@ mod residual_effect_tests {
     use crate::store::PolicyStore;
     use crate::uid::build_uid;
 
-    /// One widget the tenant declares, and no entity for it.
-    ///
-    /// Withholding the entity is what leaves `resource.region` unknown, and
-    /// an unknown is what turns a `when` clause into a residual — the shape
-    /// the whole filter path is built on, and the only shape in which a
-    /// `forbid` can survive evaluation undecided.
+    /// One widget with no entity, so `resource.region` is unknown and a `when` leaves a residual.
     struct OneWidget(&'static str);
 
     #[async_trait]
@@ -1076,9 +933,6 @@ mod residual_effect_tests {
             .expect("evaluates")
     }
 
-    /// The baseline: a `permit` whose condition could not be finished is a
-    /// conditional grant, and the resource joins the session so its
-    /// condition can become a filter.
     #[tokio::test]
     async fn a_residual_permit_is_a_conditional_grant() {
         let verdicts = verdicts(
@@ -1090,12 +944,7 @@ mod residual_effect_tests {
         assert_eq!(verdicts, [("w-1".to_owned(), true)]);
     }
 
-    /// The one this exists for. A `forbid` leaves a residual by the same
-    /// mechanism, and Cedar reports no decision because the denial is still
-    /// open — the same `None` a conditional grant produces. Read as a grant
-    /// its condition is the exact inverse of what was written: the caller
-    /// would be served precisely the rows the policy excluded, and the
-    /// resource would be added to the session besides.
+    /// Read as a grant, a residual `forbid` would serve exactly the rows it excludes.
     #[tokio::test]
     async fn a_residual_forbid_refuses_rather_than_becoming_a_grant() {
         let verdicts = verdicts(
@@ -1112,9 +961,6 @@ mod residual_effect_tests {
         );
     }
 
-    /// `unless` is the same policy written the other way round, and Cedar
-    /// desugars it to `when { !… }` — so it has to reach the same answer
-    /// rather than slipping past a check that only knew one spelling.
     #[tokio::test]
     async fn an_unless_clause_on_a_forbid_refuses_too() {
         let verdicts = verdicts(
@@ -1127,9 +973,6 @@ mod residual_effect_tests {
         assert_eq!(verdicts, [("w-1".to_owned(), false)]);
     }
 
-    /// And the refusal is confined to the resource the forbid could apply
-    /// to: a `forbid` whose *scope* rules it out never becomes a residual,
-    /// so it cannot deny a grant it was never about.
     #[tokio::test]
     async fn a_forbid_scoped_to_another_resource_leaves_the_grant_alone() {
         let verdicts = verdicts(

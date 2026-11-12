@@ -90,7 +90,7 @@ layers().push(bearer(|| session::token()));          // every crate's requests
 shop_api::service().layers().push(cookies());         // one crate's requests
 ```
 
-Across origins, add `.layer(doxa::Cors::allow([app_origin]))` to the server (feature `cors`). Or stay same-origin and forward a prefix with `.merge(doxa::proxy("/orders", orders_url))` (feature `proxy`).
+Across origins, add `.layer(doxa::Cors::allow([app_origin]).routes(&api))` to the server (feature `cors`), where `api` comes from `doxa::app(&state).split_for_parts()` and its header parameters are allowed too. Or stay same-origin and forward a prefix with `.merge(doxa::proxy("/orders", orders_url))` (feature `proxy`).
 
 ## Other ways to share routes
 

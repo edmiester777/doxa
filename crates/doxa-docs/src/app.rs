@@ -225,11 +225,8 @@ fn within(module: &str, service: &str) -> bool {
             .is_some_and(|rest| rest.starts_with("::"))
 }
 
-/// Every mounted handler under `state`, each wrapped in its service's layers.
-///
-/// Panics, naming each problem, on a handler under no service, two services in one module, a
-/// schema name two types claim, a route of doxa's own with no one service at a crate root to
-/// join, or a state the handlers weren't written for.
+/// Every mounted handler under `state`, in its service's layers. Panics, naming each problem, on
+/// a misplaced handler or service, a schema name two types claim, or the wrong state.
 pub fn app<S: Any>(state: &S) -> Routes {
     let plan = Plan::new();
     let mut app = Routes::default();

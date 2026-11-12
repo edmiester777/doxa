@@ -94,6 +94,117 @@ pub use doxa_macros::{
 #[doc(hidden)]
 pub mod mirror_diagnostics {}
 
+/// A granted route has a parameter for every field of its asset's key:
+///
+/// ```
+/// # use doxa::auth::{CapabilityContext, FromState, Granted, Granting};
+/// # use doxa::{get, Actions, PolicyResource, ToSchema};
+/// # #[derive(Clone, serde::Serialize, ToSchema, PolicyResource)]
+/// # #[resource(entity_type = "Filed")]
+/// # struct Filed { #[resource(id)] id: String }
+/// # doxa::auth::route_key!(pub FiledKey { fid: String, id: u32 });
+/// # #[derive(Actions)]
+/// # #[actions(resource = "Filed")]
+/// # pub enum FiledActions { #[action(verb = get, instance_only)] Read }
+/// # impl Granting for Filed {
+/// #     type Row = Self; type Key = FiledKey; type Ctx = CapabilityContext; type State = ();
+/// #     type Source = FromState<()>; type Error = axum::http::StatusCode; type Actions = FiledActions;
+/// #     async fn load(k: FiledKey, _: &(), _: &CapabilityContext) -> Result<Option<Self>, Self::Error> {
+/// #         Ok(Some(Filed { id: format!("{}/{}", k.fid, k.id) }))
+/// #     }
+/// # }
+/// #[get("/folders/{fid}/filed/{id}", mount = false)]
+/// async fn filed(filed: Granted<Filed>) -> String { filed.into_inner().id }
+/// # fn main() {}
+/// ```
+///
+/// A route spelling one differently is refused: "this route's path parameters (folder, id) do not include the ones this asset's key is named after":
+///
+/// ```compile_fail
+/// # use doxa::auth::{CapabilityContext, FromState, Granted, Granting};
+/// # use doxa::{get, Actions, PolicyResource, ToSchema};
+/// # #[derive(Clone, serde::Serialize, ToSchema, PolicyResource)]
+/// # #[resource(entity_type = "Filed")]
+/// # struct Filed { #[resource(id)] id: String }
+/// # doxa::auth::route_key!(pub FiledKey { fid: String, id: u32 });
+/// # #[derive(Actions)]
+/// # #[actions(resource = "Filed")]
+/// # pub enum FiledActions { #[action(verb = get, instance_only)] Read }
+/// # impl Granting for Filed {
+/// #     type Row = Self; type Key = FiledKey; type Ctx = CapabilityContext; type State = ();
+/// #     type Source = FromState<()>; type Error = axum::http::StatusCode; type Actions = FiledActions;
+/// #     async fn load(k: FiledKey, _: &(), _: &CapabilityContext) -> Result<Option<Self>, Self::Error> {
+/// #         Ok(Some(Filed { id: format!("{}/{}", k.fid, k.id) }))
+/// #     }
+/// # }
+/// #[get("/folders/{folder}/filed/{id}", mount = false)]
+/// async fn filed(filed: Granted<Filed>) -> String { filed.into_inner().id }
+/// # fn main() {}
+/// ```
+///
+/// Listing an asset whose scope is only the tenant takes an action with a capability:
+///
+/// ```
+/// # use doxa::auth::{CapabilityContext, FromState, Granted, Granting, Many, Scoping};
+/// # use doxa::policy::AuthError;
+/// # use doxa::{get, Actions, PolicyResource, ToSchema};
+/// # #[derive(Clone, serde::Serialize, ToSchema, PolicyResource)]
+/// # #[resource(entity_type = "Note")]
+/// # struct Note { #[resource(id)] id: String }
+/// # doxa::auth::route_key!(pub NoteKey { id: String });
+/// # #[derive(Actions)]
+/// # #[actions(resource = "Note", prefix = "notes")]
+/// # pub enum NoteAction { #[action(verb = get)] List, #[action(verb = post, instance_only)] Peek }
+/// # impl Granting for Note {
+/// #     type Row = Self; type Key = NoteKey; type Ctx = CapabilityContext; type State = ();
+/// #     type Source = FromState<()>; type Error = axum::http::StatusCode; type Actions = NoteAction;
+/// #     async fn load(k: NoteKey, _: &(), _: &CapabilityContext) -> Result<Option<Self>, Self::Error> {
+/// #         Ok(Some(Note { id: k.id }))
+/// #     }
+/// # }
+/// # impl Scoping for Note {
+/// #     type Filter = ();
+/// #     const FROM_POLICY: bool = false;
+/// #     fn scope(_: &str, _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(())) }
+/// # }
+/// #[get("/notes", mount = false)]
+/// async fn notes(_: Granted<Many<Note, note_action::List>>) {}
+/// # fn main() { let _ = doxa::OpenApiRouter::<()>::new().routes(doxa::routes!(notes)); }
+/// ```
+///
+/// one without is "listing an asset whose scope is only the tenant needs an action with a capability":
+///
+/// ```compile_fail
+/// # use doxa::auth::{CapabilityContext, FromState, Granted, Granting, Many, Scoping};
+/// # use doxa::policy::AuthError;
+/// # use doxa::{get, Actions, PolicyResource, ToSchema};
+/// # #[derive(Clone, serde::Serialize, ToSchema, PolicyResource)]
+/// # #[resource(entity_type = "Note")]
+/// # struct Note { #[resource(id)] id: String }
+/// # doxa::auth::route_key!(pub NoteKey { id: String });
+/// # #[derive(Actions)]
+/// # #[actions(resource = "Note", prefix = "notes")]
+/// # pub enum NoteAction { #[action(verb = get)] List, #[action(verb = post, instance_only)] Peek }
+/// # impl Granting for Note {
+/// #     type Row = Self; type Key = NoteKey; type Ctx = CapabilityContext; type State = ();
+/// #     type Source = FromState<()>; type Error = axum::http::StatusCode; type Actions = NoteAction;
+/// #     async fn load(k: NoteKey, _: &(), _: &CapabilityContext) -> Result<Option<Self>, Self::Error> {
+/// #         Ok(Some(Note { id: k.id }))
+/// #     }
+/// # }
+/// # impl Scoping for Note {
+/// #     type Filter = ();
+/// #     const FROM_POLICY: bool = false;
+/// #     fn scope(_: &str, _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(())) }
+/// # }
+/// #[get("/notes", mount = false)]
+/// async fn notes(_: Granted<Many<Note, note_action::Peek>>) {}
+/// # fn main() { let _ = doxa::OpenApiRouter::<()>::new().routes(doxa::routes!(notes)); }
+/// ```
+#[cfg(all(feature = "auth", feature = "macros", not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub mod grant_diagnostics {}
+
 #[doc(hidden)]
 pub use serde as __serde;
 
@@ -275,6 +386,32 @@ pub use doxa_ui::start;
 /// #[component]
 /// fn Chip(children: View, #[attrs] rest: Attrs) -> View { view! { <span {..rest}>{children}</span> } }
 /// let _ = view! { <Chip title="t" href="javascript:alert(1)">"x"</Chip> };
+/// ```
+///
+/// A URL attribute in any case takes a [`SafeUrl`](crate::ui::SafeUrl), not a `String`:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// let to = SafeUrl::parse("/a").unwrap();
+/// let _ = view! { <a HREF={to}>"x"</a> };
+/// ```
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// let to = String::from("/a");
+/// let _ = view! { <a HREF={to}>"x"</a> };
+/// ```
+///
+/// An event is `on:click`; an `onclick` string is "runs a string as script":
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// let _ = view! { <button on:click={|_| ()}>"x"</button> };
+/// ```
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// let _ = view! { <button onclick="go()">"x"</button> };
 /// ```
 ///
 /// A page compiles:
@@ -496,6 +633,17 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
+/// A dotted path of plain names is any field's `rename`:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/markdown.tsx", export = "Markdown")]
+/// pub struct Markdown {
+///     #[react(rename = "components.code")]
+///     pub code: String,
+/// }
+/// ```
+///
 /// and an empty path segment is "`rename` is a prop name, or a dotted path like `components.code`":
 ///
 /// ```compile_fail
@@ -507,7 +655,17 @@ pub mod ui_diagnostics {}
 /// }
 /// ```
 ///
-/// An npm module this crate doesn't declare is rejected; the local module above compiles:
+/// A module beside the crate needs no declaration:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[react(module = "./ts/monaco.tsx", export = "default")]
+/// pub struct Monaco {
+///     pub value: String,
+/// }
+/// ```
+///
+/// An npm module this crate doesn't declare is rejected:
 ///
 /// ```compile_fail
 /// use doxa::ui::prelude::*;
@@ -645,7 +803,17 @@ pub mod directive_diagnostics {}
 /// let _ = view! { <Row on_move={|id, by| drop(id.count_ones() + by.count_ones())} load={async |n| n.to_string()}/> };
 /// ```
 ///
-/// A prop can be called many times, so anything else is "not `impl FnOnce`":
+/// A prop can be called many times:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(on_move: impl Fn(u32)) -> View {
+///     View::empty()
+/// }
+/// ```
+///
+/// so anything else is "not `impl FnOnce`":
 ///
 /// ```compile_fail
 /// use doxa::ui::prelude::*;
@@ -655,7 +823,17 @@ pub mod directive_diagnostics {}
 /// }
 /// ```
 ///
-/// An async prop's future outlives its call, so it can't borrow its arguments:
+/// An async prop's future outlives its call, so it takes its arguments owned:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[component]
+/// fn Row(load: impl AsyncFn(String) -> String) -> View {
+///     View::empty()
+/// }
+/// ```
+///
+/// and can't borrow them:
 ///
 /// ```compile_fail
 /// use doxa::ui::prelude::*;

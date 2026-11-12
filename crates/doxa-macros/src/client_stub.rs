@@ -6,9 +6,10 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
-use syn::{FnArg, GenericArgument, ItemFn, LitStr, Pat, PathArguments, ReturnType, Type, TypePath};
+use syn::{FnArg, ItemFn, LitStr, Pat, PathArguments, ReturnType, Type};
 
 use crate::grant;
+use crate::ty::{first_type_arg, last_ident, type_args};
 
 /// Extractors the browser never sends: the server reads them off its own state.
 const SERVER_ONLY: &[&str] = &[
@@ -243,8 +244,6 @@ pub fn server_meta(
                 let key: ::doxa::__private::serde_json::Value = #key;
                 let identity: ::doxa::__private::serde_json::Value = #identity;
                 let error: ::core::option::Option<::std::string::String> = #error;
-                #[allow(unused_imports)]
-                use ::doxa::__private::{EntityKnown as _, EntityUnknown as _};
                 let found: &[::core::option::Option<&'static str>] = &[#(#entities),*];
                 let mut entities: ::std::vec::Vec<&str> = ::std::vec::Vec::new();
                 for e in found.iter().flatten().copied() {
@@ -588,43 +587,6 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-fn last_ident(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Path(TypePath { path, .. }) => path.segments.last().map(|s| s.ident.to_string()),
-        _ => None,
-    }
-}
-
-fn first_type_arg(ty: &Type) -> Option<&Type> {
-    let Type::Path(TypePath { path, .. }) = ty else {
-        return None;
-    };
-    let PathArguments::AngleBracketed(args) = &path.segments.last()?.arguments else {
-        return None;
-    };
-    args.args.iter().find_map(|a| match a {
-        GenericArgument::Type(t) => Some(t),
-        _ => None,
-    })
-}
-
-fn type_args(ty: &Type) -> Vec<&Type> {
-    let Type::Path(TypePath { path, .. }) = ty else {
-        return Vec::new();
-    };
-    let Some(PathArguments::AngleBracketed(args)) = path.segments.last().map(|s| &s.arguments)
-    else {
-        return Vec::new();
-    };
-    args.args
-        .iter()
-        .filter_map(|a| match a {
-            GenericArgument::Type(t) => Some(t),
-            _ => None,
-        })
-        .collect()
-}
-
 /// A binding name for the stub parameter: the pattern's own, or the one inside `Json(x)`.
 fn binding(pat: &Pat, index: usize) -> syn::Ident {
     match pat {
@@ -753,9 +715,8 @@ const UNDECODABLE: &[&str] = &[
     "HeaderMap",
 ];
 
-/// The handler's return type, with every wrapper named under `::doxa::client`. `bad` gets
-/// the first part the browser can't decode, `unread` the first name doxa doesn't know. A
-/// stream from a route that isn't a GET (`once`) is sent once and never reopened.
+/// The return type under `::doxa::client`; `bad` and `unread` get the first undecodable part and
+/// unknown name. A non-GET stream (`once`) is never reopened.
 fn response_type<'a>(
     ty: &'a Type,
     once: bool,

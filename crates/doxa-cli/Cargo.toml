@@ -41,3 +41,4 @@ tikv-jemallocator = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
+tower = { workspace = true, features = ["util"] }

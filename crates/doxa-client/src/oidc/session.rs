@@ -92,6 +92,17 @@ impl<C> Tokens<C> {
     }
 }
 
+/// The `sub` claim of an ID token, unverified.
+pub(crate) fn subject(id_token: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Sub {
+        sub: String,
+    }
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = pkce::decode(payload)?;
+    serde_json::from_slice::<Sub>(&bytes).ok().map(|s| s.sub)
+}
+
 /// A token endpoint's answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TokenResponse {

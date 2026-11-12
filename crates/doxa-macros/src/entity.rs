@@ -8,7 +8,9 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let mut key: Option<Type> = None;
     let mut name: Option<LitStr> = None;
     let mut actions: Option<Type> = None;
+    let mut seen = std::collections::HashSet::new();
     let parser = syn::meta::parser(|meta| {
+        crate::given_once(&mut seen, &meta)?;
         if meta.path.is_ident("key") {
             key = Some(meta.value()?.parse()?);
         } else if meta.path.is_ident("name") {

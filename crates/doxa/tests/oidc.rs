@@ -32,6 +32,8 @@ struct Issuer {
     nonce: Option<String>,
     refreshes: u32,
     refuse_refresh: bool,
+    /// The subject a refresh answers for, when not the default `ada`.
+    refresh_sub: Option<String>,
 }
 
 type Shared = Arc<Mutex<Issuer>>;
@@ -48,8 +50,8 @@ fn b64(bytes: &[u8]) -> String {
     out
 }
 
-fn id_token(nonce: Option<&str>) -> String {
-    let claims = json!({ "name": "Ada", "nonce": nonce });
+fn id_token(nonce: Option<&str>, sub: &str) -> String {
+    let claims = json!({ "sub": sub, "name": "Ada", "nonce": nonce });
     format!("e30.{}.sig", b64(claims.to_string().as_bytes()))
 }
 
@@ -67,7 +69,7 @@ async fn token(State(s): State<Shared>, Form(f): Form<Vec<(String, String)>>) ->
                     Json(json!({ "error": "invalid_grant" })),
                 );
             }
-            let id = id_token(s.nonce.as_deref());
+            let id = id_token(s.nonce.as_deref(), "ada");
             (
                 StatusCode::OK,
                 Json(
@@ -78,10 +80,11 @@ async fn token(State(s): State<Shared>, Form(f): Form<Vec<(String, String)>>) ->
         Some("refresh_token") if !s.refuse_refresh => {
             s.refreshes += 1;
             let n = s.refreshes;
+            let sub = s.refresh_sub.clone().unwrap_or_else(|| "ada".to_owned());
             (
                 StatusCode::OK,
                 Json(
-                    json!({ "access_token": format!("a{n}"), "refresh_token": format!("r{n}"), "id_token": id_token(None), "expires_in": 300 }),
+                    json!({ "access_token": format!("a{n}"), "refresh_token": format!("r{n}"), "id_token": id_token(None, &sub), "expires_in": 300 }),
                 ),
             )
         }
@@ -190,6 +193,28 @@ fn a_callback_with_the_wrong_state_signs_nobody_in() {
     assert!(matches!(oidc.session(), Session::SignedOut));
 }
 
+#[test]
+fn a_state_parameter_away_from_the_callback_is_the_apps_own() {
+    let _clock = clock::manual();
+    let shared = Shared::default();
+    service(SERVICE)
+        .layers()
+        .push(transport(issuer(shared.clone())));
+    let host = MemoryHost::new(&format!("{APP}/"));
+    let oidc = start(&host);
+    task::run_until_stalled();
+    oidc.sign_in();
+    task::run_until_stalled();
+    host.arrive(&format!("{APP}/orders?state=open"));
+    start(&host);
+    task::run_until_stalled();
+    assert_eq!(
+        doxa::client::oidc::Host::url(&host),
+        format!("{APP}/orders?state=open")
+    );
+    assert!(doxa::client::oidc::Host::load(&host, "doxa-oidc:pending").is_some());
+}
+
 static ME: RouteSpec = RouteSpec {
     method: Method::Get,
     path: "/me",
@@ -258,6 +283,27 @@ fn two_tabs_refresh_once() {
     task::run_until_stalled();
     assert_eq!(shared.lock().unwrap().refreshes, resumed + 1);
     assert_eq!(held(&first), held(&second));
+}
+
+#[test]
+fn a_tab_signed_in_as_someone_else_keeps_its_own_tokens() {
+    let _clock = clock::manual();
+    let shared = Shared::default();
+    let (host, first) = signed_in(&shared);
+    let before = first.session().tokens().unwrap().access_token().to_owned();
+
+    shared.lock().unwrap().refresh_sub = Some("bob".to_owned());
+    let tab = host.tab(&format!("{APP}/"));
+    doxa::client::oidc::Host::store(&tab, "doxa-oidc:refresh", "r-bob");
+    let second = Oidc::<Claims>::issuer(ISSUER)
+        .client_id("web")
+        .host(tab.clone())
+        .install();
+    task::run_until_stalled();
+
+    let held = |o: &Oidc<Claims>| o.session().tokens().unwrap().access_token().to_owned();
+    assert_ne!(held(&second), before, "the second tab signed in as bob");
+    assert_eq!(held(&first), before, "ada's tab ignored bob's broadcast");
 }
 
 #[test]

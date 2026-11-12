@@ -1,10 +1,8 @@
 //! `Granted<T>` at a route: the macro generates the site, and the guard
-//! documents itself.
-//!
-//! The unit tests in `doxa-macros` cover the rewrite in isolation. These
-//! run it through the real `#[get]` / `routes!` path and assert on the
-//! OpenAPI document that comes out, which is the thing a consumer
-//! actually ships.
+//! documents itself, asserted on the OpenAPI document `routes!` produces.
+
+mod common;
+use common::{AllowAll, RegionChecker};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -12,12 +10,11 @@ use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use tower::ServiceExt;
 
 use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceId,
 };
 use doxa::{delete, get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
@@ -100,10 +97,7 @@ async fn get_widget(widget: Granted<Widget>) -> String {
     widget.into_inner().region
 }
 
-/// Two path parameters and no annotation: the key struct's field is
-/// called `id`, so `{id}` is what binds and `{fid}` is left for the
-/// handler. The guard is destructured in the argument list, which the
-/// macro has to see through to reach the type it rewrites.
+/// `{id}` binds by the key's field, and the destructured guard is still rewritten.
 #[delete("/folders/{fid}/widgets/{id}", tag = "Widgets")]
 async fn drop_widget(Granted(_, _widget): Granted<Widget>) -> StatusCode {
     StatusCode::NO_CONTENT
@@ -119,29 +113,6 @@ async fn list_widgets(scope: Granted<Many<Widget>>) -> &'static str {
 async fn flush(gate: Granted<Cap<WidgetsRead>>) -> &'static str {
     gate.into_inner();
     "ok"
-}
-
-// ---- policy stub ------------------------------------------------------------
-
-/// Grants the capability to `viewer`, and `read` only on widgets in
-/// region `us`.
-struct RegionChecker;
-
-#[async_trait]
-impl CapabilityChecker for RegionChecker {
-    async fn check(&self, _: &str, roles: &[String], _: &Capability) -> Result<bool, AuthError> {
-        Ok(roles.iter().any(|r| r == "viewer"))
-    }
-
-    async fn check_instance(
-        &self,
-        _: &str,
-        _: &[String],
-        _: &str,
-        resource: &ResourceEntity,
-    ) -> Result<bool, AuthError> {
-        Ok(resource.attrs.get("region") == Some(&json!("us")))
-    }
 }
 
 fn api() -> utoipa::openapi::OpenApi {
@@ -216,9 +187,7 @@ async fn the_bare_form_authorizes_through_the_route_macro() {
 
 // ---- and the guard documents itself -----------------------------------------
 
-/// The instance form declares the path parameter with the schema its
-/// key implies — the site is authoritative, not the template's
-/// positional list.
+/// The path parameter's schema comes from the key, not the template.
 #[test]
 fn the_instance_form_documents_its_key() {
     let api = api();
@@ -351,10 +320,7 @@ fn each_form_words_its_own_badge() {
 
 // ---- the scheme declares what the guards stamped -----------------------------
 
-/// A guard composes its scope string per call site, so the security
-/// scheme — declared separately by the consumer — has no way to know
-/// about it. Left alone the document references scopes it never defines,
-/// which strict validators reject and SDK generators cannot resolve.
+/// Every scope a guard references is defined on the security scheme.
 #[test]
 fn stamped_scopes_are_declared_on_the_scheme() {
     use utoipa::openapi::security::{AuthorizationCode, Flow, Scopes};
@@ -421,10 +387,7 @@ fn a_consumer_declaration_is_not_overwritten() {
     assert_eq!(declared["widgets.read"], json!("Read widget definitions"));
 }
 
-/// `Granted<Widget>` and `Granted<Many<Widget>>` share a capability, so
-/// both stamp `widgets.read` — with different labels. Neither label is
-/// the scope's description, and path order deciding it would be a coin
-/// flip that reads like a fact, so the scope names itself.
+/// Two guards sharing `widgets.read` don't pick its description by path order.
 #[test]
 fn a_scope_described_two_ways_falls_back_to_its_own_name() {
     use utoipa::openapi::security::{AuthorizationCode, Flow, Scopes};
@@ -466,9 +429,7 @@ struct Filed {
     id: String,
 }
 
-// No `Scoping` impl: a filed widget is reached by folder and id, and
-// there is no route that lists them. `Granted<Many<Filed>>` therefore
-// does not compile, which is the point of the split.
+// No `Scoping` impl, so `Granted<Many<Filed>>` does not compile.
 doxa::auth::route_key!(
     /// Two segments, bound by name rather than by position — which is
     /// what stops `{fid}` and `{id}` being read the wrong way round.
@@ -510,23 +471,6 @@ async fn get_filed(filed: Granted<Filed>) -> String {
 }
 
 async fn call_filed(uri: &str) -> (StatusCode, String) {
-    struct AllowAll;
-    #[async_trait]
-    impl CapabilityChecker for AllowAll {
-        async fn check(&self, _: &str, _: &[String], _: &Capability) -> Result<bool, AuthError> {
-            Ok(true)
-        }
-        async fn check_instance(
-            &self,
-            _: &str,
-            _: &[String],
-            _: &str,
-            _: &ResourceEntity,
-        ) -> Result<bool, AuthError> {
-            Ok(true)
-        }
-    }
-
     let app = OpenApiRouter::<()>::new()
         .routes(routes!(get_filed))
         .split_for_parts()
@@ -600,10 +544,7 @@ fn a_composite_key_documents_every_segment() {
     );
 }
 
-// A site and a key that disagree about how many parameters there are used
-// to truncate silently, and then to fail on the first request. It now
-// fails the build, so the pair of tests that pin it are the `compile_fail`
-// doctests on `GrantSite::PARAMS` rather than anything runnable here.
+// A route missing one of its key's parameters fails the build: see `doxa::grant_diagnostics`.
 
 #[derive(Clone, doxa::State)]
 struct NoState;

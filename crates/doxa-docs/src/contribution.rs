@@ -115,11 +115,8 @@ impl ResponseContribution {
     }
 }
 
-/// One security requirement entry the layer enforces. References a
-/// scheme registered with [`crate::ApiDocBuilder::bearer_security`] or
-/// [`crate::ApiDocBuilder::security_scheme`]; a name that was never
-/// registered is refused when the document is built, rather than
-/// published as a dangling reference.
+/// One security requirement the layer enforces, naming a registered scheme; an
+/// unregistered name fails the build.
 #[derive(Clone, Debug)]
 pub struct SecurityContribution {
     /// Name of the security scheme as registered on the
@@ -240,14 +237,8 @@ impl LayerContribution {
 /// }
 /// ```
 ///
-/// Note what the credential is *not*: a header. An authenticating layer
-/// contributes a [`SecurityContribution`] and stops there — adding
-/// `.with_header(HeaderParam::required("Authorization"))` alongside says
-/// the same thing a second time, in the one place OpenAPI reserves for
-/// its own keywords, and [`crate::ApiDocBuilder::try_build`] refuses the
-/// document that results. [`crate::HeaderParam`] is for the headers a
-/// layer adds that are not credentials — `Idempotency-Key`,
-/// `X-Request-Id` — where there is no keyword already saying it.
+/// A credential is a [`SecurityContribution`], never a [`crate::HeaderParam`]:
+/// [`crate::ApiDocBuilder::try_build`] refuses an `Authorization` header parameter.
 pub trait DocumentedLayer {
     /// Return the OpenAPI contribution this layer adds to every
     /// operation it covers. Called once at router-build time, on
@@ -488,9 +479,7 @@ pub(crate) fn path_item_operations(
     .flatten()
 }
 
-/// Iterate the eight HTTP-method [`Operation`] slots on a
-/// [`utoipa::openapi::PathItem`] by shared reference, each paired with
-/// its method name, for messages that have to say where a defect is.
+/// The [`Operation`]s on a [`utoipa::openapi::PathItem`], each with its method name.
 fn path_item_operations_named(
     path_item: &utoipa::openapi::path::PathItem,
 ) -> impl Iterator<Item = (&'static str, &Operation)> {
@@ -508,18 +497,10 @@ fn path_item_operations_named(
     .filter_map(|(method, op)| op.map(|op| (method, op)))
 }
 
-/// The header names OpenAPI keeps for itself. A parameter with
-/// `in: header` and one of these names SHALL be ignored (OAS 3.x,
-/// Parameter Object) because a keyword already describes it:
-/// `Authorization` belongs to `securitySchemes`, `Accept` and
-/// `Content-Type` to the request and response `content` maps.
+/// Header parameters OAS 3.x says SHALL be ignored, since a keyword already describes them.
 pub(crate) const RESERVED_HEADER_PARAMS: [&str; 3] = ["Authorization", "Accept", "Content-Type"];
 
-/// Every operation declaring a reserved header as a parameter, keyed by
-/// the reserved name and listing the offenders as `METHOD /path`.
-///
-/// Matched case-insensitively, because HTTP header names are and a
-/// document writing `authorization` means the reserved one.
+/// `METHOD /path` of each operation declaring a reserved header, by name, case-insensitively.
 pub(crate) fn reserved_header_parameters(
     doc: &utoipa::openapi::OpenApi,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
@@ -569,33 +550,7 @@ pub(crate) fn path_item_operations_mut(
     .flatten()
 }
 
-/// Union every scope actually stamped onto an operation into the
-/// declaring security scheme's vocabulary.
-///
-/// [`record_required_permission`] composes a scope string per call site
-/// and merges it into `op.security`, but the scheme's scope vocabulary
-/// is supplied separately by the consumer via
-/// [`ApiDocBuilder::oauth2_security`](crate::ApiDocBuilder::oauth2_security).
-/// Left alone the two drift, and the document ends up referencing scopes
-/// its own scheme never declares: strict validators flag them, and SDK
-/// generators that surface per-operation scope requirements cannot
-/// resolve them.
-///
-/// A consumer cannot close this from outside, because the strings only
-/// exist per `(subject, site)` monomorphization at assembly time — there
-/// is no constant to enumerate. doxa is the only component that has the
-/// full list, because it emitted every entry, so it declares them.
-///
-/// Only OAuth2 schemes have a scope vocabulary to declare into; a bearer
-/// HTTP scheme has nowhere to put them.
-/// Every security scheme the document's operations reference, in the
-/// order a `BTreeSet` gives.
-///
-/// The other half of [`declare_stamped_scopes`]'s walk: that one fills in
-/// scopes for schemes that exist, this one is how a scheme that does not
-/// exist is found. Kept separate because it runs whether or not any
-/// operation carries scopes — a bearer requirement has none, and is
-/// exactly the case that used to go unnoticed.
+/// Every security scheme the document's operations reference.
 pub(crate) fn referenced_schemes(
     doc: &utoipa::openapi::OpenApi,
 ) -> std::collections::BTreeSet<String> {
@@ -607,9 +562,7 @@ pub(crate) fn referenced_schemes(
                 continue;
             };
             for requirement in security {
-                // `SecurityRequirement`'s inner map is private, so it is
-                // round-tripped through JSON exactly as the scope pass
-                // below does.
+                // `SecurityRequirement`'s map is private, so it round-trips through JSON.
                 let Ok(value) = serde_json::to_value(requirement) else {
                     continue;
                 };
@@ -626,13 +579,13 @@ pub(crate) fn referenced_schemes(
     names
 }
 
+/// Declares every scope stamped onto an operation in its OAuth2 scheme, since guards
+/// compose scope strings per call site and the consumer's vocabulary cannot list them.
 pub(crate) fn declare_stamped_scopes(doc: &mut utoipa::openapi::OpenApi) {
     use std::collections::BTreeMap;
     use utoipa::openapi::security::{Flow, Scopes, SecurityScheme};
 
-    // scheme -> scope -> description. `None` means two operations
-    // stamped the same scope with different labels, so neither is the
-    // scope's description and the scope names itself instead.
+    // scheme -> scope -> description; `None` when two operations label it differently.
     let mut stamped: BTreeMap<String, BTreeMap<String, Option<String>>> = BTreeMap::new();
 
     for path_item in doc.paths.paths.values() {
@@ -656,11 +609,8 @@ pub(crate) fn declare_stamped_scopes(doc: &mut utoipa::openapi::OpenApi) {
                 }
             }
 
-            // `record_required_permission` appends to `security` and to
-            // `x-required-permissions` in one call, but the two dedupe
-            // on different keys, so their positions only correspond when
-            // the operation stamped exactly one of each. Anything else
-            // falls back to the scope itself — less pretty, never wrong.
+            // `security` and `x-required-permissions` dedupe on different keys, so they
+            // only line up when the operation stamped exactly one of each.
             let displays = op
                 .extensions
                 .as_ref()
@@ -726,16 +676,8 @@ pub(crate) fn declare_stamped_scopes(doc: &mut utoipa::openapi::OpenApi) {
     }
 }
 
-/// Read a [`Scopes`](utoipa::openapi::security::Scopes) back out as a
-/// plain map.
-///
-/// It keeps its `BTreeMap` private and offers no accessor, so the only
-/// way in is how it serializes — and that is not stable in shape. The
-/// struct has one field, itself named `scopes`, and the flow structs
-/// flatten it, so today it round-trips as `{"scopes": {…}}` while a
-/// future `#[serde(flatten)]` on the field would make it a bare map.
-/// Accept either rather than silently reading an empty map and
-/// clobbering what the consumer declared.
+/// [`Scopes`](utoipa::openapi::security::Scopes) as a map, through serde since its map is
+/// private; accepts both `{"scopes": {…}}` and a bare map.
 fn declared_scopes(
     scopes: &utoipa::openapi::security::Scopes,
 ) -> std::collections::BTreeMap<String, String> {

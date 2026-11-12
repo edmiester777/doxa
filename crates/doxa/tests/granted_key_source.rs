@@ -1,17 +1,8 @@
-//! Where a route's key comes from, and what it is called.
-//!
-//! Two facts used to be written at every call site. What the parameter is
-//! *called* is now the key type's to say: its fields are the route's
-//! parameters, and `Granting::KEY_NAMES` repeats that list for the spec.
-//! So no route names its own segment, and a rename happens once, on the
-//! key. Where the parameter *lives* is `#[key(with = "…")]` — the path by
-//! default, the query string when the route says so.
-//!
-//! Both are read twice: once by the guard, once by the OpenAPI
-//! description. These tests assert the two halves agree, which is the
-//! failure neither half could catch on its own — a guard reading `?name=`
-//! under a spec advertising `/{name}` is two individually correct pieces
-//! of code.
+//! A route key's parameter names come from its fields, and its place from `#[key(with = "…")]`.
+//! The guard and the OpenAPI description both read them, and these tests check they agree.
+
+mod common;
+use common::RegionChecker;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -19,18 +10,12 @@ use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use tower::ServiceExt;
 
-// The *axum* `Query`, which is what a handler reading its own query string
-// imports. It sits beside a key that also comes out of the query string
-// without the two having anything to do with each other, since the guard's
-// source is a string on the annotation rather than a type in scope.
+// axum's own `Query`: the guard's source is a string on the annotation, not a type in scope.
 use axum::extract::Query;
 use doxa::auth::{CapabilityContext, FromState, Granted, Granting};
-use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, ResourceEntity, ResourceId,
-};
+use doxa::policy::{Capability, CapabilityCheck, CapabilityChecker, ResourceId};
 use doxa::{get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- domain -----------------------------------------------------------------
@@ -55,9 +40,7 @@ struct Widget {
 }
 
 doxa::auth::route_key!(
-    /// The key every route below binds, and the reason none of them
-    /// repeats its name: the field is called `name`, so `{name}` and
-    /// `?name=` both find it.
+    /// The field is `name`, so `{name}` and `?name=` both find it.
     pub WidgetKey { name: String }
 );
 
@@ -104,17 +87,13 @@ impl Granting for Widget {
 
 // ---- routes -----------------------------------------------------------------
 
-/// Two path parameters and no annotation. This is the case that used to be
-/// rejected as ambiguous: the asset names its key's column, `{name}` is
-/// one of the two segments, and nothing else has to be said.
+/// Two path parameters and no annotation: `{name}` binds by the key's field.
 #[get("/folders/{fid}/widgets/{name}", tag = "Widgets")]
 async fn get_widget(widget: Granted<Widget>) -> String {
     widget.into_inner().name
 }
 
-/// The same object, identified in the query string instead — alongside a
-/// real [`axum::extract::Query`] the handler reads for itself, so the two
-/// meanings of the word are both in scope at once.
+/// The key in the query string, beside a real [`axum::extract::Query`] of the handler's own.
 #[get("/widgets", tag = "Widgets")]
 async fn find_widget(widget: Granted<Widget>, Query(filters): Query<Filters>) -> String {
     let name = widget.into_inner().name;
@@ -132,9 +111,7 @@ struct Filters {
 }
 
 doxa::auth::route_key!(
-    /// The same column reached under another name. The rename lives here,
-    /// on the key, rather than on each route that uses it — so a segment
-    /// spelled `{slug}` and a spec saying `slug` come from one place.
+    /// The same column under another name, renamed once on the key.
     pub AliasKey { slug: String }
 );
 
@@ -166,27 +143,6 @@ impl Granting for WidgetByAlias {
 #[get("/aliases/{slug}", tag = "Widgets")]
 async fn get_alias(widget: Granted<WidgetByAlias>) -> String {
     widget.into_inner().name
-}
-
-// ---- policy stub ------------------------------------------------------------
-
-struct RegionChecker;
-
-#[async_trait]
-impl CapabilityChecker for RegionChecker {
-    async fn check(&self, _: &str, roles: &[String], _: &Capability) -> Result<bool, AuthError> {
-        Ok(roles.iter().any(|r| r == "viewer"))
-    }
-
-    async fn check_instance(
-        &self,
-        _: &str,
-        _: &[String],
-        _: &str,
-        resource: &ResourceEntity,
-    ) -> Result<bool, AuthError> {
-        Ok(resource.attrs.get("region") == Some(&json!("us")))
-    }
 }
 
 fn app() -> axum::Router {
@@ -244,9 +200,7 @@ fn params(api: &utoipa::openapi::OpenApi, path: &str) -> Vec<utoipa::openapi::pa
 
 // ---- the key's field names answer -------------------------------------------
 
-/// The whole point: two path parameters, no annotation, and the right one
-/// binds. The body is the loaded widget's name, so a route that bound
-/// `{fid}` instead would 404 rather than quietly pass.
+/// The right one of two segments binds; binding `{fid}` would 404.
 #[tokio::test]
 async fn a_multi_parameter_route_binds_the_segment_the_asset_names() {
     assert_eq!(
@@ -255,9 +209,7 @@ async fn a_multi_parameter_route_binds_the_segment_the_asset_names() {
     );
 }
 
-/// And it is genuinely reading `{name}` rather than taking the last
-/// segment: `{fid}` is a name the asset does not know, so binding it would
-/// answer 404 with the segments swapped.
+/// It reads `{name}`, not the last segment.
 #[tokio::test]
 async fn the_other_segment_is_not_what_binds() {
     let (status, _) = call("/folders/alpha/widgets/nope").await;
@@ -268,9 +220,7 @@ async fn the_other_segment_is_not_what_binds() {
     );
 }
 
-/// A route whose segment is spelled differently from the column behind
-/// it. Nothing on the route says so: the key's field is `slug`, so
-/// `{slug}` is what binds.
+/// The key's field is `slug`, so `{slug}` binds with nothing on the route.
 #[tokio::test]
 async fn a_renamed_key_binds_the_segment_its_field_names() {
     assert_eq!(call("/aliases/beta").await, (StatusCode::OK, "beta".into()));
@@ -286,9 +236,7 @@ async fn a_query_source_reads_the_key_out_of_the_query_string() {
     );
 }
 
-/// The route said the caller supplies this, and the caller did not. That
-/// is the same 400 an unparseable path segment gets — not a 500, which
-/// would read as the service being misconfigured.
+/// A missing key is a 400, like an unparseable segment, not a 500.
 #[tokio::test]
 async fn a_missing_query_key_is_a_bad_request() {
     let (status, _) = call("/widgets").await;
@@ -317,9 +265,7 @@ async fn a_path_key_is_documented_in_the_path() {
     );
 }
 
-/// The half that would otherwise drift. `#[key(with = "Query")]` reads
-/// `?name=`, so the spec says `in: query` — off the same `GrantSite::IN`
-/// the guard read.
+/// The spec says `in: query`, off the same `GrantSite::IN` the guard read.
 #[tokio::test]
 async fn a_query_key_is_documented_in_the_query() {
     let params = params(&api(), "/widgets");

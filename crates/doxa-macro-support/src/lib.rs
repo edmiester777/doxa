@@ -104,11 +104,6 @@ pub fn is_client() -> bool {
     Role::current() == Role::Client
 }
 
-/// Whether the current crate is an API crate, built for both halves.
-pub fn is_api() -> bool {
-    Role::current() == Role::Api
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

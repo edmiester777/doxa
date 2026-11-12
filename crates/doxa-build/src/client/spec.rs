@@ -3,6 +3,64 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use serde_json::Value;
+
+pub(crate) fn parse(mut doc: Value) -> Result<Spec, serde_json::Error> {
+    inline(&mut doc);
+    serde_json::from_value(doc)
+}
+
+/// Merges path-level parameters into each operation and inlines parameter, body and response refs.
+pub(crate) fn inline(doc: &mut Value) {
+    let components = doc.get("components").cloned().unwrap_or_default();
+    let inline = |v: &mut Value, kind: &str| {
+        let prefix = format!("#/components/{kind}/");
+        for _ in 0..8 {
+            let Some(name) = v.get("$ref").and_then(Value::as_str) else {
+                return;
+            };
+            let Some(found) = name
+                .strip_prefix(&prefix)
+                .and_then(|n| components[kind].get(n))
+            else {
+                return;
+            };
+            *v = found.clone();
+        }
+    };
+    let Some(paths) = doc.get_mut("paths").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for item in paths.values_mut().filter_map(Value::as_object_mut) {
+        let mut shared = match item.remove("parameters") {
+            Some(Value::Array(list)) => list,
+            _ => Vec::new(),
+        };
+        shared.iter_mut().for_each(|p| inline(p, "parameters"));
+        for op in item.values_mut().filter_map(Value::as_object_mut) {
+            let own = op
+                .entry("parameters")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let Some(own) = own.as_array_mut() else {
+                continue;
+            };
+            own.iter_mut().for_each(|p| inline(p, "parameters"));
+            let at = |p: &Value| (p.get("name").cloned(), p.get("in").cloned());
+            let inherited: Vec<Value> = shared
+                .iter()
+                .filter(|s| !own.iter().any(|o| at(o) == at(s)))
+                .cloned()
+                .collect();
+            own.splice(0..0, inherited);
+            if let Some(body) = op.get_mut("requestBody") {
+                inline(body, "requestBodies");
+            }
+            if let Some(Value::Object(responses)) = op.get_mut("responses") {
+                responses.values_mut().for_each(|r| inline(r, "responses"));
+            }
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Spec {
@@ -155,7 +213,7 @@ pub(crate) struct Schema {
     #[serde(default)]
     pub required: Vec<String>,
     pub items: Option<Box<Schema>>,
-    #[serde(default)]
+    #[serde(default, alias = "anyOf")]
     pub one_of: Vec<Schema>,
     #[serde(default)]
     pub all_of: Vec<Schema>,

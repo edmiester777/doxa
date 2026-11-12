@@ -52,6 +52,8 @@ pub struct Inputs<'a> {
     pub library: bool,
     /// What an app's `url()`s start with: the path it is served under.
     pub base: &'a str,
+    /// The workspace, which every local `url()` must resolve inside (or inside `node_modules`).
+    pub workspace: &'a Path,
 }
 
 /// Where a preprocessor writes `input`'s CSS: beside it, so relative paths still resolve.
@@ -216,18 +218,26 @@ fn tailwind_and_bundle(
         input.clone()
     };
     let entry_dir = input.parent().unwrap_or(web_dir);
+    let mut roots = vec![at.workspace, stage];
+    roots.extend(at.node_modules);
     bundle(
         &to_bundle,
         entry_dir,
         release,
         if at.library { "./" } else { at.base },
+        &roots,
     )
 }
 
-/// Inline `@import`s with lightningcss, minifying on release, and hash each local `url()`,
-/// pointing it at `prefix` and the hashed name. A url resolves against the file that wrote
-/// it, then against `fallback` (Tailwind's output lives elsewhere).
-pub fn bundle(path: &Path, fallback: &Path, release: bool, prefix: &str) -> Result<Built> {
+/// Inline `@import`s (minified on release) and point each local `url()` at `prefix` plus its hash.
+/// A url resolves against its file, then `fallback` (for Tailwind's output), and must stay in `roots`.
+pub fn bundle(
+    path: &Path,
+    fallback: &Path,
+    release: bool,
+    prefix: &str,
+    roots: &[&Path],
+) -> Result<Built> {
     let fs = FileProvider::new();
     let mut bundler = Bundler::new(&fs, None, ParserOptions::default());
     let fail = |detail: String| Error::Tool {
@@ -269,11 +279,17 @@ pub fn bundle(path: &Path, fallback: &Path, release: bool, prefix: &str) -> Resu
                             dep.url, dep.loc.file_path
                         ))
                     })?;
+                let Some(logical) = crate::dist::relative(&found, roots) else {
+                    return Err(fail(format!(
+                        "`url({})` in {} reaches outside the workspace and node_modules",
+                        dep.url, dep.loc.file_path
+                    )));
+                };
                 let bytes = std::fs::read(&found).at(&found)?;
                 let name = found.file_name().unwrap_or_default().to_string_lossy();
                 let hashed = crate::dist::hashed_name(&name, &bytes);
                 let url = format!("{prefix}{hashed}{suffix}");
-                built.assets.push((name.into_owned(), hashed, bytes));
+                built.assets.push((logical, hashed, bytes));
                 url
             }
             None => dep.url.clone(),
@@ -283,9 +299,8 @@ pub fn bundle(path: &Path, fallback: &Path, release: bool, prefix: &str) -> Resu
     Ok(built)
 }
 
-/// `css` with every style rule inside `@scope (scope)`, the page's root selectors meaning the
-/// scope's root; rules that can't be scoped (`@font-face`, `@property`, `@keyframes`, imports)
-/// stay global.
+/// `css` with every style rule inside `@scope (scope)`, root selectors meaning the scope's root;
+/// `@font-face`, `@property`, `@keyframes` and imports stay global.
 pub fn scope(css: &str, scope: &str) -> String {
     let mut global = String::new();
     let mut out = String::new();
@@ -426,6 +441,7 @@ mod tests {
             node_modules: None,
             library: false,
             base: "/",
+            workspace: web_dir,
         }
     }
 
@@ -580,7 +596,11 @@ mod tests {
         let hashed = crate::dist::hashed_name("inter.woff2", b"font");
         assert_eq!(
             out.assets,
-            [("inter.woff2".to_owned(), hashed.clone(), b"font".to_vec())]
+            [(
+                "style/fonts/inter.woff2".to_owned(),
+                hashed.clone(),
+                b"font".to_vec()
+            )]
         );
         assert!(
             out.css.contains(&format!("url(\"/{hashed}?v=2\")")),
@@ -590,6 +610,23 @@ mod tests {
         for kept in ["https://x.test/a.png", "#g", "/logo.svg"] {
             assert!(out.css.contains(kept), "{kept} in {}", out.css);
         }
+    }
+
+    #[test]
+    fn a_url_reaching_outside_the_workspace_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), b"key").unwrap();
+        std::fs::write(
+            web.join("app.css"),
+            ".a { background: url(../secret.txt); }\n",
+        )
+        .unwrap();
+        let err = build(&plain(&web), "app.css", &web.join("stage"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the workspace"), "{err}");
     }
 
     #[test]

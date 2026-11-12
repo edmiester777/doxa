@@ -307,9 +307,10 @@ export function mount(id, parent, host, component, content, handlers, onError, c
   island.onError = (message) => {
     if (island.live) onError(message);
   };
-  // React calls it with `ref.current` on commit and `null` on unmount.
+  // React calls it with `ref.current` on commit and `null` on unmount; once the island isn't
+  // live, Rust has dropped `onHandle`.
   island.ref = onHandle === undefined ? undefined : (v) => {
-    if (island.live || v === null) onHandle(v);
+    if (island.live) onHandle(v);
   };
   for (const [name, f] of Object.entries(handlers)) {
     // Created once per island, so React sees the same function on every update.

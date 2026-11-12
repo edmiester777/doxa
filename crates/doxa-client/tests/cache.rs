@@ -325,6 +325,18 @@ fn a_cached_value_is_shared_until_it_changes() {
 }
 
 #[test]
+fn concurrent_cached_calls_share_one_request() {
+    let mock = MockTransport::new();
+    mock.json(200, &widget(1, "cog"));
+    let client = serve(mock.clone());
+    let (a, b) = task::block_on(async {
+        futures_util::future::join(cget("cog").into_future(), cget("cog").into_future()).await
+    });
+    assert!(Cached::ptr_eq(&a.unwrap(), &b.unwrap()));
+    assert_eq!(client.requests_sent(), 1);
+}
+
+#[test]
 fn a_mutation_refetches_each_affected_query_once_and_tells_readers() {
     let mock = MockTransport::new();
     mock.json(200, &widget(1, "cog"))

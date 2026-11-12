@@ -71,9 +71,7 @@ struct ParsedVariant {
     /// Audit outcome declared via `#[api(outcome = "denied")]`.
     /// Defaults to `"error"` when omitted.
     outcome: Option<String>,
-    /// Declared via `#[api(transparent)]`: status, code and audit
-    /// outcome are read off the nested value instead of literals, and
-    /// the nested type's responses merge into this enum's.
+    /// `#[api(transparent)]`: status, code and outcome come from the nested value.
     transparent: bool,
     /// Declared via `#[api(internal)]`: the variant `doxa::Internal` converts into.
     internal: bool,
@@ -136,6 +134,12 @@ fn parse_variant(variant: &Variant) -> Result<ParsedVariant> {
             return Err(Error::new_spanned(
                 attr,
                 "`#[api(transparent)]` reads the code from the nested value — drop `code`",
+            ));
+        }
+        if args.outcome.is_some() {
+            return Err(Error::new_spanned(
+                attr,
+                "`#[api(transparent)]` reads the outcome from the nested value — drop `outcome`",
             ));
         }
     }
@@ -219,6 +223,9 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
             code = Some(parse_str_lit(&value)?);
             Ok(())
         } else if meta.path.is_ident("outcome") {
+            if outcome.is_some() {
+                return Err(meta.error("`outcome` is given twice"));
+            }
             let value: Expr = meta.value()?.parse()?;
             let s = parse_str_lit(&value)?;
             match s.as_str() {
@@ -728,12 +735,7 @@ fn generate_audit_outcome(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
 // HasApiMetadata codegen
 // ---------------------------------------------------------------------------
 
-/// Generate `impl HasApiMetadata for Self`.
-///
-/// This is what `#[api(transparent)]` delegates *to*. `IntoResponse` is
-/// not enough to read from — it yields a rendered `Response`, and an
-/// outer enum needs the status and code as values. Emitting it for every
-/// derived enum is what makes them nest arbitrarily deep.
+/// `impl HasApiMetadata`: the status and code as values, for an outer `#[api(transparent)]`.
 fn generate_api_metadata(enum_name: &Ident, variants: &[ParsedVariant]) -> TokenStream {
     let arms: Vec<TokenStream> = variants
         .iter()
@@ -782,5 +784,23 @@ fn generate_api_metadata(enum_name: &Ident, variants: &[ParsedVariant]) -> Token
                 code
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    #[test]
+    fn an_outcome_beside_transparent_is_refused() {
+        let err = super::expand(quote! {
+            enum E {
+                #[api(transparent, outcome = "denied")]
+                Inner(Other),
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("drop `outcome`"), "{err}");
     }
 }

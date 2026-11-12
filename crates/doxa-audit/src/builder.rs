@@ -1,43 +1,7 @@
-//! Mutable builder that accumulates audit context across request layers.
-//!
-//! [`AuditEventBuilder`] is stored in axum request extensions so each layer
-//! (auth middleware, handler, post-execution) can push what it knows without
-//! coupling to other layers.
-//!
-//! The builder **auto-emits** when paired with [`AuditLayer`](crate::AuditLayer):
-//! after the response completes, the layer calls [`auto_emit`](AuditEventBuilder::auto_emit)
-//! which sends whatever context has been accumulated with [`Outcome::Allowed`]
-//! as the default. Handlers on the happy path can simply enrich the builder and
-//! return — the event is recorded automatically. Use the explicit terminal
-//! methods ([`emit_denied`](AuditEventBuilder::emit_denied),
-//! [`emit_error`](AuditEventBuilder::emit_error)) only when the outcome
-//! diverges from success and no `ApiError` already carries it.
-//!
-//! Under that layer the terminals *record* rather than send: emitting from
-//! inside a request would take the builder before the response exists,
-//! costing the status and truncating the duration. See
-//! [`emit`](AuditEventBuilder::emit).
-//!
-//! Exactly-once emission is guaranteed even when the builder is cloned (as
-//! axum's [`Extension`](axum::extract::Extension) extractor does): all clones
-//! share state behind an [`Arc`], and the first caller to emit takes the inner
-//! state — subsequent attempts are no-ops.
-//!
-//! ## Setting versus depositing
-//!
-//! The setters below take effect immediately, so between two of them the
-//! last call wins. That is right for a handler, which knows what it means,
-//! and wrong for an authorization guard, which runs before the handler and
-//! must not pre-empt it. A guard therefore *deposits* a
-//! [`Decision`] with [`record_decision`](AuditEventBuilder::record_decision)
-//! instead, and the deposit is folded in at emit time, filling only fields
-//! nothing else named. Order stops mattering: whatever the handler set
-//! stands, whenever it set it.
-//!
-//! A request that authorizes several things — its own subject, then
-//! whatever its body refers to — needs no coordination either. Between two
-//! deposits the first stands, except that a refusal displaces a grant, so
-//! there is nothing to ask before depositing and no ordering to preserve.
+//! [`AuditEventBuilder`], kept in request extensions so each layer adds what it knows. Under
+//! [`AuditLayer`](crate::AuditLayer) the layer sends the event after the response and the
+//! terminals only record. Clones share state, and the event is sent once. Setters are
+//! last-write-wins; a guard's [`Decision`] is deposited and only fills blanks.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -58,16 +22,10 @@ struct BuilderInner {
     logger: AuditLogger,
     start: Instant,
 
-    /// Whether an [`AuditLayer`](crate::AuditLayer) will terminate this
-    /// builder after the response. Read by
-    /// [`settle`](AuditEventBuilder::settle), which is how a guard
-    /// refusing a request avoids emitting under a layer that is about to
-    /// do it better.
+    /// An [`AuditLayer`](crate::AuditLayer) sends this event after the response.
     layered: bool,
 
-    /// What a guard decided, folded in by
-    /// [`take_and_send`](AuditEventBuilder::take_and_send) for whatever
-    /// the request left unnamed.
+    /// A guard's verdict, folded into the blanks at send time.
     decision: Option<Decision>,
 
     // Auth layer
@@ -119,23 +77,12 @@ pub struct AuditEventBuilder {
 }
 
 impl AuditEventBuilder {
-    /// Create a new builder backed by the given [`AuditLogger`].
-    ///
-    /// Nothing will terminate the event on the caller's behalf — emit it
-    /// yourself. [`AuditLayer`](crate::AuditLayer) uses
-    /// [`layered`](Self::layered) instead.
+    /// A builder the caller must emit itself.
     pub fn new(logger: AuditLogger) -> Self {
         Self::build(logger, false)
     }
 
-    /// Create a builder that an [`AuditLayer`](crate::AuditLayer) will
-    /// terminate after the response.
-    ///
-    /// The distinction matters to [`settle`](Self::settle): a guard that
-    /// refuses a request mid-flight would, without a layer, be the last
-    /// thing to touch the event — so it has to emit. Under a layer it must
-    /// not, because emitting takes the builder and the layer would then
-    /// have nothing left to stamp the response status onto.
+    /// A builder an [`AuditLayer`](crate::AuditLayer) sends after the response.
     pub fn layered(logger: AuditLogger) -> Self {
         Self::build(logger, true)
     }
@@ -199,17 +146,7 @@ impl AuditEventBuilder {
         });
     }
 
-    /// Record the tenancy boundary the request is operating within.
-    ///
-    /// Tenant id, organization id, workspace id — whatever partitions
-    /// the deployment. It lands in the indexed `tenant_id` column, so
-    /// compliance queries can scope an audit trail to one tenant
-    /// without reaching into `actor_attrs` JSON.
-    ///
-    /// Pass `None` for single-tenant deployments; the column stays
-    /// empty. When `doxa-auth`'s `AuthLayer` is in the stack this is
-    /// called automatically from `Claims::scope()` — handlers only need
-    /// it for events raised outside a request's auth context.
+    /// The indexed `tenant_id` column. `AuthLayer` sets it from `Claims::scope()`.
     pub fn set_tenant(&self, tenant_id: Option<&str>) {
         self.with_inner(|inner| {
             inner.tenant_id = tenant_id.map(str::to_owned);
@@ -236,14 +173,7 @@ impl AuditEventBuilder {
         });
     }
 
-    /// Fall back to the socket peer address for `source_ip` when no
-    /// forwarding header supplied one.
-    ///
-    /// Only fills the field if [`set_request_metadata`](Self::set_request_metadata)
-    /// left it empty, so a proxy-supplied `x-forwarded-for` client address
-    /// always wins over the direct TCP peer. Lets a deployment with no
-    /// forwarding proxy (or a `kubectl port-forward` dev tunnel) still
-    /// record the caller's address.
+    /// The socket peer as `source_ip`, unless `x-forwarded-for` already supplied one.
     pub fn set_source_ip_fallback(&self, addr: SocketAddr) {
         self.with_inner(|inner| {
             if inner.source_ip.is_none() {
@@ -295,11 +225,6 @@ impl AuditEventBuilder {
     }
 
     /// Set the action without touching the event category.
-    ///
-    /// For callers that know what is being done but not which domain
-    /// event it belongs to — an authorization guard knows it is
-    /// checking `read`, not whether that is `data_access` or something
-    /// the application named itself.
     pub fn set_action(&self, action: impl Into<String>) {
         let action_str = action.into();
         self.with_inner(|inner| {
@@ -319,18 +244,8 @@ impl AuditEventBuilder {
 
     // ── Guard layer ─────────────────────────────────────────
 
-    /// Deposit what an authorization guard decided.
-    ///
-    /// Folded into the event at emit time, filling only fields nothing
-    /// else named — so this never overwrites a handler, whichever ran
-    /// first. See the [module docs](self#setting-versus-depositing).
-    ///
-    /// One request may authorize several things: the object its route
-    /// names, then the ones its body refers to. The first decision stands,
-    /// because the route's own subject is authorized before any dependency
-    /// — **except** that a refusal displaces a grant. A request that ends
-    /// on a denial is about that denial, whatever it was allowed to touch
-    /// on the way there.
+    /// Deposit a guard's verdict; it fills only fields nothing else set. The first deposit
+    /// stands, except that a denial displaces a grant.
     pub fn record_decision(&self, decision: Decision) {
         self.with_inner(|inner| {
             let displaces = match &inner.decision {
@@ -342,21 +257,8 @@ impl AuditEventBuilder {
             }
         });
     }
-    /// Close the event out at `status`, unless a layer is going to.
-    ///
-    /// For code that ends a request before it reaches a handler — a guard
-    /// refusing it, an auth layer rejecting the credentials. Under an
-    /// [`AuditLayer`](crate::AuditLayer) it is a no-op, exactly as
-    /// [`emit`](Self::emit) is: the layer sends the event after the
-    /// response, with the real status and a duration measured through it.
-    /// When the builder came from an auth layer carrying its own logger
-    /// and no `AuditLayer` sits above it, nothing downstream ever
-    /// terminates the event — so this closes it out rather than let the
-    /// record vanish.
-    ///
-    /// `status` is what the caller already knows the response will be. It
-    /// is only used on that second path; under a layer the response
-    /// itself is the better authority.
+
+    /// For a request ended before its handler: emit at `status`, unless a layer will send it.
     pub fn settle(&self, status: u16) {
         if self.is_layered() {
             return;
@@ -385,18 +287,8 @@ impl AuditEventBuilder {
 
     // ── Post-execution layer ────────────────────────────────
 
-    /// Record whether the operation was allowed, denied, or errored.
-    ///
-    /// Last writer wins, and [`AuditService`](crate::AuditService) writes
-    /// last — from the `ResponseAuditOutcome` an `ApiError` attached, so a
-    /// variant annotated `outcome = "allowed"` lands on the event even
-    /// where the handler had assumed otherwise. That is the annotation
-    /// doing its job: a `NotFound` that is not an audit-worthy failure
-    /// says so, and gets the final say on itself.
-    ///
-    /// An authorization verdict is not a `set_outcome` and does not
-    /// compete with one — it arrives as a [`Decision`] and is folded in
-    /// after all of this. See [`record_decision`](Self::record_decision).
+    /// Last writer wins; [`AuditService`](crate::AuditService) writes last, from an `ApiError`'s
+    /// outcome. A deposited denial still overrides it.
     pub fn set_outcome(&self, outcome: Outcome) {
         self.with_inner(|inner| {
             inner.outcome = Some(outcome);
@@ -436,16 +328,8 @@ impl AuditEventBuilder {
     }
 
     // ── Convenience terminals ───────────────────────────────
-    //
-    // All of these route through `emit`, so under an `AuditLayer` they
-    // record their outcome and leave the sending to the layer. See
-    // `emit` for why.
 
     /// Set outcome to [`Outcome::Allowed`] and emit the event.
-    ///
-    /// Redundant under an [`AuditLayer`](crate::AuditLayer), which
-    /// already defaults to [`Outcome::Allowed`] for a response that
-    /// raised nothing.
     pub fn emit_allowed(&self) {
         self.with_inner(|inner| {
             inner.outcome = Some(Outcome::Allowed);
@@ -494,36 +378,8 @@ impl AuditEventBuilder {
 
     // ── Terminal ────────────────────────────────────────────
 
-    /// Send the event to the background writer — or, under an
-    /// [`AuditLayer`](crate::AuditLayer), leave that to the layer.
-    ///
-    /// Auto-calculates `duration_ms` from the builder's creation instant
-    /// if not explicitly set via [`set_duration_ms`](Self::set_duration_ms).
-    ///
-    /// Safe to call multiple times — only the first call emits; subsequent
-    /// calls are no-ops.
-    ///
-    /// # Under a layer this defers rather than sends
-    ///
-    /// Emitting *takes* the builder, and nothing can write to it
-    /// afterwards. Called from a handler, that lands before the response
-    /// exists — so [`AuditService`](crate::AuditService) never gets to
-    /// stamp `http_status`, the duration stops at the call instead of at
-    /// response completion, and anything fallible the handler does next is
-    /// already recorded as having succeeded.
-    ///
-    /// So when a layer owns this builder, every terminal here records its
-    /// outcome and returns without sending. The layer's
-    /// [`auto_emit`](Self::auto_emit) sends the same event moments later,
-    /// with the status and duration the early send would have cost.
-    /// Whatever the caller wanted recorded is recorded; only the timing
-    /// changes, and a call that would have been a bug is instead merely
-    /// redundant — delete it.
-    ///
-    /// One consequence worth knowing: a deferred emit does not freeze the
-    /// builder, so a later write still lands. That is the intent — the
-    /// event is sent once, at the end, carrying everything anyone knew
-    /// about it.
+    /// Send the event once. Under an [`AuditLayer`](crate::AuditLayer) this only records, so
+    /// the layer can still stamp the status and full duration; later writes still land.
     pub fn emit(&self) {
         if self.defer_to_layer() {
             return;
@@ -531,23 +387,12 @@ impl AuditEventBuilder {
         self.take_and_send(None);
     }
 
-    /// Emit with [`Outcome::Allowed`] if no prior emission has occurred.
-    ///
-    /// Called by [`AuditService`](crate::AuditService) after the inner
-    /// service returns, and the only terminal that always sends — it is
-    /// the one [`emit`](Self::emit) defers *to*. If an explicit emit
-    /// already sent the event (no layer in the stack), or an `ApiError`
-    /// outcome was attached to response extensions, this is a no-op.
+    /// Send with a default of [`Outcome::Allowed`], unless already sent; the layer's terminal.
     pub fn auto_emit(&self) {
         self.take_and_send(Some(Outcome::Allowed));
     }
 
     /// Whether an explicit emit should stand aside for the layer.
-    ///
-    /// False once the event has been sent, so a second `emit()` after an
-    /// unlayered first one still no-ops through
-    /// [`take_and_send`](Self::take_and_send) rather than looking
-    /// deferred.
     fn defer_to_layer(&self) -> bool {
         let deferring = self.is_layered();
 
@@ -603,25 +448,8 @@ impl AuditEventBuilder {
     }
 }
 
-/// Fold a guard's [`Decision`] into the fields the request left unnamed.
-///
-/// Everything here fills a blank rather than replacing a value, which is
-/// what lets a guard and a handler write to one event without agreeing on
-/// an order.
-///
-/// The one exception is a refusal's outcome, and it is the only place in
-/// the builder where something outranks the response. A policy refusal is
-/// not an opinion about how the request went — it is the event the trail
-/// exists for. Masking it in the response is a legitimate and common
-/// thing to do: a route that answers 404 rather than 403 so a caller
-/// cannot probe for what exists, or one whose `NotFound` is annotated
-/// `outcome = "allowed"` because a miss is not normally a failure. None
-/// of that unmakes the refusal, and all of it would erase the record of
-/// it if the response got the last word here.
-///
-/// This applies only to a deposited [`Decision`] — an authorization
-/// verdict. A handler's own [`set_outcome`](AuditEventBuilder::set_outcome)
-/// is an ordinary write and the response still overrides it.
+/// Fold a guard's [`Decision`] into the blanks. A denial's outcome alone overrides, so a route
+/// that masks a refusal (a 404, `outcome = "allowed"`) still records it.
 fn fold_decision(inner: &mut BuilderInner) {
     let Some(decision) = inner.decision.take() else {
         return;
@@ -635,9 +463,7 @@ fn fold_decision(inner: &mut BuilderInner) {
         inner.action = Some(decision.action.into_owned());
     }
 
-    // Type and id move together — an id under the wrong type names
-    // nothing — so the type standing alone is what marks the pair
-    // claimed.
+    // Type and id move together; the type marks the pair claimed.
     if inner.resource_type.is_none() {
         inner.resource_type = Some(decision.resource_type.into_owned());
         inner.resource_id = Some(decision.resource_id.into_owned());
@@ -685,9 +511,7 @@ mod tests {
         assert_eq!(event.outcome, Outcome::Allowed);
     }
 
-    /// A deposit fills blanks and never overwrites, so a handler that has
-    /// its own view of the event keeps it — and does not have to have run
-    /// in any particular order to do so.
+    /// A deposit never overwrites a handler's field, whichever ran first.
     #[tokio::test]
     async fn a_handler_outranks_a_deposit_whichever_ran_first() {
         for handler_first in [true, false] {
@@ -773,9 +597,7 @@ mod tests {
         assert_eq!(event.event_type, "auth_failure");
     }
 
-    /// Every other field yields to the request, but this one cannot: a
-    /// refused request reaching the trail as `Allowed` is worse than no
-    /// trail at all.
+    /// A deposited denial outranks the request's outcome.
     #[tokio::test]
     async fn a_refusal_outranks_an_allowed_outcome() {
         let (b, mut rx) = builder();
@@ -860,9 +682,7 @@ mod tests {
         );
     }
 
-    /// `outcome = "allowed"` on an error variant is the author saying
-    /// this failure is not audit-worthy. The layer writes it last, so it
-    /// lands — even over a handler that had already assumed worse.
+    /// An error variant's `outcome = "allowed"` lands over the handler's outcome.
     #[tokio::test]
     async fn an_allowed_annotation_overrides_what_the_handler_assumed() {
         let (b, mut rx) = layered();
@@ -889,9 +709,7 @@ mod tests {
         assert_eq!(event.outcome, Outcome::Error);
     }
 
-    /// A policy refusal is the exception, and it is not a `set_outcome`.
-    /// A route may legitimately mask one — answering 404 so a caller
-    /// cannot probe for what exists — without unmaking it.
+    /// A route that masks a refusal as a 404 still records the denial.
     #[tokio::test]
     async fn a_masked_refusal_is_still_recorded_as_a_refusal() {
         let (b, mut rx) = layered();
@@ -919,9 +737,7 @@ mod tests {
 
     // ── Settling ────────────────────────────────────────────
 
-    /// Under a layer the guard must keep its hands off: emitting would
-    /// take the builder before the response exists, costing the status
-    /// and truncating the duration.
+    /// Under a layer, `settle` leaves the sending to it.
     #[tokio::test]
     async fn settling_under_a_layer_leaves_the_event_for_the_layer() {
         let (b, mut rx) = layered();

@@ -5,6 +5,8 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{GenericArgument, PathArguments, ReturnType, Type, TypeParamBound};
 
+use crate::ty::inner_of;
+
 /// A `Callback<dyn Fn(A, B) -> R>`, read from its syntax.
 pub(crate) struct Sig {
     pub inputs: Vec<Type>,
@@ -42,19 +44,6 @@ fn fn_bound(
             return None;
         };
         Some((last.ident.to_string(), args))
-    })
-}
-
-/// `T` in `Name<T>`, by the path's last segment.
-pub(crate) fn inner_of<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
-    let Type::Path(p) = ty else { return None };
-    let last = p.path.segments.last().filter(|s| s.ident == name)?;
-    let PathArguments::AngleBracketed(a) = &last.arguments else {
-        return None;
-    };
-    a.args.iter().find_map(|a| match a {
-        GenericArgument::Type(t) => Some(t),
-        _ => None,
     })
 }
 

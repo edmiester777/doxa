@@ -54,7 +54,7 @@ pub struct DoxaConfig {
     pub service: Option<String>,
 }
 
-/// `"/dl" = { to = "http://localhost:3100", env = "LAKE_URL", strip = true }`.
+/// `"/reports" = { to = "http://localhost:3100", env = "REPORTS_URL", strip = true }`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Upstream {
@@ -388,13 +388,13 @@ mod tests {
     #[test]
     fn a_proxy_table_names_each_upstream() {
         let config: DoxaConfig = serde_json::from_value(serde_json::json!({
-            "proxy": { "/dl": { "to": "http://a", "env": "A", "strip": true }, "/api": { "env": "B" } }
+            "proxy": { "/reports": { "to": "http://a", "env": "A", "strip": true }, "/api": { "env": "B" } }
         }))
         .unwrap();
-        let dl = &config.proxy["/dl"];
-        assert_eq!(dl.to.as_deref(), Some("http://a"));
-        assert_eq!(dl.env.as_deref(), Some("A"));
-        assert!(dl.strip);
+        let reports = &config.proxy["/reports"];
+        assert_eq!(reports.to.as_deref(), Some("http://a"));
+        assert_eq!(reports.env.as_deref(), Some("A"));
+        assert!(reports.strip);
         assert!(!config.proxy["/api"].strip);
     }
 

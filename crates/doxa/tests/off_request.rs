@@ -1,15 +1,6 @@
 //! Authorizing where there is no request: a job, a queue consumer, a task.
 //!
-//! Nothing about the chain needed a request — it reads a caller, a checker
-//! and a state, and a worker has all three. What it did not have was
-//! anywhere to put them, so every consumer assembled `http::Extensions` by
-//! hand and the one that left the audit builder out authorized successfully
-//! and recorded nothing.
-//!
-//! These tests are mostly about that last part. The verdicts are the easy
-//! half; what is worth pinning is that a grant reaches the trail with
-//! nothing called to make it, that a refusal does the same, and that the
-//! event says who did the work rather than trailing off at the tenant.
+//! Mostly about the trail: grants and refusals reach it with nothing called, naming who did the work.
 
 #![cfg(all(feature = "full", feature = "policy-sea-orm"))]
 
@@ -78,9 +69,7 @@ fn catalog() -> Catalog {
     ])
 }
 
-/// The derive declares the `datasets.read` capability alongside the `read`
-/// action and gates one on the other, so the coarse half of the chain is
-/// exercised without a capability written out here.
+/// Declares `datasets.read`, so the coarse gate runs with no capability written here.
 #[derive(Debug, Clone, Copy, Actions)]
 #[actions(resource = "Dataset", prefix = "datasets")]
 pub enum DatasetAction {
@@ -152,12 +141,7 @@ fn work(tenant: &str, roles: &[&str]) -> (OffRequest<CapabilityContext>, Receive
 
 // ---- the verdicts -----------------------------------------------------------
 
-/// The whole point: the same chain, no request, and the state handed over
-/// rather than extracted.
-///
-/// `LoaderSource` and the `FromRequestParts` half of the guard are the
-/// request's business — a worker already holds its connection, and this
-/// call proves it never has to wrap it in anything to be allowed to use it.
+/// The same chain with no request, and the state handed over rather than extracted.
 #[tokio::test]
 async fn a_job_authorizes_against_the_state_it_already_holds() {
     let (work, _rx) = work("acme", &["datasets.read"]);
@@ -197,11 +181,6 @@ async fn a_job_is_confined_to_its_callers_tenant() {
 // ---- and they are recorded --------------------------------------------------
 
 /// A grant reaches the trail with nothing called to make it happen.
-///
-/// This is the hole the type exists to close. Hand-assembled extensions
-/// that omit the audit builder authorize exactly as well as these do, and
-/// deposit the decision into nothing — so the failure is invisible at the
-/// call site and the trail is simply missing rows nobody knows to look for.
 #[tokio::test]
 async fn a_grant_reaches_the_trail_with_no_request_anywhere() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
@@ -227,10 +206,9 @@ async fn a_grant_reaches_the_trail_with_no_request_anywhere() {
     assert_eq!(event.tenant_id.as_deref(), Some("acme"));
 }
 
-/// A refusal settles itself, so the trail has the denial even if the job
-/// never reaches its own terminal.
+/// A refusal is recorded once the handle drops, as a grant is.
 #[tokio::test]
-async fn a_refused_job_is_recorded_before_anything_else_runs() {
+async fn a_refused_job_is_recorded_when_its_handle_drops() {
     let (work, mut rx) = work("acme", &[]);
 
     let refusal = work
@@ -244,6 +222,11 @@ async fn a_refused_job_is_recorded_before_anything_else_runs() {
         .expect_err("the capability is not held");
 
     assert!(matches!(refusal, Refusal::Denied { .. }), "{refusal:?}");
+    assert!(
+        rx.try_recv().is_err(),
+        "nothing is sent while the handle lives"
+    );
+    drop(work);
 
     let event = rx.recv().await.expect("an event was emitted");
     assert_eq!(event.outcome, Outcome::Denied);
@@ -254,11 +237,28 @@ async fn a_refused_job_is_recorded_before_anything_else_runs() {
     assert_eq!(event.error_message.as_deref(), Some("capability denied"));
 }
 
-/// The event names the principal the work ran as.
-///
-/// There is no token here for a subject to have come from, so the actor is
-/// whatever the application calls its job. Left unset it would be roles and
-/// no subject — honest, and not much use when the trail is queried later.
+/// Several decisions through one handle are one event.
+#[tokio::test]
+async fn every_decision_lands_on_one_event() {
+    let (work, mut rx) = work("acme", &["datasets.read"]);
+    for _ in 0..2 {
+        work.authorize::<One<DatasetByName, Read>>(
+            DatasetKey {
+                name: "sales".to_owned(),
+            },
+            &catalog(),
+        )
+        .await
+        .expect("granted");
+    }
+    work.finish();
+
+    let event = rx.recv().await.expect("an event was emitted");
+    assert_eq!(event.outcome, Outcome::Allowed);
+    assert!(rx.try_recv().is_err(), "a second event was sent");
+}
+
+/// The event names the principal the work ran as, with no token to take a subject from.
 #[tokio::test]
 async fn the_actor_names_the_job_that_did_the_work() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
@@ -316,9 +316,7 @@ async fn a_job_that_fails_after_authorizing_records_the_failure() {
 
 // ---- the other door ---------------------------------------------------------
 
-/// `AuthorizeLoaded` through the same handle, which is the door a worker
-/// usually wants: a job loads its own rows, and this decides about one
-/// already in hand without a `Response` anywhere in the error type.
+/// `AuthorizeLoaded` through the same handle, for a row the job already loaded.
 #[tokio::test]
 async fn a_row_already_in_hand_is_decided_through_the_extensions() {
     let (work, mut rx) = work("acme", &["datasets.read"]);
@@ -341,13 +339,7 @@ async fn a_row_already_in_hand_is_decided_through_the_extensions() {
     assert_eq!(event.resource_id.as_deref(), Some("sales"));
 }
 
-/// The caller shape is a type parameter, so a handle only authorizes
-/// subjects whose `Ctx` it actually carries.
-///
-/// Through the request path the same mismatch is a `401` at run time,
-/// because extensions cannot be typed that way. Here the bound is what this
-/// function's existence proves: it will not instantiate for a subject whose
-/// caller shape differs from the handle's.
+/// A handle only authorizes subjects whose `Ctx` it carries; it compiles, so the bound holds.
 #[test]
 fn the_handle_only_serves_subjects_that_want_its_caller() {
     fn accepts<C, T>()

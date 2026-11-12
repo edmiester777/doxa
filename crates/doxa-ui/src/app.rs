@@ -92,9 +92,8 @@ impl App {
         self
     }
 
-    /// Mount into the page element matching `selector`. Only a browser has a page;
-    /// natively, mount a [`MemDom`](crate::dom::MemDom) with [`App::mount_on`].
-    /// The root stays mounted for the page's life.
+    /// Mount for the page's life into the element matching `selector`, in a browser; natively,
+    /// mount a [`MemDom`](crate::dom::MemDom) with [`App::mount_on`].
     pub fn mount(self, selector: &str) {
         #[cfg(target_arch = "wasm32")]
         {

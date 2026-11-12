@@ -17,16 +17,16 @@ use super::statics;
 /// The bindgen'd fat module, parsed once per base build.
 pub struct Cache {
     symbol_ifunc: HashMap<String, i32>,
+    data_symbols: HashMap<String, DataSymbol>,
     old: Module,
-    old_bytes: Vec<u8>,
     old_exports: HashSet<String>,
     old_imports: HashSet<String>,
 }
 
 impl Cache {
     /// Parse the module wasm-bindgen wrote from the fat link.
-    pub fn new(bytes: Vec<u8>) -> Result<Self> {
-        let parsed = parse_with_ids(&bytes)?;
+    pub fn new(bytes: &[u8]) -> Result<Self> {
+        let parsed = parse_with_ids(bytes)?;
         if parsed.symbols.code_symbols.is_empty() {
             bail!("the fat wasm has no symbol table; it must be linked with --emit-relocs");
         }
@@ -62,11 +62,17 @@ impl Cache {
             .iter()
             .map(|i| i.name.clone())
             .collect();
+        let data_symbols = parsed
+            .symbols
+            .data_symbol_index
+            .iter()
+            .filter_map(|(name, i)| Some((name.to_string(), *parsed.symbols.data_symbols.get(i)?)))
+            .collect();
         let old = parsed.module;
         Ok(Cache {
             symbol_ifunc,
+            data_symbols,
             old,
-            old_bytes: bytes,
             old_exports,
             old_imports,
         })
@@ -80,12 +86,10 @@ pub(super) fn jump_table(
     sites: &statics::Sites,
     cache: &Cache,
 ) -> Result<(Vec<u8>, JumpTable)> {
-    let old_symbols = parse_data_symbols(&cache.old_bytes)?;
     let (patch, bound) = statics::rebind(patch, sites, |name, size| {
-        let symbol = old_symbols
-            .data_symbol_index
+        let symbol = cache
+            .data_symbols
             .get(name)
-            .and_then(|i| old_symbols.data_symbols.get(i))
             .filter(|symbol| symbol.size == size)?;
         data_address(cache, symbol).ok()
     })?;
@@ -122,10 +126,9 @@ pub(super) fn jump_table(
 
     for mem in got_mems {
         let import = new.imports.get(mem);
-        let symbol = old_symbols
-            .data_symbol_index
+        let symbol = cache
+            .data_symbols
             .get(import.name.as_str())
-            .and_then(|i| old_symbols.data_symbols.get(i))
             .with_context(|| format!("no data symbol {} in the base module", import.name))?;
         let address = data_address(cache, symbol)?;
         let ImportKind::Global(global) = import.kind else {
@@ -157,9 +160,8 @@ pub(super) fn jump_table(
         }
         if let Some(slot) = cache.symbol_ifunc.get(&name) {
             new.imports.delete(import_id);
-            call_through_table(&mut new, table, func, *slot, name.clone());
-        }
-        if is_bindgen_symbol(&name) {
+            call_through_table(&mut new, table, func, *slot, name);
+        } else if is_bindgen_symbol(&name) {
             new.imports.delete(import_id);
             call_through_table(&mut new, table, func, 0, name);
         }
@@ -465,6 +467,7 @@ fn is_bindgen_symbol(name: &str) -> bool {
     .any(|s| name.contains(s))
 }
 
+#[derive(Clone, Copy)]
 struct DataSymbol {
     size: u32,
     segment: usize,

@@ -9,6 +9,7 @@ use doxa::ui::prelude::*;
 fn story(name: &str, module: &str) -> StoryMeta {
     StoryMeta {
         name: name.into(),
+        title: name.into(),
         module: module.into(),
         file: "web/src/stories.rs".into(),
         line: 7,
@@ -136,6 +137,36 @@ fn the_phone_bar_opens_the_tree_and_a_pick_closes_it() {
     doxa::client::task::run_until_stalled();
     assert!(!dom.attr(app, "class").unwrap().contains("menu"));
     assert_eq!(dom.text(open), "Lists / Full list");
+}
+
+#[test]
+fn stories_sharing_a_name_stay_apart_and_a_bare_name_finds_one() {
+    let entries = vec![
+        StoryMeta {
+            name: "empty_1a2b3c4d".into(),
+            ..story("empty", "app::lists")
+        },
+        StoryMeta {
+            name: "empty_5e6f7a8b".into(),
+            ..story("empty", "app::forms")
+        },
+    ];
+    let dom = MemDom::new();
+    let initial = Initial {
+        story: Some("empty".into()),
+        ..start()
+    };
+    App::embedded(move || view! { <Gallery entries={entries.clone()} initial={initial.clone()}/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    doxa::client::task::run_until_stalled();
+    assert!(leaf(&dom, "empty_1a2b3c4d").is_some() && leaf(&dom, "empty_5e6f7a8b").is_some());
+    assert!(
+        frame_src(&dom).contains("story=empty_1a2b3c4d"),
+        "{}",
+        frame_src(&dom)
+    );
+    assert_eq!(dom.document_title(), "Empty · Stories");
 }
 
 #[test]

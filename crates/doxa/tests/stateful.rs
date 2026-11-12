@@ -1,21 +1,14 @@
 //! A router that carries state, and rows keyed by UUID.
 //!
-//! Both are the ordinary case for a control plane and neither used to
-//! work. A `Uuid` key needed a newtype, because `RouteKey` and
-//! `uuid::Uuid` are both foreign to the consumer; and `Granted<Cap<M>>`
-//! could only be mounted on a stateless router, because the capability
-//! form named `()` as its state and nothing produces a `()` from an
-//! `AppState`.
-//!
-//! Everything below is written the way a consumer writes it — no newtype
-//! for the key, no `FromRef` impl for the capability route — so most of
-//! what this file asserts, it asserts by compiling.
+//! No newtype for the key and no `FromRef` for the capability route, so most of this asserts by compiling.
 
 #![cfg(feature = "full")]
 
+mod common;
+use common::AllowAll;
+
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::FromRef;
 use axum::http::{Request, StatusCode};
@@ -25,15 +18,13 @@ use tower::ServiceExt;
 
 use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, Scoping};
 use doxa::policy::{
-    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
+    AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceId,
 };
 use doxa::{get, routes, Actions, OpenApiRouter, PolicyResource, ToSchema};
 
 // ---- state ------------------------------------------------------------------
 
-/// What the router carries. The loader wants only the handle, so the
-/// asset names `Store` and reaches it through `FromRef` — the ordinary
-/// axum arrangement, and the one the capability form has to coexist with.
+/// The asset names `Store` and reaches it through `FromRef`.
 #[derive(Clone, doxa::State)]
 struct AppState {
     store: Store,
@@ -139,33 +130,10 @@ async fn list_documents(documents: Granted<Many<Document>>) -> &'static str {
     documents.into_inner()
 }
 
-/// The route that could not be written before: a bare capability gate on
-/// a router that carries state. `Cap` reaches nothing out of `AppState`,
-/// and now it does not have to pretend otherwise.
+/// A bare capability gate on a router that carries state.
 #[get("/reindex", tag = "Documents")]
 async fn reindex(_: Granted<Cap<DocumentsReindex>>) -> &'static str {
     "ok"
-}
-
-// ---- policy stub ------------------------------------------------------------
-
-struct AllowAll;
-
-#[async_trait]
-impl CapabilityChecker for AllowAll {
-    async fn check(&self, _: &str, _: &[String], _: &Capability) -> Result<bool, AuthError> {
-        Ok(true)
-    }
-
-    async fn check_instance(
-        &self,
-        _: &str,
-        _: &[String],
-        _: &str,
-        _: &ResourceEntity,
-    ) -> Result<bool, AuthError> {
-        Ok(true)
-    }
 }
 
 // ---- harness ----------------------------------------------------------------
@@ -243,9 +211,7 @@ async fn an_unknown_uuid_is_a_miss() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// `format: uuid` survives into the document, which is what a generated
-/// client needs to type the parameter — a bare `String` key would flatten
-/// it to an unformatted string.
+/// `format: uuid` survives into the document.
 #[test]
 fn the_uuid_segment_keeps_its_format() {
     let api = api();
@@ -269,9 +235,7 @@ fn the_uuid_segment_keeps_its_format() {
 
 // ---- and a capability gate mounts on a stateful router -----------------------
 
-/// Compiling is most of the assertion: before `NoState`, mounting this
-/// route on an `OpenApiRouter<AppState>` required the consumer to write
-/// `impl FromRef<AppState> for ()`.
+/// Compiling is most of the assertion: no `impl FromRef<AppState> for ()`.
 #[tokio::test]
 async fn a_capability_gate_mounts_on_a_stateful_router() {
     let (status, body) = call("/reindex").await;

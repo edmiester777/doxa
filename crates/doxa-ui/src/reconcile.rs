@@ -2,6 +2,7 @@
 //! keyed children are matched by key and moved along a longest increasing subsequence.
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use futures_util::future::LocalBoxFuture;
@@ -226,12 +227,22 @@ fn reconcile_keyed(
         .map(|(i, _)| i)
         .collect::<Vec<_>>()
         .into_iter();
+    let mut keyed: HashMap<Key, VecDeque<usize>> = HashMap::new();
+    for (i, k) in previous
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| Some((i, m.as_ref()?.key()?)))
+    {
+        keyed.entry(k).or_default().push_back(i);
+    }
     let mut placed: Vec<(Mounted, Option<usize>)> = Vec::with_capacity(new.len());
     for n in new {
         let found = match node_key(&n) {
-            Some(k) => previous.iter().position(|m| {
-                m.as_ref()
-                    .is_some_and(|m| m.key() == Some(k) && same_kind(m, &n))
+            Some(k) => keyed.get_mut(&k).and_then(|at| {
+                let j = at
+                    .iter()
+                    .position(|&i| previous[i].as_ref().is_some_and(|m| same_kind(m, &n)))?;
+                at.remove(j)
             }),
             None => unkeyed
                 .next()
@@ -250,11 +261,14 @@ fn reconcile_keyed(
         unmount(dom, parent, m, true);
     }
     let order: Vec<usize> = placed.iter().filter_map(|(_, i)| *i).collect();
-    let stay = lis(&order);
+    let mut stay = vec![false; order.iter().max().map_or(0, |m| m + 1)];
+    for i in lis(&order) {
+        stay[i] = true;
+    }
     let mut next = end;
     let mut nodes = Vec::new();
     for (m, i) in placed.iter().rev() {
-        let stays = i.is_some_and(|i| stay.contains(&i));
+        let stays = i.is_some_and(|i| stay[i]);
         if !stays {
             nodes.clear();
             m.nodes(&mut nodes);
@@ -546,16 +560,25 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
     }
     m.props = e.props.clone();
 
+    // The nth handler for an event takes over the nth listener for it.
+    let mut taken = vec![false; m.events.len()];
     for (name, o, h) in &e.events {
-        match m.events.iter().find(|(n, mo, _)| n == name && mo == o) {
-            Some((.., cell)) => *cell.borrow_mut() = h.clone(),
-            None => m
-                .events
-                .push((name, *o, listen(dom, node, name, *o, h.clone()))),
+        let free = (0..m.events.len())
+            .find(|&i| !taken[i] && m.events[i].0 == *name && m.events[i].1 == *o);
+        match free {
+            Some(i) => {
+                taken[i] = true;
+                *m.events[i].2.borrow_mut() = h.clone();
+            }
+            None => {
+                taken.push(true);
+                m.events
+                    .push((name, *o, listen(dom, node, name, *o, h.clone())));
+            }
         }
     }
-    for (name, o, cell) in &m.events {
-        if !e.events.iter().any(|(n, eo, _)| n == name && eo == o) {
+    for ((.., cell), taken) in m.events.iter().zip(taken) {
+        if !taken {
             *cell.borrow_mut() = Rc::new(|_| {});
         }
     }
@@ -571,6 +594,9 @@ fn patch_element(dom: &dyn Dom, owner: &Rc<Instance>, m: &mut MountedElement, e:
             m.inner_html = e.inner_html.clone();
         }
         return;
+    }
+    if m.inner_html.take().is_some() {
+        dom.set_inner_html(node, "");
     }
     let mut flat = Vec::new();
     e.children

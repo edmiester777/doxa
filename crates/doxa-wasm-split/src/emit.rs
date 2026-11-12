@@ -41,7 +41,9 @@ pub(crate) struct Plan<'p> {
     pub label: &'p str,
     pub export: Option<(&'p str, u32, u32)>,
     pub table_funcs: HashSet<u32>,
-    /// Functions main keeps, as the table slot their stub calls.
+    /// Functions this part puts in main's table for other parts' stubs, with their slots.
+    pub placed: Vec<(u32, u32)>,
+    /// Functions defined elsewhere, as the table slot their stub calls.
     pub stubs: HashMap<u32, u32>,
     pub deleted: HashSet<u32>,
     /// `(offset, size)` ranges of the first data segment this part initializes.
@@ -228,7 +230,7 @@ impl<'a> Source<'a> {
                 }
             }
         }
-        for func in slots.values() {
+        for func in slots.values().chain(plan.placed.iter().map(|(f, _)| f)) {
             r.index(*func);
         }
 
@@ -279,6 +281,10 @@ impl<'a> Source<'a> {
         }
         for (slot, func) in &slots {
             let at = ConstExpr::i32_const(*slot);
+            elements.active(table, &at, Elements::Functions(vec![r.map[func]].into()));
+        }
+        for (func, slot) in &plan.placed {
+            let at = ConstExpr::i32_const(*slot as i32);
             elements.active(table, &at, Elements::Functions(vec![r.map[func]].into()));
         }
         module.section(&exports).section(&elements);

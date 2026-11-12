@@ -166,13 +166,7 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
         })
     }
 
-    /// Check `action` against one concrete object.
-    ///
-    /// Unlike [`check_capability`](Self::check_capability), whose
-    /// resource ids are constants or the tenant, this evaluates against
-    /// the instance the request actually touches — and injects its
-    /// attributes into the entity set, so a `when { resource.<attr> … }`
-    /// clause resolves instead of collapsing to a residual denial.
+    /// Check `action` against one concrete object, whose attributes resolve `resource.<attr>`.
     #[tracing::instrument(skip_all, fields(tenant_id, action))]
     pub async fn check_instance(
         &self,
@@ -209,17 +203,8 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
         })
     }
 
-    /// Check `action` against several concrete objects, in one pass.
-    ///
-    /// [`check_instance`](Self::check_instance) assembles an entity set,
-    /// then evaluates. The set does not depend on which object is being
-    /// asked about, so N objects asked separately is N identical
-    /// assemblies — the cost a handler pays for a request body naming
-    /// several references. Here the hierarchy is built once and every
-    /// resource is evaluated against it.
-    ///
-    /// Verdicts come back positionally, one per resource. An empty slice
-    /// answers with an empty vector without loading the tenant at all.
+    /// Check `action` against several objects over one entity set; one verdict per resource,
+    /// in order.
     #[tracing::instrument(skip_all, fields(tenant_id, action, count = resources.len()))]
     pub async fn check_instance_many(
         &self,
@@ -238,9 +223,7 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
                 .collect());
         }
 
-        // Resolved before the evaluator is built, so a resource whose id
-        // cannot become a UID fails the whole call rather than being
-        // silently absent from the answers.
+        // A bad id fails the call rather than shortening the answers.
         let uids = resources
             .iter()
             .map(|resource| {
@@ -274,12 +257,6 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
     }
 
     /// The [`PolicyExtension`] this router evaluates through.
-    ///
-    /// Exposed so a wrapper that has to consult the extension before
-    /// reaching the policy — a session that already holds the answer, an
-    /// admin shortcut — can do so without being handed a second copy to
-    /// keep in step. [`SessionChecker`](crate::session::SessionChecker) is
-    /// the one in the box.
     pub fn extension(&self) -> &E {
         &self.extension
     }
@@ -301,29 +278,39 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
         roles: &[String],
         cap: &Capability,
     ) -> Result<bool, AuthError> {
-        for check in cap.checks {
-            // Resolved here, so `build_resource_uid` is handed a real id.
-            // It is the consumer's hook for the consumer's UID hierarchy;
-            // asking it to decode a marker doxa invented, using a value
-            // doxa passed it in the same call, was a round trip through
-            // consumer code that consulted nothing about the consumer.
-            let resource = self.extension.build_resource_uid(
-                tenant_id,
-                check.entity_type,
-                check.entity_id.resolve(tenant_id),
-            )?;
-            let decision = self.check(tenant_id, roles, check.action, resource).await?;
-            if !decision.allowed {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        Ok(self.check_capabilities(tenant_id, roles, &[cap]).await?[0])
     }
 
-    // `check_capability` is also the core of the type-erased
-    // `CapabilityChecker` impl below — the impl just delegates so
-    // external callers carrying `Arc<dyn CapabilityChecker>` go through
-    // the same evaluator path without touching the `E` type parameter.
+    /// Each of `caps`, in order, against one evaluator.
+    pub async fn check_capabilities(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        caps: &[&Capability],
+    ) -> Result<Vec<bool>, AuthError> {
+        if tenant_id.is_empty() {
+            return Ok(caps.iter().map(|cap| cap.checks.is_empty()).collect());
+        }
+        let store = self.cache.get_or_load(&self.store, tenant_id).await?;
+        let evaluator = CedarEvaluator::new(&store, tenant_id, roles, self.extension.as_ref())?;
+        let mut out = Vec::with_capacity(caps.len());
+        for cap in caps {
+            let mut allowed = true;
+            for check in cap.checks {
+                let resource = self.extension.build_resource_uid(
+                    tenant_id,
+                    check.entity_type,
+                    check.entity_id.resolve(tenant_id),
+                )?;
+                if !evaluator.check_action(check.action, resource)? {
+                    allowed = false;
+                    break;
+                }
+            }
+            out.push(allowed);
+        }
+        Ok(out)
+    }
 
     /// Evaluate a slice of capabilities and return a stable
     /// `name → allowed` map.
@@ -337,12 +324,9 @@ impl<E: PolicyExtension + 'static> PolicyRouter<E> {
         roles: &[String],
         caps: &[Capability],
     ) -> Result<BTreeMap<&'static str, bool>, AuthError> {
-        let mut out = BTreeMap::new();
-        for cap in caps {
-            let allowed = self.check_capability(tenant_id, roles, cap).await?;
-            out.insert(cap.name, allowed);
-        }
-        Ok(out)
+        let refs: Vec<&Capability> = caps.iter().collect();
+        let allowed = self.check_capabilities(tenant_id, roles, &refs).await?;
+        Ok(caps.iter().map(|cap| cap.name).zip(allowed).collect())
     }
 }
 
@@ -360,6 +344,15 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for PolicyRouter<E> {
         self.check_capability(tenant_id, roles, cap).await
     }
 
+    async fn check_capabilities(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        caps: &[&Capability],
+    ) -> Result<Vec<bool>, AuthError> {
+        PolicyRouter::check_capabilities(self, tenant_id, roles, caps).await
+    }
+
     async fn check_instance(
         &self,
         tenant_id: &str,
@@ -375,9 +368,7 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for PolicyRouter<E> {
         )
     }
 
-    /// Overridden rather than left to the default loop: the router is
-    /// exactly the implementation that can hoist the entity-set assembly
-    /// out of the per-resource question.
+    /// Builds the entity set once rather than per resource.
     async fn check_instance_many(
         &self,
         tenant_id: &str,
@@ -476,13 +467,7 @@ mod tests {
         assert!(allowed);
     }
 
-    /// The substitution, and the whole point of it: the stub extension
-    /// ignores the tenant it is passed and builds a UID straight from the
-    /// id (`test_support.rs:52`), so the only way this policy can match
-    /// is if `Tenant` was resolved before the hook was reached.
-    ///
-    /// That is what an extension no longer has to do — it now receives an
-    /// id rather than a marker naming an argument it was already holding.
+    /// The stub builds UIDs from the id alone, so this matches only if `Tenant` was resolved first.
     #[tokio::test]
     async fn the_tenant_is_substituted_before_the_extension_sees_it() {
         let policy = r#"
@@ -506,9 +491,6 @@ mod tests {
         assert!(allowed);
     }
 
-    /// And it is the *asking* tenant, not a constant baked into the
-    /// catalog: the same capability evaluated in another tenant asks
-    /// about that tenant's collection and is refused.
     #[tokio::test]
     async fn a_tenant_id_follows_the_request_rather_than_the_declaration() {
         let policy = r#"
@@ -735,10 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn attribute_policy_denies_without_the_entity_in_scope() {
-        // The same policy through the capability path, whose resource
-        // has no attributes: `resource.region` cannot be dereferenced,
-        // the clause survives as a residual, and the residual reads as
-        // a denial. This is what instance checks exist to fix.
+        // The capability path has no attributes, so the residual reads as a denial.
         let router = build_stub_router(REGION_POLICY);
         let uid = crate::uid::build_uid("Widget", "w-1").expect("uid");
         let decision = router
@@ -761,9 +740,6 @@ mod tests {
         assert!(!decision.allowed);
     }
 
-    /// A store that already persists an entity for the checked UID must
-    /// not produce two entries — Cedar rejects the duplicate and the
-    /// check would error instead of deciding.
     #[tokio::test]
     async fn stored_entity_for_the_same_uid_is_merged_not_duplicated() {
         let stored = serde_json::json!({
@@ -788,9 +764,6 @@ mod tests {
         );
     }
 
-    /// The stored entity carries the hierarchy tenant policies are
-    /// written against; a loaded resource declaring no parents must not
-    /// drop it.
     #[tokio::test]
     async fn stored_parents_survive_the_merge() {
         const TENANT_POLICY: &str = r#"
@@ -826,9 +799,6 @@ mod tests {
 
     // ── Batched instance checks ─────────────────────────────
 
-    /// The whole point: several resources, one entity hierarchy, one
-    /// verdict each — and each verdict about its own resource, not about
-    /// the set.
     #[tokio::test]
     async fn a_batch_decides_each_resource_on_its_own_attributes() {
         let router = build_stub_router(REGION_POLICY);
@@ -854,10 +824,6 @@ mod tests {
         assert!(decisions[1].reason.is_some(), "denials carry a reason");
     }
 
-    /// Batching is an optimization, so it has to be invisible: the same
-    /// question asked either way must reach the same verdict. A shared
-    /// entity set that let one resource's attributes leak into another's
-    /// decision would show up here and nowhere else.
     #[tokio::test]
     async fn a_batch_agrees_with_the_checks_it_replaces() {
         let router = build_stub_router(REGION_POLICY);
@@ -881,9 +847,7 @@ mod tests {
         }
     }
 
-    /// The duplicate-UID case, in the plural. One overlapping resource
-    /// sends the whole batch down the merge path, and every resource in it
-    /// — overlapping or not — must still be decided on its own attributes.
+    /// One stored UID sends the whole batch down the merge path.
     #[tokio::test]
     async fn a_batch_containing_a_stored_uid_still_merges() {
         let stored = serde_json::json!({
@@ -910,10 +874,6 @@ mod tests {
         );
     }
 
-    /// A body may name one object twice — `sales.orders` and the bare
-    /// `orders` resolving to one row — so the batch has to tolerate two
-    /// entries for one UID. Cedar refuses a duplicate in an entity set, so
-    /// without folding them this is a `500` rather than two answers.
     #[tokio::test]
     async fn a_batch_naming_one_resource_twice_answers_twice() {
         let router = build_stub_router(REGION_POLICY);
@@ -934,12 +894,7 @@ mod tests {
         );
     }
 
-    /// Two snapshots of one row disagreeing about an attribute is still one
-    /// object, and Cedar decides about objects — so the two slots have to
-    /// carry one verdict rather than one each. Which snapshot's attributes
-    /// survive the fold is not specified; that they agree is, because an
-    /// object both granted and refused in one answer is not a verdict a
-    /// caller can act on.
+    /// Which snapshot's attributes survive is unspecified; that both slots agree is.
     #[tokio::test]
     async fn one_uid_gets_one_verdict_however_often_it_is_named() {
         let router = build_stub_router(REGION_POLICY);
@@ -981,9 +936,6 @@ mod tests {
         assert!(!decisions[0].allowed);
     }
 
-    /// A resource whose id cannot become a UID fails the call rather than
-    /// being quietly missing from the answers — a short vector would line
-    /// the remaining verdicts up against the wrong rows.
     #[tokio::test]
     async fn a_batch_propagates_a_uid_failure() {
         let router = build_failing_uid_router();

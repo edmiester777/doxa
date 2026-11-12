@@ -1,61 +1,7 @@
-//! Turning a policy's residual into a `WHERE` clause.
-//!
-//! Cedar's partial evaluation answers three ways: allowed, denied, or a
-//! **residual** — a `when` clause it could not finish because the value it
-//! needed was not in the entity set. `permit(…) when { resource.region ==
-//! "us" }` evaluated without a concrete resource is the whole clause,
-//! handed back as JSON EST.
-//!
-//! That residual is a filter. Applying it a row at a time means loading
-//! every row and asking the policy about each one; applying it as SQL means
-//! the database never returns the rows the caller may not see. This module
-//! is the translation between the two, and the reason a listing can be one
-//! query rather than a query plus a loop.
-//!
-//! ## What it refuses
-//!
-//! Everything it does not recognize. A translator that skipped an
-//! untranslatable clause would return a filter *wider* than the policy
-//! authorized — every row the unskipped clause would have excluded, handed
-//! to a caller the policy meant to exclude them from — and nothing about
-//! the result would look wrong. So an unknown node, an attribute with no
-//! column, a comparison between two attributes, and a literal type with no
-//! SQL equivalent are all [`AuthError::PolicyFailed`], and the caller is
-//! expected to treat that as a denial.
-//!
-//! Cedar's `in` is refused specifically. It is hierarchy membership —
-//! `resource in Folder::"reports"` asks whether one entity is under
-//! another, which is a question about the entity graph and not about any
-//! column. Reading it as SQL `IN` would silently turn a parent check into a
-//! set comparison against a column that may not even exist. Set membership
-//! in Cedar is `contains`, which this does translate.
-//!
-//! ## Which residual this reads
-//!
-//! The one where `resource.<attr>` means a column of the table being
-//! filtered. That is the shape a check against a *named* resource
-//! produces: the request carries the entity's UID, the row's attributes go
-//! into the entity set through
-//! [`PolicyResource::cedar_attrs`](crate::PolicyResource::cedar_attrs), and
-//! what survives partially evaluated is a condition over exactly those
-//! attributes. [`ScopedTable::column_for_attr`] is derived from the same
-//! field list, so the two cannot come apart.
-//!
-//! There is another shape, and this does not read it. A consumer that
-//! withholds resource entities from the store on purpose — so that Cedar
-//! hands back a residual it can push into a query over some *other* table,
-//! the data a row describes rather than the row — gets attribute accesses
-//! whose base is Cedar's `unknown` placeholder rather than the `resource`
-//! variable, and a scope constraint (`resource in Tenant::"…"`) that
-//! survives as an obligation nothing here can discharge. Both are refused,
-//! which is correct but not useful: that residual is about a different
-//! table, and translating it here would build a `WHERE` clause against the
-//! wrong one — the single failure this module's refusals cannot catch,
-//! because the result looks like an ordinary filter.
-//!
-//! A consumer in that position owns the translation, and owns discharging
-//! the obligations against the caller it knows about. What ships here is
-//! the mechanical half of the easy case.
+//! A Cedar residual (`when { resource.region == "us" }`, as JSON EST) as a SeaORM `WHERE` clause
+//! over the resource's own table. Anything it can't translate exactly is refused with
+//! [`AuthError::PolicyFailed`], never skipped, since a skipped clause widens the filter.
+//! Cedar `in` is hierarchy, not SQL `IN`, and is refused.
 
 use sea_orm::{ColumnTrait, Condition, EntityTrait, Value as DbValue};
 use serde_json::Value;
@@ -63,18 +9,8 @@ use serde_json::Value;
 use crate::error::AuthError;
 use crate::scoped::ScopedTable;
 
-/// Translate a residual condition body into a [`Condition`] over `R`'s
-/// table.
-///
-/// The body is what
-/// [`PolicyExtension::extract_residual_attrs`](crate::PolicyExtension::extract_residual_attrs)
-/// receives — already merged into one expression when a policy had several
-/// `when` clauses.
-///
-/// Attribute names resolve through [`ScopedTable::column_for_attr`], which
-/// `#[derive(PolicyResource)]` writes from the same `#[resource(attr)]`
-/// fields the policy sees, so a policy can only mention what the row
-/// actually exposes.
+/// The body [`PolicyExtension::extract_residual_attrs`](crate::PolicyExtension::extract_residual_attrs)
+/// receives, as a [`Condition`]; attributes resolve through [`ScopedTable::column_for_attr`].
 ///
 /// ```ignore
 /// fn extract_residual_attrs(
@@ -102,9 +38,7 @@ fn translate<R: ScopedTable>(node: &Value) -> Result<Condition, AuthError> {
         "&&" => {
             let (left, right) = pair(arg)?;
             let (left, right) = (translate::<R>(left)?, translate::<R>(right)?);
-            // `true` is the identity of a conjunction, and an empty
-            // condition is how this spells it — so a resolved scope
-            // constraint drops out instead of becoming `TRUE AND …`.
+            // `true` (the empty condition) drops out of a conjunction.
             Ok(match (is_true(&left), is_true(&right)) {
                 (true, true) => Condition::all(),
                 (true, false) => right,
@@ -115,10 +49,7 @@ fn translate<R: ScopedTable>(node: &Value) -> Result<Condition, AuthError> {
         "||" => {
             let (left, right) = pair(arg)?;
             let (left, right) = (translate::<R>(left)?, translate::<R>(right)?);
-            // The other way round: `true` *absorbs* a disjunction rather
-            // than dropping out of it. A branch that holds unconditionally
-            // makes the whole clause hold, so the answer is `true` — not
-            // the other branch, which would be narrower than the policy.
+            // `true` absorbs a disjunction.
             if is_true(&left) || is_true(&right) {
                 return Ok(Condition::all());
             }
@@ -127,9 +58,6 @@ fn translate<R: ScopedTable>(node: &Value) -> Result<Condition, AuthError> {
         "!" => {
             let inner = arg.get("arg").ok_or_else(|| refused("`!` with no `arg`"))?;
             let inner = translate::<R>(inner)?;
-            // `!true` is `false`, and refused for the reason a bare
-            // `false` is: negating the empty condition would render as
-            // nothing, which reads as granting everything.
             if is_true(&inner) {
                 return Err(refused(
                     "a negated `true`, which grants nothing; an empty filter would grant \
@@ -150,15 +78,8 @@ fn translate<R: ScopedTable>(node: &Value) -> Result<Condition, AuthError> {
             "`in` is Cedar hierarchy membership, not a column comparison; a parent check \
              cannot be pushed into a row filter",
         )),
-        // Cedar leaves the parts of a policy's scope it *did* resolve as
-        // `true` conjuncts inside the residual, so a clause that translates
-        // perfectly well still arrives wrapped in them. `true` is the
-        // identity of a conjunction, and an empty `Condition::all()` is how
-        // SeaORM spells it — it contributes no SQL wherever it is added.
-        //
-        // `false` is not the mirror of that. It says the policy grants
-        // nothing, and an empty condition would be read as granting
-        // everything, so it refuses.
+        // Resolved scope constraints arrive as `true` conjuncts. `false` refuses: an empty
+        // condition would grant everything.
         "Value" => match arg.as_bool() {
             Some(true) => Ok(Condition::all()),
             Some(false) => Err(refused(
@@ -206,11 +127,7 @@ fn comparison<R: ScopedTable>(op: &str, arg: &Value) -> Result<Condition, AuthEr
     Ok(Condition::all().add(expr))
 }
 
-/// `[…].contains(resource.attr)` — a literal set the column must be in.
-///
-/// The reverse, `resource.attr.contains(…)`, asks whether the *attribute*
-/// is a set containing something. A column holding a scalar cannot answer
-/// that, so it is refused rather than guessed at.
+/// `[…].contains(resource.attr)`: a literal set the column must be in. The reverse is refused.
 fn contains<R: ScopedTable>(arg: &Value) -> Result<Condition, AuthError> {
     let (left, right) = pair(arg)?;
 
@@ -231,13 +148,8 @@ fn contains<R: ScopedTable>(arg: &Value) -> Result<Condition, AuthError> {
     Ok(Condition::all().add(column::<R>(attr)?.is_in(values)))
 }
 
-/// Whether a translated node is the unconditional `true`.
-///
-/// The only empty condition this module builds is the one the `true`
-/// literal produces — every other arm adds at least one expression — so
-/// emptiness and unconditional truth are the same fact here. They are not
-/// the same fact in SeaORM generally: an empty `Condition::any()` is
-/// `false`, and nothing below constructs one.
+/// Whether a translated node is `true`. Only the `true` literal builds an empty condition here;
+/// an empty `Condition::any()` would be `false`, and none is built.
 fn is_true(condition: &Condition) -> bool {
     condition.is_empty()
 }
@@ -279,11 +191,7 @@ fn pair(arg: &Value) -> Result<(&Value, &Value), AuthError> {
     Ok((left, right))
 }
 
-/// The attribute name in `resource.<name>`, if that is what this node is.
-///
-/// Only `resource`. A residual still naming `principal` is one partial
-/// evaluation could not resolve, and the row's columns say nothing about
-/// the caller.
+/// The attribute name in `resource.<name>`; any other variable is `None`.
 fn attr_of(node: &Value) -> Option<&str> {
     let access = node.get(".")?;
     let var = access.get("left")?.get("Var")?.as_str()?;
@@ -317,9 +225,7 @@ fn db_value(literal: &Value) -> Result<DbValue, AuthError> {
             (None, Some(float)) => Ok(DbValue::from(float)),
             _ => Err(refused("a number with no SQL equivalent")),
         },
-        // `null` compares false to everything in SQL, including itself, so
-        // a filter built from one would silently match nothing. Whatever
-        // the policy meant, it did not mean that.
+        // SQL `null` compares false to everything.
         Value::Null => Err(refused("a comparison against `null`")),
         _ => Err(refused("a literal that is not a scalar")),
     }
@@ -336,9 +242,7 @@ fn flip(op: &str) -> &str {
     }
 }
 
-/// Every refusal is the same kind of failure: the policy said something
-/// this cannot express, and the caller must not be handed a filter that
-/// omits it.
+/// A clause this cannot express.
 fn refused(what: &str) -> AuthError {
     AuthError::PolicyFailed(format!("residual cannot become a row filter: {what}"))
 }
@@ -407,9 +311,6 @@ mod tests {
         assert!(sql.contains(r#""region" = 'us'"#), "{sql}");
     }
 
-    /// `5 < resource.size` and `resource.size > 5` are the same filter, and
-    /// a translator that read the first literally would produce the wrong
-    /// one.
     #[test]
     fn a_literal_on_the_left_reads_the_operator_backwards() {
         let body = json!({"<": {"left": value(json!(5)), "right": attr("size")}});
@@ -445,9 +346,6 @@ mod tests {
         assert!(sql.contains(r#""region" IN ('us', 'eu')"#), "{sql}");
     }
 
-    /// The refusal that matters most. `in` is hierarchy membership, and
-    /// reading it as SQL `IN` would turn `resource in Folder::"reports"`
-    /// into a comparison against a column that means something else.
     #[test]
     fn hierarchy_membership_is_refused_rather_than_read_as_a_set() {
         let body = json!({"in": {"left": attr("region"), "right": value(json!("us"))}});
@@ -459,9 +357,6 @@ mod tests {
         );
     }
 
-    /// An attribute the row does not expose as a column cannot be filtered
-    /// on, and the answer is a refusal rather than a filter missing that
-    /// clause.
     #[test]
     fn an_attribute_with_no_column_is_refused() {
         let body = json!({"==": {"left": attr("owner"), "right": value(json!("me"))}});
@@ -470,9 +365,6 @@ mod tests {
         assert!(format!("{error}").contains("no column"), "{error}");
     }
 
-    /// The general case of the same rule: anything unrecognized refuses.
-    /// A translator that returned `Condition::all()` for an operator it did
-    /// not know would grant every row the clause meant to exclude.
     #[test]
     fn an_unknown_operator_is_refused() {
         let body = json!({"like": {"left": attr("region"), "right": value(json!("us%"))}});
@@ -480,10 +372,7 @@ mod tests {
         assert!(condition_from_residual::<Model>(&body).is_err());
     }
 
-    /// Cedar leaves the scope constraints it resolved as `true` conjuncts
-    /// inside the residual, so a translatable clause arrives wrapped in
-    /// them. Refusing those would refuse every real residual; they have to
-    /// vanish, which for a conjunction means contributing no SQL.
+    /// Resolved scope constraints arrive as `true` conjuncts and must contribute no SQL.
     #[test]
     fn a_true_literal_is_the_identity_of_a_conjunction() {
         let clause = json!({"==": {"left": attr("region"), "right": value(json!("us"))}});
@@ -501,10 +390,6 @@ mod tests {
         );
     }
 
-    /// `false` is not its mirror. It grants nothing, and an empty
-    /// condition — which is what "contributes no SQL" means — would be
-    /// read as granting everything. Same for the `!true` that says it the
-    /// long way round.
     #[test]
     fn a_false_literal_is_refused_rather_than_dropped() {
         for body in [
@@ -516,11 +401,6 @@ mod tests {
         }
     }
 
-    /// `true` absorbs a disjunction rather than dropping out of it. Taking
-    /// the other branch instead would hand back a filter *narrower* than
-    /// the policy — the mirror of the mistake every refusal here exists to
-    /// prevent, and the one direction that is safe to get wrong is not
-    /// this one.
     #[test]
     fn a_true_branch_of_a_disjunction_absorbs_it() {
         let body = json!({"||": {
@@ -537,11 +417,7 @@ mod tests {
         assert!(sql.contains("WHERE TRUE"), "{sql}");
     }
 
-    /// The shape this module does not read: partial evaluation over a
-    /// *withheld* entity bases its attribute access on Cedar's `unknown`
-    /// placeholder rather than the `resource` variable. Refusing is
-    /// correct — that residual is about a different table — and silently
-    /// translating it would build a `WHERE` clause against the wrong one.
+    /// A withheld entity's residual reads `unknown`, not `resource`: it is about another table.
     #[test]
     fn an_unknown_entity_base_is_refused_rather_than_read_as_the_resource() {
         let unknown = json!({".": {

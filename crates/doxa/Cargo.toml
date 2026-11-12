@@ -100,7 +100,7 @@ gallery = ["ui", "doxa-ui/gallery"]
 tailwind = ["ui", "dep:doxa-tailwind"]
 
 # Everything.
-full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
+full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm", "client", "ui", "react"]
 
 [dependencies]
 doxa-wire = { workspace = true }

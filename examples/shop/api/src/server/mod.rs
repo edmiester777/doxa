@@ -4,7 +4,7 @@ mod orders;
 mod widgets;
 
 pub use orders::{OrderById, OrderRow, Store};
-pub use widgets::{field_sizes, Caller, Catalog, WidgetByName, WidgetRow};
+pub use widgets::{field_sizes, Caller, Catalog, WidgetByName, WidgetRow, KEPT_SUGGESTIONS};
 
 pub use axum::extract::Multipart;
 

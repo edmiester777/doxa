@@ -181,9 +181,10 @@ fn a_form_checks_its_rules_first_and_shows_the_servers_422_on_the_field() {
 fn Choices() -> View {
     let size = state(String::from("s"));
     let tags = state(Vec::<String>::new());
+    let medium = String::from("m");
     view! {
         <input id="s" type="radio" value="s" bind:group={size}/>
-        <input id="m" type="radio" value="m" bind:group={size}/>
+        <input id="m" type="radio" bind:group={size} value={medium}/>
         <select id="tags" multiple="" bind:selected={tags}>
             <option value="a">"a"</option>
             <option value="b">"b"</option>
@@ -576,6 +577,9 @@ fn a_validating_route_documents_its_422_and_a_plain_one_does_not() {
     let doc = serde_json::to_value(doc).unwrap();
     let code = "/responses/422/content/application~1json/schema/properties/code/enum";
     let of = |path: &str| doc["paths"][path]["get"].pointer(code).cloned();
-    assert_eq!(of("/valid-page"), Some(serde_json::json!(["invalid"])));
+    assert_eq!(
+        of("/valid-page"),
+        Some(serde_json::json!(["malformed", "invalid"]))
+    );
     assert_eq!(of("/plain-page"), None);
 }

@@ -107,6 +107,10 @@ impl<E: PolicyExtension + 'static> Policy<E::SessionOutput> for CedarPolicy<E>
 where
     E::SessionOutput: Clone,
 {
+    fn is_admin_role(&self, role: &str) -> bool {
+        self.extension.is_admin_role(role)
+    }
+
     async fn flush_cache(&self) {
         self.cache.flush().await;
     }

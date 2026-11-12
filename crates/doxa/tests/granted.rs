@@ -60,9 +60,7 @@ doxa::auth::route_key!(pub LedgerKey { id: u32 });
 pub enum WidgetActions {
     #[action(verb = get, capable = WidgetsRead)]
     Read,
-    // Behind the same coarse capability as `read`, so the only thing
-    // separating listing widgets from bulk-purging them is what `scope`
-    // makes of the action.
+    // Same capability as `read`: only `scope` tells a listing from a purge.
     #[action(capable = WidgetsRead)]
     Purge,
 }
@@ -98,12 +96,7 @@ impl Granting for Widget {
 impl Scoping for Widget {
     type Filter = Filter;
 
-    /// A real impl reads the session the policy assembled. This one keys
-    /// off a role so a test can produce a caller who clears the coarse
-    /// gate but has no scope.
-    ///
-    /// A collection route runs no instance check, so an impl that ignored
-    /// the action would hand a purge the same rows it hands a listing.
+    /// Keys off a role, so a test can clear the coarse gate with no scope.
     fn scope(action: &str, ctx: &CapabilityContext) -> Result<Option<Filter>, AuthError> {
         if !ctx.roles.iter().any(|r| r == "viewer") {
             return Ok(None);
@@ -165,18 +158,14 @@ impl Scoping for Gadget {
 
 // ---- actions (what a route names, and the macro resolves) -------------------
 
-// Each asset's own, which is the point: one `Listing` site used to stand
-// in for the read action of three different assets. An action now belongs
-// to a vocabulary, so `Many<Gadget, widget_actions::Read>` does not build.
+// Each asset's own: `Many<Gadget, widget_actions::Read>` does not build.
 use gadget_actions::Read as ListGadgets;
 use ledger_actions::Read as ListLedgers;
 use widget_actions::{Purge as Purging, Read as GetWidget};
 
 // ---- policy stub ------------------------------------------------------------
 
-/// Grants the capability to `viewer` and `lister`, and `read` only on
-/// widgets in region `us` — so a wrong instance decision means the
-/// object's attributes never reached the policy.
+/// Grants `viewer` and `lister`, and `read` only on widgets in region `us`.
 struct RegionChecker;
 
 #[async_trait]
@@ -248,12 +237,7 @@ async fn a_collection_yields_the_authorized_scope() {
     );
 }
 
-/// Two collection routes over one asset, differing only in the action.
-///
-/// The coarse capability is the same for both, and a collection form runs
-/// no instance check, so if the action did not reach
-/// [`Scoping::scope`](doxa::auth::Scoping::scope) a caller cleared to
-/// list widgets would be cleared to purge them.
+/// Two collection routes differing only in the action, which must reach `Scoping::scope`.
 #[tokio::test]
 async fn the_scope_is_per_action_not_per_asset() {
     let (mut listing, _rx) = parts(&["viewer"]);
@@ -273,14 +257,6 @@ async fn the_scope_is_per_action_not_per_asset() {
     assert_eq!(event.error_message.as_deref(), Some("no authorized scope"));
 }
 
-// An action the asset never declared used to be refused here, at request
-// time, with `reason: "action not declared"`. There is no such request to
-// make any more: an action is a type belonging to a vocabulary, and
-// `authorize::<Many<Widget, A>>` will not accept one whose `Table` is not
-// `Widget`'s. The `DeclaredAction` doctests in doxa-auth are where that is
-// held — a `compile_fail` naming another asset's action, beside the
-// passing one it differs from.
-
 /// The coarse gate runs first, so a caller without the capability never
 /// reaches the scope lookup.
 #[tokio::test]
@@ -298,9 +274,7 @@ async fn the_coarse_gate_refuses_before_the_scope_lookup() {
     assert_eq!(event.error_message.as_deref(), Some("capability denied"));
 }
 
-/// Clearing the coarse gate is not the same as having a scope: an asset
-/// the policy granted nothing on refuses by default, so a misconfigured
-/// policy cannot pass for an empty table.
+/// No scope refuses, so a misconfigured policy cannot pass for an empty table.
 #[tokio::test]
 async fn a_caller_with_no_scope_is_refused_by_default() {
     // `lister` satisfies the capability but `Widget::scope` returns None.
@@ -390,7 +364,7 @@ async fn an_allowed_instance_reaches_the_handler() {
 async fn a_denied_instance_names_the_object() {
     let (status, event) = get_widget(&["viewer"], "/widgets/2").await;
 
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::NOT_FOUND, "a refused row is hidden");
     assert_eq!(event.outcome, Outcome::Denied);
     assert_eq!(event.action, "read");
     assert_eq!(event.resource_id.as_deref(), Some("2"));
@@ -418,9 +392,7 @@ async fn an_unparseable_key_is_rejected_early() {
 
 // ---- authorizing what the extractor cannot reach -----------------------------
 
-/// A guard runs in `FromRequestParts`, which sees no request body, so an
-/// id named in a payload can only be authorized from inside the handler
-/// that parsed it. `authorize` is the extractor's own body, callable.
+/// An id from a payload is authorized in the handler, with the guard's own `authorize`.
 #[tokio::test]
 async fn a_handler_can_authorize_an_id_from_its_body() {
     let (parts, _rx) = parts(&["viewer"]);
@@ -436,10 +408,7 @@ async fn a_handler_can_authorize_an_id_from_its_body() {
     assert_eq!(widget.region, "us");
 }
 
-/// `authorize` is the only door onto a policy decision — the chain
-/// itself is sealed — so the manual path and the guard path cannot
-/// disagree about whether a denial is auditable. There is no third path
-/// that reaches a verdict and records nothing.
+/// The manual and guard paths agree on whether a denial is audited.
 #[tokio::test]
 async fn a_manual_refusal_is_recorded_like_the_extractors() {
     let (parts, mut rx) = parts(&["viewer"]);
@@ -452,7 +421,7 @@ async fn a_manual_refusal_is_recorded_like_the_extractors() {
     .await
     .expect_err("region eu is denied");
 
-    assert_eq!(refused.into_response().status(), StatusCode::FORBIDDEN);
+    assert_eq!(refused.into_response().status(), StatusCode::NOT_FOUND);
 
     let event = rx.try_recv().expect("the refusal is recorded");
     assert_eq!(event.outcome, Outcome::Denied);
@@ -488,10 +457,7 @@ async fn a_manual_grant_is_recorded_like_the_extractors() {
 
 // ---- the caller is shared, not copied ---------------------------------------
 
-/// A session the policy assembled. Deliberately **not** `Clone`: the
-/// context is behind an `Arc`, so nothing on the request path copies it,
-/// and requiring `Clone` here would have been the tell that something
-/// did.
+/// Deliberately not `Clone`: nothing on the request path may copy the context.
 #[derive(Debug)]
 struct Session {
     grants: Vec<&'static str>,
@@ -561,13 +527,7 @@ fn typed_parts() -> axum::http::request::Parts {
     request.into_parts().0
 }
 
-/// A guard and an `Auth` extractor on one handler reach the *same*
-/// context allocation.
-///
-/// This is the pairing that motivated the shared context: a listing
-/// route takes the guard for its scope and `Auth` for the claims, and
-/// each used to deep-copy the assembled session on the way in — a cost
-/// that scaled with how much the policy had granted.
+/// A guard and an `Auth` extractor on one handler reach the same context allocation.
 #[tokio::test]
 async fn a_guard_and_an_auth_extractor_share_one_context() {
     let mut parts = typed_parts();

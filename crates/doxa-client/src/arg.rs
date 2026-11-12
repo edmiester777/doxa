@@ -76,7 +76,8 @@ pub struct Outgoing {
     template: &'static str,
     named: Vec<(String, String)>,
     positional: Vec<String>,
-    query: Vec<(String, String)>,
+    /// Already form-encoded.
+    query: String,
     keys: Vec<Value>,
     body: Option<(Option<String>, Payload)>,
     headers: Vec<(String, String)>,
@@ -114,9 +115,12 @@ impl Outgoing {
     /// Add `value`'s fields to the query string.
     pub fn query(&mut self, value: &impl Serialize) -> Result<(), String> {
         let encoded = serde_urlencoded::to_string(value).map_err(|e| e.to_string())?;
-        let pairs: Vec<(String, String)> =
-            serde_urlencoded::from_str(&encoded).map_err(|e| e.to_string())?;
-        self.query.extend(pairs);
+        if !encoded.is_empty() {
+            if !self.query.is_empty() {
+                self.query.push('&');
+            }
+            self.query.push_str(&encoded);
+        }
         Ok(())
     }
 
@@ -132,7 +136,7 @@ impl Outgoing {
             if names.contains(&k.as_str()) {
                 self.named.push((k, s));
             } else {
-                self.query.push((k, s));
+                self.query(&[(k, s)])?;
             }
         }
         Ok(())
@@ -188,6 +192,24 @@ impl Outgoing {
         &self.headers
     }
 
+    /// `url` with this call's headers, so calls differing only in a header don't share an answer.
+    pub(crate) fn identity(&self, url: &str) -> String {
+        let mut headers: Vec<_> = self
+            .headers
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str()))
+            .collect();
+        headers.sort();
+        let mut out = url.to_owned();
+        for (k, v) in headers {
+            out.push('\n');
+            out.push_str(&k);
+            out.push_str(": ");
+            out.push_str(v);
+        }
+        out
+    }
+
     pub(crate) fn body(&self) -> Option<&(Option<String>, Payload)> {
         self.body.as_ref()
     }
@@ -219,9 +241,13 @@ impl Outgoing {
                 .or_else(|| positional.next())
                 .ok_or_else(|| format!("no argument fills `{{{name}}}` in `{template}`"))?;
             if raw.starts_with('*') {
-                out.push_str(&value.split('/').map(segment).collect::<Vec<_>>().join("/"));
+                let parts = value
+                    .split('/')
+                    .map(segment)
+                    .collect::<Result<Vec<_>, _>>()?;
+                out.push_str(&parts.join("/"));
             } else {
-                out.push_str(&segment(value));
+                out.push_str(&segment(value)?);
             }
             rest = &rest[close + 1..];
         }
@@ -231,7 +257,7 @@ impl Outgoing {
         }
         if !self.query.is_empty() {
             out.push('?');
-            out.push_str(&serde_urlencoded::to_string(&self.query).map_err(|e| e.to_string())?);
+            out.push_str(&self.query);
         }
         Ok(out)
     }
@@ -243,8 +269,13 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
-fn segment(s: &str) -> String {
-    utf8_percent_encode(s, SEGMENT).to_string()
+/// One encoded path segment. `.` and `..` are refused: URL parsers resolve them (encoded or not),
+/// so they would change which route is requested.
+fn segment(s: &str) -> Result<String, String> {
+    if s == "." || s == ".." {
+        return Err(format!("`{s}` can't be a path value"));
+    }
+    Ok(utf8_percent_encode(s, SEGMENT).to_string())
 }
 
 fn to_value(value: &impl Serialize) -> Result<Value, String> {
@@ -370,6 +401,34 @@ mod tests {
         let mut out = Outgoing::new("/orders/{name}/items/{id}");
         out.path(&("a", 7)).unwrap();
         assert_eq!(out.url().unwrap(), "/orders/a/items/7");
+    }
+
+    #[test]
+    fn calls_differing_only_in_a_header_have_different_identities() {
+        let identity = |tenant: &str| {
+            let mut out = Outgoing::new("/orders");
+            out.header("X-Tenant", tenant);
+            out.header("accept-language", "en");
+            out.identity(&out.url().unwrap())
+        };
+        assert_ne!(identity("a"), identity("b"));
+        assert_eq!(identity("a"), identity("a"));
+        assert_eq!(Outgoing::new("/orders").identity("/orders"), "/orders");
+    }
+
+    #[test]
+    fn a_dot_segment_is_refused_rather_than_resolved() {
+        for value in [".", ".."] {
+            let mut out = Outgoing::new("/orders/{name}/items/{id}");
+            out.path(&(value, 7)).unwrap();
+            assert!(out.url().is_err(), "{value}");
+        }
+        let mut out = Outgoing::new("/files/{*rest}");
+        out.path(&"a/../../admin").unwrap();
+        assert!(out.url().is_err());
+        let mut out = Outgoing::new("/files/{*rest}");
+        out.path(&"a/..b/c.d").unwrap();
+        assert_eq!(out.url().unwrap(), "/files/a/..b/c.d");
     }
 
     #[test]

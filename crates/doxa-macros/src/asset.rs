@@ -1,81 +1,7 @@
-//! `#[asset]` — the `Granting` impl an application would otherwise
-//! transcribe.
-//!
-//! Seven of `Granting`'s eight items are not decisions. `Ctx`, `State`,
-//! `Source` and `Error` belong to the application and are the same for
-//! every asset in it; `Key`, `KEY_NAMES` and `load` are the lookup the row
-//! already declares through [`FetchByKey`] — or, for `key = pk`, through
-//! [`FetchById`], which is why the id route reaches a row that declares no
-//! key column at all; `Row` is `Self` unless the attribute says otherwise.
-//! Only `ACTIONS` is a fact about this asset, and the attribute takes it
-//! as one word.
-//!
-//! `KEY_NAMES` is what lets a route stop naming its own key segment.
-//! `#[resource(key)] name: String` produces a key whose field is `name`, so
-//! `/widgets/{name}/revisions/{rev}` binds the right one of the two
-//! segments and the route says nothing. Rename at the row —
-//! `#[resource(key = "slug")]` — not per route.
-//!
-//! `with` names a [`Lookup`] instead — one of the markers
-//! `#[resource(key(Name))]` emits, for the row reached more ways than
-//! `FetchByKey` and `FetchById` can spell between them. A marker carries
-//! its row and its key, so `with = FindByPair` needs no `row =` beside it
-//! and two assets over one row cannot come to name different rows.
-//!
-//! `ctx`, `error` and `source` override the profile for the asset that
-//! genuinely differs — a loader answering 409 on an ambiguous name, a
-//! `Scoping` impl that needs the assembled session to read the policy's
-//! residual, a lookup that must run inside the request's open transaction
-//! — without the rest of the service restating anything.
-//!
-//! ```ignore
-//! #[doxa::asset(profile = AppGrants, actions = WidgetAction)]
-//! pub struct WidgetByName;
-//! ```
-//!
-//! # No backend is assumed
-//!
-//! The lookups are named through [`fetch`], which no backend owns, so what
-//! this writes is the same whether the row lives in Postgres, behind an
-//! HTTP control plane or in a process-local map. `#[derive(PolicyResource)]`
-//! answers those traits for a SeaORM model; anything else answers them
-//! itself, in about fifteen lines.
-//!
-//! # `load_with`, and what taking the caller costs
-//!
-//! [`FetchByKey::fetch`] is handed a `&str` scope and nothing else. That
-//! is not a thin signature, it is the guarantee: a lookup that cannot see
-//! the caller cannot ignore the caller's tenant, so the generated loader
-//! confines every fetch and refuses to guess when there is no tenant to
-//! confine to.
-//!
-//! `load_with` is handed the whole `Ctx`, and exists for the lookup that
-//! needs more than the scope — one that varies by role, or reads the
-//! assembled session. Those two facts are the same fact. Taking the `Ctx`
-//! is what makes such a lookup expressible, and it is what makes
-//! confinement the consumer's to write: a `load_with` that takes `_ctx`
-//! and means it compiles, passes its tests, and serves one tenant's rows
-//! to another, with the capability gate and the instance check both
-//! passing on the way. `asset_load_with.rs` in the `doxa` crate pins that
-//! boundary as a runnable fact.
-//!
-//! Everything around the loader is unchanged either way: the coarse gate
-//! still runs first and still costs no load, the instance check still runs
-//! on whatever came back, and the verdict still reaches the audit trail
-//! under the row's Cedar identity. The scope is the only thing that moves.
-//!
-//! The struct is left exactly as written. That is the whole reason this
-//! is an attribute on a descriptor rather than something that generates
-//! one: `Granting::Row` is a separate associated type, so a second route
-//! key over the same row is a unit struct naming `row = …`, not a newtype
-//! wrapping it. Two descriptors over one row therefore share one
-//! `PolicyResource` impl and cannot come to disagree about the object's
-//! Cedar identity.
-//!
-//! [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
-//! [`FetchByKey`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.FetchByKey.html
-//! [`FetchById`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.FetchById.html
-//! [`Lookup`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/trait.Lookup.html
+//! `#[asset]`: a descriptor's `Granting` impl, from its profile, its actions and the row's lookup
+//! (`FetchByKey`, `FetchById` for `key = pk`, or a named `Lookup` via `with`). The lookup gets only
+//! the tenant, so it is confined to it; `load_with` gets the whole `Ctx`, and confinement is then
+//! the consumer's to write. The struct is left as written.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -94,10 +20,7 @@ struct Args {
     actions: Option<Path>,
     /// Route key. `<Row as FetchByKey<State>>::Key` when absent.
     key: Option<Type>,
-    /// `key = pk`: the row's own identifier rather than a key column, and
-    /// `FetchById` rather than `FetchByKey`. Asks nothing of
-    /// `#[resource(key)]`, so a row that declares no key column still has
-    /// an id route.
+    /// `key = pk`: the row's identifier through `FetchById`, needing no key column.
     by_primary_key: bool,
     /// Loader failure, overriding the profile's.
     error: Option<Type>,
@@ -122,10 +45,17 @@ struct Args {
 impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut out = Args::default();
+        let mut seen = std::collections::HashSet::new();
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
+            if !seen.insert(key.to_string()) {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("`{key}` is given twice"),
+                ));
+            }
 
             if key == "row" {
                 out.row = Some(input.parse()?);
@@ -134,9 +64,7 @@ impl Parse for Args {
             } else if key == "actions" {
                 out.actions = Some(input.parse()?);
             } else if key == "key" {
-                // `pk` is a word rather than a type because it names a
-                // *lookup*, not a key type: the type follows from the
-                // row's primary key, and the loader changes with it.
+                // `pk` names a lookup; the key type follows from it.
                 if input.peek(syn::Ident) && input.fork().parse::<Ident>()? == "pk" {
                     input.parse::<Ident>()?;
                     out.by_primary_key = true;
@@ -233,9 +161,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     };
 
-    // Both are facts the attribute cannot work out: the profile is the
-    // application's, and an asset's vocabulary is the whole of what it
-    // permits — defaulting either would be inventing a permission.
+    // No defaults: either would invent a permission.
     let profile = args.profile.as_ref().ok_or_else(|| {
         syn::Error::new(
             name.span(),
@@ -250,18 +176,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         )
     })?;
 
-    if args.by_primary_key {
-        if let Some(key) = &args.key {
-            return Err(syn::Error::new(
-                key.span(),
-                "`key = pk` already says what the key is: the row's primary key",
-            ));
-        }
-    }
-
-    // Both are answers to "how is this row reached", and a descriptor has
-    // one way in. Silently preferring either would mean a declaration that
-    // names a lookup and does not use it.
+    // A descriptor has one way in.
     if let (Some(with), Some(_)) = (&args.with, &args.load_with) {
         return Err(syn::Error::new(
             with.span(),
@@ -279,15 +194,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     }
 
-    // The source and the state move together: naming a source is naming
-    // where the loader's handle comes from, and the handle it yields is
-    // then what the loader gets. Letting them be set apart would allow a
-    // profile whose `State` no source produces, which is a type error
-    // stated in two places instead of one.
-    //
-    // Resolved before the row, because a named lookup is reached *through*
-    // the state — one lookup serves every connection type — and carries the
-    // row with it.
+    // The state is what the source yields. Resolved before the row, which a lookup reaches through it.
     let (source, state) = match &args.source {
         Some(source) => (
             quote!(#source),
@@ -299,11 +206,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         ),
     };
 
-    // A marker means "this row, by these columns", so naming one is naming
-    // the row too — and two lookups over one row cannot come to disagree
-    // about which row that is. An explicit `row` still wins, for the
-    // descriptor whose lookup produces a type it wants to call something
-    // else.
+    // A lookup marker names its row; an explicit `row` wins.
     let row = match (&args.row, &args.with) {
         (Some(row), _) => quote!(#row),
         (None, Some(with)) => quote!(<#with as ::doxa::policy::Lookup<#state>>::Row),
@@ -317,11 +220,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         (None, None, false) => quote!(<#row as ::doxa::policy::FetchByKey<#state>>::Key),
     };
 
-    // The fallback for `KEY_NAMES`, read off whichever lookup was selected
-    // above. The key's own `RouteKey::NAMES` wins where it has any, which
-    // is every generated key; this is left for a lookup matching more
-    // columns than its key parses segments. An explicit `key = T` names no
-    // lookup at all.
+    // `KEY_NAMES`' fallback, behind the key's own `RouteKey::NAMES`; `key = T` names no lookup.
     let lookup_names = match (&args.key, &args.with, args.by_primary_key) {
         (Some(_), _, _) => quote!(&[]),
         (None, Some(with), _) => {
@@ -340,12 +239,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         None => quote!(<#profile as ::doxa::auth::GrantProfile>::Error),
     };
 
-    // The caller shape is the profile's, and overridable for the one asset
-    // that needs a different one. A `Scoping` impl reading the policy's
-    // residual needs the assembled session rather than tenant + roles, and
-    // without this the whole application would have to switch context types
-    // to give one asset a filter — or that asset would drop the attribute
-    // and write `Granting` out by hand.
     let ctx = match &args.ctx {
         Some(ctx) => quote!(#ctx),
         None => quote!(<#profile as ::doxa::auth::GrantProfile>::Ctx),
@@ -362,12 +255,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             }
         },
         None => {
-            // `fetch_by_id` is a `FetchById` method and `fetch` a
-            // `FetchByKey` one, so the trait is part of the choice rather
-            // than a constant around it. That is the whole reach of
-            // `key = pk` on a row that declares no key column: an
-            // identifier belongs to the collection, so the id route asks
-            // nothing of `#[resource(key)]`.
             let lookup = match (&args.with, args.by_primary_key) {
                 (Some(with), _) => quote!(<#with as ::doxa::policy::Lookup<#state>>::fetch),
                 (None, true) => quote!(<#row as ::doxa::policy::FetchById<#state>>::fetch_by_id),
@@ -393,20 +280,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     };
 
-    // Listing, and only the tenant-confined kind. `Scoping::scope` is
-    // meant to carry the policy's residual, which is a per-row condition
-    // this cannot see — so the option names its filter rather than
-    // implying it is that. An asset needing the residual writes `Scoping`
-    // itself, and the compiler asks for it the moment a route says
-    // `Many<…>`.
+    // Tenant-confined listing only; an asset needing the policy's residual writes `Scoping` itself.
     let scoping = match &args.list {
         None => quote!(),
-        // Bounded on `FetchSubset` rather than `FetchByKey`: listing needs
-        // the owning column and nothing else, so a collection no route
-        // addresses by a key can still be paged.
+        // `FetchSubset`, so a collection with no key column can still be listed.
         Some(_) => quote! {
             impl ::doxa::auth::Scoping for #name {
                 type Filter = <#row as ::doxa::policy::FetchSubset>::Filter;
+                const FROM_POLICY: bool = false;
 
                 fn scope(
                     _action: &str,
@@ -415,13 +296,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     ::std::option::Option<Self::Filter>,
                     ::doxa::policy::AuthError,
                 > {
-                    // The coarse capability already decided whether this
-                    // caller may list at all; what is left is which rows,
-                    // and that is the tenant.
-                    //
-                    // No tenant is no scope, which `empty_scope` turns into
-                    // a refusal — rather than a listing of whatever happens
-                    // to sit under the empty string.
+                    // The action's capability (required, since `FROM_POLICY` is false) decided
+                    // whether to list; the tenant decides which rows. No tenant is a refusal.
                     let ::std::option::Option::Some(scope) =
                         ::doxa::auth::FromAuthExtensions::tenant(ctx)
                     else {
@@ -432,11 +308,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     ))
                 }
 
-                // Forwarded rather than left at the default, so a backend
-                // that can say "everything" is asked. `FetchSubset` answers
-                // `None` unless it overrides this, which is the right
-                // reading of a scope that is only tenancy: an administrator
-                // of a tenant is still inside it.
+                // Forwarded, so a backend that can answer "everything" is asked.
                 fn unscoped() -> ::std::option::Option<Self::Filter> {
                     <#row as ::doxa::policy::FetchSubset>::everything()
                 }
@@ -633,10 +505,6 @@ mod tests {
         assert!(out.contains("type Actions = WidgetAction ;"), "{out}");
     }
 
-    /// Nothing the attribute writes names an ORM, so the whole of it is
-    /// available to a row that lives somewhere else. This is the test that
-    /// would have failed before `fetch` existed: the loader arm used to
-    /// refuse outright without the `sea-orm` feature, and `list` with it.
     #[test]
     fn no_backend_is_named_anywhere_in_the_output() {
         let out = expand_ok(
@@ -651,10 +519,6 @@ mod tests {
         assert!(!out.contains("ScopedTable"), "{out}");
     }
 
-    /// The source and the state move together, so `source = …` is also the
-    /// answer to "which handle does the loader get". A request-scoped
-    /// transaction is the case: naming it as the source is the whole of
-    /// what an asset does to be loaded inside one.
     #[test]
     fn a_source_override_carries_the_state_with_it() {
         let out = expand_ok(
@@ -686,12 +550,6 @@ mod tests {
         );
     }
 
-    /// The one asset that needs a different caller shape says so, and the
-    /// rest of the application keeps the profile's.
-    ///
-    /// `Scoping` reading the policy's residual needs the assembled session,
-    /// not tenant + roles. Without an override, giving one asset a filter
-    /// would mean changing the context type of every asset in the service.
     #[test]
     fn an_asset_may_override_the_callers_shape() {
         let out = expand_ok(
@@ -718,9 +576,6 @@ mod tests {
         );
     }
 
-    /// The struct is emitted untouched. A descriptor that came out a
-    /// different shape than it was written would be a surprise in the one
-    /// place surprises are least welcome — the type a handler receives.
     #[test]
     fn the_item_is_left_exactly_as_written() {
         let out = expand_ok(
@@ -759,9 +614,6 @@ mod tests {
         assert!(out.contains("type Key = Uuid ;"), "{out}");
     }
 
-    /// The generated lookup is confined to the caller's tenant, which is
-    /// the security property `FetchByKey` exists for: a key owned by
-    /// someone else answers `None`, exactly as a key that does not exist.
     #[test]
     fn the_default_loader_is_the_scoped_one() {
         let out = expand_ok(
@@ -775,13 +627,7 @@ mod tests {
         assert!(out.contains("tenant (ctx)"), "{out}");
     }
 
-    /// A caller with no tenant has no scope to confine the lookup to, and
-    /// the loader answers that nothing is there rather than querying for
-    /// the empty string.
-    ///
-    /// Paired with the test above because the two halves are separable:
-    /// a loader that reads the tenant and then falls back to `""` also
-    /// contains `tenant (ctx)`, and is the bug this arm exists to avoid.
+    /// A loader falling back to `""` would pass the test above, so this one checks there is no fallback.
     #[test]
     fn no_tenant_is_no_row_rather_than_an_empty_scope() {
         let out = expand_ok(
@@ -856,10 +702,6 @@ mod tests {
         .contains("`actions = …`"),);
     }
 
-    /// The column a lookup matches is a fact about the lookup, so the name
-    /// travels with it rather than being repeated on every route. This is
-    /// what lets `/widgets/{name}/revisions/{rev}` bind with nothing said
-    /// at the call site.
     #[test]
     fn the_key_names_come_off_the_lookup_that_was_selected() {
         let out = expand_ok(
@@ -879,9 +721,6 @@ mod tests {
         assert!(out.contains(":: KEY_NAMES ,) ;"), "{out}");
     }
 
-    /// `key = pk` reaches a different lookup, so it reaches a different
-    /// name — the identifier column, not the key column, which the row may
-    /// not even have.
     #[test]
     fn key_pk_takes_its_name_from_the_identifier() {
         let out = expand_ok(
@@ -926,10 +765,6 @@ mod tests {
         assert!(out.contains(":: KEY_NAMES ,) ;"), "{out}");
     }
 
-    /// The key's own `RouteKey::NAMES` is the first argument, so it wins
-    /// where it has any. That is the lookup matching more columns than its
-    /// key parses segments — a qualified name split on the way in — where
-    /// the columns and the segments are not the same list.
     #[test]
     fn the_keys_own_names_are_preferred_over_the_lookups() {
         let out = expand_ok(
@@ -954,9 +789,6 @@ mod tests {
         );
     }
 
-    /// An explicit `key = T` names no lookup at all, so the key type is the
-    /// only source there is — asking a `FetchByKey` the row may not
-    /// implement would be a bound invented by the attribute.
     #[test]
     fn an_explicit_key_type_consults_no_lookup() {
         let out = expand_ok(
@@ -978,16 +810,7 @@ mod tests {
         );
     }
 
-    /// `pk` changes the lookup, not just the key type — which is why it
-    /// is a word rather than `key = Uuid`. The generated call is
-    /// `fetch_by_id`, which keeps the scope filter that a hand-written
-    /// `find_by_id` drops.
-    ///
-    /// The trait it is qualified with is asserted too, and is not
-    /// incidental: `FetchById` is the half a row gets from
-    /// `#[resource(scope)]` alone, so naming `FetchByKey` here would put
-    /// the id route out of reach of every collection that declares no key
-    /// column — and back into a hand-written `find_by_id`.
+    /// `FetchById` is what `#[resource(scope)]` alone gives a row, so the id route needs no key column.
     #[test]
     fn key_pk_selects_the_scoped_identifier_lookup() {
         let out = expand_ok(
@@ -1014,9 +837,6 @@ mod tests {
         assert!(!out.contains(":: fetch (key"), "{out}");
     }
 
-    /// A marker means "this row, by these columns", so naming a lookup
-    /// names the row too — and the key comes off the same place. That is
-    /// what leaves `with = …` as the entire declaration.
     #[test]
     fn with_takes_the_row_and_the_key_off_the_lookup() {
         let out = expand_ok(
@@ -1044,9 +864,6 @@ mod tests {
         assert!(out.contains("tenant (ctx)"), "{out}");
     }
 
-    /// Both are answers to "how is this row reached", and silently
-    /// preferring one would mean a declaration naming a lookup it never
-    /// uses.
     #[test]
     fn with_and_load_with_together_are_refused() {
         let message = expand_err(
@@ -1107,8 +924,6 @@ mod tests {
         );
     }
 
-    /// `key = pk` says what the key is, so a type beside it is a second
-    /// answer to the same question.
     #[test]
     fn key_pk_and_a_key_type_together_are_refused() {
         let message = expand_err(
@@ -1123,16 +938,9 @@ mod tests {
             ),
         );
 
-        assert!(
-            message.contains("already says what the key is"),
-            "{message}"
-        );
+        assert!(message.contains("`key` is given twice"), "{message}");
     }
 
-    /// Listing is opt-in and names its filter. The generated `Scoping`
-    /// applies the tenant and no other policy condition, so `list = tenant`
-    /// rather than a bare `list` — the call site says which listing this
-    /// is, and an asset needing the policy's residual writes its own.
     #[test]
     fn list_tenant_emits_a_tenant_confined_scoping() {
         let out = expand_ok(
@@ -1158,14 +966,7 @@ mod tests {
         assert!(out.contains(":: subset (scope)"), "{out}");
     }
 
-    /// `unscoped` is forwarded rather than left at `Scoping`'s default, so
-    /// a backend that can say "everything" is the one that decides whether
-    /// an administrator gets it.
-    ///
-    /// Worth its own test because the default is silent: leaving the
-    /// method off compiles, and the only symptom is an admin quietly
-    /// receiving the tenant-filtered subset on a collection whose backend
-    /// had a wider answer to give.
+    /// Leaving `unscoped` at the default compiles and silently narrows an admin's listing.
     #[test]
     fn list_tenant_forwards_the_backends_unrestricted_subset() {
         let out = expand_ok(
@@ -1189,9 +990,6 @@ mod tests {
         );
     }
 
-    /// No `list`, no `Scoping` — so `Granted<Many<…>>` over an asset that
-    /// did not ask for a listing does not compile, which is the split
-    /// `Scoping` exists for.
     #[test]
     fn without_list_there_is_no_scoping() {
         let out = expand_ok(

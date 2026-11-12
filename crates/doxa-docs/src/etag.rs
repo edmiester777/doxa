@@ -11,9 +11,8 @@ use axum::body::Body;
 use axum::http::{header, HeaderValue, Method, Request, Response, StatusCode};
 use tower::{Layer, Service};
 
-/// Tags `200` JSON responses to `GET`s with a weak `ETag`, and marks them
-/// `Cache-Control: private` and `Vary: Authorization, Cookie` unless the route
-/// set its own. Streams (`text/event-stream`) pass through untouched.
+/// Tags `200` JSON `GET` responses with a weak `ETag`, plus `Cache-Control: private` and
+/// `Vary: Authorization, Cookie` unless the route set its own. Streams pass through.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ETagLayer;
 

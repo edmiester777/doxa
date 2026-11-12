@@ -211,7 +211,12 @@ async fn assert_answered(method: &str, path: &str) {
 async fn assert_refused(method: &str, path: &str, policy: (bool, bool)) {
     let before = RAN.load(Ordering::SeqCst);
     let (status, echoed, event) = probe(method, path, policy).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    // An instance denial hides the row; a capability denial says so.
+    let refused = match policy.0 {
+        true => StatusCode::NOT_FOUND,
+        false => StatusCode::FORBIDDEN,
+    };
+    assert_eq!(status, refused, "{path}");
     assert!(!echoed, "{path}");
     assert_eq!(event.outcome, Outcome::Denied, "{path}");
     assert_eq!(RAN.load(Ordering::SeqCst), before, "{path} ran its handler");

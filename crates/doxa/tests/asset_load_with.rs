@@ -1,23 +1,7 @@
 //! `load_with`: what the door keeps, and the one thing it drops.
 //!
-//! Every other loader `#[asset]` writes is a `FetchByKey`, which is handed
-//! a `&str` scope and nothing else — it *cannot* ignore the caller's
-//! tenant, because it cannot see anything about the caller except that.
-//! `load_with` is the door for a lookup that needs more than the scope,
-//! and it is handed the whole `Ctx`. Both halves of that sentence matter:
-//! it is the only way to write such a lookup, and it is the only loader
-//! that can get confinement wrong.
-//!
-//! So this file pins the boundary. Everything the chain does *around* the
-//! loader is unchanged — the capability gate still runs first and still
-//! costs no load, the instance check still runs after, the audit verdict
-//! is still recorded with the row's Cedar identity — and confinement is
-//! the single thing that becomes the consumer's to write.
-//!
-//! The last test asserts that an unconfined loader really does serve
-//! another tenant's row. That is not an endorsement; it is the security
-//! boundary written down. If something later starts catching this, that
-//! test fails and says the documentation is stale.
+//! The gate, instance check and audit still wrap the loader; confinement is the consumer's
+//! to write, and the last test pins that an unconfined loader serves another tenant's row.
 
 #![cfg(feature = "full")]
 
@@ -56,9 +40,7 @@ pub enum WidgetAction {
     Read,
 }
 
-/// Rows, and a count of how many times a loader was entered. The counter
-/// is per-request rather than a static so the tests below can run in
-/// parallel and still each observe their own request.
+/// Rows, and a per-request count of loader entries, so tests can run in parallel.
 #[derive(Clone)]
 pub struct Catalog {
     rows: Arc<Vec<Widget>>,
@@ -86,17 +68,11 @@ impl Catalog {
 // ---- the two loaders --------------------------------------------------------
 
 doxa::auth::route_key!(
-    /// What the route's `{name}` segment parses into. A `load_with` row
-    /// has no `FetchByKey` impl to read a key off, so the key is declared
-    /// here and named on the asset.
+    /// Declared here, since a `load_with` row has no `FetchByKey` to read a key off.
     pub WidgetKey { name: String }
 );
 
-/// Written the way the attribute's own loader is: read the tenant, refuse
-/// to guess when there is none, confine the lookup to it.
-///
-/// This is what a `load_with` owes, and there is nothing in the signature
-/// that says so — which is the whole reason the generated path exists.
+/// What a `load_with` owes: read the tenant, refuse without one, confine to it.
 async fn confined(
     key: WidgetKey,
     catalog: &Catalog,
@@ -114,10 +90,7 @@ async fn confined(
         .cloned())
 }
 
-/// The same lookup with the tenant left out — the shape of every
-/// hand-written loader that takes `_ctx` and means it.
-///
-/// It compiles, and nothing downstream catches it. See the last test.
+/// The same lookup with the tenant left out. It compiles, and nothing downstream catches it.
 async fn unconfined(
     key: WidgetKey,
     catalog: &Catalog,
@@ -143,12 +116,7 @@ impl GrantProfile for AppGrants {
     type Error = StatusCode;
 }
 
-/// `key = WidgetKey` is not optional here, and the reason is worth
-/// knowing: the key still defaults to `<Row as FetchByKey<State>>::Key`,
-/// and a row reached only by a `load_with` has no `FetchByKey` impl to
-/// read it from. The error names the trait, but naming the key is the
-/// answer — and naming it is also what tells the route that its segment
-/// is called `name`.
+/// `key =` is required: the default reads `FetchByKey`, which this row lacks.
 #[asset(
     row = Widget,
     key = WidgetKey,
@@ -299,10 +267,7 @@ async fn a_confined_loader_still_answers_absent_for_another_tenant() {
     assert!(!call.body.contains("globex"), "{}", call.body);
 }
 
-/// The coarse capability runs *before* the loader, and a caller who fails
-/// it costs no load at all. That is the property `gate` exists for, and
-/// `load_with` does not move it: a bespoke loader is still behind the same
-/// door as a generated one.
+/// The coarse gate still runs first, so a refused caller costs no load.
 #[tokio::test]
 async fn the_capability_gate_still_runs_first_and_costs_no_load() {
     let call = call("/loose/alpha", Some("acme"), Verdict::DenyCapability).await;
@@ -314,20 +279,20 @@ async fn the_capability_gate_still_runs_first_and_costs_no_load() {
     );
 }
 
-/// And the instance check still runs after it, on the row the bespoke
-/// loader returned — so `load_with` does not skip the half of the chain
-/// that reads the object's own attributes.
+/// The instance check still runs, on the row the loader returned.
 #[tokio::test]
 async fn the_instance_check_still_runs_on_the_loaded_row() {
     let call = call("/loose/alpha", Some("acme"), Verdict::DenyInstance).await;
 
-    assert_eq!(call.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        call.status,
+        StatusCode::NOT_FOUND,
+        "a refused row answers as a missing one"
+    );
     assert_eq!(call.loads, 1, "the row was loaded, then refused");
 }
 
-/// The verdict reaches the audit trail with the row's Cedar identity,
-/// exactly as a generated loader's would. Nothing about the trail is the
-/// handler's or the loader's business either way.
+/// The verdict reaches the trail with the row's Cedar identity.
 #[tokio::test]
 async fn the_grant_is_recorded_with_the_rows_cedar_identity() {
     let call = call("/strict/alpha", Some("acme"), Verdict::Allow).await;
@@ -357,18 +322,8 @@ async fn a_denial_over_a_bespoke_loader_is_recorded() {
 
 // ---- and the one thing it drops ---------------------------------------------
 
-/// The boundary, written down.
-///
-/// `beta` belongs to globex. An `acme` caller asking for it gets it —
-/// through the capability gate, through the instance check, into the
-/// response, and recorded in the trail as a legitimate grant. Every other
-/// mechanism in the chain did its job; none of them is the one that was
-/// supposed to catch this, because the only thing that catches it is the
-/// loader reading `ctx`, and this loader does not.
-///
-/// The generated path cannot express this: `FetchByKey::fetch` is handed
-/// `&str` and has nothing else to consult. That is why `load_with` takes
-/// the whole `Ctx` and why taking it is the cost of the door.
+/// The boundary: an `acme` caller gets globex's `beta`, because only the loader reading `ctx`
+/// confines it. If this starts failing, the `load_with` docs are stale.
 #[tokio::test]
 async fn an_unconfined_loader_reaches_another_tenants_row_and_nothing_stops_it() {
     let call = call("/loose/beta", Some("acme"), Verdict::Allow).await;

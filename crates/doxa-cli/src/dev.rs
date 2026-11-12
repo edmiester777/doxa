@@ -32,6 +32,8 @@ const RELOAD_PATH: &str = "/__doxa/reload";
 /// Where hot patches are fetched from, matching [`Pipeline::patch`]'s jump tables.
 const PATCH_PREFIX: &str = "__doxa_patch/";
 const API_PREFIX: &str = "/api";
+/// The largest request body the proxy buffers for an upstream, in bytes.
+const MAX_BODY: usize = 100 * 1024 * 1024;
 const NO_UPSTREAM: &str = "no server or [package.metadata.doxa.proxy] entry answers this path";
 
 const RELOAD_SCRIPT: &str = r#"<script type="module">
@@ -381,29 +383,37 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
         reload: reload.clone(),
         latest_patch: Mutex::new(None),
     });
-    let app = Router::new()
-        .route(RELOAD_PATH, get(reload_events))
-        .fallback(forward)
-        .with_state(proxy.clone());
     let host = match std::env::var("DOXA_HOST") {
         Ok(h) => h
             .parse::<IpAddr>()
             .map_err(|_| format!("DOXA_HOST={h} is not an IP address"))?,
         Err(_) => Ipv4Addr::LOCALHOST.into(),
     };
+    let allowed = Arc::new(allowed_hosts(
+        host,
+        lan_ip(),
+        std::env::var("DOXA_ALLOWED_HOSTS").ok().as_deref(),
+    ));
+    let app = Router::new()
+        .route(RELOAD_PATH, get(reload_events))
+        .fallback(forward)
+        .with_state(proxy.clone())
+        .layer(axum::middleware::from_fn_with_state(allowed, guard_host));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     for url in urls(host, lan_ip(), port) {
         note(format!("serving {url}"));
     }
     tokio::spawn(async move { axum::serve(listener, app).await });
 
+    let mut stop = stop_signal()?;
     let (changed, mut changes) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     let mut debouncer = new_debouncer(
         Duration::from_millis(200),
-        move |res: DebounceEventResult| {
-            if let Ok(events) = res {
+        move |res: DebounceEventResult| match res {
+            Ok(events) => {
                 let _ = changed.send(events.into_iter().map(|e| e.path).collect());
             }
+            Err(e) => eprintln!("error: watching for changes: {e}"),
         },
     )?;
     for (dir, mode) in watch.roots() {
@@ -412,7 +422,7 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
 
     loop {
         let mut paths = tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
+            _ = stop.changed() => break,
             Some(paths) = changes.recv() => paths,
         };
         while let Ok(more) = changes.try_recv() {
@@ -438,7 +448,6 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
                 }
             }
         }
-        *proxy.latest_patch.lock().expect("patch") = None;
         let p = pipeline.clone();
         let built =
             tokio::task::spawn_blocking(move || rebuild(&mut p.lock().expect("pipeline"), plan))
@@ -450,9 +459,15 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
                 continue;
             }
         };
+        if plan.wasm {
+            *proxy.latest_patch.lock().expect("patch") = None;
+        }
         if let (true, Some(server)) = (plan.server, &mut server) {
             server.restart().await?;
-            server.wait_ready().await;
+            tokio::select! {
+                _ = stop.changed() => break,
+                () = server.wait_ready() => {}
+            }
         }
         let event = match dist {
             Some(d) if !plan.wasm && !plan.bundle && !plan.server => {
@@ -466,6 +481,24 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
         server.stop().await;
     }
     Ok(())
+}
+
+/// Changes once Ctrl-C or SIGTERM arrives, at any point after this call.
+fn stop_signal() -> std::io::Result<tokio::sync::watch::Receiver<()>> {
+    let (tx, rx) = tokio::sync::watch::channel(());
+    #[cfg(unix)]
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = tx.send(());
+    });
+    Ok(rx)
 }
 
 /// A `[package.metadata.doxa.proxy]` entry with its upstream settled.
@@ -536,6 +569,63 @@ fn urls(host: IpAddr, lan: Option<IpAddr>, port: u16) -> Vec<String> {
         .collect()
 }
 
+/// The hostnames a request may name in `Host` or `Origin`: loopback, the address bound (or the LAN
+/// address for `0.0.0.0`), and `$DOXA_ALLOWED_HOSTS` (comma-separated, e.g. a tunnel's).
+fn allowed_hosts(
+    host: IpAddr,
+    lan: Option<IpAddr>,
+    extra: Option<&str>,
+) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = ["localhost", "127.0.0.1", "::1"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if host.is_unspecified() {
+        out.extend(lan.map(|ip| ip.to_string()));
+    } else {
+        out.insert(host.to_string());
+    }
+    out.extend(
+        extra
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty()),
+    );
+    out
+}
+
+/// The hostname in a `Host` value or an origin, without port or IPv6 brackets.
+fn hostname(authority: &str) -> String {
+    let authority = authority.rsplit("://").next().unwrap_or(authority);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None => authority.split(':').next().unwrap_or(authority),
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Refuses a request naming another host, so a page rebinding its DNS to this server can't read it.
+async fn guard_host(
+    State(allowed): State<Arc<std::collections::HashSet<String>>>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let named = [header::HOST, header::ORIGIN].into_iter().filter_map(|h| {
+        req.headers()
+            .get(h)
+            .and_then(|v| v.to_str().ok())
+            .map(hostname)
+    });
+    for name in named.collect::<Vec<_>>() {
+        if !allowed.contains(&name) {
+            let message = format!("{name} is not this dev server; add it to DOXA_ALLOWED_HOSTS");
+            return (StatusCode::FORBIDDEN, message).into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// The address this machine routes outward from; a UDP connect sends nothing.
 fn lan_ip() -> Option<IpAddr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
@@ -601,6 +691,10 @@ impl Server {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        eprintln!(
+            "warning: {} isn't listening on port {} after 2 minutes; reloading anyway",
+            self.package, self.port
+        );
     }
 }
 
@@ -764,7 +858,7 @@ impl Proxy {
     async fn upstream(&self, req: Request) -> Result<Response, String> {
         let (parts, body) = req.into_parts();
         let url = self.target(&parts.uri).ok_or(NO_UPSTREAM)?;
-        let body = axum::body::to_bytes(body, usize::MAX)
+        let body = axum::body::to_bytes(body, MAX_BODY)
             .await
             .map_err(|e| e.to_string())?;
         let mut headers = parts.headers;
@@ -997,6 +1091,39 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn a_request_naming_another_host_is_refused() {
+        let allowed = Arc::new(allowed_hosts(
+            Ipv4Addr::UNSPECIFIED.into(),
+            Some(Ipv4Addr::new(192, 168, 1, 9).into()),
+            Some("dev.example.test"),
+        ));
+        let app = Router::new()
+            .fallback(|| async { "ok" })
+            .layer(axum::middleware::from_fn_with_state(allowed, guard_host));
+        let status = |host: &str, origin: Option<&str>| {
+            let app = app.clone();
+            let mut req = Request::builder().uri("/").header(header::HOST, host);
+            if let Some(o) = origin {
+                req = req.header(header::ORIGIN, o);
+            }
+            let req = req.body(Body::empty()).unwrap();
+            async move { tower::ServiceExt::oneshot(app, req).await.unwrap().status() }
+        };
+        assert_eq!(status("localhost:4710", None).await, StatusCode::OK);
+        assert_eq!(status("[::1]:4710", None).await, StatusCode::OK);
+        assert_eq!(status("192.168.1.9:4710", None).await, StatusCode::OK);
+        assert_eq!(status("dev.example.test", None).await, StatusCode::OK);
+        assert_eq!(
+            status("rebound.attacker.test:4710", None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status("localhost:4710", Some("http://attacker.test")).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
     #[test]
     fn a_one_sided_directory_rebuilds_only_its_half() {
         assert_eq!(
@@ -1221,7 +1348,7 @@ mod tests {
         let routes = routes(
             &BTreeMap::from([
                 ("/api".to_owned(), upstream(Some(&one), None, false)),
-                ("/dl".to_owned(), upstream(Some(&two), None, true)),
+                ("/v2".to_owned(), upstream(Some(&two), None, true)),
             ]),
             |_| None,
         )
@@ -1242,10 +1369,10 @@ mod tests {
         };
 
         assert_eq!(get("/api/me?a=1").await.1, "GET /api/me?a=1 ");
-        assert_eq!(get("/dl/api/me?a=1").await.1, "GET /api/me?a=1 ");
-        assert_eq!(get("/dl").await.1, "GET / ");
+        assert_eq!(get("/v2/api/me?a=1").await.1, "GET /api/me?a=1 ");
+        assert_eq!(get("/v2").await.1, "GET / ");
         let posted = client
-            .post(format!("{base}/dl/q"))
+            .post(format!("{base}/v2/q"))
             .body("sql")
             .send()
             .await
@@ -1253,7 +1380,7 @@ mod tests {
         assert_eq!(posted.text().await.unwrap(), "POST /q sql");
 
         assert_eq!(get("/app.js").await.1, "js");
-        let (status, page) = get("/dlx/page").await;
+        let (status, page) = get("/v2x/page").await;
         assert_eq!(status, 200);
         assert!(
             page.contains("shell") && page.contains("/__doxa/reload"),
@@ -1323,7 +1450,7 @@ mod tests {
         let dist = tempfile::tempdir().unwrap();
         let base = serverless(
             vec![Route {
-                prefix: "/dl".into(),
+                prefix: "/v2".into(),
                 target: format!("http://127.0.0.1:{port}"),
                 strip: true,
             }],
@@ -1334,7 +1461,7 @@ mod tests {
             .await
             .unwrap();
         c.write_all(
-            b"GET /dl/live HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
+            b"GET /v2/live HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
         )
         .await
         .unwrap();

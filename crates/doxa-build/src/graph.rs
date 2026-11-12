@@ -59,11 +59,11 @@ impl Graph {
         }
         let json: Value = serde_json::from_slice(&out.stdout)
             .map_err(|e| Error::tool("cargo", &cmd, e.to_string(), "upgrade cargo"))?;
-        Ok(Self::from_metadata(&json, web))
+        Self::from_metadata(&json, web)
     }
 
     /// The graph under the package named `web` in `cargo metadata` output.
-    pub fn from_metadata(meta: &Value, web: &str) -> Self {
+    pub fn from_metadata(meta: &Value, web: &str) -> Result<Self> {
         let items = |v: &Value| v.as_array().cloned().unwrap_or_default();
         let packages: HashMap<String, Value> = items(&meta["packages"])
             .into_iter()
@@ -101,7 +101,7 @@ impl Graph {
             .find(|id| name(id) == Some(web))
             .map(str::to_owned)
         else {
-            return Self::default();
+            return Ok(Self::default());
         };
         let mut seen = HashSet::from([root.clone()]);
         let mut queue = VecDeque::from([root.clone()]);
@@ -110,16 +110,24 @@ impl Graph {
             let own = deps.get(&id).cloned().unwrap_or_default();
             if id != root {
                 let p = &packages[&id];
+                let pkg_name = p["name"].as_str().unwrap_or_default();
                 let npm = p["metadata"]["doxa"]["npm"]
                     .as_object()
                     .map(|o| {
                         o.iter()
-                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
-                            .collect()
+                            .map(|(k, v)| match v.as_str() {
+                                Some(range) => Ok((k.clone(), range.to_owned())),
+                                None => Err(Error::config(
+                                    format!("`{pkg_name}`'s npm `{k}` is {v}, not a version range"),
+                                    "write it as a string, like \"^1.2\"",
+                                )),
+                            })
+                            .collect::<Result<_>>()
                     })
+                    .transpose()?
                     .unwrap_or_default();
                 members.push(Member {
-                    name: p["name"].as_str().unwrap_or_default().to_owned(),
+                    name: pkg_name.to_owned(),
                     dir: Path::new(p["manifest_path"].as_str().unwrap_or_default())
                         .parent()
                         .map(Path::to_owned)
@@ -135,7 +143,7 @@ impl Graph {
             }
         }
         members.sort_by(|a, b| a.name.cmp(&b.name).then(a.dir.cmp(&b.dir)));
-        Self { members }
+        Ok(Self { members })
     }
 
     /// The directories of the crates whose components carry Tailwind classes: each that uses
@@ -148,41 +156,33 @@ impl Graph {
             .collect()
     }
 
-    /// The npm packages the graph asks for, each with its range and the crate asking. `app`, the
-    /// web crate's own, wins; two other crates asking different ranges stop the build.
+    /// The web crate's npm packages, each with its range and the crate asking. A package another
+    /// crate asks for installs only once `app`, the web crate's own, lists it.
     pub fn npm(
         &self,
         app_name: &str,
         app: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, (String, String)>> {
-        let mut out: BTreeMap<String, (String, String)> = app
+        let unlisted: Vec<String> = self
+            .members
+            .iter()
+            .flat_map(|m| m.npm.iter().map(move |(pkg, range)| (m, pkg, range)))
+            .filter(|(_, pkg, _)| !app.contains_key(*pkg))
+            .map(|(m, pkg, range)| format!("{pkg} = \"{range}\" (for `{}`)", m.name))
+            .collect();
+        if !unlisted.is_empty() {
+            return Err(Error::config(
+                format!(
+                    "dependencies ask for npm packages `{app_name}` doesn't list: {}",
+                    unlisted.join(", ")
+                ),
+                format!("add them to `{app_name}`'s [package.metadata.doxa.npm] to install them"),
+            ));
+        }
+        Ok(app
             .iter()
             .map(|(k, v)| (k.clone(), (v.clone(), app_name.to_owned())))
-            .collect();
-        for m in &self.members {
-            for (pkg, range) in &m.npm {
-                match out.get(pkg) {
-                    None => {
-                        out.insert(pkg.clone(), (range.clone(), m.name.clone()));
-                    }
-                    Some((_, by)) if by == app_name => {}
-                    Some((theirs, by)) if theirs != range => {
-                        return Err(Error::config(
-                            format!(
-                                "npm `{pkg}` is `{theirs}` in `{by}` and `{range}` in `{}`",
-                                m.name
-                            ),
-                            format!(
-                                "pick one range in `{app_name}`'s [package.metadata.doxa.npm]; the \
-                                 app's own wins"
-                            ),
-                        ));
-                    }
-                    Some(_) => {}
-                }
-            }
-        }
-        Ok(out)
+            .collect())
     }
 }
 
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn a_git_dependency_using_doxa_ui_is_scanned_at_its_checkout() {
-        let graph = Graph::from_metadata(&meta(), "web");
+        let graph = Graph::from_metadata(&meta(), "web").unwrap();
         assert_eq!(
             graph.tailwind_sources(),
             [PathBuf::from("/home/.cargo/git/checkouts/kit-1/abc")]
@@ -254,26 +254,34 @@ mod tests {
     }
 
     #[test]
-    fn the_graphs_npm_packages_merge_and_the_apps_range_wins() {
-        let graph = Graph::from_metadata(&meta(), "web");
-        let app = BTreeMap::from([("react".to_owned(), "^19".to_owned())]);
+    fn a_package_the_app_lists_installs_at_the_apps_range() {
+        let graph = Graph::from_metadata(&meta(), "web").unwrap();
+        let app = BTreeMap::from(
+            [("react", "^19"), ("motion", "^11"), ("d3", "^7")].map(|(k, v)| (k.into(), v.into())),
+        );
         let npm = graph.npm("web", &app).unwrap();
         assert_eq!(npm["react"], ("^19".into(), "web".into()));
-        assert_eq!(npm["motion"], ("^11".into(), "kit".into()));
-        assert_eq!(npm["d3"], ("^7".into(), "charts".into()));
+        assert_eq!(npm["motion"], ("^11".into(), "web".into()));
         assert!(!npm.contains_key("vitest"));
     }
 
     #[test]
-    fn two_crates_asking_different_ranges_stop_the_build_naming_both() {
-        let graph = Graph::from_metadata(&meta(), "web");
-        let err = graph.npm("web", &BTreeMap::new()).unwrap_err().to_string();
-        assert!(err.contains("`react`"), "{err}");
-        assert!(
-            err.contains("`^19` in `charts` and `^18` in `kit`"),
-            "{err}"
-        );
+    fn a_package_only_a_dependency_asks_for_stops_the_build() {
+        let graph = Graph::from_metadata(&meta(), "web").unwrap();
+        let app = BTreeMap::from([("react".to_owned(), "^19".to_owned())]);
+        let err = graph.npm("web", &app).unwrap_err().to_string();
+        assert!(err.contains("motion = \"^11\" (for `kit`)"), "{err}");
+        assert!(err.contains("d3 = \"^7\" (for `charts`)"), "{err}");
+        assert!(!err.contains("react"), "{err}");
         assert!(err.contains("`web`'s [package.metadata.doxa.npm]"), "{err}");
+    }
+
+    #[test]
+    fn an_npm_range_that_isnt_a_string_is_an_error() {
+        let mut meta = meta();
+        meta["packages"][1]["metadata"]["doxa"]["npm"]["motion"] = json!(11);
+        let err = Graph::from_metadata(&meta, "web").unwrap_err().to_string();
+        assert!(err.contains("`kit`'s npm `motion` is 11"), "{err}");
     }
 
     #[test]

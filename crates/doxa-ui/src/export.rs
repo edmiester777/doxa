@@ -61,9 +61,12 @@ mod web {
     pub struct Calls(RefCell<HashMap<&'static str, Call>>);
 
     struct Call {
-        latest: Rc<RefCell<js_sys::Function>>,
+        latest: Latest,
         callback: Box<dyn Any>,
     }
+
+    /// The function JS passed last; `None` while the prop is missing, so a call does nothing.
+    type Latest = Rc<RefCell<Option<js_sys::Function>>>;
 
     /// Read prop `key` of `props`.
     pub fn prop<T: DeserializeOwned>(props: &JsValue, key: &str) -> Result<T, JsError> {
@@ -73,7 +76,7 @@ mod web {
 
     /// A signature a JS function can stand behind: its arguments cross as JSON-compatible data.
     pub trait JsCallable: 'static {
-        fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self>;
+        fn calling(latest: Latest) -> Callback<Self>;
     }
 
     /// `null` for a value JS has no form for, so the function still gets its position.
@@ -83,9 +86,11 @@ mod web {
     }
 
     impl JsCallable for dyn Fn() {
-        fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self> {
+        fn calling(latest: Latest) -> Callback<Self> {
             Callback::from(move || {
-                let f = latest.borrow().clone();
+                let Some(f) = latest.borrow().clone() else {
+                    return;
+                };
                 let _ = f.call0(&JsValue::NULL);
             })
         }
@@ -93,9 +98,11 @@ mod web {
 
     /// `()` and anything else serializing to nothing call the function with no arguments.
     impl<T: Serialize + 'static> JsCallable for dyn Fn(T) {
-        fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self> {
+        fn calling(latest: Latest) -> Callback<Self> {
             Callback::from(move |arg: T| {
-                let f = latest.borrow().clone();
+                let Some(f) = latest.borrow().clone() else {
+                    return;
+                };
                 let v = to_arg(&arg);
                 let _ = if v.is_undefined() || v.is_null() {
                     f.call0(&JsValue::NULL)
@@ -109,9 +116,9 @@ mod web {
     macro_rules! js_callable {
         ($($a:ident $v:ident),+) => {
             impl<$($a: Serialize + 'static),+> JsCallable for dyn Fn($($a),+) {
-                fn calling(latest: Rc<RefCell<js_sys::Function>>) -> Callback<Self> {
+                fn calling(latest: Latest) -> Callback<Self> {
                     Callback::from(move |$($v: $a),+| {
-                        let f = latest.borrow().clone();
+                        let Some(f) = latest.borrow().clone() else { return };
                         let args = js_sys::Array::new();
                         $(args.push(&to_arg(&$v));)+
                         let _ = f.apply(&JsValue::NULL, &args);
@@ -131,13 +138,7 @@ mod web {
         props: &JsValue,
         key: &'static str,
     ) -> Result<Callback<F>, JsError> {
-        let v = js_sys::Reflect::get(props, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
-        let f: js_sys::Function = if v.is_undefined() || v.is_null() {
-            js_sys::Function::new_no_args("")
-        } else {
-            v.dyn_into()
-                .map_err(|_| JsError::new(&format!("prop `{key}` isn't a function")))?
-        };
+        let f = function(props, key)?;
         let mut map = calls.0.borrow_mut();
         if let Some(call) = map.get(key) {
             if let Some(cb) = call.callback.downcast_ref::<Callback<F>>() {
@@ -155,6 +156,29 @@ mod web {
             },
         );
         Ok(cb)
+    }
+
+    /// [`callback`] for an `Option<Callback<…>>` prop: `None` while JS passes nothing.
+    pub fn optional_callback<F: JsCallable + ?Sized>(
+        calls: &Calls,
+        props: &JsValue,
+        key: &'static str,
+    ) -> Result<Option<Callback<F>>, JsError> {
+        match function(props, key)? {
+            Some(_) => callback(calls, props, key).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Prop `key` as a function, or `None` when it's missing.
+    fn function(props: &JsValue, key: &str) -> Result<Option<js_sys::Function>, JsError> {
+        let v = js_sys::Reflect::get(props, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+        if v.is_undefined() || v.is_null() {
+            return Ok(None);
+        }
+        v.dyn_into()
+            .map(Some)
+            .map_err(|_| JsError::new(&format!("prop `{key}` isn't a function")))
     }
 
     trait Mounted {

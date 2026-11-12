@@ -33,7 +33,9 @@ pub fn WidgetFeed(name: String) -> View {
             <ol class="feed">
                 {seen.get().iter().map(|e| view! { <li>{e}</li> }).collect::<View>()}
             </ol>
-            {seen.get().is_empty().then(|| view! { <p class="muted">"Waiting for the server…"</p> })}
+            {seen.get().is_empty().then(|| view! {
+                <p class="muted">"Waiting for the server…"</p>
+            })}
         </figure>
     }
 }

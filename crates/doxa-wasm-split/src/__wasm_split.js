@@ -1,10 +1,23 @@
-// when running the harness we need to make sure to uncommon this out...
-
 export function makeLoad(url, deps, fusedImports, initIt) {
   let alreadyLoaded = false;
+  // Shared by concurrent callers: a second instance would re-run the part's data initializers.
+  let loading = null;
   return async (callbackIndex, callbackData) => {
     await Promise.all(deps.map((dep) => dep()));
     if (alreadyLoaded) return;
+    loading ??= instantiate().finally(() => {
+      loading = null;
+    });
+    const mainExports = await loading;
+    if (mainExports && callbackIndex !== undefined) {
+      mainExports.__indirect_function_table.get(callbackIndex)(
+        callbackData,
+        true
+      );
+    }
+  };
+
+  async function instantiate() {
     try {
       const response = await fetch(url);
       const initSync = initIt || globalThis.__wasm_split_main_initSync;
@@ -40,13 +53,7 @@ export function makeLoad(url, deps, fusedImports, initIt) {
       for (let name in new_exports.instance.exports) {
         fusedImports[name] = new_exports.instance.exports[name];
       }
-
-      if (callbackIndex !== undefined) {
-        mainExports.__indirect_function_table.get(callbackIndex)(
-          callbackData,
-          true
-        );
-      }
+      return mainExports;
     } catch (e) {
       console.error(
         "Failed to load wasm-split module",
@@ -55,9 +62,9 @@ export function makeLoad(url, deps, fusedImports, initIt) {
         deps,
         fusedImports
       );
-      return;
+      return null;
     }
-  };
+  }
 }
 
 let fusedImports = {};

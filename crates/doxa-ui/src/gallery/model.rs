@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 /// One `#[story]`, as `doxa build` read it from the wasm and its file.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct StoryMeta {
-    /// The function's name, and its export's suffix.
+    /// Its export's suffix: the function's name and a hash of where it is.
     pub name: String,
+    /// The function's name; empty for an export the build had no metadata for.
+    #[serde(default)]
+    pub title: String,
     /// Its `module_path!()`.
     pub module: String,
     /// Its file, as rustc named it.
@@ -17,6 +20,23 @@ pub struct StoryMeta {
     pub line: usize,
     /// Its function's text; empty when the file couldn't be read.
     pub source: String,
+}
+
+impl StoryMeta {
+    /// What the gallery calls it: its function's name.
+    pub fn title(&self) -> &str {
+        if self.title.is_empty() {
+            &self.name
+        } else {
+            &self.title
+        }
+    }
+}
+
+/// The story `wanted` names: its export suffix, or else the first with that function name.
+pub(crate) fn find_story<'a>(entries: &'a [StoryMeta], wanted: &str) -> Option<&'a StoryMeta> {
+    (entries.iter().find(|e| e.name == wanted))
+        .or_else(|| entries.iter().find(|e| e.title() == wanted))
 }
 
 /// Every exported story, with what the build knew of it; sorted by name.
@@ -30,6 +50,7 @@ pub fn entries(mut names: Vec<String>, meta: Vec<StoryMeta>) -> Vec<StoryMeta> {
                 .cloned()
                 .unwrap_or(StoryMeta {
                     name,
+                    title: String::new(),
                     module: String::new(),
                     file: String::new(),
                     line: 0,
@@ -223,7 +244,7 @@ pub(crate) fn tree_rows(entries: &[StoryMeta], query: &str, closed: &[String]) -
         }
         out.extend(node.leaves.iter().map(|s| Row::Leaf {
             name: s.name.clone(),
-            label: human(&s.name),
+            label: human(s.title()),
             depth,
         }));
     }
@@ -231,7 +252,7 @@ pub(crate) fn tree_rows(entries: &[StoryMeta], query: &str, closed: &[String]) -
     let query = query.trim().to_lowercase();
     let mut top = Node::default();
     for s in entries {
-        if !query.is_empty() && !human(&s.name).to_lowercase().contains(&query) {
+        if !query.is_empty() && !human(s.title()).to_lowercase().contains(&query) {
             continue;
         }
         let mut node = &mut top;
@@ -262,6 +283,7 @@ mod tests {
     fn story(name: &str, module: &str) -> StoryMeta {
         StoryMeta {
             name: name.into(),
+            title: String::new(),
             module: module.into(),
             file: String::new(),
             line: 0,

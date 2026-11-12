@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use futures_util::future::LocalBoxFuture;
-use percent_encoding_lite::{decode, encode};
+use percent_encoding_lite::{decode, decode_query, encode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -577,13 +577,16 @@ fn go(url: String, mut nav: Nav, origin: Origin) {
                 return;
             }
         }
-        set_pending(None, false);
         commit(url, nav, origin);
     });
 }
 
+/// Show `url`, ending whatever navigation was pending: this one, or one it superseded.
 #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
 fn commit(url: String, nav: Nav, origin: Origin) {
+    if NAV.with(|n| n.borrow().to.is_some() || n.borrow().starting) {
+        set_pending(None, false);
+    }
     if let (Origin::App, Some(host)) = (origin, HOST.with(|h| h.borrow().clone())) {
         host(&url, nav.replace);
         return set_location(url);
@@ -923,7 +926,7 @@ fn parse_query(query: &str) -> Vec<(String, String)> {
         .filter(|s| !s.is_empty())
         .map(|kv| {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            (decode(k), decode(v))
+            (decode_query(k), decode_query(v))
         })
         .collect()
 }
@@ -975,6 +978,36 @@ pub fn href(route: &Route) -> Route {
     }
 }
 
+/// The app URL of the browser URL `url` (a path and query): the base off, the `#hash` dropped.
+#[cfg_attr(not(feature = "oidc"), allow(dead_code))]
+pub(crate) fn app_url(url: &str) -> String {
+    let url = url.split('#').next().unwrap_or_default();
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    #[cfg(target_arch = "wasm32")]
+    let path = web::BASE.with(|b| unbase(b, path));
+    #[cfg(not(target_arch = "wasm32"))]
+    let path = unbase("", path);
+    match query {
+        "" => path,
+        q => format!("{path}?{q}"),
+    }
+}
+
+/// Whether the router serves `url`: a path or query on this origin, not `//host` or `scheme:`.
+fn is_app_url(url: &str) -> bool {
+    (url.starts_with('/') && !url.starts_with("//")) || url.starts_with('?')
+}
+
+/// `path` without the leading `base`; as it is when it lies outside it.
+#[cfg_attr(not(any(feature = "oidc", target_arch = "wasm32")), allow(dead_code))]
+fn unbase(base: &str, path: &str) -> String {
+    match path.strip_prefix(base) {
+        Some("") if !base.is_empty() => "/".to_owned(),
+        Some(rest) if rest.starts_with('/') => rest.to_owned(),
+        _ => path.to_owned(),
+    }
+}
+
 fn initial_url() -> String {
     #[cfg(target_arch = "wasm32")]
     {
@@ -992,7 +1025,7 @@ mod web {
     use wasm_bindgen::{JsCast, JsValue};
 
     thread_local! {
-        static BASE: String = base_of_document();
+        pub(super) static BASE: String = base_of_document();
     }
 
     /// `doxa build`'s `<meta name="doxa-base">` without its trailing `/`; empty at `/`.
@@ -1017,11 +1050,7 @@ mod web {
         let loc = web_sys::window().map(|w| w.location());
         loc.map(|l| {
             let path = l.pathname().unwrap_or_default();
-            let path = BASE.with(|b| match path.strip_prefix(b.as_str()) {
-                Some(rest) if !b.is_empty() && rest.is_empty() => "/".to_owned(),
-                Some(rest) if rest.starts_with('/') => rest.to_owned(),
-                _ => path.clone(),
-            });
+            let path = BASE.with(|b| super::unbase(b, &path));
             format!("{path}{}", l.search().unwrap_or_default())
         })
         .unwrap_or_else(|| "/".to_owned())
@@ -1224,20 +1253,30 @@ impl Component for Link {
         .flatten()
         .collect::<Vec<_>>()
         .join(" ");
+        // The browser's own: another site, another window, or a file to save.
+        let elsewhere = !is_app_url(&props.to.0)
+            || (props.rest.get("target")).is_some_and(|t| !t.eq_ignore_ascii_case("_self"))
+            || props.rest.get("download").is_some();
         let a = el("a")
             .url("href", href(&props.to))
             .attr("class", (!class.is_empty()).then_some(class))
             .attr("aria-current", active.then_some("page"))
             .on("click", move |e| {
                 // Modified and non-primary clicks open a new tab or window.
-                if e.button() != 0 || e.ctrl_key() || e.meta_key() || e.shift_key() || e.alt_key() {
+                if elsewhere
+                    || e.button() != 0
+                    || e.ctrl_key()
+                    || e.meta_key()
+                    || e.shift_key()
+                    || e.alt_key()
+                {
                     return;
                 }
                 e.prevent_default();
                 navigate(to.clone());
             })
             .on("pointerenter", move |_| {
-                if let Some(r) = installed() {
+                if let Some(r) = installed().filter(|_| !elsewhere) {
                     r.prefetch(&hover);
                 }
             })
@@ -1261,6 +1300,11 @@ mod percent_encoding_lite {
         out
     }
 
+    /// A query key or value: `+` is a space there, and only there.
+    pub fn decode_query(s: &str) -> String {
+        decode(&s.replace('+', " "))
+    }
+
     pub fn decode(s: &str) -> String {
         let bytes = s.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());
@@ -1277,10 +1321,6 @@ mod percent_encoding_lite {
                         i += 1;
                     }
                 },
-                b'+' => {
-                    out.push(b' ');
-                    i += 1;
-                }
                 b => {
                     out.push(b);
                     i += 1;
@@ -1314,6 +1354,22 @@ mod tests {
             ]
         );
         assert_eq!(current_url(), "/widgets");
+    }
+
+    #[test]
+    fn a_plus_is_a_space_only_in_the_query() {
+        let s = match_path("/tags/{tag}", "/tags/c++?q=a+b").unwrap();
+        assert_eq!(s.get("tag"), Some("c++"));
+        assert_eq!(s.query("q"), Some("a b"));
+    }
+
+    #[test]
+    fn a_browser_url_loses_its_base_and_hash() {
+        assert_eq!(unbase("/app", "/app/orders"), "/orders");
+        assert_eq!(unbase("/app", "/app"), "/");
+        assert_eq!(unbase("/app", "/apple"), "/apple");
+        assert_eq!(unbase("", "/orders"), "/orders");
+        assert_eq!(app_url("/orders?page=2#top"), "/orders?page=2");
     }
 
     #[test]

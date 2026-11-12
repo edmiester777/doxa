@@ -106,9 +106,7 @@ pub use doxa_ui_macros::icons;
 #[cfg(feature = "npm")]
 pub use doxa_ui_macros::npm;
 /// A React component as a doxa one: `#[react(module = "…", export = "…")]` on its props struct.
-///
-/// A `View` field reaches React as an element wrapping doxa's DOM; for a `render`/`asChild`
-/// prop, `#[react(element)]` has React render the element and doxa only its children.
+/// A `View` field reaches React as an element; `#[react(element)]` lets React render it itself.
 #[cfg(feature = "react")]
 pub use doxa_ui_macros::react;
 pub use doxa_ui_macros::{component, page, start, story, view};
@@ -122,7 +120,9 @@ pub mod __private {
     pub use crate::attrs::RestAttrs;
     pub use crate::component::comp_for;
     #[cfg(all(feature = "export", target_arch = "wasm32"))]
-    pub use crate::export::{callback, mount as mount_export, prop, Calls, ExportHandle};
+    pub use crate::export::{
+        callback, mount as mount_export, optional_callback, prop, Calls, ExportHandle,
+    };
     pub use crate::icon::{svg_el, svg_root};
     pub use crate::story::story_meta;
     pub use crate::view::{owner, FromChildren, IntoOptional, OptionOf, Owner};

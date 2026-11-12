@@ -147,10 +147,8 @@ pub struct Events {
     owner: Weak<Instance>,
 }
 
-/// A function React calls for a value: `#[react(func)] pub row_id: Func<Row, String>`.
-///
-/// JS passes one argument as `A`, several as a tuple. A Rust panic in it traps the whole wasm
-/// instance, which no error boundary catches.
+/// A function React calls for a value: `#[react(func)] pub row_id: Func<Row, String>`. Several JS
+/// arguments arrive as one tuple, unlike a callback's `impl Fn(A, B)`; a panic traps the wasm.
 pub struct Func<A, R>(Rc<dyn Fn(A) -> R>);
 
 impl<A, R> Clone for Func<A, R> {
@@ -196,8 +194,7 @@ impl<A: 'static, R: 'static, F: AsyncFn(A) -> crate::Result<R> + 'static> From<F
 }
 
 /// A doxa view React places as an element: `#[react(render)] pub cell: Render<(Row, Column)>`.
-///
-/// It is mounted after React commits, inside this island, so context and `<Catch>` reach it.
+/// Arguments arrive as one tuple, as for [`Func`]; mounted inside this island, so context reaches it.
 pub struct Render<A>(Rc<dyn Fn(A) -> View>);
 
 impl<A> Clone for Render<A> {
@@ -298,10 +295,8 @@ struct FeedInner<T> {
     next: Cell<u64>,
 }
 
-/// An append-only stream into a React component, e.g. a terminal's output:
-/// `#[react(feed)] pub output: Feed<String>`, read in JS as `props.output.subscribe(cb)`.
-///
-/// It keeps the last `capacity` items, which a new subscriber is given first.
+/// An append-only stream into React: `#[react(feed)] pub output: Feed<String>`, read as
+/// `props.output.subscribe(cb)`. A new subscriber first gets the last `capacity` items.
 pub struct Feed<T: 'static>(Rc<FeedInner<T>>);
 
 impl<T> Clone for Feed<T> {
@@ -1303,9 +1298,11 @@ mod web {
     #[derive(Default)]
     struct Functions {
         events: Vec<Closure<dyn Fn(String)>>,
-        shells: HashMap<String, JsValue>,
-        /// Typed arrays and feed subscribers by prop, with the identity they were made from.
+        shells: HashMap<ShellFn, JsValue>,
+        /// Typed arrays by prop, with the identity they were made from.
         made: HashMap<&'static str, (usize, JsValue)>,
+        /// Feed subscribers by prop, with the feed they serve; replacing one drops its closure.
+        feeds: HashMap<&'static str, (usize, JsValue, Box<dyn std::any::Any>)>,
         /// `#[react(js)]` arrays by prop, with the values they hold.
         arrays: HashMap<&'static str, (Vec<crate::Js>, JsValue)>,
         keep: Vec<Box<dyn std::any::Any>>,
@@ -1323,8 +1320,16 @@ mod web {
         }
     }
 
-    /// `{ subscribe(cb) }`, returning a function that unsubscribes.
-    fn subscriber(fns: &super::FeedFns, keep: &mut Vec<Box<dyn std::any::Any>>) -> JsValue {
+    /// Which of a slot's or shell's functions a [`Functions::shells`] entry is.
+    #[derive(PartialEq, Eq, Hash)]
+    enum ShellFn {
+        Slot(&'static str),
+        Event(&'static str, &'static str),
+        Ref(&'static str),
+    }
+
+    /// `{ subscribe(cb) }`, returning a function that unsubscribes, and the closure to keep.
+    fn subscriber(fns: &super::FeedFns) -> (JsValue, Box<dyn std::any::Any>) {
         let fns = fns.clone();
         let c = Closure::<dyn Fn(js_sys::Function) -> JsValue>::new(move |cb: js_sys::Function| {
             let id = (fns.subscribe)(Rc::new(move |v| {
@@ -1335,8 +1340,7 @@ mod web {
         });
         let obj: JsValue = js_sys::Object::new().into();
         set(&obj, "subscribe", c.as_ref());
-        keep.push(Box::new(c));
-        obj
+        (obj, Box::new(c))
     }
 
     /// Islands rendered by the shipped runtime, keeping each one's functions alive.
@@ -1361,7 +1365,7 @@ mod web {
             let f = all.entry(id).or_default();
             let slots: JsValue = js_sys::Object::new().into();
             for (name, node) in &c.slots {
-                let js = f.shells.entry(format!("{name}:slot")).or_insert_with(|| {
+                let js = f.shells.entry(ShellFn::Slot(name)).or_insert_with(|| {
                     let node = node.clone();
                     let c = Closure::<dyn Fn(JsValue)>::new(move |el: JsValue| {
                         let n = el.dyn_into::<web_sys::Node>().ok().and_then(|n| {
@@ -1388,21 +1392,22 @@ mod web {
                 set(&shell, "attrs", &attrs);
                 let events: JsValue = js_sys::Object::new().into();
                 for (name, h) in &s.events {
-                    let key = format!("{}:on:{name}", s.prop);
-                    let js = f.shells.entry(key).or_insert_with(|| {
-                        let h = h.clone();
-                        let c = Closure::<dyn Fn(web_sys::Event)>::new(move |e: web_sys::Event| {
-                            h(super::web_event(e))
-                        });
-                        let v = c.as_ref().clone();
-                        f.keep.push(Box::new(c));
-                        v
-                    });
+                    let js =
+                        f.shells
+                            .entry(ShellFn::Event(s.prop, name))
+                            .or_insert_with(|| {
+                                let h = h.clone();
+                                let c = Closure::<dyn Fn(web_sys::Event)>::new(
+                                    move |e: web_sys::Event| h(super::web_event(e)),
+                                );
+                                let v = c.as_ref().clone();
+                                f.keep.push(Box::new(c));
+                                v
+                            });
                     set(&events, name, js);
                 }
                 set(&shell, "events", &events);
-                let key = format!("{}:ref", s.prop);
-                let r = f.shells.entry(key).or_insert_with(|| {
+                let r = f.shells.entry(ShellFn::Ref(s.prop)).or_insert_with(|| {
                     let node = s.node.clone();
                     let c = Closure::<dyn Fn(JsValue)>::new(move |el: JsValue| {
                         let n = el.dyn_into::<web_sys::Node>().ok().and_then(|n| {
@@ -1434,11 +1439,11 @@ mod web {
             set(&out, "raw", &raw);
             let feeds: JsValue = js_sys::Object::new().into();
             for (name, fns) in &c.feeds {
-                let v = match f.made.get(name) {
-                    Some((made, v)) if *made == fns.id => v.clone(),
+                let v = match f.feeds.get(name) {
+                    Some((made, v, _)) if *made == fns.id => v.clone(),
                     _ => {
-                        let v = subscriber(fns, &mut f.keep);
-                        f.made.insert(name, (fns.id, v.clone()));
+                        let (v, closure) = subscriber(fns);
+                        f.feeds.insert(name, (fns.id, v.clone(), closure));
                         v
                     }
                 };

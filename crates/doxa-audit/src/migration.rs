@@ -1,24 +1,11 @@
-//! SeaORM migrator for the `doxa_audit_log` table.
-//!
-//! The migrator uses its own tracking table (`doxa_audit_seaql_migrations`)
-//! so it never touches the consumer application's own `seaql_migrations`.
-//! Run it standalone:
+//! SeaORM migrator for `doxa_audit_log`, tracked in its own `doxa_audit_seaql_migrations`.
+//! Every migration shares this file, so `DeriveMigrationName` (the file stem) can't name them:
+//! write [`MigrationName`] by hand, and never rename a shipped one.
 //!
 //! ```ignore
 //! use sea_orm_migration::MigratorTrait;
 //! doxa_audit::Migrator::up(&db, None).await?;
 //! ```
-//!
-//! Or use the [`crate::init`] convenience wrapper.
-//!
-//! # Adding a migration
-//!
-//! Every migration lives in this one file, so `DeriveMigrationName` is
-//! unusable here — it names a migration after `file!()`'s stem, which
-//! would hand all of them the identical version string. Write the
-//! [`MigrationName`] impl by hand, returning the module's own name, and
-//! never change one that has shipped: the string is the primary key in
-//! `doxa_audit_seaql_migrations`.
 
 use sea_orm::{DatabaseConnection, DbErr};
 use sea_orm_migration::prelude::*;
@@ -62,13 +49,7 @@ mod m20260515_000001_create_audit_log {
     pub struct Migration;
 
     impl MigrationName for Migration {
-        /// Frozen at `"migration"` — the file stem
-        /// `DeriveMigrationName` produced when this was the only
-        /// migration in the file, and therefore the exact string every
-        /// database created by 0.1.4 through 0.1.6 carries in
-        /// `doxa_audit_seaql_migrations`. Renaming it would make the
-        /// migrator read those databases as having no audit table and
-        /// try to create it a second time.
+        /// Frozen: databases from 0.1.4–0.1.6 recorded this name, and renaming it recreates the table.
         fn name(&self) -> &str {
             "migration"
         }
@@ -76,12 +57,8 @@ mod m20260515_000001_create_audit_log {
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
-        /// Derives the table from the live entity, so a fresh database
-        /// gets today's column set in one statement while a database
-        /// created by an older release has only the columns that
-        /// existed back then. Migrations that add columns must
-        /// therefore guard on [`SchemaManager::has_column`] — see
-        /// [`super::m20260723_000001_add_tenant_id`].
+        /// Built from the live entity, so a later migration adding a column must guard on
+        /// [`SchemaManager::has_column`].
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             let backend = manager.get_database_backend();
             let schema = Schema::new(backend);
@@ -112,17 +89,8 @@ mod m20260723_000001_add_tenant_id {
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
-        /// Promotes the tenancy boundary out of the opaque `actor_attrs`
-        /// JSON and into a real, indexable column.
-        ///
-        /// Nullable on purpose: single-tenant deployments never set it,
-        /// and auth failures are recorded before a principal — and so
-        /// before a tenant — has been resolved.
-        ///
-        /// A database created by 0.1.7 or later already has the column
-        /// (the create-table migration builds from the live entity), so
-        /// this is a no-op there and only does work on databases created
-        /// by an earlier release.
+        /// Nullable: auth failures are recorded before a tenant is known. A no-op where the
+        /// create-table migration already built the column.
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             if manager.has_column("doxa_audit_log", "tenant_id").await? {
                 return Ok(());
@@ -164,21 +132,8 @@ mod m20260723_000002_add_audit_log_indexes {
         }
     }
 
-    /// Every filter column an audit query starts from, paired with the
-    /// index that serves it.
-    ///
-    /// Each one trails `created_at DESC` because audit reads are
-    /// universally newest-first over a time window: with the timestamp
-    /// in the index the planner walks matching rows in output order and
-    /// stops at the `LIMIT`, instead of collecting the whole match set
-    /// and sorting it. The bare `created_at` entry serves the unfiltered
-    /// timeline and the retention job's `DELETE … WHERE created_at < $1`.
-    ///
-    /// This is a write-amplifying set — an append-only log pays for
-    /// every index on every insert. It is sized for deployments that
-    /// actually query their audit trail (compliance review, incident
-    /// response, tenant-scoped activity feeds). Drop the indexes your
-    /// deployment never queries.
+    /// Each filter column's index, trailing `created_at DESC` so a newest-first read stops at
+    /// its `LIMIT` instead of sorting.
     pub(super) fn index_specs() -> Vec<(&'static str, Vec<Column>)> {
         vec![
             // Unfiltered timeline; also the retention sweep.
@@ -285,9 +240,7 @@ mod tests {
     ];
 
     async fn migrated_db() -> DatabaseConnection {
-        // Every pooled connection to `sqlite::memory:` opens its *own*
-        // empty database, so the pool has to be pinned to one connection
-        // or the migrator races itself across several of them.
+        // Each `sqlite::memory:` connection is its own database, so pin the pool to one.
         let mut opts = sea_orm::ConnectOptions::new("sqlite::memory:");
         opts.max_connections(1).sqlx_logging(false);
 
@@ -340,11 +293,7 @@ mod tests {
         let db = migrated_db().await;
         let manager = SchemaManager::new(&db);
 
-        // Simulate a database created by a release that predates the
-        // column: the create-table migration builds from the live
-        // entity, so a fresh database already has it. The index that
-        // covers the column has to go first — SQLite refuses to drop a
-        // column an index still references.
+        // A pre-column database. SQLite won't drop a column an index references.
         for sql in [
             "DROP INDEX idx_doxa_audit_log_tenant_created_at",
             "ALTER TABLE doxa_audit_log DROP COLUMN tenant_id",
@@ -393,12 +342,8 @@ mod tests {
             .await
             .unwrap());
     }
-    /// Postgres is the production target but the tests above run on
-    /// SQLite, which reports nothing about column ordering through
-    /// `sqlite_master`. Pin the emitted DDL instead: the trailing
-    /// `created_at DESC` is the whole point of these indexes, and losing
-    /// it would leave every one of them still present, still used, and
-    /// silently sorting on every query.
+
+    /// SQLite can't report index column order, so pin the Postgres DDL.
     #[test]
     fn postgres_ddl_orders_created_at_descending() {
         use m20260723_000002_add_audit_log_indexes as indexes;

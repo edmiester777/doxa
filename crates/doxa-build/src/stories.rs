@@ -7,14 +7,16 @@ use syn::spanned::Spanned;
 
 use crate::split;
 
-/// The custom section `#[story]` writes `name\tmodule\tfile\tline` lines into.
+/// The custom section `#[story]` writes `key\tname\tmodule\tfile\tline` lines into.
 const SECTION: &str = "doxa_stories";
 
 /// One story, as the gallery page reads it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Story {
-    /// The function's name, and its export's suffix.
+    /// Its export's suffix: the function's name and a hash of where it is.
     pub name: String,
+    /// The function's name.
+    pub title: String,
     /// Its `module_path!()`.
     pub module: String,
     /// Its file, as rustc named it.
@@ -31,14 +33,15 @@ pub fn stories(wasm: &[u8], root: &Path) -> Vec<Story> {
         .lines()
         .filter_map(|l| {
             let mut f = l.split('\t');
-            let (name, module, file, line) = (f.next()?, f.next()?, f.next()?, f.next()?);
-            let line = line.parse().ok()?;
+            let (key, name, module, file) = (f.next()?, f.next()?, f.next()?, f.next()?);
+            let line = f.next()?.parse().ok()?;
             let source = std::fs::read_to_string(root.join(file))
                 .ok()
                 .and_then(|text| source_of(&text, name, line))
                 .unwrap_or_default();
             Some(Story {
-                name: name.into(),
+                name: key.into(),
+                title: name.into(),
                 module: module.into(),
                 file: file.into(),
                 line,
@@ -46,8 +49,8 @@ pub fn stories(wasm: &[u8], root: &Path) -> Vec<Story> {
             })
         })
         .collect();
-    out.sort_by(|a, b| (&a.module, &a.name).cmp(&(&b.module, &b.name)));
-    out.dedup_by(|a, b| a.name == b.name && a.module == b.module);
+    out.sort_by(|a, b| (&a.module, &a.title, &a.name).cmp(&(&b.module, &b.title, &b.name)));
+    out.dedup_by(|a, b| a.name == b.name);
     out
 }
 
@@ -142,12 +145,17 @@ fn empty() -> View { view! {} }
     fn stories_are_read_from_the_section_and_their_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("s.rs"), FILE).unwrap();
-        let wasm = section("empty\tapp::inner\ts.rs\t5\nempty\tapp\tgone.rs\t1\n");
+        let wasm =
+            section("empty_1\tempty\tapp::inner\ts.rs\t5\nempty_2\tempty\tapp\tgone.rs\t1\n");
         let got = stories(&wasm, dir.path());
         assert_eq!(got.len(), 2);
         assert_eq!(
             (got[0].module.as_str(), got[0].source.is_empty()),
             ("app", true)
+        );
+        assert_eq!(
+            (got[0].name.as_str(), got[0].title.as_str()),
+            ("empty_2", "empty")
         );
         assert_eq!(got[1].module, "app::inner");
         assert!(

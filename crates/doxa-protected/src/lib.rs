@@ -1,19 +1,5 @@
-//! Protected string wrapper for secrets that must not leak into logs or traces.
-//!
-//! [`ProtectedString`] wraps a [`secrecy::SecretString`] in an [`Arc`] for
-//! cheap cloning (config structs are cloned freely throughout downstream
-//! codebases). The inner value is zeroized on drop via the `secrecy` crate.
-//!
-//! # Masking behaviour
-//!
-//! Both [`fmt::Display`] and [`fmt::Debug`] emit `[REDACTED]` instead of the
-//! inner value, making it safe to include in tracing spans, error messages, and
-//! serialized API responses without accidentally leaking credentials.
-//!
-//! # Access
-//!
-//! Use [`ProtectedString::expose`] to access the inner `&str`. This makes
-//! every secret-access site grep-able and auditable.
+//! [`ProtectedString`]: a secret that `Debug`, `Display` and serialized responses show as
+//! `[REDACTED]`, zeroized on drop. [`ProtectedString::expose`] is the one way to read it.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -28,18 +14,12 @@ use utoipa::openapi::{
 };
 use utoipa::{PartialSchema, ToSchema};
 
-/// A string value that is masked in `Debug`, `Display`, and serialized output.
-///
-/// Backed by [`Arc<SecretString>`](std::sync::Arc) for cheap cloning and
-/// `zeroize`-on-drop. Use [`expose`](Self::expose) to access the inner `&str`
-/// — this makes every secret-access site explicit and auditable.
-///
-/// # Serde
-///
-/// Deserializes from a plain string. Serializes as `"[REDACTED]"`, except when
-/// built for wasm32, where a browser client sends the real value.
+/// A string masked as `"[REDACTED]"` in `Debug`, `Display` and serde, except a browser build sends
+/// the real value. Deserializing `"[REDACTED]"` fails, so a form can't store the mask.
 #[derive(Clone)]
 pub struct ProtectedString(Arc<SecretString>);
+
+const REDACTED: &str = "[REDACTED]";
 
 impl ProtectedString {
     /// Access the secret value. Every call site is grep-able for auditing.
@@ -52,22 +32,20 @@ impl ProtectedString {
         if browser {
             self.expose()
         } else {
-            "[REDACTED]"
+            REDACTED
         }
     }
 }
 
 impl fmt::Display for ProtectedString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[REDACTED]")
+        f.write_str(REDACTED)
     }
 }
 
 impl fmt::Debug for ProtectedString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ProtectedString")
-            .field(&"[REDACTED]")
-            .finish()
+        f.debug_tuple("ProtectedString").field(&REDACTED).finish()
     }
 }
 
@@ -91,13 +69,19 @@ impl From<&str> for ProtectedString {
 
 impl Serialize for ProtectedString {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.on_the_wire(cfg!(target_arch = "wasm32")))
+        let browser = cfg!(all(target_arch = "wasm32", target_os = "unknown"));
+        serializer.serialize_str(self.on_the_wire(browser))
     }
 }
 
 impl<'de> Deserialize<'de> for ProtectedString {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
+        if s == REDACTED {
+            return Err(serde::de::Error::custom(
+                "`[REDACTED]` is the mask a response carries, not a secret; leave the field out to keep it",
+            ));
+        }
         Ok(Self::from(s))
     }
 }
@@ -152,6 +136,12 @@ mod tests {
     fn deserialize_from_plain_string() {
         let ps: ProtectedString = serde_json::from_str(r#""my-secret""#).unwrap();
         assert_eq!(ps.expose(), "my-secret");
+    }
+
+    #[test]
+    fn the_mask_is_refused_as_a_value() {
+        assert!(serde_json::from_str::<ProtectedString>(r#""[REDACTED]""#).is_err());
+        assert!(serde_json::from_str::<ProtectedString>(r#""[REDACTED] ""#).is_ok());
     }
 
     #[test]

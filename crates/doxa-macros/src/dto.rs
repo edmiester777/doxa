@@ -3,9 +3,9 @@
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use syn::punctuated::Punctuated;
-use syn::{
-    Attribute, Data, DeriveInput, Fields, GenericArgument, Ident, Path, PathArguments, Token, Type,
-};
+use syn::{Attribute, Data, DeriveInput, Fields, Ident, Path, Token, Type};
+
+use crate::ty::inner_of;
 
 /// A derive `#[dto]` adds unless the item already lists it or skips it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,20 +198,8 @@ fn strip_fields(fields: &mut Fields) {
     }
 }
 
-/// `T` when `ty` is written `Option<T>`.
 fn option_inner(ty: &Type) -> Option<&Type> {
-    let Type::Path(p) = ty else { return None };
-    let seg = p.path.segments.last()?;
-    if seg.ident != "Option" {
-        return None;
-    }
-    let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return None;
-    };
-    match args.args.iter().collect::<Vec<_>>().as_slice() {
-        [GenericArgument::Type(t)] => Some(t),
-        _ => None,
-    }
+    inner_of(ty, "Option")
 }
 
 /// Turn `#[nullable]` and `#[omit_none]` into the serde and schema attributes they stand for.

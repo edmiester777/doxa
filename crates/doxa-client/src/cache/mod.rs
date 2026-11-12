@@ -200,6 +200,18 @@ impl Pending {
         self.wakers.borrow_mut().drain(..).for_each(Waker::wake);
     }
 
+    /// Resolves once the request has finished, leaving its outcome.
+    pub async fn settled(&self) {
+        std::future::poll_fn(|cx| {
+            if self.done.get() {
+                return Poll::Ready(());
+            }
+            self.wakers.borrow_mut().push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+
     /// The outcome, for the first render to ask once it lands; `None` if another took it.
     pub async fn take(&self) -> Option<Box<dyn Any>> {
         std::future::poll_fn(|cx| {

@@ -38,6 +38,88 @@ fn state_rerenders_in_place() {
     );
 }
 
+#[test]
+fn a_script_url_set_as_a_plain_attribute_is_left_unset() {
+    let user = "  JavaScript:alert(1)".to_owned();
+    let dom = mount(move || {
+        let user = user.clone();
+        doxa::ui::el("a")
+            .attr("HREF", user.clone())
+            .attr("title", user)
+            .into_view()
+    });
+    let a = dom.find_tag("a").unwrap();
+    assert_eq!(dom.attr(a, "HREF"), None);
+    assert!(
+        dom.attr(a, "title").is_some(),
+        "only URL attributes are checked"
+    );
+}
+
+thread_local! {
+    static CLICKS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[component]
+fn TwoHandlers() -> View {
+    let tick = state(0);
+    let _ = tick.get();
+    doxa::ui::el("button")
+        .on("click", |_| CLICKS.with(|c| c.borrow_mut().push("a")))
+        .on("click", |_| CLICKS.with(|c| c.borrow_mut().push("b")))
+        .on("focus", move |_| tick.update(|t| *t += 1))
+        .into_view()
+}
+
+#[test]
+fn two_handlers_for_one_event_both_survive_a_rerender() {
+    let dom = mount(|| view! { <TwoHandlers/> });
+    let button = dom.find_tag("button").unwrap();
+    dom.dispatch(button, "focus", Default::default());
+    settle();
+    dom.click(button);
+    assert_eq!(CLICKS.with(|c| c.borrow().clone()), ["a", "b"]);
+}
+
+#[component]
+fn RawThenKid() -> View {
+    let raw = state(true);
+    let div = doxa::ui::el("div").on("click", move |_| raw.set(false));
+    let div = if raw.get() {
+        div.inner_html(DangerousHtml::trust("<i>raw</i>"))
+    } else {
+        div.child("kid")
+    };
+    div.into_view()
+}
+
+#[test]
+fn children_replace_inner_html_when_it_goes() {
+    let dom = mount(|| view! { <RawThenKid/> });
+    let div = dom.find_tag("div").unwrap();
+    dom.click(div);
+    settle();
+    assert_eq!(dom.html(div), "<div>kid</div>");
+}
+
+#[component]
+fn Chip(#[attrs] rest: Attrs) -> View {
+    view! { <a {..rest}>"x"</a> }
+}
+
+#[test]
+fn a_spread_checks_the_attributes_it_carries() {
+    let dom = mount(|| view! { <Chip href={SafeUrl::parse("/ok").unwrap()} data-x="1"/> });
+    let a = dom.find_tag("a").unwrap();
+    assert_eq!(dom.attr(a, "href").as_deref(), Some("/ok"));
+}
+
+#[test]
+#[should_panic(expected = "runs script")]
+fn an_event_handler_attribute_panics() {
+    let _ = doxa::ui::el("a").attr("onclick", "alert(1)");
+}
+
 thread_local! {
     static ORDER: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -747,6 +829,59 @@ fn a_modified_link_click_is_left_to_the_browser() {
     assert!(!dom.click(a), "a plain click is handled");
     settle();
     assert_eq!(dom.text(dom.find_tag("p").unwrap()), "target");
+}
+
+thread_local! {
+    static PREFS: std::cell::Cell<Option<doxa::ui::Stored<u32>>> = const { std::cell::Cell::new(None) };
+}
+
+#[component]
+fn Prefs() -> View {
+    PREFS.set(Some(stored("prefs", || 0)));
+    view! { <i>"prefs"</i> }
+}
+
+#[component]
+fn PrefsUntilClick() -> View {
+    let shown = state(true);
+    view! {
+        <button on:click={move |_| shown.set(false)}>"close"</button>
+        {shown.get().then(|| view! { <Prefs/> })}
+    }
+}
+
+#[test]
+fn a_stored_update_after_unmount_is_ignored() {
+    let dom = mount(|| view! { <PrefsUntilClick/> });
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert!(dom.find_tag("i").is_none());
+    PREFS.get().unwrap().update(|n| *n += 1);
+}
+
+#[page("/elsewhere")]
+fn Elsewhere() -> View {
+    view! {
+        <Link to={Target::route()} target="_blank" data-k="tab">"tab"</Link>
+        <Link to={Target::route()} download="" data-k="file">"file"</Link>
+        <Link to="https://example.com/x" data-k="site">"site"</Link>
+    }
+}
+
+#[test]
+fn a_link_leaving_the_app_is_left_to_the_browser() {
+    let dom = MemDom::new();
+    App::new(Router::new().page::<Elsewhere>().page::<Target>())
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    navigate("/elsewhere");
+    settle();
+    for text in ["tab", "file", "site"] {
+        let a = dom.find("data-k", text).unwrap();
+        assert!(dom.click(a), "{text}: default not prevented");
+        settle();
+        assert!(dom.find_tag("p").is_none(), "{text}: did not navigate");
+    }
 }
 
 const LIGHT: Theme = Theme::new("light", &[("--bg", "white"), ("--fg", "black")]);

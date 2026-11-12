@@ -26,10 +26,7 @@ mod emit;
 
 pub const MAKE_LOAD_JS: &str = include_str!("./__wasm_split.js");
 
-/// A parsed wasm module with additional metadata and functionality for splitting and patching.
-///
-/// This struct assumes that relocations will be present in incoming wasm binary.
-/// Upon construction, all the required metadata will be constructed.
+/// A parsed wasm module and the call graph to split it, built from its relocations.
 pub struct Splitter<'a> {
     /// The original module we use as a reference
     source_module: Module,
@@ -39,11 +36,7 @@ pub struct Splitter<'a> {
     original: &'a [u8],
     bindgened: &'a [u8],
 
-    // Mapping of indices of source functions
-    // This lets us use a much faster approach to emitting split modules simply by maintaining a mapping
-    // between the original Module and the new Module. Ideally we could just index the new module
-    // with old FunctionIds but the underlying IndexMap actually checks that a key belongs to a particular
-    // arena.
+    // Function indices, since walrus's arenas reject another module's `FunctionId`.
     fns_to_ids: HashMap<FunctionId, usize>,
     ids_to_fns: Vec<FunctionId>,
 
@@ -80,13 +73,8 @@ pub struct SplitModule {
 }
 
 impl<'a> Splitter<'a> {
-    /// Create a new "splitter" instance using the original wasm and the wasm from the output of wasm-bindgen.
-    ///
-    /// This will use the relocation data from the original module to create a call graph that we
-    /// then use with the post-bindgened module to create the split modules.
-    ///
-    /// It's important to compile the wasm with --emit-relocs such that the relocations are available
-    /// to construct the callgraph.
+    /// A splitter over the linker's wasm, whose relocations (`--emit-relocs`) give the call graph,
+    /// and wasm-bindgen's output of it, which is what gets split.
     pub fn new(original: &'a [u8], bindgened: &'a [u8]) -> Result<Self> {
         let (module, ids, fns_to_ids) = parse_module_with_ids(bindgened)?;
 
@@ -117,14 +105,8 @@ impl<'a> Splitter<'a> {
         Ok(module)
     }
 
-    /// Split the module into multiple modules at the boundaries of split points.
-    ///
-    /// Note that the binaries might still be "large" at the end of this process. In practice, you
-    /// need to push these binaries through wasm-bindgen and wasm-opt to take advantage of the
-    /// optimizations and splitting. We perform a few steps like zero-ing out the data segments
-    /// that will only be removed by the memory-packing step of wasm-opt.
-    ///
-    /// This returns the list of chunks, an import map, and some javascript to link everything together.
+    /// Split the module at its split points into main, a module per split point, and shared chunks.
+    /// Zeroed data segments are only removed by wasm-opt's memory packing.
     pub fn emit(self) -> Result<OutputModules> {
         tracing::info!("Emitting split modules.");
 
@@ -140,7 +122,7 @@ impl<'a> Splitter<'a> {
             .iter()
             .map(|m| m.name.clone())
             .collect();
-        let extra = (self.split_points.len() + self.shared_symbols.len()) as u64;
+        let extra = self.extra_slots() as u64;
         let src = emit::Source::new(self.bindgened, &tables, &memories, extra)?;
         let slots = self.shared_slots(src.slots_start);
         let chunks = (0..self.chunks.len())
@@ -161,18 +143,7 @@ impl<'a> Splitter<'a> {
         })
     }
 
-    /// Emit the main module.
-    ///
-    /// This will analyze the call graph and then perform some transformations on the module.
-    /// - Clear out active segments that the split modules will initialize
-    /// - Wipe away unused functions and data symbols
-    /// - Re-export the memories, globals, and other items that the split modules will need
-    /// - Convert the split module import functions to real functions that call the indirect function
-    ///
-    /// Once this is done, all the split module functions will have been removed, making the main module smaller.
-    ///
-    /// Emitting the main module is conceptually pretty simple. Emitting the split modules is more
-    /// complex.
+    /// Emit the main module, with every split module's functions removed.
     fn emit_main_module(mut self) -> Result<SplitModule> {
         tracing::info!("Emitting main bundle split module");
 
@@ -292,8 +263,7 @@ impl<'a> Splitter<'a> {
 
         let unique_symbols = &self.chunks[idx];
 
-        // The functions we'll need to import
-        let symbols_to_import: HashSet<_> = unique_symbols
+        let symbols_to_import: HashSet<_> = reachable_graph(&self.call_graph, unique_symbols)
             .intersection(&self.main_graph)
             .cloned()
             .collect();
@@ -305,12 +275,19 @@ impl<'a> Splitter<'a> {
             .cloned()
             .collect();
 
-        let plan = self.plan(
+        let mut plan = self.plan(
             "split chunk",
             None,
             [unique_symbols, &symbols_to_import, &symbols_to_delete],
             slots,
         );
+        plan.placed = unique_symbols
+            .iter()
+            .filter_map(|n| match n {
+                Node::Function(id) => Some((self.fns_to_ids[id] as u32, slots[id])),
+                Node::DataSymbol(_) => None,
+            })
+            .collect();
 
         Ok(SplitModule {
             bytes: src.emit(&plan, |i| self.func_name(i))?,
@@ -321,14 +298,24 @@ impl<'a> Splitter<'a> {
         })
     }
 
-    /// Each shared function's slot in main's funcref table, after one per split point.
+    /// How far main grows its funcref table: a slot per split point, shared symbol and chunk function.
+    fn extra_slots(&self) -> usize {
+        self.split_points.len() + self.shared_symbols.len() + self.chunk_funcs().len()
+    }
+
+    /// Each shared function's slot in main's funcref table, after one per split point, then
+    /// each chunk function's.
     fn shared_slots(&self, start: u32) -> HashMap<FunctionId, u32> {
         let funcs = self.shared_symbols.iter().filter_map(|n| match n {
             Node::Function(id) => Some(*id),
             Node::DataSymbol(_) => None,
         });
         let first = start + self.split_points.len() as u32;
-        funcs.zip(first..).collect()
+        let chunked = first + self.shared_symbols.len() as u32;
+        funcs
+            .zip(first..)
+            .chain(self.chunk_funcs().into_iter().zip(chunked..))
+            .collect()
     }
 
     /// `sets` are the part's unique symbols, the ones it calls in main, and the ones it drops.
@@ -369,6 +356,7 @@ impl<'a> Splitter<'a> {
             label,
             export: export.map(|(name, func, slot)| (name, idx(&func), slot)),
             table_funcs: funcs(unique),
+            placed: Vec::new(),
             stubs,
             deleted: funcs(delete),
             data,
@@ -380,55 +368,35 @@ impl<'a> Splitter<'a> {
         self.source_module.funcs.get(id).name.clone()
     }
 
-    /// Convert split import functions to local functions that call an indirect function that will
-    /// be filled in from the loaded split module.
-    ///
-    /// This is because these imports are going to be delayed until the split module is loaded
-    /// and loading in the main module these as imports won't be possible since the imports won't
-    /// be resolved until the split module is loaded.
+    /// Replace each split import with a stub calling a table slot the split module fills when it
+    /// loads, since main can't import from a module that isn't loaded yet.
     fn create_ifunc_table(&self, out: &mut Module) {
         let ifunc_table = self.load_funcref_table(out);
         let dummy_func = self.make_dummy_func(out);
 
         out.exports.add("__indirect_function_table", ifunc_table);
 
-        // Expand the ifunc table to accommodate the new ifuncs
         let segment_start = self
-            .expand_ifunc_table_max(
-                out,
-                ifunc_table,
-                self.split_points.len() + self.shared_symbols.len(),
-            )
+            .expand_ifunc_table_max(out, ifunc_table, self.extra_slots())
             .expect("failed to expand ifunc table");
 
-        // Delete the split import functions and replace them with local functions
-        //
-        // Start by pushing all the shared imports into the list
-        // These don't require an additional stub function
         let mut ifuncs = vec![];
 
-        // Push the split import functions into the list - after we've pushed in the shared imports
         for idx in 0..self.split_points.len() {
-            // this is okay since we're in the main module
             let import_func = self.split_points[idx].import_func;
             let import_id = self.split_points[idx].import_id;
             let ty_id = out.funcs.get(import_func).ty();
             let stub_idx = segment_start + ifuncs.len();
 
-            // Replace the import function with a local function that calls the indirect function
             out.funcs.get_mut(import_func).kind =
                 self.make_stub_funcs(out, ifunc_table, ty_id, stub_idx as _);
-
-            // And remove the corresponding import
             out.imports.delete(import_id);
 
-            // Push into the list the properly typed dummy func so the entry is populated
-            // unclear if the typing is important here
+            // A placeholder until the split module loads.
             ifuncs.push(dummy_func);
         }
 
-        // Add the stub functions to the ifunc table
-        // The callers of these functions will call the stub instead of the import
+        // Shared functions follow, so other parts' stubs reach them through the table.
         let mut _idx = 0;
         for func in self.shared_symbols.iter() {
             if let Node::Function(id) = func {
@@ -437,7 +405,6 @@ impl<'a> Splitter<'a> {
             }
         }
 
-        // Now add segments to the ifunc table
         out.tables
             .get_mut(ifunc_table)
             .elem_segments
@@ -450,9 +417,8 @@ impl<'a> Splitter<'a> {
             ));
     }
 
-    /// Re-export the memories, globals, and other items from the main module to the side modules
+    /// Export main's memories, globals and non-funcref tables for the split modules to import.
     fn re_export_items(&self, out: &mut Module) {
-        // Re-export memories
         for (idx, memory) in out.memories.iter().enumerate() {
             let name = memory
                 .name
@@ -461,13 +427,11 @@ impl<'a> Splitter<'a> {
             out.exports.add(&name, memory.id());
         }
 
-        // Re-export globals
         for (idx, global) in out.globals.iter().enumerate() {
             let global_name = format!("__global__{idx}");
             out.exports.add(&global_name, global.id());
         }
 
-        // Export any tables
         for (idx, table) in out.tables.iter().enumerate() {
             if table.element_ty != RefType::Funcref {
                 let table_name = format!("__imported_table_{}", idx);
@@ -477,9 +441,7 @@ impl<'a> Splitter<'a> {
     }
 
     fn prune_main_symbols(&self, out: &mut Module, unused_symbols: &HashSet<Node>) -> Result<()> {
-        // Wipe the split point exports
         for split in self.split_points.iter() {
-            // it's okay that we're not re-mapping IDs since this is just used by the main module
             out.exports.delete(split.export_id);
         }
 
@@ -494,27 +456,20 @@ impl<'a> Splitter<'a> {
             }
         }
 
-        // And then any actual symbols from the callgraph
         for symbol in unused_symbols.iter().cloned() {
             match symbol {
-                // Simply delete functions
                 Node::Function(id) => {
                     out.funcs.delete(id);
                 }
 
-                // Otherwise, zero out the data segment, which should lead to elimination by wasm-opt
+                // Zeroed, for wasm-opt's memory packing to remove.
                 Node::DataSymbol(id) => {
                     let symbol = self
                         .data_symbols
                         .get(&id)
                         .context("Failed to find data symbol")?;
 
-                    // VERY IMPORTANT
-                    //
-                    // apparently wasm-bindgen makes data segments that aren't the main one
-                    // even *touching* those will break the vtable / binding layer
-                    // We can only interact with the first data segment - the rest need to stay available
-                    // for the `.js` to interact with.
+                    // Only the first segment: touching wasm-bindgen's others breaks the JS bindings.
                     if symbol.which_data_segment == 0 {
                         let data_id = out.data.iter().nth(symbol.which_data_segment).unwrap().id();
                         let data = out.data.get_mut(data_id);
@@ -533,8 +488,7 @@ impl<'a> Splitter<'a> {
         Ok(())
     }
 
-    // 2.1 Create a dummy func that will be overridden later as modules pop in
-    // 2.2 swap the segment entries with the dummy func, leaving hole in its placed that will be filled in later
+    /// Point each removed function's table entry at a dummy, a hole its split module fills on load.
     fn replace_segments_with_holes(&self, out: &mut Module, unused_symbols: &HashSet<Node>) {
         let dummy_func = self.make_dummy_func(out);
         for element in out.elements.iter_mut() {
@@ -565,8 +519,7 @@ impl<'a> Splitter<'a> {
         b.finish(vec![], &mut out.funcs)
     }
 
-    /// Load the funcref table from the main module. This *should* exist for all modules created by
-    /// Rustc or Wasm-Bindgen, but we create it if it doesn't exist.
+    /// Main's funcref table, created if missing.
     fn load_funcref_table(&self, out: &mut Module) -> TableId {
         let ifunc_table = out
             .tables
@@ -581,11 +534,7 @@ impl<'a> Splitter<'a> {
         }
     }
 
-    /// Convert the imported function to a local function that calls an indirect function from the table
-    ///
-    /// This will enable the main module (and split modules) to call functions from outside their own module.
-    /// The functions might not exist when the main module is loaded, so we'll register some elements
-    /// that fill those in eventually.
+    /// A local function passing its params to whatever is in `table_idx`.
     fn make_stub_funcs(
         &self,
         out: &mut Module,
@@ -593,28 +542,23 @@ impl<'a> Splitter<'a> {
         ty_id: TypeId,
         table_idx: i32,
     ) -> FunctionKind {
-        // Convert the import function to a local function that calls the indirect function from the table
         let ty = out.types.get(ty_id);
 
         let params = ty.params().to_vec();
         let results = ty.results().to_vec();
         let args: Vec<_> = params.iter().map(|ty| out.locals.add(*ty)).collect();
 
-        // New function that calls the indirect function
         let mut builder = FunctionBuilder::new(&mut out.types, &params, &results);
         let mut body = builder.name("stub".into()).func_body();
 
-        // Push the params onto the stack
         for arg in args.iter() {
             body.local_get(*arg);
         }
 
-        // And then the address of the indirect function
         body.instr(ir::Instr::Const(ir::Const {
             value: ir::Value::I32(table_idx),
         }));
 
-        // And call it
         body.instr(ir::Instr::CallIndirect(ir::CallIndirect {
             ty: ty_id,
             table,
@@ -623,9 +567,7 @@ impl<'a> Splitter<'a> {
         FunctionKind::Local(builder.local_func(args))
     }
 
-    /// Expand the ifunc table to accommodate the new ifuncs
-    ///
-    /// returns the old maximum
+    /// Grow the table by `num_ifuncs`, returning the old maximum.
     fn expand_ifunc_table_max(
         &self,
         out: &mut Module,
@@ -662,29 +604,34 @@ impl<'a> Splitter<'a> {
         }
     }
 
-    /// Accumulate any shared funcs between multiple chunks into a single residual chunk.
-    /// This prevents duplicates from being downloaded.
-    /// Eventually we need to group the chunks into smarter "communities" - ie the Louvain algorithm
-    ///
-    /// Todo: we could chunk up the main module itself! Not going to now but it would enable parallel downloads of the main chunk
+    /// One chunk of what several splits reach outside main, so each static is initialized once.
     fn build_split_chunks(&mut self) {
-        // create a single chunk that contains all functions used by multiple modules
-        let mut funcs_used_by_chunks: HashMap<Node, HashSet<usize>> = HashMap::new();
-        for split in self.split_points.iter() {
-            for item in split.reachable_graph.iter() {
-                if self.main_graph.contains(item) {
-                    continue;
-                }
+        let mut users: HashMap<Node, usize> = HashMap::new();
+        for split in &self.split_points {
+            for item in split.reachable_graph.difference(&self.main_graph) {
+                *users.entry(*item).or_default() += 1;
             }
         }
+        let shared: HashSet<Node> = users
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(node, _)| node)
+            .collect();
+        if !shared.is_empty() {
+            self.chunks.push(shared);
+        }
+    }
 
-        // Only consider funcs that are used by multiple modules - otherwise they can just stay in their respective module
-        funcs_used_by_chunks.retain(|_, v| v.len() > 1);
-
-        // todo: break down this chunk if it exceeds a certain size (100kb?) by identifying different groups
-
-        self.chunks
-            .push(funcs_used_by_chunks.keys().cloned().collect());
+    /// The chunks' functions, in the order they take table slots after main's shared ones.
+    fn chunk_funcs(&self) -> Vec<FunctionId> {
+        let funcs: BTreeSet<Node> = self.chunks.iter().flatten().copied().collect();
+        funcs
+            .into_iter()
+            .filter_map(|n| match n {
+                Node::Function(id) => Some(id),
+                Node::DataSymbol(_) => None,
+            })
+            .collect()
     }
 
     fn unused_main_symbols(&self) -> HashSet<Node> {
@@ -744,14 +691,8 @@ impl<'a> Splitter<'a> {
             }
         };
 
-        // the symbols that we can't find in the original module touch functions that unfortunately
-        // we can't figure out where should exist in the call graph
-        //
-        // we're going to walk and find every child we possibly can and then add it to the call graph
-        // at the root
-        //
-        // wasm-bindgen will dissolve describe functions into the shim functions, but we don't have a
-        // sense of lining up old to new, so we just assume everything ends up in the main chunk.
+        // A symbol wasm-bindgen dissolved (describe functions into shims) can't be placed, so its
+        // descendants are attached to the root and stay in main.
         let mut lost_children = HashSet::new();
         self.call_graph = original
             .call_graph
@@ -1149,17 +1090,7 @@ pub struct SplitPoint {
     export_name: String,
 }
 
-/// Search the module's imports and exports for functions marked as split points.
-///
-/// These will be in the form of:
-///
-/// `__wasm_split_00<module>00_<import|export>_<hash>_<function>`
-///
-/// For a function named `SomeRoute2` in the module `add_body_element`, the pairings would be:
-///
-/// `__wasm_split_00add_body_element00_import_abef5ee3ebe66ff17677c56ee392b4c2_SomeRoute2`
-/// `__wasm_split_00add_body_element00_export_abef5ee3ebe66ff17677c56ee392b4c2_SomeRoute2`
-///
+/// The split points: import/export pairs named `__wasm_split_00<module>00_<import|export>_<hash>_<function>`.
 fn accumulate_split_points(module: &Module) -> Vec<SplitPoint> {
     let mut index = 0;
 
@@ -1253,11 +1184,7 @@ struct DataSymbol {
     which_data_segment: usize,
 }
 
-/// Manually parse the data section from a wasm module
-///
-/// We need to do this for data symbols because walrus doesn't provide the right range and offset
-/// information for data segments. Fortunately, it provides it for code sections, so we only need to
-/// do a small amount extra of parsing here.
+/// The data section's symbols, parsed by hand since walrus gives no ranges or offsets for data segments.
 fn parse_bytes_to_data_segment(bytes: &[u8]) -> Result<RawDataSection<'_>> {
     let parser = wasmparser::Parser::new(0);
     let mut parser = parser.parse_all(bytes);

@@ -1,28 +1,6 @@
-//! OpenAPI metadata for [`crate::AuthLayer`].
-//!
-//! [`auth_contribution`] returns the bundle of security requirement and
-//! 401 response that the auth pipeline adds to every operation behind
-//! it. [`crate::AuthLayer`] reads this via the
-//! [`doxa::DocumentedLayer`] trait so the layer is fully
-//! self-describing — call sites use
-//! [`doxa::OpenApiRouterExt::layer_documented`] with a single
-//! argument and the contribution is inferred automatically.
-//!
-//! # Why there is no `Authorization` header parameter
-//!
-//! The credential is a security scheme, and a security scheme only.
-//! OpenAPI reserves `Authorization` as an `in: header` parameter name —
-//! a definition using it SHALL be ignored — because `securitySchemes`
-//! already describes the credential, and describes it better: the
-//! scheme's type and the scopes the operation needs are both things a
-//! header parameter has no way to say.
-//!
-//! Declaring both stated the same requirement twice with nothing
-//! reconciling the two, and the copies drifted. Worse, generators that
-//! overlook the reserved-name rule read the parameter literally: every
-//! operation grew a mandatory `Authorization` argument, so callers had
-//! to thread a raw token through each call site to satisfy a header
-//! their client already set centrally.
+//! OpenAPI metadata for [`crate::AuthLayer`]: a security requirement and a 401 on each
+//! operation behind it. The credential is the security scheme only; OpenAPI reserves an
+//! `Authorization` header parameter.
 
 use doxa::{DocumentedLayer, LayerContribution, ResponseContribution, SecurityContribution};
 
@@ -36,21 +14,8 @@ impl DocumentedLayer for AuthDocs {
     }
 }
 
-/// Full OpenAPI contribution made by [`crate::AuthLayer`]: a security
-/// requirement naming the scheme `scheme_name`, and the 401 the pipeline
-/// returns when no acceptable credential arrives.
-///
-/// The 401 response schema is not declared here — it is inferred
-/// from [`AuthError`](doxa_policy::AuthError)'s `#[derive(ApiError)]`
-/// which generates typed per-status-code schemas directly on the error
-/// enum.
-///
-/// `scheme_name` must match a security scheme already registered on the
-/// [`doxa::ApiDocBuilder`] via
-/// [`bearer_security`](doxa::ApiDocBuilder::bearer_security) (or
-/// [`bearer_security_with_format`](doxa::ApiDocBuilder::bearer_security_with_format))
-/// before the handlers returning `AuthError` are mounted. The conventional
-/// value is `"bearer"`.
+/// [`crate::AuthLayer`]'s contribution: a requirement on `scheme_name`, which must be registered
+/// on the [`doxa::ApiDocBuilder`], and a 401.
 pub fn auth_contribution(scheme_name: impl Into<String>) -> LayerContribution {
     LayerContribution::new()
         .with_security(SecurityContribution::new(scheme_name))
@@ -62,9 +27,7 @@ mod tests {
     use super::*;
     use utoipa::openapi::path::{HttpMethod, Operation, OperationBuilder, PathItem};
 
-    /// Apply `c` to a lone `GET /x` and hand back the operation it
-    /// landed on. What the contribution *means* is only visible once
-    /// stamped, so every assertion below reads the applied form.
+    /// The operation `c` produces when applied to a lone `GET /x`.
     fn applied(c: &LayerContribution) -> Operation {
         let mut openapi = utoipa::openapi::OpenApiBuilder::new().build();
         openapi.paths.paths.insert(
@@ -79,11 +42,6 @@ mod tests {
             .clone()
     }
 
-    /// The credential travels as `security` alone. A header parameter
-    /// naming it is the thing OpenAPI reserves and every generator
-    /// reads differently, so the contribution must not contain one —
-    /// asserted here rather than left to the document builder's refusal,
-    /// which would only catch it once someone assembled a whole spec.
     #[test]
     fn auth_contribution_declares_no_authorization_header_parameter() {
         let op = applied(&auth_contribution("bearer"));

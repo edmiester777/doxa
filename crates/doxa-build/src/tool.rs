@@ -37,6 +37,25 @@ const TAILWIND_SHA256: &[(&str, &str)] = &[
     ),
 ];
 
+/// Each `@esbuild/<platform>` tarball's npm `dist.integrity` for [`ESBUILD_VERSION`].
+const ESBUILD_INTEGRITY: &[(&str, &str)] = &[
+    ("darwin-arm64", "sha512-n4KqkOQrraxHJcgjM1RvwbigfQKIKJVpM7xp+KsxiyUSrRdIXnt73VhrPAx0fV44hgfmIVKjxMN9J1t5jySVkw=="),
+    ("darwin-x64", "sha512-uq6suIWYP37qzGddBKPw5QEQPi6HiLGsO7UmkpfyaYNQ3D+rN6w6WfwH+nuqcGXWvawGwxOEroO4YGnFh95azw=="),
+    ("linux-arm64", "sha512-pW4AC0P3it8c7do9MVM4p51FzHzdM/TZrerurgRcHJ2WTa1VQ1CIq18xncfpBJw4ojkiZZrKW2yIBWBP92j6Ug=="),
+    ("linux-x64", "sha512-4xTZr1FUmSoQW4XIWmit3tzQrUTZM+N3P0XV8xROKYF50XfI7xeO90+1bZvNwxIufQ9hDQVRJH5YhgPVF8A/HQ=="),
+    ("linux-ia32", "sha512-CYbnj78HsIeA+DhgUKgFCfvNsTHFhMMrinUrMZpDXJXKN8T3XViTZ/+wtHeVxEWY8ewSzTFN+nRmSwO2tZaLUQ=="),
+    ("linux-arm", "sha512-XlDnu2q5yoqems+xay6wSAcg9DDD7K9RLKZEBOMZm3ckNpJBvOX20tSfby8KfrrhINDyv9V2YVZKY/SpoGJI8w=="),
+    ("win32-x64", "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="),
+    ("win32-arm64", "sha512-PIhhEkE9uPBleRBrQEJpUn7MBnibZzbGzYWPmY3x+YoVg/95zbjB4CxPPOQ8l5tYYM4mMaCthF8/1DIfBQQyWQ=="),
+    ("win32-ia32", "sha512-YmJbfTlvU7Sdn9BB+4PRES4oB6pxgS37MAONj+hBr/cpXS1aBPKXxNnDbu+QCWPj0o9dgyxeq79g6c5P8KeuYA=="),
+    ("freebsd-x64", "sha512-78XJTJkvPs0kz2w61301PJjXl4g7q3JqiYMZ/M/yVI73EHBrCRTgkhu9oqG7vPqq+a/yadEW8aD+agKlk5xrmg=="),
+    ("freebsd-arm64", "sha512-n+I0BTSRIoy+d6RPKnEVwql5UwBJolytvY4mAOIEJorKlqgPII8ix6slVVrfZ5Tnj7glIZvloylbB/EJPMWEXw=="),
+    ("openbsd-x64", "sha512-QtiuPytchRyC4rwUKhexJdQKvDuZ6hWloi3igqPQNUJCS1/v9EiO3UTOXR6A3FoMo4fnAKbWJdqaIwhOzh8qEw=="),
+    ("openbsd-arm64", "sha512-AL2qJILH7lNjrDmCQDvdxMfAUIv8KMNZOvrwAQ8i8//ntL9FflhOyMJ8OZSMBb8/AWXe3/5v5S20y3zCoZWKoQ=="),
+    ("netbsd-x64", "sha512-lqnzCV+mM0gIADaKihiCg6ifgfU2L3h5E33rNQBN1Y4MaVGnzryzmvvf7UHxprpQdE8hpqLolJ9Rl+SkIRDpyw=="),
+    ("netbsd-arm64", "sha512-sSATRjPeDBg3pdgHoQfoYBob11Kk1FGa9lui5RIHZCoCkJa9QKlvl3/vKz2usCmYYjs7ymJR/2Nnsqe+Hjt5nw=="),
+];
+
 /// `~/.cache/doxa`.
 pub fn cache_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
@@ -152,13 +171,17 @@ pub fn esbuild() -> Result<PathBuf> {
                 "build on macOS, Linux, Windows, or a BSD",
             )
         })?;
-    let meta_url = format!("https://registry.npmjs.org/@esbuild/{platform}/{ESBUILD_VERSION}");
     let what = format!("esbuild {ESBUILD_VERSION} ({platform})");
-    let meta: serde_json::Value = serde_json::from_slice(&fetch(&what, &meta_url)?)
-        .map_err(|e| download_error(&what, &meta_url, e))?;
-    let integrity = meta["dist"]["integrity"]
-        .as_str()
-        .ok_or_else(|| download_error(&what, &meta_url, "no dist.integrity in package metadata"))?;
+    let integrity = ESBUILD_INTEGRITY
+        .iter()
+        .find(|(p, _)| *p == platform)
+        .map(|(_, i)| *i)
+        .ok_or_else(|| {
+            Error::config(
+                format!("{what} has no pinned checksum"),
+                "build on macOS, Linux, Windows, or a BSD",
+            )
+        })?;
     let url = format!(
         "https://registry.npmjs.org/@esbuild/{platform}/-/{platform}-{ESBUILD_VERSION}.tgz"
     );
@@ -194,10 +217,11 @@ pub fn tailwind() -> Result<PathBuf> {
     );
     let what = format!("tailwindcss {TAILWIND_VERSION} ({asset})");
     let bin = fetch(&what, &url)?;
-    match TAILWIND_SHA256.iter().find(|(name, _)| *name == asset) {
-        Some((_, sha)) => verify_sha256(&bin, sha).map_err(|e| download_error(&what, &url, e))?,
-        None => eprintln!("warning: no pinned checksum for {asset}; using it unverified"),
-    }
+    let (_, sha) = TAILWIND_SHA256
+        .iter()
+        .find(|(name, _)| *name == asset)
+        .ok_or_else(|| download_error(&what, &url, "no pinned checksum"))?;
+    verify_sha256(&bin, sha).map_err(|e| download_error(&what, &url, e))?;
     install(&path, &bin)?;
     Ok(path)
 }
@@ -337,6 +361,15 @@ mod tests {
         ] {
             let asset = tailwind_asset(os, arch).unwrap();
             assert!(TAILWIND_SHA256.iter().any(|(n, _)| *n == asset), "{asset}");
+        }
+        for os in ["macos", "linux", "windows"] {
+            for arch in ["x86_64", "aarch64"] {
+                let platform = esbuild_platform(os, arch).unwrap();
+                assert!(
+                    ESBUILD_INTEGRITY.iter().any(|(p, _)| *p == platform),
+                    "{platform}"
+                );
+            }
         }
     }
 }

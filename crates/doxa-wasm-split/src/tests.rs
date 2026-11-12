@@ -183,6 +183,103 @@ fn split_with_shared_callee() -> &'static [u8] {
 }
 
 #[test]
+fn what_two_splits_share_is_one_chunk_they_both_stub() {
+    const OTHER_IMPORT: &str = "__wasm_split_00___other___00_import_cd_render";
+    const OTHER_EXPORT: &str = "__wasm_split_00___other___00_export_cd_render";
+    let mut module = Module::default();
+    let ty = module.types.add(&[], &[]);
+    module.add_import_func("./__wasm_split.js", IMPORT, ty);
+    module.add_import_func("./__wasm_split.js", OTHER_IMPORT, ty);
+    let named = |module: &mut Module, name: &str, callees: &[FunctionId]| {
+        let mut builder = FunctionBuilder::new(&mut module.types, &[], &[]);
+        builder.name(name.into());
+        let mut body = builder.func_body();
+        for callee in callees {
+            body.call(*callee);
+        }
+        builder.finish(Vec::new(), &mut module.funcs)
+    };
+    let common = named(&mut module, "common", &[]);
+    let a = named(&mut module, "a", &[common]);
+    let b = named(&mut module, "b", &[common]);
+    let kept = named(&mut module, "kept", &[]);
+    module.exports.add(EXPORT, a);
+    module.exports.add(OTHER_EXPORT, b);
+    module.exports.add("kept", kept);
+    module.tables.add_local(false, 1, Some(1), RefType::Funcref);
+    let memory = module.memories.add_local(false, false, 1, None, None);
+    module.data.add(
+        DataKind::Active {
+            memory,
+            offset: ConstExpr::Value(ir::Value::I32(16)),
+        },
+        vec![1, 2, 3, 4],
+    );
+    let bytes: &'static [u8] = module.emit_wasm().leak();
+
+    let (module, ids, fns_to_ids) = parse_module_with_ids(bytes).unwrap();
+    let f = |name| Node::Function(module.funcs.by_name(name).unwrap());
+    let graph = [
+        (f("a"), [f("common")].into()),
+        (f("b"), [f("common")].into()),
+        (f("common"), [Node::DataSymbol(1)].into()),
+    ]
+    .into();
+    let Node::Function(common) = f("common") else {
+        unreachable!()
+    };
+    let mut splitter = splitter(module, graph);
+    splitter.bindgened = bytes;
+    splitter.fns_to_ids = fns_to_ids;
+    splitter.ids_to_fns = ids;
+    splitter.data_symbols = [(
+        1,
+        DataSymbol {
+            index: 1,
+            range: 0..0,
+            segment_offset: 1,
+            symbol_size: 2,
+            which_data_segment: 0,
+        },
+    )]
+    .into();
+    splitter.build_split_chunks();
+    let slot = splitter.shared_slots(1)[&common];
+
+    let out = splitter.emit().unwrap();
+    Module::from_buffer(&out.main.bytes).unwrap();
+    assert_eq!(out.chunks.len(), 1);
+    let chunk = Module::from_buffer(&out.chunks[0].bytes).unwrap();
+    let common = chunk.funcs.by_name("common").unwrap();
+    assert!(matches!(
+        chunk.funcs.get(common).kind,
+        FunctionKind::Local(_)
+    ));
+    let placed = chunk.elements.iter().any(|e| {
+        matches!(&e.kind, ElementKind::Active { offset: ConstExpr::Value(ir::Value::I32(s)), .. } if *s as u32 == slot)
+            && matches!(&e.items, ElementItems::Functions(fs) if fs == &[common])
+    });
+    assert!(placed, "the chunk puts `common` in its slot");
+    let initialized = |m: &Module| m.data.iter().any(|d| !d.value.is_empty());
+    assert!(initialized(&chunk));
+
+    for part in &out.modules {
+        assert_eq!(part.relies_on_chunks, [0].into());
+        let part = Module::from_buffer(&part.bytes).unwrap();
+        assert!(!initialized(&part), "only the chunk initializes the static");
+        let stub = part.funcs.by_name("common").unwrap();
+        let FunctionKind::Local(stub) = &part.funcs.get(stub).kind else {
+            panic!("the stub has no body")
+        };
+        let calls = &stub.block(stub.entry_block()).instrs;
+        assert!(matches!(
+            calls[0].0,
+            ir::Instr::Const(ir::Const { value: ir::Value::I32(s) }) if s as u32 == slot
+        ));
+    }
+}
+
+#[test]
 fn a_split_module_holds_its_own_functions_and_stubs_the_ones_main_keeps() {
     let bytes = split_with_shared_callee();
     let (module, ids, fns_to_ids) = parse_module_with_ids(bytes).unwrap();

@@ -2,7 +2,9 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Fields, GenericArgument, Item, Path, PathArguments, Type};
+use syn::{Fields, Item, Path, Type};
+
+use crate::ty::inner_of;
 
 pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let there: Path = syn::parse2(args)?;
@@ -98,30 +100,14 @@ fn arms(here: &TokenStream, there: &TokenStream, fields: &Fields) -> (TokenStrea
 
 /// `value` of type `ty` as the other side's copy, through any `Option` and `Vec` around it.
 fn converted(ty: &Type, value: TokenStream) -> TokenStream {
-    match wrapped(ty) {
-        Some(("Option", inner)) => {
-            let item = converted(inner, quote!(item));
-            quote!(#value.map(|item| #item))
-        }
-        Some(("Vec", inner)) => {
-            let item = converted(inner, quote!(item));
-            quote!(#value.into_iter().map(|item| #item).collect())
-        }
-        _ => quote!(::core::convert::Into::into(#value)),
-    }
-}
-
-/// `("Option", T)` for `Option<T>` and `("Vec", T)` for `Vec<T>`, by last path segment.
-fn wrapped(ty: &Type) -> Option<(&'static str, &Type)> {
-    let Type::Path(path) = ty else { return None };
-    let last = path.path.segments.last()?;
-    let name = ["Option", "Vec"].into_iter().find(|n| last.ident == n)?;
-    let PathArguments::AngleBracketed(args) = &last.arguments else {
-        return None;
-    };
-    match args.args.first()? {
-        GenericArgument::Type(inner) => Some((name, inner)),
-        _ => None,
+    if let Some(inner) = inner_of(ty, "Option") {
+        let item = converted(inner, quote!(item));
+        quote!(#value.map(|item| #item))
+    } else if let Some(inner) = inner_of(ty, "Vec") {
+        let item = converted(inner, quote!(item));
+        quote!(#value.into_iter().map(|item| #item).collect())
+    } else {
+        quote!(::core::convert::Into::into(#value))
     }
 }
 

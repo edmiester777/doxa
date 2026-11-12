@@ -96,7 +96,7 @@ pub fn format_source(src: &str, config: &Config) -> Formatted {
     let printer = print::Printer::new(src, config);
     let mut edits = Vec::new();
     for mac in finder.found {
-        match printer.format_macro(mac, None) {
+        match printer.format_macro(mac, None, None) {
             Ok(edit) => edits.push(edit),
             Err(e) => printer.warn(mac, e),
         }

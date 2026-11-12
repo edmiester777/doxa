@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use axum::http::{HeaderName, HeaderValue, Method};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use utoipa::openapi::path::ParameterIn;
 
 /// A CORS layer that allows the headers a doxa client sends and exposes the ones it reads.
 /// Without them a cross-origin client loses session resets, invalidation and `<Can>`.
@@ -12,13 +13,15 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 /// use axum::Router;
 /// use doxa_docs::Cors;
 ///
-/// let app: Router = Router::new().layer(Cors::allow(["https://app.example.com"]).credentials(true));
+/// let (router, api) = doxa_docs::OpenApiRouter::<()>::new().split_for_parts();
+/// let app: Router = router.layer(Cors::allow(["https://app.example.com"]).routes(&api));
 /// ```
 #[derive(Debug, Clone)]
 pub struct Cors {
     origins: Vec<HeaderValue>,
     credentials: bool,
     max_age: Duration,
+    headers: Vec<HeaderName>,
 }
 
 impl Cors {
@@ -36,7 +39,30 @@ impl Cors {
             origins,
             credentials: false,
             max_age: Duration::from_secs(600),
+            headers: Vec::new(),
         }
+    }
+
+    /// Also allow every header parameter the routes in `api` declare.
+    pub fn routes(mut self, api: &utoipa::openapi::OpenApi) -> Cors {
+        let params = api.paths.paths.values().flat_map(|item| {
+            let shared = item.parameters.iter().flatten();
+            let own = crate::contribution::path_item_operations(item)
+                .flat_map(|op| op.parameters.iter().flatten());
+            shared.chain(own)
+        });
+        for param in params {
+            if !matches!(param.parameter_in, ParameterIn::Header) {
+                continue;
+            }
+            let Ok(name) = HeaderName::try_from(param.name.as_str()) else {
+                continue;
+            };
+            if !self.headers.contains(&name) {
+                self.headers.push(name);
+            }
+        }
+        self
     }
 
     /// Let the browser send cookies, for a client using `layer::cookies()`.
@@ -65,7 +91,7 @@ impl Cors {
                 Method::PATCH,
                 Method::DELETE,
             ])
-            .allow_headers(names(doxa_wire::REQUEST_HEADERS))
+            .allow_headers([names(doxa_wire::REQUEST_HEADERS), self.headers.clone()].concat())
             .expose_headers(names(doxa_wire::RESPONSE_HEADERS))
             .allow_credentials(self.credentials)
             .max_age(self.max_age)
@@ -157,5 +183,44 @@ mod tests {
         )
         .await;
         assert_eq!(hdr(&res, "access-control-allow-origin"), None);
+    }
+
+    #[tokio::test]
+    async fn a_header_a_route_declares_is_allowed() {
+        use utoipa::openapi::path::{OperationBuilder, ParameterBuilder, ParameterIn, PathItem};
+        use utoipa::openapi::{HttpMethod, OpenApiBuilder, PathsBuilder};
+
+        let op = OperationBuilder::new()
+            .parameter(
+                ParameterBuilder::new()
+                    .name("Idempotency-Key")
+                    .parameter_in(ParameterIn::Header),
+            )
+            .parameter(
+                ParameterBuilder::new()
+                    .name("page")
+                    .parameter_in(ParameterIn::Query),
+            )
+            .build();
+        let api = OpenApiBuilder::new()
+            .paths(PathsBuilder::new().path("/api/w", PathItem::new(HttpMethod::Post, op)))
+            .build();
+        let app = Router::new()
+            .route("/api/w", get(|| async { "{}" }))
+            .layer(Cors::allow(["https://app.example.com"]).routes(&api));
+        let res = app
+            .oneshot(
+                Request::options("/api/w")
+                    .header(header::ORIGIN, "https://app.example.com")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "idempotency-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let allowed = hdr(&res, "access-control-allow-headers").unwrap();
+        assert!(allowed.contains("idempotency-key"), "{allowed}");
+        assert!(!allowed.contains("page"), "{allowed}");
     }
 }

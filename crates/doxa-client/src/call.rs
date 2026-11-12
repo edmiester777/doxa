@@ -123,10 +123,8 @@ impl<R> Call<R> {
         self.out.url().map_err(Fetch::Encode)
     }
 
-    /// Patch every cached `T` this call is about now; undone if the call fails.
-    ///
-    /// A cached `T` is about this call when its `#[identity(key = …)]` equals the
-    /// key the call sends. A `T` coming back replaces the cached ones.
+    /// Patch now every cached `T` whose `#[identity(key = …)]` is the key this call sends; undone
+    /// if it fails, replaced by a returned `T`.
     pub fn optimistic<T>(mut self, patch: impl Fn(&mut T) + 'static) -> Self
     where
         T: Identity + Clone + 'static,
@@ -306,15 +304,15 @@ fn invalidates(response: &crate::transport::Response) -> Vec<String> {
 async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
-    let key = format!("{} {url}", call.route.method.as_str());
+    let key = format!("{} {}", call.route.method.as_str(), call.out.identity(&url));
+    let request = call.request(url, "text/event-stream");
     let response = loop {
         if let Some(hub) = client.open_stream(&key) {
             return Ok(R::stream(hub));
         }
-        let request = call.request(url.clone(), "text/event-stream");
         client.cache.count_request();
         let session = client.session();
-        let response = client.send(request).await.map_err(widen)?;
+        let response = client.send(request.clone()).await.map_err(widen)?;
         if client.observe_session(&response, session) {
             break response;
         }
@@ -326,7 +324,6 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     if let Some(hub) = client.open_stream(&key) {
         return Ok(R::stream(hub));
     }
-    let request = call.request(url, "text/event-stream");
     let hub = Rc::new(Hub::new(request, client.clone(), response.body));
     client.share_stream(key, &hub);
     Ok(R::stream(hub))
@@ -336,10 +333,10 @@ async fn subscribe<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
 async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R::Error>> {
     let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
-    let request = call.request(url.clone(), "text/event-stream");
+    let request = call.request(url, "text/event-stream");
     client.cache.count_request();
     let session = client.session();
-    let response = client.send(request).await.map_err(widen)?;
+    let response = client.send(request.clone()).await.map_err(widen)?;
     if !client.observe_session(&response, session) {
         return Err(Fetch::Stream("the session changed".into()));
     }
@@ -352,7 +349,6 @@ async fn open_once<R: FromResponse>(call: Call<R>) -> Result<R::Output, Fetch<R:
     entities.extend(extra.iter().map(String::as_str));
     client.cache.invalidate(&entities);
     crate::cache::report(&entities);
-    let request = call.request(url, "text/event-stream");
     let hub = Rc::new(Hub::new(request, client.clone(), response.body));
     client.own_stream(&hub);
     Ok(R::stream(hub))
@@ -368,14 +364,15 @@ async fn query<R: FromResponse>(
     let Some(slot) = slot else {
         return send_current(&client, &call, &url).await.into_result();
     };
-    let kept = client.cache.get_slot(&slot, &url);
+    let identity = call.out.identity(&url);
+    let kept = client.cache.get_slot(&slot, &identity);
     if let Some(v) = kept.as_ref().and_then(|v| v.downcast_ref::<R::Output>()) {
         if let Some(v) = R::copy(v) {
             return Ok(v);
         }
     }
     let (route, route_key) = (call.route, call.out.first_key().cloned());
-    let (pending, mine) = client.cache.pending(&slot, &url);
+    let (pending, mine) = client.cache.pending(&slot, &identity);
     if mine {
         // Its own task, so a re-render cancelling this one doesn't drop the request.
         let (client, url, slot, pending) =
@@ -394,7 +391,7 @@ async fn query<R: FromResponse>(
         if let Some(kept) = R::copy(v) {
             client
                 .cache
-                .store_slot(slot, route, route_key, Rc::new(kept), url);
+                .store_slot(slot, route, route_key, Rc::new(kept), identity);
         }
     }
     sent.into_result()
@@ -417,13 +414,36 @@ async fn cached_query<R: FromResponse>(
 ) -> Result<Cached<R::Output>, Fetch<R::Error>> {
     let client = service(call.route.package);
     let url = call.url().map_err(widen)?;
-    let key = format!("GET {url}");
-    loop {
-        if let Some(found) = client.cache.get(&key, now()) {
-            return found
+    let key = format!("GET {}", call.out.identity(&url));
+    let found = |client: &Service| {
+        let found = client.cache.get(&key, now())?;
+        Some(
+            found
                 .downcast::<R::Output>()
                 .map(Cached::from_rc)
-                .map_err(|_| Fetch::Decode("cached value has another type".to_owned()));
+                .map_err(|_| Fetch::Decode("cached value has another type".to_owned())),
+        )
+    };
+    if let Some(found) = found(&client) {
+        return found;
+    }
+    let slot = format!("cached {key}");
+    let (pending, mine) = client.cache.pending(&slot, &key);
+    if !mine {
+        // Another caller is fetching it; a failure there leaves this one to send its own.
+        pending.settled().await;
+        if let Some(found) = found(&client) {
+            return found;
+        }
+    }
+    let _lead = mine.then(|| Lead {
+        client: client.clone(),
+        slot,
+        pending,
+    });
+    loop {
+        if let Some(found) = found(&client) {
+            return found;
         }
         let request = call.request(url.clone(), "application/json");
         let (sent, current) = send::<R>(&client, request).await;
@@ -437,6 +457,20 @@ async fn cached_query<R: FromResponse>(
             .cache
             .store(key, call.route, route_key, stored, ttl, now());
         return Ok(Cached::from_rc(value));
+    }
+}
+
+/// The caller fetching a cached query for the others; settles them however it ends.
+struct Lead {
+    client: Rc<Service>,
+    slot: String,
+    pending: Rc<crate::cache::Pending>,
+}
+
+impl Drop for Lead {
+    fn drop(&mut self) {
+        self.client.cache.end_pending(&self.slot, &self.pending);
+        self.pending.finish(Box::new(()));
     }
 }
 

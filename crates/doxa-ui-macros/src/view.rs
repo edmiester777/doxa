@@ -16,7 +16,16 @@ pub(crate) const VOID_ELEMENTS: [&str; 14] = [
 ];
 
 /// Attributes holding a URL, set through `SafeUrl` so `javascript:` can't slip in.
-const URL_ATTRS: [&str; 6] = ["href", "src", "action", "formaction", "poster", "cite"];
+const URL_ATTRS: [&str; 8] = [
+    "href",
+    "xlink:href",
+    "src",
+    "action",
+    "formaction",
+    "poster",
+    "cite",
+    "background",
+];
 
 pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let config = ParserConfig::new()
@@ -93,11 +102,11 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
     let span = e.name().span();
     let mut out = quote_spanned! { span => ::doxa::ui::el(#tag) };
     let mut key = None;
-    // `bind:group` needs the radio's own `value`, wherever it is written.
-    let radio_value = e.attributes().iter().find_map(|attr| {
-        let a = keyed(attr).ok()?;
-        (a.key.to_string() == "value").then(|| value(a)).flatten()
-    });
+    let has_value = e
+        .attributes()
+        .iter()
+        .any(|attr| keyed(attr).is_ok_and(|a| a.key.to_string() == "value"));
+    let mut group = None;
     let mut spreads = Vec::new();
     for attr in e.attributes() {
         if let NodeAttribute::Block(b) = attr {
@@ -151,13 +160,14 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
             ("bind:checked", Some(v)) => quote_spanned! { span => #out.bind_checked(#v) },
             ("bind:selected", Some(v)) => quote_spanned! { span => #out.bind_selected(#v) },
             ("bind:group", Some(v)) => {
-                let Some(value) = radio_value.clone() else {
+                if !has_value {
                     return Err(syn::Error::new(
                         span,
                         "`bind:group` goes on a radio button with a `value`, e.g. `<input type=\"radio\" value=\"a\" bind:group={kind}/>`",
                     ));
-                };
-                quote_spanned! { span => #out.bind_group(#v, #value) }
+                }
+                group = Some(quote_spanned! { span => .bind_group(#v) });
+                out
             }
             (n, _) if n.starts_with("bind:") => {
                 return Err(syn::Error::new(
@@ -165,13 +175,32 @@ fn element(e: &NodeElement<rstml::Infallible>) -> syn::Result<TokenStream> {
                     "`bind:` takes `value`, `checked`, `group` or `selected`, with a `State` or a form field",
                 ));
             }
-            (n, Some(v)) if URL_ATTRS.contains(&n) => {
+            (n, _) if n.to_ascii_lowercase().starts_with("on") => {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`{n}` runs a string as script; handle the event with `on:{}`",
+                        &n[2..]
+                    ),
+                ));
+            }
+            (n, Some(v)) if n.eq_ignore_ascii_case("srcdoc") => {
+                quote_spanned! { span => #out.srcdoc(#v) }
+            }
+            (n, Some(v))
+                if URL_ATTRS.iter().any(|u| n.eq_ignore_ascii_case(u))
+                    || (n.eq_ignore_ascii_case("data") && tag.eq_ignore_ascii_case("object")) =>
+            {
                 let url = url(a, v)?;
                 quote_spanned! { span => #out.url(#n, #url) }
             }
             (n, Some(v)) => quote_spanned! { span => #out.attr(#n, #v) },
             (n, None) => quote_spanned! { span => #out.attr(#n, true) },
         };
+    }
+    // After the attributes, so it reads the `value` they set.
+    if let Some(g) = group {
+        out = quote! { #out #g };
     }
     // Last, so an attribute the element sets itself is already there to win.
     for s in spreads {

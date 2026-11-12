@@ -166,47 +166,17 @@ pub(crate) fn specifier(module: &LitStr) -> syn::Result<String> {
     }
 }
 
-fn camel(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut up = false;
-    for c in name.chars() {
-        if c == '_' {
-            up = !out.is_empty();
-        } else if up {
-            out.extend(c.to_uppercase());
-            up = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// `T` in `outer<T>`.
-fn inner<'a>(ty: &'a Type, outer: &str) -> Option<&'a Type> {
-    let Type::Path(p) = ty else { return None };
-    let last = p.path.segments.last().filter(|s| s.ident == outer)?;
-    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-        return None;
-    };
-    match args.args.first() {
-        Some(syn::GenericArgument::Type(t)) => Some(t),
-        _ => None,
-    }
-}
+use crate::export::camel;
+use crate::ty::{inner_of, is_named};
 
 /// `outer<T>` where `T`'s last segment is `name`.
 fn generic_of(ty: &Type, outer: &str, name: &str) -> bool {
-    inner(ty, outer).is_some_and(|t| last_segment_is(t, name))
+    inner_of(ty, outer).is_some_and(|t| is_named(t, name))
 }
 
 /// `Option<T>` where `T`'s last segment is `name`.
 fn option_of(ty: &Type, name: &str) -> bool {
     generic_of(ty, "Option", name)
-}
-
-fn last_segment_is(ty: &Type, name: &str) -> bool {
-    matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.segments.last().is_some_and(|s| s.ident == name))
 }
 
 pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStream> {
@@ -300,35 +270,35 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 "a prop takes one of `optional`, `event`, `element`, `func`, `render`, `component`, `js`, `raw` and `feed`",
             ));
         }
-        if component && !last_segment_is(&f.ty, "ComponentFn") {
+        if component && !is_named(&f.ty, "ComponentFn") {
             return Err(syn::Error::new(
                 f.ty.span(),
                 format!("`#[react(component)]` field `{name}` must be a `ComponentFn<P>`"),
             ));
         }
-        let js_typed = last_segment_is(&f.ty, "Js")
+        let js_typed = is_named(&f.ty, "Js")
             || generic_of(&f.ty, "Vec", "Js")
             || option_of(&f.ty, "Js")
-            || matches!(inner(&f.ty, "Option"), Some(t) if generic_of(t, "Vec", "Js"));
+            || matches!(inner_of(&f.ty, "Option"), Some(t) if generic_of(t, "Vec", "Js"));
         if js && !js_typed {
             return Err(syn::Error::new(
                 f.ty.span(),
                 format!("`#[react(js)]` field `{name}` must be a `Js`, `Vec<Js>`, or an `Option` of one"),
             ));
         }
-        if raw && !last_segment_is(&f.ty, "Rc") {
+        if raw && !is_named(&f.ty, "Rc") {
             return Err(syn::Error::new(
                 f.ty.span(),
                 format!("`#[react(raw)]` field `{name}` must be an `Rc<[f64]>`, or of `f32`, `i32`, `u32` or `u8`"),
             ));
         }
-        if feed && !last_segment_is(&f.ty, "Feed") {
+        if feed && !is_named(&f.ty, "Feed") {
             return Err(syn::Error::new(
                 f.ty.span(),
                 format!("`#[react(feed)]` field `{name}` must be a `Feed<T>`"),
             ));
         }
-        if func && !last_segment_is(&f.ty, "Func") && !last_segment_is(&f.ty, "AsyncFunc") {
+        if func && !is_named(&f.ty, "Func") && !is_named(&f.ty, "AsyncFunc") {
             return Err(syn::Error::new(
                 f.ty.span(),
                 format!(
@@ -336,13 +306,13 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 ),
             ));
         }
-        if render && !last_segment_is(&f.ty, "Render") {
+        if render && !is_named(&f.ty, "Render") {
             return Err(syn::Error::new(
                 f.ty.span(),
                 format!("`#[react(render)]` field `{name}` must be a `Render<A>`"),
             ));
         }
-        if element && !last_segment_is(&f.ty, "View") {
+        if element && !is_named(&f.ty, "View") {
             return Err(syn::Error::new(
                 f.ty.span(),
                 format!("`#[react(element)]` field `{name}` must be a `View`"),
@@ -356,10 +326,10 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             _ if raw => Role::Raw,
             _ if feed => Role::Feed,
             _ if func => Role::Func {
-                is_async: last_segment_is(&f.ty, "AsyncFunc"),
+                is_async: is_named(&f.ty, "AsyncFunc"),
             },
             (true, true) => unreachable!("two roles are refused above"),
-            (true, false) if !last_segment_is(&f.ty, "Option") => {
+            (true, false) if !is_named(&f.ty, "Option") => {
                 return Err(syn::Error::new(
                     f.ty.span(),
                     format!("`#[react(optional)]` field `{name}` must be an `Option<T>`"),
@@ -378,7 +348,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
                 ))
             }
             (false, true) => Role::Event,
-            (false, false) if last_segment_is(&f.ty, "View") => Role::Slot { optional: false },
+            (false, false) if is_named(&f.ty, "View") => Role::Slot { optional: false },
             (false, false) if option_of(&f.ty, "View") => Role::Slot { optional: true },
             (false, false) => Role::Data,
         };
@@ -415,7 +385,7 @@ pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStrea
             ty: f.ty.clone(),
             default: (f.name == "children"
                 || matches!(f.role, Role::Optional | Role::Slot { optional: true })
-                || (matches!(f.role, Role::Data | Role::Js) && last_segment_is(&f.ty, "Option")))
+                || (matches!(f.role, Role::Data | Role::Js) && is_named(&f.ty, "Option")))
             .then(|| quote!(::core::default::Default::default())),
             optional: false,
         })

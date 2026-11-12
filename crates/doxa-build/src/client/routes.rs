@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
 use super::spec::{Location, Meta, Operation, Spec};
@@ -118,7 +118,7 @@ fn short(type_name: &str) -> &str {
 
 pub(crate) fn render(spec: &Spec, types: &mut Types<'_>) -> Result<TokenStream, GenerateError> {
     let mut guards = Guards::default();
-    let mut modules: BTreeMap<Option<String>, Vec<TokenStream>> = BTreeMap::new();
+    let mut modules: BTreeMap<Option<String>, (Option<Ident>, Vec<TokenStream>)> = BTreeMap::new();
     for (path, item) in &spec.paths {
         for (method, op) in item.operations() {
             let meta = op.doxa.as_ref();
@@ -143,18 +143,21 @@ pub(crate) fn render(spec: &Spec, types: &mut Types<'_>) -> Result<TokenStream, 
                     continue;
                 }
             };
-            let module = op.tags.first().map(|t| field_ident(t).0.to_string());
-            modules.entry(module).or_default().push(route);
+            let module = op.tags.first().map(|t| field_ident(t).0);
+            modules
+                .entry(module.as_ref().map(Ident::to_string))
+                .or_insert_with(|| (module, Vec::new()))
+                .1
+                .push(route);
         }
     }
     let mut out = TokenStream::new();
-    for (module, routes) in modules {
+    for (module, routes) in modules.into_values() {
         let calls = quote! {
             ::doxa::client::__as_client! { #(#routes)* }
         };
         out.extend(match module {
             Some(m) => {
-                let m = Ident::new(&m, Span::call_site());
                 quote! {
                     pub mod #m {
                         #[allow(unused_imports)]
@@ -260,7 +263,7 @@ fn route(
         })
         .collect();
     if !headers.is_empty() {
-        let ty = types.query(&format!("{}Headers", pascal(&id)), headers, &at);
+        let ty = types.query(&format!("{}Headers", pascal(&id)), false, headers, &at);
         guards.headers.entry(ty.to_string()).or_insert_with(|| quote! {
             impl ::doxa::client::ClientArg for #ty {
                 type Value = Self;
@@ -304,11 +307,10 @@ fn route(
         })
         .collect();
     if !query.is_empty() {
-        let name = meta
-            .query
-            .clone()
-            .unwrap_or_else(|| format!("{}Query", pascal(&id)));
-        let ty = types.query(&name, query, &at);
+        let ty = match &meta.query {
+            Some(name) => types.query(name, true, query, &at),
+            None => types.query(&format!("{}Query", pascal(&id)), false, query, &at),
+        };
         args.push(quote!(query: Query<#ty>));
     }
 

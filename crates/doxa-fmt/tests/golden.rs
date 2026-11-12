@@ -50,6 +50,20 @@ fn long_attributes_break_one_per_line() {
 }
 
 #[test]
+fn a_view_in_a_wrapped_attribute_is_measured_where_it_lands() {
+    let src = "fn f() -> View {\n    view! {\n        <Suspense fallback={view! { <div class=\"skeleton\" aria-busy=\"true\"/> }}>\n            <p/>\n        </Suspense>\n    }\n}\n";
+    for width in [72, 73] {
+        let config = Config {
+            max_width: width,
+            ..Config::default()
+        };
+        let out = format_source(src, &config).output;
+        golden_with(&config, src, &out);
+        assert!(out.lines().all(|l| l.len() <= width), "{out}");
+    }
+}
+
+#[test]
 fn a_short_view_stays_inline_and_empty_self_closes() {
     golden(
         "fn f() {\n    view! { <div   class=\"a\"   id={ x }></div> }\n}\n",

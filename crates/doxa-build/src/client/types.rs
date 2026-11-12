@@ -67,6 +67,8 @@ struct Branch {
 /// A type the client defines, from a component or an inline schema.
 struct Pending {
     name: String,
+    ident: String,
+    component: bool,
     schema: Schema,
     operation: String,
     owner: Option<String>,
@@ -85,6 +87,8 @@ pub(crate) struct Types<'a> {
     options: Options,
     queue: Vec<Pending>,
     named: BTreeSet<String>,
+    /// Each component's type name, by schema name.
+    components: BTreeMap<String, String>,
     identities: BTreeMap<String, IdentityMeta>,
     mapped: BTreeSet<String>,
     errors: Vec<GenerateError>,
@@ -104,6 +108,7 @@ impl<'a> Types<'a> {
             options,
             queue: Vec::new(),
             named: BTreeSet::new(),
+            components: BTreeMap::new(),
             identities: BTreeMap::new(),
             mapped: map
                 .formats
@@ -269,16 +274,51 @@ impl<'a> Types<'a> {
             .map(|(n, _)| n.clone())
     }
 
+    /// The type of component `name`, queued the first time it is reached.
     fn define(&mut self, name: &str, schema: &Schema, at: &At<'_>) -> TokenStream {
-        let ident = Ident::new(&pascal(name), Span::call_site());
-        if self.named.insert(pascal(name)) {
-            self.queue.push(Pending {
-                name: name.to_owned(),
-                schema: schema.clone(),
-                operation: at.operation.to_owned(),
-                owner: at.owner.clone(),
-            });
-        }
+        self.keyed(name.to_owned(), name, true, schema, at)
+    }
+
+    fn keyed(
+        &mut self,
+        key: String,
+        name: &str,
+        component: bool,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> TokenStream {
+        let ident = match self.components.get(&key) {
+            Some(ident) => ident.clone(),
+            None => {
+                let ident = self.queue_type(name, component, schema, at);
+                self.components.insert(key, ident.clone());
+                ident
+            }
+        };
+        self.named_type(&ident)
+    }
+
+    /// A new type named `base`, or `base2`… when that is taken.
+    fn fresh(&mut self, base: &str, schema: &Schema, at: &At<'_>) -> TokenStream {
+        let ident = self.queue_type(base, false, schema, at);
+        self.named_type(&ident)
+    }
+
+    fn queue_type(&mut self, name: &str, component: bool, schema: &Schema, at: &At<'_>) -> String {
+        let ident = unique(pascal(name), &mut self.named);
+        self.queue.push(Pending {
+            name: name.to_owned(),
+            ident: ident.clone(),
+            component,
+            schema: schema.clone(),
+            operation: at.operation.to_owned(),
+            owner: at.owner.clone(),
+        });
+        ident
+    }
+
+    fn named_type(&mut self, ident: &str) -> TokenStream {
+        let ident = Ident::new(ident, Span::call_site());
         if std::mem::take(&mut self.box_next) {
             quote!(::std::boxed::Box<#ident>)
         } else {
@@ -287,13 +327,8 @@ impl<'a> Types<'a> {
     }
 
     fn inline(&mut self, schema: &Schema, at: &At<'_>) -> TokenStream {
-        let mut name = at.hint.clone();
-        let mut n = 2;
-        while self.named.contains(&name) {
-            name = format!("{}{n}", at.hint);
-            n += 1;
-        }
-        self.define(&name, schema, at)
+        let hint = at.hint.clone();
+        self.fresh(&hint, schema, at)
     }
 
     /// The type of `error` in the bodies doxa answers a failure with (`{ message, status, code,
@@ -349,7 +384,7 @@ impl<'a> Types<'a> {
             one_of: branches.into_values().collect(),
             ..Schema::default()
         };
-        Ok(Some(self.define(name, &schema, at)))
+        Ok(Some(self.fresh(name, &schema, at)))
     }
 
     /// The one key of a branch serde writes as `{ "Variant": … }`.
@@ -361,10 +396,11 @@ impl<'a> Types<'a> {
         }
     }
 
-    /// A struct of query or header parameters, named `name`.
+    /// A struct of query or header parameters, named `name`; `shared` names one several routes use.
     pub fn query(
         &mut self,
         name: &str,
+        shared: bool,
         params: Vec<(String, Schema, bool)>,
         at: &At<'_>,
     ) -> TokenStream {
@@ -381,30 +417,38 @@ impl<'a> Types<'a> {
                 .collect(),
             ..Schema::default()
         };
-        self.define(name, &schema, at)
+        match shared {
+            true => self.keyed(format!("?{name}"), name, false, &schema, at),
+            false => self.fresh(name, &schema, at),
+        }
     }
 
     /// Every type defined so far, and the ones they reach.
     pub fn render(&mut self) -> Result<TokenStream, GenerateError> {
         let mut out = TokenStream::new();
         while let Some(p) = self.queue.pop() {
-            let owner = match self.spec.components.schemas.contains_key(&p.name) {
+            let owner = match p.component {
                 true => Some(p.name.clone()),
                 false => p.owner.clone(),
             };
             let at = At {
                 operation: &p.operation,
-                hint: pascal(&p.name),
+                hint: p.ident.clone(),
                 owner,
             };
-            match self.render_one(&p.name, &p.schema, &at) {
+            match self.render_one(&p.name, &p.ident, &p.schema, &at) {
                 Ok(item) => out.extend(item),
                 Err(e) => self.record(e),
             }
         }
+        let mut seen = BTreeSet::new();
         let mapped = self
             .mapped
             .iter()
+            .filter(|p| {
+                let key = canonical(p);
+                !covered(&key) && seen.insert(key)
+            })
             .map(|p| parse_path(p))
             .collect::<Result<Vec<_>, _>>()?;
         let prelude = prelude(&mapped);
@@ -414,10 +458,11 @@ impl<'a> Types<'a> {
     fn render_one(
         &mut self,
         name: &str,
+        ident: &str,
         schema: &Schema,
         at: &At<'_>,
     ) -> Result<TokenStream, GenerateError> {
-        let ident = Ident::new(&pascal(name), Span::call_site());
+        let ident = Ident::new(ident, Span::call_site());
         self.current = Some(schema.clone());
         let docs = doc(schema.description.as_deref());
         if !schema.values.is_empty() {
@@ -619,11 +664,12 @@ impl<'a> Types<'a> {
     /// Each property by `required` and `nullable`; absent and nullable is `Option<Option<T>>`.
     fn fields(&mut self, schema: &Schema, at: &At<'_>) -> Result<Vec<Field>, GenerateError> {
         let mut out = Vec::new();
+        let mut taken = BTreeSet::new();
         for (name, prop) in &schema.properties {
             let required = schema.required.contains(name);
             let nullable = self.nullable(prop);
             let ty = self.held(prop, &at.child(format!("{}{}", at.hint, pascal(name))))?;
-            let (ident, renamed) = field_ident(name);
+            let (ident, renamed) = unique_field(name, &mut taken);
             let rename = renamed.then(|| quote!(#[serde(rename = #name)]));
             let docs = doc(prop.description.as_deref());
             let (ty, default) = match (required, nullable) {
@@ -797,6 +843,7 @@ impl<'a> Types<'a> {
             _ => None,
         };
         let mut variants = Vec::new();
+        let mut taken = BTreeSet::new();
         for Branch {
             name,
             object: branch,
@@ -820,8 +867,8 @@ impl<'a> Types<'a> {
                         None => at.here(reason),
                     }
                 })?;
-            let variant = Ident::new(&pascal(&value), Span::call_site());
-            let hint = format!("{}{}", at.hint, pascal(&value));
+            let variant = Ident::new(&unique(pascal(&value), &mut taken), Span::call_site());
+            let hint = format!("{}{}", at.hint, variant);
             let rename = quote!(#[serde(rename = #value)]);
             variants.push(match &content {
                 Some(key) => match branch.properties.get(key) {
@@ -867,11 +914,12 @@ impl<'a> Types<'a> {
         at: &At<'_>,
     ) -> Result<TokenStream, GenerateError> {
         let mut variants = Vec::new();
+        let mut taken = BTreeSet::new();
         // A mapped branch is a whole object, which only an untagged variant, after the rest, reads.
         let mut mapped = Vec::new();
         for raw in &schema.one_of {
             if let Some(n) = raw.ref_name().filter(|n| self.map.schemas.contains_key(*n)) {
-                let variant = Ident::new(&pascal(n), Span::call_site());
+                let variant = Ident::new(&unique(pascal(n), &mut taken), Span::call_site());
                 let ty = parse_path(&self.map.schemas[n])?;
                 mapped.push(Variant::tuple(
                     quote!(#[serde(untagged)]),
@@ -886,7 +934,7 @@ impl<'a> Types<'a> {
                     let Scalar::Str(v) = v else {
                         return Err(at.here("has a non-string enum value"));
                     };
-                    let variant = Ident::new(&pascal(v), Span::call_site());
+                    let variant = Ident::new(&unique(pascal(v), &mut taken), Span::call_site());
                     variants.push(Variant::unit(quote!(#[serde(rename = #v)]), variant));
                 }
                 continue;
@@ -894,8 +942,8 @@ impl<'a> Types<'a> {
             let [(key, payload)] = branch.properties.iter().collect::<Vec<_>>()[..] else {
                 return Err(at.here("is a `oneOf` that is neither tagged nor one key per branch"));
             };
-            let variant = Ident::new(&pascal(key), Span::call_site());
-            let at = at.child(format!("{}{}", at.hint, pascal(key)));
+            let variant = Ident::new(&unique(pascal(key), &mut taken), Span::call_site());
+            let at = at.child(format!("{}{}", at.hint, variant));
             variants.push(self.newtype(quote!(#[serde(rename = #key)]), variant, payload, &at)?);
         }
         variants.extend(mapped);
@@ -1006,12 +1054,7 @@ impl<'a> Types<'a> {
                     _ => "Object".into(),
                 },
             };
-            let mut name = base.clone();
-            let mut n = 2;
-            while !used.insert(name.clone()) {
-                name = format!("{base}{n}");
-                n += 1;
-            }
+            let name = unique(base, &mut used);
             let variant = Ident::new(&name, Span::call_site());
             if name == "Null" {
                 variants.push(Variant::unit(quote!(), variant));
@@ -1137,11 +1180,12 @@ impl Types<'_> {
         at: &At<'_>,
     ) -> Result<TokenStream, GenerateError> {
         let mut variants = Vec::new();
+        let mut taken = BTreeSet::new();
         for v in &schema.values {
             let Scalar::Str(v) = v else {
                 return Err(at.here("has a non-string enum value"));
             };
-            let variant = Ident::new(&pascal(v), Span::call_site());
+            let variant = Ident::new(&unique(pascal(v), &mut taken), Span::call_site());
             variants.push(Variant::unit(quote!(#[serde(rename = #v)]), variant));
         }
         Ok(self.enum_items(ident, docs, quote!(), &variants))
@@ -1254,6 +1298,60 @@ fn prelude(mapped: &[TokenStream]) -> TokenStream {
     }
 }
 
+/// A type path without whitespace or the std prefixes, so two spellings of one type compare equal.
+fn canonical(path: &str) -> String {
+    let mut s: String = path.chars().filter(|c| !c.is_whitespace()).collect();
+    for prefix in [
+        "::",
+        "std::",
+        "alloc::",
+        "core::",
+        "string::",
+        "vec::",
+        "option::",
+        "boxed::",
+        "collections::",
+        "primitive::",
+    ] {
+        while let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.to_owned();
+        }
+    }
+    s
+}
+
+/// Whether the prelude already implements `__Constraints` for this canonical path.
+fn covered(path: &str) -> bool {
+    const OWN: &[&str] = &[
+        "String",
+        "bool",
+        "u8",
+        "i32",
+        "i64",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
+        "()",
+        "doxa::wire::__Value",
+    ];
+    OWN.contains(&path)
+        || ["Vec<", "Option<", "Box<", "BTreeMap<"]
+            .iter()
+            .any(|head| path.starts_with(head))
+}
+
+/// `name`, or `name2`, `name3`… when it is already in `taken`.
+fn unique(name: String, taken: &mut BTreeSet<String>) -> String {
+    let mut out = name.clone();
+    let mut n = 2;
+    while !taken.insert(out.clone()) {
+        out = format!("{name}{n}");
+        n += 1;
+    }
+    out
+}
+
 /// Whether a component gets a type of its own rather than being written inline.
 fn nameable(schema: &Schema) -> bool {
     or_null(schema).is_none()
@@ -1334,6 +1432,16 @@ pub(crate) fn pascal(name: &str) -> String {
         None => "Unnamed".into(),
         _ if out == "Self" => "Self_".into(),
         _ => out,
+    }
+}
+
+/// [`field_ident`], suffixed when another property already took the name.
+fn unique_field(name: &str, taken: &mut BTreeSet<String>) -> (Ident, bool) {
+    let (ident, renamed) = field_ident(name);
+    let bare = ident.to_string().trim_start_matches("r#").to_owned();
+    match unique(bare.clone(), taken) {
+        free if free == bare => (ident, renamed),
+        free => (Ident::new(&free, Span::call_site()), true),
     }
 }
 

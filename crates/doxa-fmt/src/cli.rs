@@ -86,8 +86,8 @@ fn run_stdin() -> ExitCode {
         eprintln!("stdin: {e}");
         return ExitCode::from(2);
     }
-    let src = rustfmt(&input).unwrap_or(input);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let src = rustfmt(&input, &edition(&cwd)).unwrap_or(input);
     let result = format_source(&src, &Config::discover(&cwd));
     for w in &result.warnings {
         eprintln!("<stdin>: {w}");
@@ -101,9 +101,49 @@ fn run_stdin() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn rustfmt(input: &str) -> Option<String> {
+/// The edition of the package around `dir`, as cargo would pass it to rustfmt.
+fn edition(dir: &Path) -> String {
+    let mut inherits = false;
+    for ancestor in dir.ancestors() {
+        let Ok(text) = std::fs::read_to_string(ancestor.join("Cargo.toml")) else {
+            continue;
+        };
+        let (mut section, mut package, mut own, mut shared) = ("", false, None, None);
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                section = line.trim_matches(['[', ']']).trim();
+                package |= section == "package";
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let (key, value) = (key.trim(), value.trim().trim_matches('"'));
+            match (section, key) {
+                ("package", "edition.workspace") => own = Some(None),
+                ("package", "edition") if value.contains("workspace") => own = Some(None),
+                ("package", "edition") => own = Some(Some(value.to_owned())),
+                ("workspace.package", "edition") => shared = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+        if package && !inherits {
+            match own {
+                Some(Some(edition)) => return edition,
+                Some(None) => inherits = true,
+                None => return "2015".to_owned(),
+            }
+        }
+        if let (true, Some(edition)) = (inherits, shared) {
+            return edition;
+        }
+    }
+    "2021".to_owned()
+}
+
+fn rustfmt(input: &str, edition: &str) -> Option<String> {
     let mut child = Command::new("rustfmt")
-        .args(["--edition", "2021", "--emit", "stdout"])
+        .args(["--edition", edition, "--emit", "stdout"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -151,4 +191,30 @@ fn print_diff(file: &Path, old: &str, new: &str) {
         "{}",
         diff.unified_diff().context_radius(3).header(&name, &name)
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edition;
+
+    #[test]
+    fn the_edition_is_the_packages_or_its_workspaces() {
+        let root = std::env::temp_dir().join(format!("doxa-fmt-edition-{}", std::process::id()));
+        let (own, inherited, bare) = (root.join("own"), root.join("inh"), root.join("bare"));
+        for dir in [&own, &inherited, &bare] {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+        }
+        let write = |p: &std::path::Path, s: &str| std::fs::write(p.join("Cargo.toml"), s).unwrap();
+        write(&root, "[workspace.package]\nedition = \"2024\"\n");
+        write(&own, "[package]\nname = \"a\"\nedition = \"2018\"\n");
+        write(
+            &inherited,
+            "[package]\nname = \"b\"\nedition.workspace = true\n",
+        );
+        write(&bare, "[package]\nname = \"c\"\n");
+        assert_eq!(edition(&own.join("src")), "2018");
+        assert_eq!(edition(&inherited.join("src")), "2024");
+        assert_eq!(edition(&bare), "2015");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

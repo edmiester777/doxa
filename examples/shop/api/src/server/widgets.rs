@@ -38,6 +38,9 @@ impl From<WidgetRow> for Widget {
 )]
 pub struct WidgetByName;
 
+/// How many suggestions [`Catalog`] keeps.
+pub const KEPT_SUGGESTIONS: usize = 100;
+
 /// Widgets in memory, and the names people have suggested.
 #[derive(Clone, Default)]
 pub struct Catalog(Arc<RwLock<Vec<WidgetRow>>>, Arc<RwLock<Vec<String>>>);
@@ -48,14 +51,18 @@ impl Catalog {
         Self(Arc::new(RwLock::new(widgets)), Arc::default())
     }
 
-    /// Every suggested name, oldest first.
+    /// The kept suggestions, oldest first.
     pub fn suggestions(&self) -> Vec<String> {
         self.1.read().unwrap().clone()
     }
 
-    /// Note a suggested name.
+    /// Note a suggested name, keeping only the latest [`KEPT_SUGGESTIONS`].
     pub fn suggest(&self, suggestion: String) {
-        self.1.write().unwrap().push(suggestion);
+        let mut kept = self.1.write().unwrap();
+        if kept.len() == KEPT_SUGGESTIONS {
+            kept.remove(0);
+        }
+        kept.push(suggestion);
     }
 
     /// Every widget, or those whose name holds `contains`.

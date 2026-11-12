@@ -389,10 +389,8 @@ impl EffectSlot {
     }
 }
 
-/// Run `f` after the render commits whenever `deps` change, like React's `useEffect`.
-///
-/// The previous run is dropped first; dropping is its cleanup. It returns `()` or a `Result`,
-/// whose `Err` goes to the nearest `<Catch>`.
+/// Run `f` after the render commits whenever `deps` change, like `useEffect`; dropping the previous
+/// run is its cleanup. An `Err` it returns goes to the nearest `<Catch>`.
 #[track_caller]
 pub fn effect<D, F, R>(deps: D, f: F)
 where
@@ -455,9 +453,8 @@ impl<A, T> Clone for Action<A, T> {
 
 impl<A, T> Copy for Action<A, T> {}
 
-/// An operation to run from event handlers, like a form submit. While one is
-/// running further `run`s are ignored, and the runtime, not the component,
-/// owns it, so unmounting doesn't lose its effects.
+/// An operation run from event handlers, like a form submit. `run` is ignored while one is in
+/// flight, and the runtime owns it, so unmounting doesn't lose its effects.
 #[track_caller]
 pub fn action<A, T, F>(f: F) -> Action<A, T>
 where

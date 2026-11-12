@@ -218,7 +218,7 @@ impl Pipeline {
         if let Some(base) = &mut self.hot {
             let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
             let bytes = hot::wasm::stub_placeholder_imports(&bytes).map_err(hot::patch_error)?;
-            base.set_bindgened(bytes.clone())?;
+            base.set_bindgened(&bytes)?;
             std::fs::write(&app_wasm, split::strip_link_sections(&bytes, true)).at(&app_wasm)?;
         } else if splits {
             self.split(&original, &app_wasm)?;
@@ -404,6 +404,7 @@ impl Pipeline {
                 node_modules: self.npm.dir(),
                 library: self.library,
                 base: &base,
+                workspace: &self.workspace.workspace_root,
             };
             let built = css::build(&inputs, entry, &stage, self.opts.release)?;
             let stem = Path::new(entry)
@@ -546,6 +547,12 @@ fn copy_public(root: &Path, d: &mut Dist) -> Result<()> {
                 .expect("under root")
                 .to_string_lossy()
                 .replace('\\', "/");
+            if d.files.contains_key(&rel) || dist::GENERATED.contains(&rel.as_str()) {
+                return Err(Error::config(
+                    format!("{} would replace the built `{rel}`", path.display()),
+                    "rename or remove it",
+                ));
+            }
             let bytes = std::fs::read(&path).at(&path)?;
             d.add(&rel, &rel, bytes);
         }
@@ -555,7 +562,29 @@ fn copy_public(root: &Path, d: &mut Dist) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_budget;
+    use super::{check_budget, copy_public};
+    use crate::dist::Dist;
+
+    #[test]
+    fn a_public_file_named_like_a_built_one_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("robots.txt"), "").unwrap();
+        let mut d = Dist::default();
+        copy_public(dir.path(), &mut d).unwrap();
+        assert!(d.files.contains_key("robots.txt"));
+
+        for built in ["index.html", "robots.txt"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(built), "").unwrap();
+            let mut d = Dist::default();
+            d.add("robots.txt", "robots.txt", Vec::new());
+            let err = copy_public(dir.path(), &mut d).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("would replace the built `{built}`")),
+                "{err}"
+            );
+        }
+    }
 
     #[test]
     fn a_wasm_over_its_budget_fails_with_its_size() {

@@ -58,9 +58,7 @@ enum MigrationEvent {
     },
     // Generic newtype payload: the component must $ref the monomorphized name.
     Wrapped(Wrap<WrappedOnly>),
-    // Two variants whose payloads nest the *same* generic base (`Wrap<…>`) with
-    // different arguments. utoipa refs the inner `Wrap<…>` by its base ident, so
-    // without the ref-rewrite these would collapse onto one `Wrap` component.
+    // The same generic base nested with different arguments, which utoipa refs as bare `Wrap`.
     DoubleA(Wrap<Wrap<WrappedOnly>>),
     DoubleB(Wrap<Wrap<StartedPayload>>),
 }
@@ -192,9 +190,7 @@ fn default_output_is_openapi_3_2_with_item_schema() {
         "the generic argument component must be registered so its $ref resolves"
     );
 
-    // Sibling monomorphizations of the same generic base stay distinct: the
-    // inner `Wrap<…>` ref is rewritten to its composed name, not the bare `Wrap`
-    // base utoipa emits (which would collapse both onto one component).
+    // The inner ref is rewritten to its composed name, so the two stay distinct.
     let outer_a = &v["components"]["schemas"]["Wrap_Wrap_WrappedOnly"];
     assert_eq!(
         outer_a["properties"]["inner"]["$ref"], "#/components/schemas/Wrap_WrappedOnly",

@@ -78,9 +78,31 @@ pub fn el(tag: &'static str) -> Element {
 }
 
 impl Element {
-    /// Set an attribute: a string, a number, or a `bool` for presence.
+    /// Set an attribute: a string, number, or `bool` for presence; a script URL is left unset.
+    /// Panics on `on*` and `srcdoc`: use `on:` and [`srcdoc`](Self::srcdoc).
     pub fn attr(mut self, name: &'static str, value: impl IntoAttr) -> Self {
-        self.attrs.push((name, value.into_attr()));
+        let value = self.checked(name, value.into_attr());
+        self.attrs.push((name, value));
+        self
+    }
+
+    /// `value` as attribute `name` may hold it: see [`attr`](Self::attr).
+    pub(crate) fn checked(&self, name: &str, value: Option<String>) -> Option<String> {
+        let lower = name.to_ascii_lowercase();
+        assert!(
+            !lower.starts_with("on") && lower != "srcdoc",
+            "`{name}` runs script: handle events with `on:`, set `srcdoc` from a `DangerousHtml`, \
+             and name a custom attribute `data-…`",
+        );
+        match is_url_attr(&lower, self.tag) {
+            true => value.filter(|v| SafeUrl::parse(v).is_some()),
+            false => value,
+        }
+    }
+
+    /// Set `<iframe srcdoc>`, which is HTML.
+    pub fn srcdoc(mut self, html: DangerousHtml) -> Self {
+        self.attrs.push(("srcdoc", Some(html.0)));
         self
     }
 
@@ -516,6 +538,14 @@ impl<T: IntoProp> IntoProp for Option<T> {
     }
 }
 
+/// Whether attribute `name` (lowercase) on `tag` holds a URL a browser may navigate or load.
+fn is_url_attr(name: &str, tag: &str) -> bool {
+    matches!(
+        name,
+        "href" | "xlink:href" | "src" | "action" | "formaction" | "poster" | "cite" | "background"
+    ) || (name == "data" && tag.eq_ignore_ascii_case("object"))
+}
+
 /// A URL checked not to run script: no `javascript:`, `vbscript:` or `data:` scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeUrl(pub(crate) Rc<str>);
@@ -822,9 +852,11 @@ impl Element {
             .on("change", move |e| x.set_checked(e.checked()))
     }
 
-    /// `bind:group={x}`, for a radio button whose `value` is `value`.
-    pub fn bind_group(self, x: impl BindValue, value: impl ToString) -> Self {
-        let value = value.to_string();
+    /// `bind:group={x}`, for a radio button whose `value` attribute is already set.
+    pub fn bind_group(self, x: impl BindValue) -> Self {
+        let value = (self.attrs.iter())
+            .find_map(|(k, v)| (*k == "value").then(|| v.clone()).flatten())
+            .expect("`bind:group` needs the radio's `value` set first");
         let on = x.current() == value;
         self.prop("checked", on).on("change", move |e| {
             if e.checked() {

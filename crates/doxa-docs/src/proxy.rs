@@ -48,6 +48,9 @@ struct Inner {
 impl Upstream {
     async fn forward(&self, req: Request) -> Response {
         let (parts, body) = req.into_parts();
+        if has_dot_segment(parts.uri.path()) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
         let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
         let mut headers = parts.headers.clone();
         strip_hop_by_hop(&mut headers);
@@ -83,6 +86,15 @@ impl Upstream {
 
 const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
 const X_FORWARDED_PREFIX: HeaderName = HeaderName::from_static("x-forwarded-prefix");
+
+/// A `.` or `..` segment, raw or percent-encoded, which the upstream URL would resolve away
+/// and so leave the upstream's base path.
+fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(|s| {
+        let s = s.to_ascii_lowercase().replace("%2e", ".");
+        s == "." || s == ".."
+    })
+}
 
 /// Remove the headers that describe one connection, including any `Connection` names.
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
@@ -224,6 +236,18 @@ mod tests {
         go.notify_one();
         let second = body.frame().await.unwrap().unwrap().into_data().unwrap();
         assert_eq!(second, "data: 2\n\n");
+    }
+
+    #[tokio::test]
+    async fn a_dot_segment_never_leaves_the_upstreams_base() {
+        for path in ["/orders/../x", "/orders/a/%2E%2e/x", "/orders/./x"] {
+            let app: Router = proxy("/orders", "http://127.0.0.1:1/svc");
+            let res = app
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
     }
 
     #[tokio::test]

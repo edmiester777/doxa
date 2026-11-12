@@ -5,6 +5,8 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{FnArg, Ident, ItemFn, Pat, Type};
 
+use crate::ty::{inner_of, is_named};
+
 pub(crate) struct Prop {
     pub name: Ident,
     pub ty: Type,
@@ -136,7 +138,7 @@ pub(crate) fn parse(mut item: ItemFn) -> syn::Result<Parsed> {
         pt.attrs = kept;
         crate::callback::desugar(&mut pt.ty)?;
         let ty = (*pt.ty).clone();
-        let optional = is_option(&ty);
+        let optional = is_named(&ty, "Option");
         if default.is_none() && (optional || name == "children") {
             default = Some(quote!(::core::default::Default::default()));
         }
@@ -186,14 +188,6 @@ fn no_spawn(body: &syn::Block) -> syn::Result<()> {
     }
 }
 
-fn is_option(ty: &Type) -> bool {
-    matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.segments.last().is_some_and(|s| s.ident == "Option"))
-}
-
-fn is_named(ty: &Type, name: &str) -> bool {
-    matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == name))
-}
-
 /// A number keeps `Into<Option<_>>`, so an unsuffixed literal still infers.
 fn is_number(ty: &Type) -> bool {
     const NUMBERS: [&str; 14] = [
@@ -213,7 +207,7 @@ fn views_in(ty: &Type, depth: usize) -> Option<(TokenStream, TokenStream)> {
             quote!(::doxa::ui::IntoView::into_view(#v)),
         ));
     }
-    if let Some(item) = crate::callback::inner_of(ty, "Vec") {
+    if let Some(item) = inner_of(ty, "Vec") {
         let (arg, expr) = views_in(item, depth + 1)?;
         let next = format_ident!("__v{}", depth + 1);
         return Some((
@@ -528,7 +522,7 @@ pub(crate) fn builder(
                 }
             }
         };
-        let inner = crate::callback::inner_of(t, "Option");
+        let inner = inner_of(t, "Option");
         let (generics, arg, convert) = if n == "children" {
             (
                 quote!(),

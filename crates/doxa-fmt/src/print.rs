@@ -60,30 +60,34 @@ impl<'a> Printer<'a> {
             .push(format!("line {line}: view! left unformatted: {msg}"));
     }
 
-    /// Formats one `view!` invocation, returning the source range it replaces.
+    /// Formats one `view!` invocation, returning the source range it replaces. `place` is the
+    /// output column it starts at and the width that follows it on its line, when nested.
     pub(crate) fn format_macro(
         &self,
         mac: &syn::Macro,
         base: Option<usize>,
+        place: Option<(usize, usize)>,
     ) -> Res<(Range<usize>, String)> {
         let path = self.range_of(&mac.path)?;
         let group = mac.delimiter.span().join().byte_range();
         self.check_range(&group)?;
         let nested = base.is_some();
         let base = base.unwrap_or_else(|| self.line_indent(path.start));
-        let out = self.render_macro(mac, &path, &group, base, None)?;
+        let (column, trail) = place.map_or((None, 0), |(c, t)| (Some(c), t));
+        let out = self.render_macro(mac, &path, &group, base, column, trail)?;
         // rustfmt puts a multi-line closure body in a block; do it here so the two agree.
         let closure_body = self.src[..path.start].trim_end().ends_with('|');
         if out.contains('\n') && closure_body && !nested {
             let indent = base + self.cfg.tab_spaces;
-            let inner = self.render_macro(mac, &path, &group, indent, Some(indent))?;
+            let inner = self.render_macro(mac, &path, &group, indent, Some(indent), 0)?;
             let block = format!("{{\n{}{inner}\n{}}}", spaces(indent), spaces(base));
             return Ok((path.start..group.end, block));
         }
         Ok((path.start..group.end, out))
     }
 
-    /// The macro printed at indent `base`; `column` is where it starts, if not where it is now.
+    /// The macro printed at indent `base`; `column` is where it starts, if not where it is now,
+    /// and `trail` the width after it on its line.
     fn render_macro(
         &self,
         mac: &syn::Macro,
@@ -91,6 +95,7 @@ impl<'a> Printer<'a> {
         group: &Range<usize>,
         base: usize,
         column: Option<usize>,
+        trail: usize,
     ) -> Res<String> {
         let inner = group.start + 1..group.end - 1;
 
@@ -116,7 +121,7 @@ impl<'a> Printer<'a> {
             [one] => Some(format!("{out}{}{close}", one.trim_start())),
             _ => None,
         };
-        if let Some(line) = inline.filter(|l| column + width(l) <= self.cfg.max_width) {
+        if let Some(line) = inline.filter(|l| column + width(l) + trail <= self.cfg.max_width) {
             out = line;
         } else if !body.is_empty() {
             out.push('\n');
@@ -234,14 +239,14 @@ impl<'a> Printer<'a> {
                 vec![format!("<!-- {} -->", &self.src[r])]
             }
             Node::Doctype(d) => vec![squash_spaces(&self.src[self.range_of(d)?])],
-            Node::Text(t) => self.raw(self.range_of(t)?, indent),
+            Node::Text(t) => self.raw(self.range_of(t)?, indent, indent),
             Node::RawText(t) => {
                 let r = self.range_of(t)?;
                 self.no_comments(r.clone())?;
                 // Unquoted text may be read back from source, so its whitespace is kept verbatim.
                 self.src[r].split('\n').map(str::to_string).collect()
             }
-            Node::Block(NodeBlock::ValidBlock(b)) => self.braced(b, indent)?,
+            Node::Block(NodeBlock::ValidBlock(b)) => self.braced(b, indent, indent)?,
             _ => return Err("unsupported node".into()),
         };
         Ok(place(indent, "", frag))
@@ -366,7 +371,9 @@ impl<'a> Printer<'a> {
 
     fn render_attr(&self, attr: &NodeAttribute, indent: usize) -> Res<Frag> {
         let kv: &KeyedAttribute = match attr {
-            NodeAttribute::Block(NodeBlock::ValidBlock(b)) => return self.braced(b, indent),
+            NodeAttribute::Block(NodeBlock::ValidBlock(b)) => {
+                return self.braced(b, indent, indent)
+            }
             NodeAttribute::Block(_) => return Err("invalid attribute block".into()),
             NodeAttribute::Attribute(kv) => kv,
         };
@@ -380,18 +387,20 @@ impl<'a> Printer<'a> {
                 Ok(vec![format!("{key}{}", squash_spaces(&self.src[r]))])
             }
             KeyedAttributeValue::Value(v) => {
+                // Where the value starts once the attribute is on a line of its own.
+                let at = indent + width(&key) + 1;
                 let (value_start, mut frag) = match &v.value {
                     KVAttributeValue::Expr(syn::Expr::Block(eb))
                         if eb.attrs.is_empty() && eb.label.is_none() =>
                     {
                         (
                             self.range_of(&eb.block)?.start,
-                            self.braced(&eb.block, indent)?,
+                            self.braced(&eb.block, indent, at)?,
                         )
                     }
                     KVAttributeValue::Expr(e) => {
                         let r = self.range_of(e)?;
-                        (r.start, self.raw(r, indent))
+                        (r.start, self.raw(r, indent, at))
                     }
                     KVAttributeValue::InvalidBraced(_) => {
                         return Err("invalid attribute value".into())
@@ -404,8 +413,9 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Formats a `{ … }` block, through prettyplease when that loses nothing.
-    fn braced(&self, block: &syn::Block, indent: usize) -> Res<Frag> {
+    /// Formats a `{ … }` block starting at column `at`, through prettyplease when that loses
+    /// nothing.
+    fn braced(&self, block: &syn::Block, indent: usize, at: usize) -> Res<Frag> {
         let r = self.range_of(block)?;
         if r.len() < 2
             || !self.src[r.clone()].starts_with('{')
@@ -442,7 +452,15 @@ impl<'a> Printer<'a> {
         };
         let shift = target as isize - from as isize;
         let protected = self.multiline_literals(block);
-        let text = self.reindent(content, shift, block_style, target, &protected, &scan.views);
+        let first_col = if block_style { 0 } else { at + 1 };
+        let text = self.reindent(
+            content,
+            shift,
+            block_style,
+            (target, first_col, usize::from(!block_style)),
+            &protected,
+            &scan.views,
+        );
 
         let ends_in_line_comment = comments(&text)
             .last()
@@ -503,8 +521,9 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Source text of a non-block expression or literal, with continuation lines re-indented.
-    fn raw(&self, r: Range<usize>, indent: usize) -> Frag {
+    /// Source text of a non-block expression or literal at column `at`, with continuation lines
+    /// re-indented.
+    fn raw(&self, r: Range<usize>, indent: usize, at: usize) -> Frag {
         let shift = indent as isize - self.line_indent(r.start) as isize;
         let tokens = self.src[r.clone()].parse::<TokenStream>().ok();
         let mut protected = Vec::new();
@@ -515,18 +534,18 @@ impl<'a> Printer<'a> {
                 *p = p.start + offset..p.end + offset;
             }
         }
-        let text = self.reindent(r, shift, false, indent, &protected, &[]);
+        let text = self.reindent(r, shift, false, (indent, at, 0), &protected, &[]);
         text.split('\n').map(str::to_string).collect()
     }
 
-    /// Copies `range`, moving each line after the first by `shift` columns (the first too if
-    /// `shift_first`), formatting nested `view!` calls in place.
+    /// Copies `range` shifted `shift` columns (the first line only if `shift_first`), formatting
+    /// nested `view!`s; `first_col` is where it starts, `close` the width the caller adds after.
     fn reindent(
         &self,
         range: Range<usize>,
         shift: isize,
         shift_first: bool,
-        first_indent: usize,
+        (first_indent, first_col, close): (usize, usize, usize),
         protected: &[Range<usize>],
         views: &[&syn::Macro],
     ) -> String {
@@ -544,7 +563,17 @@ impl<'a> Printer<'a> {
         let mut i = range.start;
         while i < range.end {
             if let Some((_, mac)) = nested.iter().find(|(s, _)| *s == i) {
-                match self.format_macro(mac, Some(line_indent)) {
+                let column = match out.rfind('\n') {
+                    Some(n) => width(&out[n + 1..]),
+                    None => first_col + width(&out),
+                };
+                let end = mac.delimiter.span().join().byte_range().end.min(range.end);
+                let after = &self.src[end..range.end];
+                let trail = match after.split_once('\n') {
+                    Some((line, _)) => width(line.trim_end()),
+                    None => width(after.trim_end()) + close,
+                };
+                match self.format_macro(mac, Some(line_indent), Some((column, trail))) {
                     Ok((r, text)) if r.end <= range.end => {
                         out.push_str(&text);
                         i = r.end;

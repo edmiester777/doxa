@@ -202,6 +202,19 @@ fn by_role(
     out.unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
+/// Fail if this option is already in `seen`, which collects across an item's attributes.
+fn given_once(
+    seen: &mut std::collections::HashSet<String>,
+    meta: &syn::meta::ParseNestedMeta,
+) -> syn::Result<()> {
+    let key = quote::ToTokens::to_token_stream(&meta.path).to_string();
+    if seen.insert(key.clone()) {
+        Ok(())
+    } else {
+        Err(meta.error(format!("`{key}` is given twice")))
+    }
+}
+
 mod actions;
 mod api_error;
 mod app;
@@ -217,6 +230,7 @@ mod policy_resource;
 mod role;
 mod sig;
 mod sse_event;
+mod ty;
 mod validator;
 
 /// Derive [`axum::response::IntoResponse`] and [`utoipa::IntoResponses`]
@@ -267,12 +281,7 @@ mod validator;
 /// `IntoResponses` impl groups `Validation` and `Query` under one
 /// `400` response with two examples.
 ///
-/// # Sharing failure modes between enums
-///
-/// `#[api(transparent)]` delegates a variant's status, code and audit
-/// outcome to a nested error type instead of declaring literals, so a
-/// set of cross-cutting failure modes lives in one enum rather than
-/// being copy-pasted into every endpoint's:
+/// `#[api(transparent)]` takes a variant's status, code and audit outcome from a nested error:
 ///
 /// ```no_run
 /// # use doxa::{ApiError, ToSchema};
@@ -296,17 +305,8 @@ mod validator;
 /// }
 /// ```
 ///
-/// A transparent variant declares no `status` or `code` of its own —
-/// there is only one right answer and the nested value has it. Its
-/// statuses merge into the outer `IntoResponses` map, unioning the
-/// `code` enum and the `error` `oneOf` at any status both declare, so
-/// the document keeps every mode the endpoint can actually return.
-///
-/// Pair it with serde's `#[serde(untagged)]` (which requires the variant
-/// to come last) to keep the emitted body flat — `{"error": {"RateLimited": …}}`
-/// rather than `{"error": {"Fault": {"RateLimited": …}}}` — so
-/// consolidating shared modes stays a non-breaking refactor rather than
-/// an SDK-visible one.
+/// Its responses merge into the outer enum's. `#[serde(untagged)]` (last variant) keeps the body
+/// flat: `{"error": {"RateLimited": …}}`, not `{"error": {"Fault": {…}}}`.
 ///
 /// `#[api(internal)]` marks the one variant `doxa::Internal` converts into:
 ///
@@ -444,27 +444,11 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Derive Cedar entity identity so a type can be authorized by instance
-/// with `Granted<R>`.
+/// Cedar entity identity, for authorizing a type by instance with `Granted<R>`.
 ///
-/// `entity_type` is reused as the audit `resource_type`, so audit rows
-/// join to the decisions that produced them. Fields opt into a role:
-/// `#[resource(id)]` (exactly one, unless `id_with` supplies it),
-/// `#[resource(attr)]` to expose a field to policies as
-/// `resource.<name>` (`attr = "key"` renames), and
-/// `#[resource(parent = "Folder")]` for `in` checks.
-///
-/// Not every identity is a field. `#[resource(id_with = method)]` names a
-/// method that computes the Cedar id from several columns, and
-/// `#[resource(attrs_with = method)]` merges a map of attributes no field
-/// backs — a derived flag, say. Both take a method on the type; the
-/// merged attributes win on a key collision, being the deliberate ones.
-///
-/// The route's OpenAPI parameter type comes from the key
-/// (`RouteKey::SEGMENTS`), not from here — a resource is reached by
-/// whatever segments the route names, which is not always its own id.
-///
-/// # Example
+/// Fields take `#[resource(id)]`, `#[resource(attr)]` (`attr = "key"` renames) and
+/// `#[resource(parent = "Folder")]`. `id_with = method` computes the id; `attrs_with = method`
+/// merges extra attributes, panicking on a key a field already supplies.
 ///
 /// ```ignore
 /// #[derive(PolicyResource)]
@@ -477,22 +461,8 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// # The loader (`policy-sea-orm`)
-///
-/// On a SeaORM `Model`, `#[resource(scope)]` emits a `ScopedTable` impl
-/// and `#[resource(key)]` adds `ScopedRow` on top of it — the query a route
-/// runs before it can decide anything. `key` is the column the route's path
-/// segment matches; `scope` is the column every lookup is confined to, so a
-/// key belonging to another owner is indistinguishable from one that does
-/// not exist.
-///
-/// `scope` alone is a table no column addresses — a name resolved through
-/// logic rather than matched — and it is not the lesser half: listing, a
-/// residual read and the primary-key lookup all live on `ScopedTable`, so
-/// such a table still takes `list = tenant` and `key = pk`.
-///
-/// Both are independent of the Cedar id: a row reached by `{model_id}` and
-/// the same row reached by `{name}` are one entity with two loaders.
+/// With `policy-sea-orm`, `#[resource(scope)]` emits `ScopedTable` (every lookup confined to that
+/// column) and `#[resource(key)]` adds `ScopedRow`, keyed on the column the route matches.
 ///
 /// ```ignore
 /// #[derive(DeriveEntityModel, PolicyResource)]
@@ -507,19 +477,7 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// let row = Model::load_scoped("primary".to_owned(), &db, "acme").await?;
 /// ```
 ///
-/// Both roles require the `policy-sea-orm` feature; using one without it
-/// is an error naming the feature rather than a missing impl at the route.
-///
-/// ## More ways in than one
-///
-/// `#[resource(key)]` is the *unnamed* lookup, and there is one per struct.
-/// A row reached three ways — a uuid, a name, and a `(widget, revision)`
-/// pair — runs out of it, and used to give the surplus to `#[asset]`'s
-/// `load_with`, which is the one door that gives up the scope guarantee.
-///
-/// So name them. `#[resource(key(FindByPair))]` on every column that takes
-/// part emits a `Lookup` marker of that name; a column may carry several
-/// names, and several columns may carry one:
+/// `#[resource(key(FindByPair))]` on each column taking part emits a named `Lookup` marker:
 ///
 /// ```ignore
 /// #[resource(entity_type = "Revision")]
@@ -535,50 +493,21 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// pub struct RevisionByPair;
 /// ```
 ///
-/// A composite lookup also gets a key struct — `FindByPairKey` above, with
-/// a field per column and a `RouteKey` impl that parses it out of the
-/// route's path segments. It is a struct rather than a tuple because every
-/// hand-written call site builds the key by position, and two segments of
-/// the same type transpose silently. Route parsing stays positional, in
-/// declaration order, because path segments are. A single-column lookup
-/// keys on the bare scalar, exactly as `#[resource(key)]` does.
+/// A composite lookup gets a key struct (`FindByPairKey`) so same-typed segments can't transpose.
+/// Every lookup is built on `ScopedTable::scoped`, so all stay confined to the scope.
 ///
-/// Named or not, every lookup is built on `ScopedTable::scoped`, so the
-/// owning column reaches all of them: a second way in is not a way out.
-///
-/// ## A condition on every query
-///
-/// `#[resource(filter = …)]` adds a condition each query carries on top of
-/// the scope — the soft-delete tombstone being the case it exists for:
+/// `#[resource(filter = …)]`, repeatable and `AND`ed, adds a SeaORM condition to every query:
 ///
 /// ```ignore
 /// #[resource(entity_type = "Revision", filter = Column::DeletedAt.is_null())]
 /// ```
-///
-/// Repeatable, and `AND`ed. The expression is spliced rather than
-/// interpreted, so it is whatever SeaORM accepts in a `filter(…)` call and
-/// there is no operator vocabulary here to fall behind theirs.
-///
-/// It lands on the table rather than on a lookup, which is what makes it
-/// unforgettable: applied by hand it has to be applied to the key lookup,
-/// the id lookup, the listing *and* the residual filter, and missing one is
-/// not a compile error but a deleted row coming back on whichever route
-/// used it.
 #[proc_macro_derive(PolicyResource, attributes(resource))]
 pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
     by_role(|| policy_resource::expand(input.into()), || Ok(TS2::new()))
 }
 
-/// Declare an asset's action vocabulary — every action it permits, and
-/// what each one costs — as one enum.
-///
-/// Emits a capability marker per variant (each registering itself in the
-/// catalog, exactly as `#[capability]` does), the `ACTIONS` table that
-/// `Granting` requires, and `ALL` / `as_static` so the enum is usable as
-/// a value.
-///
-/// Everything but the audit category is defaulted off the enum's own
-/// name, so `#[action(…)]` appears only where a default is wrong:
+/// An asset's action vocabulary as one enum: a marker per variant, `impl ActionTable`, and
+/// `ALL` / `as_static`. Every default but the audit category comes from the names:
 ///
 /// | | Default | Override |
 /// |---|---|---|
@@ -590,20 +519,8 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 /// | check entity type | `{Resource}Collection` | `#[actions(entity_type = …)]` |
 /// | check entity id | `"collection"` | `#[actions(entity_id = …)]` |
 ///
-/// The audit category has no default: what counts as one is the
-/// application's to say, which is why `doxa_audit::AuditEventType` is a
-/// trait rather than an enum. It takes any `&'static str` const
-/// expression, so name a variant of that enum rather than spelling the
-/// string — a typo is then a resolution error instead of a category
-/// nothing reads.
-///
-/// # Gating on a capability that already exists
-///
-/// `capability = "…"` *declares* one. An application with a catalog of
-/// its own already has the marker, and declaring a second over the same
-/// action would catalogue an entry that no route names and that therefore
-/// only looks enforced. `capable = <path>` gates on the existing marker
-/// instead, and mints nothing:
+/// `event = …` takes a `&'static str` const expression, such as `EventType::X.as_static()`.
+/// `capable = <path>` gates on an existing capability marker instead of declaring one:
 ///
 /// ```ignore
 /// #[derive(Actions)]
@@ -615,10 +532,6 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 ///     WriteConnection,
 /// }
 /// ```
-///
-/// When no variant declares a capability, no marker module is emitted.
-///
-/// # Example
 ///
 /// ```ignore
 /// #[derive(Actions)]
@@ -681,13 +594,8 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
     )
 }
 
-/// One route's way into a resource: the `Granting` impl, written from the
-/// application's profile and the row's own lookup.
-///
-/// Six of `Granting`'s seven items are transcription. `Ctx`, `State`,
-/// `Source` and `Error` are the application's and identical across its
-/// assets; `Key` and `load` are the scoped lookup the row already declares
-/// through [`fetch`]. Only the vocabulary is a fact about this asset.
+/// One route's way into a resource: the `Granting` impl, from the application's profile and
+/// the row's own [`fetch`] lookup.
 ///
 /// [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
 ///
@@ -696,11 +604,7 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// pub struct Source { /* … */ }
 /// ```
 ///
-/// A second route key over the same row is a unit struct naming it. The
-/// row keeps one `PolicyResource` impl, so the two routes cannot come to
-/// disagree about the object's Cedar identity — which a newtype per key
-/// would allow, and which fails silently, as a policy that simply does not
-/// match:
+/// A second route key over the same row is a unit struct naming the row, which keeps one identity:
 ///
 /// ```ignore
 /// #[doxa::asset(row = Source, key = Uuid, profile = AppGrants, actions = WidgetAction)]
@@ -720,72 +624,10 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// | `error` | the profile's |
 /// | `load_with` | `FetchByKey::fetch`, confined to the caller's tenant |
 ///
-/// # No backend is assumed
+/// `load_with` is handed the whole `Ctx`, so confining it to the caller's tenant is its own job;
+/// prefer `with`, whose lookup sees only the scope.
 ///
-/// The lookups are named through [`fetch`], which no backend owns, so
-/// everything above reads the same whether the row is a SeaORM model, a
-/// document behind an HTTP control plane or an entry in a map.
-/// `#[derive(PolicyResource)]` answers those traits for a SeaORM model
-/// from `#[resource(key)]` and `#[resource(scope)]`; anything else answers
-/// them itself, which is one associated type and a method per lookup.
-///
-/// # A second way in
-///
-/// `with = FindByPair` names a `Lookup` — one of the markers
-/// `#[resource(key(FindByPair))]` emits — for the row reached more ways
-/// than its unnamed `FetchByKey` and `FetchById` can spell between them. A
-/// marker carries its row and its key, so `with` is the whole declaration:
-///
-/// ```ignore
-/// #[asset(with = FindByPair, profile = AppGrants, actions = RevisionAction)]
-/// pub struct RevisionByPair;
-/// ```
-///
-/// Reach for it before `load_with`, and for the reason below: a named
-/// lookup is still handed a `&str` scope and nothing else, so it is a
-/// second way in rather than a way out.
-///
-/// # `load_with`, and what taking the caller costs
-///
-/// `FetchByKey::fetch` is handed a `&str` scope and nothing else, which is
-/// the guarantee rather than a thin signature: a lookup that cannot see
-/// the caller cannot ignore the caller's tenant. `Lookup::fetch` takes the
-/// same, which is why naming one costs nothing here.
-///
-/// `load_with` is handed the whole `Ctx`, and exists for the lookup that
-/// needs more than the scope — one that varies by role, or reads the
-/// assembled session. Those are the same fact. Taking the `Ctx` is what
-/// makes such a lookup expressible, and it is what makes confinement
-/// yours to write: a `load_with` that takes `_ctx` and means it compiles,
-/// passes its tests, and serves one tenant's rows to another, with the
-/// capability gate and the instance check both passing on the way.
-///
-/// Nothing else moves. The coarse gate still runs first and still costs no
-/// load, the instance check still runs on whatever came back, and the
-/// verdict still reaches the audit trail under the row's Cedar identity.
-/// The scope is the only thing that becomes the loader's responsibility.
-///
-/// `source` is what a loader is handed and where it comes from, which move
-/// together: `source = Extension<Txn>` means the guard extracts the
-/// request's transaction and `load` receives `&Txn`. That is the case a
-/// router-state loader cannot serve — a pool does not see rows the request
-/// has written and not committed, so a lookup pinned to one answers `None`
-/// for an object the caller is holding.
-///
-/// `key = pk` is a word rather than a type because it selects a different
-/// lookup, not just a different key: `FetchById::fetch_by_id`, which keeps
-/// the scope filter that a hand-written `Entity::find_by_id(id).one(db)`
-/// silently drops. It reads `FetchById` and not `FetchByKey` deliberately
-/// — an identifier belongs to the collection — so a row that declares no
-/// `#[resource(key)]` still has an id route.
-///
-/// `list = tenant` names its filter for the same reason. The generated
-/// `Scoping` confines the listing to the caller's tenant and applies **no
-/// other policy condition** — it is not the policy's residual, which is
-/// per-row and which this cannot see. An asset that needs the residual
-/// writes `Scoping` itself, and without `list` there is no impl at all, so
-/// `Granted<Many<…>>` over an asset that never asked to be listed does not
-/// compile.
+/// `list = tenant` confines a listing to the tenant and applies no other policy condition.
 #[proc_macro_attribute]
 pub fn asset(args: TokenStream, item: TokenStream) -> TokenStream {
     use doxa_macro_support::{tag, Role, Side};

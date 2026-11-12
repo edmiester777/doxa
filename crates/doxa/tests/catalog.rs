@@ -1,14 +1,5 @@
-//! The capability catalog assembles itself.
-//!
-//! Nothing here maintains a list. Each `#[capability]` registers as it
-//! declares, and [`doxa::policy::capabilities`] answers — which is what a
-//! `/me`-style endpoint and an OAuth2 scope vocabulary both need and
-//! neither can name.
-//!
-//! The test that matters is the one asserting a count: a hand-written
-//! catalog fails *silently* when someone forgets a line, and the
-//! capability goes on working everywhere it is named in code while
-//! quietly vanishing from what the client is told it has.
+//! The capability catalog assembles itself: each `#[capability]` registers as it declares,
+//! and [`doxa::policy::capabilities`] answers.
 
 #![cfg(feature = "full")]
 
@@ -29,9 +20,7 @@ pub struct WidgetsRead;
 )]
 pub struct WidgetsDelete;
 
-/// Two checks, and no resource of its own — the shape a hand-written
-/// catalog is most likely to drop, because nothing else in the codebase
-/// refers to it.
+/// Two checks and no resource of its own.
 #[capability(
     name = "widgets.admin",
     description = "Administer the widget subsystem",
@@ -52,9 +41,7 @@ fn every_declaration_reaches_the_catalog() {
     );
 }
 
-/// Link order is unspecified, so the catalog sorts. A published OpenAPI
-/// document whose scope list reshuffled between builds would be
-/// unreadable in review.
+/// Link order is unspecified, so the catalog sorts.
 #[test]
 fn the_catalog_is_ordered_by_name() {
     let all = doxa::policy::capabilities();
