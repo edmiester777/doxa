@@ -20,6 +20,31 @@ pub struct StoryMeta {
     pub line: usize,
     /// Its function's text; empty when the file couldn't be read.
     pub source: String,
+    /// The crate's own code it is built from, a file each.
+    #[serde(default)]
+    pub parts: Vec<Part>,
+}
+
+/// A file a story is built from, and the pieces of it the story reaches.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Part {
+    /// Its path in its crate: the tab's label.
+    pub title: String,
+    /// Its path, written as [`StoryMeta::file`] is.
+    pub file: String,
+    /// Whether it is Rust, and so highlighted.
+    pub rust: bool,
+    /// The pieces shown, in file order.
+    pub snippets: Vec<Snippet>,
+}
+
+/// Consecutive lines of a file.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Snippet {
+    /// The first one's number, from 1.
+    pub line: usize,
+    /// Their text.
+    pub source: String,
 }
 
 impl StoryMeta {
@@ -55,6 +80,7 @@ pub fn entries(mut names: Vec<String>, meta: Vec<StoryMeta>) -> Vec<StoryMeta> {
                     file: String::new(),
                     line: 0,
                     source: String::new(),
+                    parts: Vec::new(),
                 })
         })
         .collect()
@@ -288,6 +314,7 @@ mod tests {
             file: String::new(),
             line: 0,
             source: String::new(),
+            parts: Vec::new(),
         }
     }
 

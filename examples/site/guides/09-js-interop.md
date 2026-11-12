@@ -59,7 +59,7 @@ view! { <Count total={widgets.len()} on_pick={move |_: bool| picks.update(|n| *n
 
 Props go over as JSON, and `#[react(event)]` callbacks come back into Rust. For richer props, `#[react(js)]` passes JS values untouched (plugin lists, class instances), `#[react(component)]` hands React a Rust component to render, and `#[react(element)]` passes a `View` as a React node. A dotted `rename = "components.letter"` targets a nested prop.
 
-Each of these runs live in the gallery's [React stories](https://edmiester777.github.io/doxa/gallery/?show=react_star_rating), with its source beside it.
+Each of these runs live in the gallery's [React stories](https://edmiester777.github.io/doxa/gallery/?show=react_star_rating), with its source beside it, down to the `#[react]` declaration and the `.tsx` it wraps.
 
 ## Icons
 

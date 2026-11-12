@@ -94,12 +94,13 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 .canvas.framed iframe { margin: auto; flex: none; border-radius: 10px; box-shadow: var(--shadow), 0 0 0 1px var(--border); transition: width .2s, height .2s; }
 
 .panel { height: var(--panel); min-height: 0; display: flex; flex-direction: column; border-top: 1px solid var(--border); flex: none; }
-.tabs { display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 8px; border-bottom: 1px solid var(--border); flex: none; }
+.tabs { display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 8px; border-bottom: 1px solid var(--border); flex: none; overflow-x: auto; scrollbar-width: none; }
 .tab {
-  position: relative; display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 10px;
-  color: var(--text); font-weight: 550;
+  position: relative; display: inline-flex; flex: none; align-items: center; gap: 6px; height: 40px; padding: 0 10px;
+  background: none; border: 0; cursor: pointer; white-space: nowrap; color: var(--muted); font-weight: 550;
 }
-.tab::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent); }
+.tab:hover, .tab[aria-selected="true"] { color: var(--text); }
+.tab[aria-selected="true"]::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0; height: 2px; border-radius: 2px; background: var(--accent); }
 .body { flex: 1; overflow: auto; font: 12.5px/1.6 var(--mono); }
 
 .empty { height: 100%; width: 100%; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--muted); font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; text-align: center; padding: 24px; }
@@ -109,6 +110,7 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 
 .src-head { position: sticky; top: 0; display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 16px; background: var(--surface); border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 .src { margin: 0; padding: 12px 0; counter-reset: line; }
+.src + .src { border-top: 1px dashed var(--border); }
 .src .l { display: block; padding-right: 16px; white-space: pre; min-height: 1.6em; }
 .src .l::before { counter-increment: line; content: counter(line); display: inline-block; width: 3.5em; padding-right: 1.25em; text-align: right; color: var(--faint); user-select: none; }
 .t-com { color: var(--com); font-style: italic; } .t-str { color: var(--str); } .t-num { color: var(--num); } .t-kw { color: var(--kw); }

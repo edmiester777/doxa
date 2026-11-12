@@ -11,4 +11,4 @@ mod web;
 
 #[cfg(not(test))]
 pub use app::{Gallery, GalleryBuilder, GalleryProps};
-pub use model::{entries, Initial, StoryMeta, Viewport};
+pub use model::{entries, Initial, Part, Snippet, StoryMeta, Viewport};

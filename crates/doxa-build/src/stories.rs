@@ -7,6 +7,10 @@ use syn::spanned::Spanned;
 
 use crate::split;
 
+mod parts;
+
+pub use parts::{Part, Snippet};
+
 /// The custom section `#[story]` writes `key\tname\tmodule\tfile\tline` lines into.
 const SECTION: &str = "doxa_stories";
 
@@ -25,10 +29,13 @@ pub struct Story {
     pub line: usize,
     /// Its function's text, doc comments included; empty when the file can't be read.
     pub source: String,
+    /// The crate's own code it is built from.
+    pub parts: Vec<Part>,
 }
 
 /// The stories in the linked `wasm`, their files read relative to `root`.
 pub fn stories(wasm: &[u8], root: &Path) -> Vec<Story> {
+    let mut sources = parts::Sources::default();
     let mut out: Vec<Story> = String::from_utf8_lossy(&split::custom_section(wasm, SECTION))
         .lines()
         .filter_map(|l| {
@@ -46,6 +53,7 @@ pub fn stories(wasm: &[u8], root: &Path) -> Vec<Story> {
                 file: file.into(),
                 line,
                 source,
+                parts: sources.parts(root, file, name, line),
             })
         })
         .collect();

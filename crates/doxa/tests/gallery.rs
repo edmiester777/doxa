@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use doxa::ui::dom::{MemDom, NodeId};
-use doxa::ui::gallery::{Gallery, Initial, StoryMeta, Viewport};
+use doxa::ui::gallery::{Gallery, Initial, Part, Snippet, StoryMeta, Viewport};
 use doxa::ui::prelude::*;
 
 fn story(name: &str, module: &str) -> StoryMeta {
@@ -14,6 +14,15 @@ fn story(name: &str, module: &str) -> StoryMeta {
         file: "web/src/stories.rs".into(),
         line: 7,
         source: format!("#[story]\nfn {name}() -> View {{ view! {{}} }}"),
+        parts: vec![Part {
+            title: "kit.rs".into(),
+            file: "web/src/kit.rs".into(),
+            rust: true,
+            snippets: vec![Snippet {
+                line: 12,
+                source: "#[component]\npub fn Picker() -> View { view! {} }".into(),
+            }],
+        }],
     }
 }
 
@@ -117,6 +126,29 @@ fn the_url_picks_the_story_viewport_and_theme() {
     );
     let keyword = dom.find("class", "t-kw").expect("highlighted source");
     assert_eq!(dom.text(keyword), "fn");
+    assert!(dom.text(dom.body()).contains("web/src/stories.rs:7"));
+}
+
+#[test]
+fn a_tab_shows_a_file_the_story_is_built_from_and_a_new_story_resets_it() {
+    let dom = mount(start());
+    let tab = dom.find("title", "web/src/kit.rs").expect("the kit.rs tab");
+    assert_eq!(dom.text(tab), "kit.rs");
+    dom.click(tab);
+    doxa::client::task::run_until_stalled();
+    let text = dom.text(dom.body());
+    assert!(
+        text.contains("web/src/kit.rs:12") && text.contains("Picker"),
+        "{text}"
+    );
+    let pre = dom.find_tag("pre").expect("the snippet");
+    assert_eq!(
+        dom.attr(pre, "style").as_deref(),
+        Some("counter-reset:line 11")
+    );
+
+    dom.click(leaf(&dom, "full_list").expect("the full list story"));
+    doxa::client::task::run_until_stalled();
     assert!(dom.text(dom.body()).contains("web/src/stories.rs:7"));
 }
 

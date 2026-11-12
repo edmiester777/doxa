@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use super::highlight::highlight;
 use super::model::{
-    find_story, folders, human, story_url, tree_rows, visible, Initial, Message, Row, StoryMeta,
-    Viewport,
+    find_story, folders, human, story_url, tree_rows, visible, Initial, Message, Row, Snippet,
+    StoryMeta, Viewport,
 };
 use crate::clipboard::{self, Clip};
 use crate::prelude::*;
@@ -32,6 +32,7 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     let remount = state(0u64);
     let query = state(String::new());
     let copied = state(false);
+    let tab = state(0usize);
     let dragging = state(None::<Axis>);
     // The phone layout's drawers: the story tree, and the panel.
     let menu = state(false);
@@ -79,6 +80,7 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     let select = move |name: String| {
         menu.set(false);
         if story.get().as_ref() != Some(&name) {
+            tab.set(0);
             story.set(Some(name));
         }
     };
@@ -387,7 +389,9 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
         },
     };
 
-    let body = match meta.filter(|m| !m.source.is_empty()) {
+    let panes = meta.as_ref().map(panes).unwrap_or_default();
+    let at = tab.get().min(panes.len().saturating_sub(1));
+    let body = match panes.get(at) {
         None => view! {
             <div class="empty">
                 {icon("code")}
@@ -395,12 +399,16 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
                 <span>"The story's file couldn't be read at build time."</span>
             </div>
         },
-        Some(m) => {
-            let text = m.source.clone();
+        Some(p) => {
+            let text = (p.snippets.iter())
+                .map(|s| s.source.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let rust = p.rust;
             view! {
                 <div class="src-head">
-                    {icon("story")}
-                    {format!("{}:{}", m.file, m.line)}
+                    {icon(if at == 0 { "story" } else { "code" })}
+                    {format!("{}:{}", p.file, p.line)}
                     <span class="grow"/>
                     <button
                         class="tool"
@@ -417,18 +425,42 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
                         {if copied.get() { "Copied" } else { "Copy" }}
                     </button>
                 </div>
-                <pre class="src">
-                    <code>{source_lines(&m.source)}</code>
-                </pre>
+                {p.snippets.iter().map(|s| view! {
+                    <pre class="src" style={format!("counter-reset:line {}", s.line - 1)}>
+                        <code>{source_lines(&s.source, rust)}</code>
+                    </pre>
+                }).collect::<View>()}
             }
         }
     };
-    let tabs = view! {
-        <div class="tabs">
-            <span class="tab">
+    let labels = if panes.is_empty() {
+        view! {
+            <span class="tab" aria-selected="true">
                 {icon("code")}
                 "Source"
             </span>
+        }
+    } else {
+        (panes.iter().enumerate())
+            .map(|(i, p)| {
+                view! {
+                    <button
+                        class="tab"
+                        role="tab"
+                        aria-selected={(i == at).to_string()}
+                        title={p.file.clone()}
+                        on:click={move || tab.set(i)}
+                    >
+                        {(i == 0).then(|| icon("code"))}
+                        {p.label.clone()}
+                    </button>
+                }
+            })
+            .collect::<View>()
+    };
+    let tabs = view! {
+        <div class="tabs" role="tablist">
+            {labels}
             <span class="grow"/>
             <button
                 class="tool close"
@@ -501,7 +533,43 @@ pub fn Gallery(entries: Vec<StoryMeta>, initial: Initial) -> View {
     }
 }
 
-fn source_lines(src: &str) -> View {
+/// A tab of the source panel: the story, then each file it is built from.
+struct Pane {
+    label: String,
+    file: String,
+    line: usize,
+    rust: bool,
+    snippets: Vec<Snippet>,
+}
+
+fn panes(m: &StoryMeta) -> Vec<Pane> {
+    let story = (!m.source.is_empty()).then(|| Pane {
+        label: "Story".into(),
+        file: m.file.clone(),
+        line: m.line,
+        rust: true,
+        snippets: vec![Snippet {
+            line: 1,
+            source: m.source.clone(),
+        }],
+    });
+    let parts = m.parts.iter().map(|p| Pane {
+        label: p.title.clone(),
+        file: p.file.clone(),
+        line: p.snippets.first().map_or(1, |s| s.line),
+        rust: p.rust,
+        snippets: p.snippets.clone(),
+    });
+    story.into_iter().chain(parts).collect()
+}
+
+fn source_lines(src: &str, rust: bool) -> View {
+    if !rust {
+        return src
+            .lines()
+            .map(|l| view! { <span class="l">{l.to_owned()}</span> })
+            .collect();
+    }
     highlight(src)
         .into_iter()
         .map(|line| {
