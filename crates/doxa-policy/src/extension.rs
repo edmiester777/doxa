@@ -127,15 +127,7 @@ pub trait PolicyExtension: Send + Sync {
     /// Called once per policy in Cedar's `nontrivial_residuals()` set.
     /// `condition_body` is the JSON EST body from the policy's `when` clause
     /// after partial evaluation. Consumers translate this to their own
-    /// predicate type or ignore it.
-    ///
-    /// Every policy reaching here is a `permit`. Cedar's residual set holds
-    /// both effects, and a `forbid` whose condition could not be finished
-    /// leaves the request with no decision at all — so the resource is
-    /// refused before this is called rather than having an exclusion handed
-    /// over as though it were a grant. An implementation may take the body
-    /// as a condition under which access is *allowed*, and does not need to
-    /// consult [`Policy::effect`](cedar_policy::Policy::effect).
+    /// predicate type or ignore it. Only `permit`s reach here; a residual `forbid` refuses first.
     ///
     /// Returns `Err` if the residual contains expressions the consumer
     /// cannot handle (fail-safe denial).
@@ -246,51 +238,16 @@ pub trait PolicyExtension: Send + Sync {
         role == "admin"
     }
 
-    // -----------------------------------------------------------------
-    // What the assembled session already knows
-    // -----------------------------------------------------------------
-    //
-    // The two below are read by
-    // [`SessionChecker`](crate::session::SessionChecker), which is the
-    // per-request bridge from a guard to this policy. They exist because
-    // the session an extension assembles is frequently a *decision*, not
-    // just a description: an allow-list resolved up front answers some
-    // questions outright, and re-asking Cedar can only agree with it more
-    // slowly. Both default to "the session says nothing", so an extension
-    // that does not model any of this is unaffected.
-    //
-    // What is deliberately not here is the tenant. That is the auth
-    // layer's, through [`FromAuthExtensions::tenant`], and a deployment
-    // whose callers carry no tenant claim configures the layer to supply
-    // one. An extension answering it too would be a second source for a
-    // value already settled, and the two would eventually disagree about
-    // which partition a request was decided in.
+    // ---- What the assembled session already knows (read by `SessionChecker`) ----
 
-    /// Whether this session bypasses policy entirely.
-    ///
-    /// Checked before anything else, on every door. An extension that
-    /// models an administrator has to answer here as well as in
-    /// [`admin_session`](Self::admin_session): that one says what an
-    /// admin's session *is*, this one recognizes one that was already
-    /// assembled.
-    ///
-    /// Default: `false` — no session is privileged, which is the safe
-    /// direction for an extension that has no notion of admin.
+    /// Whether an assembled session bypasses policy, as [`admin_session`](Self::admin_session)'s
+    /// would. Default: `false`.
     fn session_is_admin(&self, _session: &Self::SessionOutput) -> bool {
         false
     }
 
-    /// The verdict the session already holds for this pair, if it holds
-    /// one.
-    ///
-    /// `Some(_)` is authoritative and Cedar is not consulted; `None` falls
-    /// through. The answer must be one Cedar would agree with — this is a
-    /// shortcut past the evaluation, not a second policy — so an extension
-    /// answering here is asserting that
-    /// [`assemble_session`](Self::assemble_session) already asked, for
-    /// this action on this entity type, and recorded what came back.
-    ///
-    /// Default: `None` for everything, so nothing is short-circuited.
+    /// The verdict [`assemble_session`](Self::assemble_session) already recorded for this pair;
+    /// `Some` skips Cedar and must agree with it. Default: `None`.
     fn decide_from_session(
         &self,
         _session: &Self::SessionOutput,

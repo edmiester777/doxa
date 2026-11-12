@@ -1,52 +1,7 @@
-//! `#[derive(PolicyResource)]` — Cedar entity identity for a domain type,
-//! and optionally the scoped lookup that loads it.
-//!
-//! One declaration produces the Cedar entity type, the instance id, the
-//! attributes policies may reference, and the parent list. The entity
-//! type doubles as the audit `resource_type`, so an audit row and the
-//! decision that produced it share one string.
-//!
-//! Identity is usually a field apiece, but not always: a Cedar id can be
-//! computed from several columns, and an attribute can be a fact about a
-//! row rather than a column on it. `id_with` and `attrs_with` name a
-//! method for those, so one awkward attribute does not push a whole type
-//! back to a hand-written impl.
-//!
-//! With the `sea-orm` feature, `#[resource(scope)]` emits a
-//! [`ScopedTable`] impl — the column every query is confined to, and the
-//! column behind each Cedar attribute — and `#[resource(key)]` adds
-//! [`ScopedRow`] on top of it, the lookup a route reaches one row by.
-//! Marking only the scope is a table nothing addresses by a column, which
-//! can still be listed and still have a policy's residual read against it.
-//! The key and the Cedar id are deliberately independent: a row addressed
-//! by `{model_id}` and the same row addressed by `{name}` are one Cedar
-//! entity reached two ways.
-//!
-//! Both roles also emit the backend-neutral [`fetch`] impls, via
-//! `fetch_from_scoped!`. Those are what `#[asset]` reaches, so the SeaORM
-//! traits above are one answer to the question rather than the question:
-//! a row that is not in a table implements [`fetch`] directly and gets the
-//! same generated `Granting`.
-//!
-//! `#[resource(key)]` is the unnamed lookup and there is one per struct,
-//! which runs out for a row reached three ways. `#[resource(key(Name))]`
-//! names one instead: a column may carry several names and several columns
-//! may carry one, so a composite key and a column serving two routes are
-//! the same declaration. Each name emits a `Lookup` marker through
-//! `scoped_lookup!`, and a composite additionally gets a key struct with a
-//! field per column — plus the `RouteKey` impl for it, which is written
-//! here rather than in that macro because the trait belongs to `doxa-auth`
-//! and `doxa-policy` does not depend on it.
-//!
-//! `#[resource(filter = …)]` is a condition every query carries on top of
-//! the scope, spliced rather than interpreted. It hangs on the table so
-//! that the key lookup, the id lookup, the listing and the residual filter
-//! all inherit it — a soft delete applied to three of those four is not a
-//! compile error, it is a deleted row coming back on the fourth.
-//!
-//! [`ScopedTable`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedTable.html
-//! [`ScopedRow`]: https://docs.rs/doxa-policy/latest/doxa_policy/scoped/trait.ScopedRow.html
-//! [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
+//! `#[derive(PolicyResource)]`: a type's Cedar entity type, id, attributes and parents. With
+//! `sea-orm`, `#[resource(scope)]` emits `ScopedTable`, `#[resource(key)]` or `key(Name)` add the
+//! lookups a route reaches a row by, and `#[resource(filter = …)]` is a condition every one of
+//! them carries. The backend-neutral `fetch` impls `#[asset]` reaches come with them.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -60,10 +15,7 @@ enum Role {
     /// The unnamed lookup, carrying the name a route's segment is spelled
     /// with — the field's own unless `key = "…"` said otherwise.
     Key(String),
-    /// One column of the named lookup `#[resource(key(Name))]` declares.
-    /// A field may carry several, and several fields may carry the same
-    /// one — which is how a column serves more than one way in, and how a
-    /// composite key is spelled.
+    /// A column of the named lookup `#[resource(key(Name))]`; several fields compose one key.
     NamedKey(Ident),
     Scope,
 }
@@ -80,9 +32,7 @@ struct Container {
     attrs_with: Option<Ident>,
     /// Entity type this resource is `in` by virtue of the request.
     tenant_parent: Option<LitStr>,
-    /// Conditions every query against this table carries, on top of the
-    /// scope. Spliced verbatim and `AND`ed, so they are whatever SeaORM
-    /// accepts rather than a vocabulary this derive has to keep up with.
+    /// Conditions every query carries on top of the scope, spliced verbatim and `AND`ed.
     filters: Vec<Expr>,
 }
 
@@ -113,11 +63,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let mut key: Option<(Ident, Type, String)> = None;
     let mut named: Vec<NamedLookup> = Vec::new();
     let mut scope: Option<Ident> = None;
-    // What the identifier columns are called, for the `key = pk` route.
-    // Read off SeaORM's own marker rather than `#[resource(…)]`, because a
-    // primary key is a fact about the table that the row has already
-    // stated once. Plural for the composite key, whose `PrimaryKeyOf` is a
-    // tuple and whose route therefore has a segment each.
+    // The identifier columns for `key = pk`, from SeaORM's own `primary_key` marker.
     let mut primary_key: Vec<(Ident, Type)> = Vec::new();
 
     for field in &fields.named {
@@ -212,10 +158,21 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         }
     });
 
-    // Merged after the field inserts, so the escape hatch wins on a
-    // collision: a computed attribute is the deliberate one.
+    // A key both a field and `attrs_with` supply has no right answer, so it panics.
     let attrs_merge = container.attrs_with.as_ref().map(|method| {
-        quote! { __map.extend(self.#method()); }
+        let what = format!("`{ident}::{method}`");
+        quote! {
+            for (__key, __value) in self.#method() {
+                if __map.contains_key(&__key) {
+                    ::std::panic!(
+                        "{} returned `{}`, which a `#[resource(attr)]` field already supplies",
+                        #what,
+                        __key,
+                    );
+                }
+                __map.insert(__key, __value);
+            }
+        }
     });
 
     let parent_pushes = parents.iter().map(|(entity, field)| {
@@ -232,10 +189,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         &attrs,
     )?;
 
-    // Not a field: the tenant is a fact about the request, so there may
-    // be no column to read and a nullable one would answer a different
-    // question — a row belonging to no tenant is still decided about
-    // inside the asking one.
+    // The asking tenant, not a column: a row with no tenant is still decided inside the caller's.
     let tenant_parent = match &container.tenant_parent {
         Some(ty) => quote!(const TENANT_PARENT: ::std::option::Option<&'static str> = Some(#ty);),
         None => quote!(),
@@ -274,25 +228,8 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     })
 }
 
-/// The SeaORM half: `ScopedTable` from the scope column, and `ScopedRow`
-/// on top of it when the struct also marked a key.
-///
-/// The two are emitted separately because the struct can supply one
-/// without the other. A scope column and no key is a table whose rows have
-/// an owner but which no route addresses by a column — a name resolved
-/// through logic, an id that means nothing to a policy — and it still
-/// wants listing and still wants its attributes to have columns. A key
-/// with no scope is the reverse and is refused: it would look up across
-/// every owner.
-///
-/// `Entity` and `Column` are named unqualified because `DeriveEntityModel`
-/// puts them beside the `Model` this derive is sitting on. That is the
-/// whole reason the loader can be generated at all: the table, its columns
-/// and the row are one module by construction.
-///
-/// The feature is checked here rather than as a `#[cfg]` on the emitted
-/// impl. A `#[cfg]` would silently produce nothing, and the consumer would
-/// meet a missing-impl error at the route rather than an explanation here.
+/// `ScopedTable` from the scope column (on `DeriveEntityModel`'s `Entity`), and the lookups on it.
+/// A key without a scope is refused: it would look up across every owner.
 fn scoped_impl(
     ident: &Ident,
     key: Option<&(Ident, Type, String)>,
@@ -305,9 +242,7 @@ fn scoped_impl(
     let scope = match scope {
         Some(scope) => scope,
         None => {
-            // Every one of these needs the owning column, and each is worth
-            // its own diagnosis: they are three different things a struct
-            // can ask for that all resolve to "mark the scope".
+            // Each needs the owning column; each gets its own message.
             if let Some((field, _, _)) = key {
                 return Err(syn::Error::new(
                     field.span(),
@@ -345,14 +280,7 @@ fn scoped_impl(
 
     let scope_column = column_variant(scope);
 
-    // The attributes a policy may name, paired with the columns they sit
-    // in. Written from the same `#[resource(attr)]` fields that build
-    // `cedar_attrs`, so a policy cannot mention an attribute the filter
-    // half has never heard of.
-    //
-    // An attribute from `attrs_with` is absent by construction: it is a
-    // fact computed about the row rather than a column on it, so there is
-    // nothing to put in a `WHERE` clause and the fallthrough refuses it.
+    // Each `#[resource(attr)]` with its column; an `attrs_with` attribute has none.
     let attr_columns = attrs.iter().map(|(key, field)| {
         let column = column_variant(field);
         quote!(#key => ::std::option::Option::Some(Column::#column),)
@@ -372,21 +300,8 @@ fn scoped_impl(
         }
     });
 
-    // The backend-neutral half, which is what `#[asset]` actually reaches:
-    // the SeaORM traits above say how *this* table answers a scoped
-    // lookup, and these say that it answers one at all. Emitted here
-    // rather than as a blanket impl in `doxa-policy` because a blanket
-    // would foreclose a consumer implementing the same traits for a row of
-    // their own against some other backend — see `fetch_from_scoped!`.
-    //
-    // `key` selects the arm: without one there is no `ScopedRow` to build
-    // `FetchByKey` from, and the table keeps its id route and its listing.
-    //
-    // A route reads its key with axum's `Path` / `Query`, which bind by
-    // field name, so every key is a struct with one named field per
-    // segment — including the one-segment keys, where a bare `String`
-    // would have nothing to bind against. These are those structs, and
-    // the fields are the idents this derive already read.
+    // The `fetch` impls `#[asset]` reaches; not a blanket in `doxa-policy`, which would stop
+    // another backend implementing them. Keys are structs so a route binds them by field name.
     let id_key = (!primary_key.is_empty()).then(|| key_struct(ident, "Id", primary_key));
     let named_key = key.map(|(field, ty, segment)| {
         let segment = Ident::new(segment, field.span());
@@ -420,10 +335,7 @@ fn scoped_impl(
     let id_key = id_key.map(|(_, tokens)| tokens);
     let named_key = named_key.map(|(_, tokens)| tokens);
 
-    // One marker type per named lookup, each carrying its own key and its
-    // own columns. The macro builds every one on `ScopedTable::scoped`, so
-    // they all inherit the scope filter and the conditions below — a second
-    // way into a row cannot be a way around either.
+    // A marker per named lookup, built on `ScopedTable::scoped` so it keeps the scope and filters.
     let lookups = named.iter().map(|(lookup, columns)| {
         let entries = columns.iter().map(|(field, ty)| {
             let column = column_variant(field);
@@ -438,9 +350,6 @@ fn scoped_impl(
                 .join(" + "),
         );
 
-        // Every lookup gets a key struct, one column or several: the name
-        // is what binds a route's segment to a column, and only a struct
-        // has names to offer.
         let key = Ident::new(&format!("{lookup}Key"), lookup.span());
         let route_key = route_key_impl(&key, columns);
 
@@ -455,9 +364,6 @@ fn scoped_impl(
         }
     });
 
-    // Spliced rather than interpreted: `filter` takes whatever SeaORM would
-    // accept in a `filter(…)` call, so there is no operator vocabulary here
-    // to fall behind the one SeaORM actually has.
     let table_condition = (!filters.is_empty()).then(|| {
         quote! {
             fn table_condition() -> ::std::option::Option<
@@ -506,16 +412,7 @@ fn scoped_impl(
     })
 }
 
-/// The struct a route's key parses into, plus the [`RouteKey`] impl that
-/// describes its segments to the generated OpenAPI.
-///
-/// One named field per segment, and the name is the whole point: a guard
-/// reads the key with axum's `Path` or `Query`, which bind a capture to a
-/// field by name, so the route parameter and the field are one string.
-/// A one-segment key is a one-field struct rather than the bare column
-/// type for exactly that reason — a `String` names nothing.
-///
-/// [`RouteKey`]: https://docs.rs/doxa-auth/latest/doxa_auth/granted/trait.RouteKey.html
+/// A route key struct, one named field per segment, and its `RouteKey` impl.
 fn key_struct(row: &Ident, suffix: &str, fields: &[(Ident, Type)]) -> (Ident, TokenStream) {
     let name = Ident::new(&format!("{row}{suffix}"), row.span());
     let doc = format!("The key a route naming a [`{row}`] parses into.");
@@ -529,7 +426,8 @@ fn key_struct(row: &Ident, suffix: &str, fields: &[(Ident, Type)]) -> (Ident, To
 
     let tokens = quote! {
         #[doc = #doc]
-        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, ::doxa::__serde::Deserialize)]
+        #[serde(crate = "::doxa::__serde")]
         pub struct #name { #(#decls)* }
     };
 
@@ -537,21 +435,8 @@ fn key_struct(row: &Ident, suffix: &str, fields: &[(Ident, Type)]) -> (Ident, To
     (name, quote! { #tokens #route_key })
 }
 
-/// The `RouteKey` impl for a generated key struct.
-///
-/// Emitted here rather than by `scoped_lookup!` because [`RouteKey`] lives
-/// in `doxa-auth`, and `doxa-policy` — where that macro is defined, and
-/// which spells its own paths with `$crate` so it works standalone — does
-/// not depend on it. The derive already assumes the `doxa` facade, so
-/// naming both halves of it costs nothing new.
-///
-/// It describes the key rather than parsing it. Reading the segments is
-/// serde's job — the struct derives [`Deserialize`](serde::Deserialize)
-/// and a guard hands it to axum's `Path` / `Query` — so what is left here
-/// is what serde cannot say: the OpenAPI type of each segment, and the
-/// order the document lists them in.
-///
-/// [`RouteKey`]: https://docs.rs/doxa-auth/latest/doxa_auth/granted/trait.RouteKey.html
+/// The `RouteKey` impl for a key struct; here, not in `scoped_lookup!`, since `doxa-policy`
+/// doesn't depend on `doxa-auth`.
 fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
     let kinds = columns
         .iter()
@@ -573,12 +458,7 @@ fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
     }
 }
 
-/// Whether SeaORM's own `#[sea_orm(primary_key)]` marks this field.
-///
-/// Read as tokens rather than through `parse_nested_meta`, because the
-/// attribute is not ours: it carries `auto_increment`, `column_type` and
-/// whatever SeaORM adds next, and a parser that has to recognise all of
-/// them would fail the build over a key it was never asked about.
+/// Whether `#[sea_orm(primary_key)]` marks this field; read as tokens, since the attribute isn't ours.
 fn is_primary_key(field: &syn::Field) -> bool {
     field.attrs.iter().any(|attr| {
         if !attr.path().is_ident("sea_orm") {
@@ -594,7 +474,7 @@ fn is_primary_key(field: &syn::Field) -> bool {
     })
 }
 
-/// `company_id` -> `CompanyId`, matching the `Column` variant
+/// `tenant_id` -> `TenantId`, matching the `Column` variant
 /// `DeriveEntityModel` generates from a field name.
 fn column_variant(field: &Ident) -> Ident {
     let raw = field.to_string();
@@ -620,12 +500,16 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
     let mut attrs_with = None;
     let mut tenant_parent = None;
     let mut filters = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     for attr in &input.attrs {
         if !attr.path().is_ident("resource") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("filter") {
+                crate::given_once(&mut seen, &meta)?;
+            }
             if meta.path.is_ident("entity_type") {
                 entity_type = Some(meta.value()?.parse::<LitStr>()?);
                 Ok(())
@@ -639,9 +523,7 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
                 tenant_parent = Some(meta.value()?.parse::<LitStr>()?);
                 Ok(())
             } else if meta.path.is_ident("filter") {
-                // Repeatable, and `AND`ed. Two conditions written as two
-                // `filter`s rather than one `.and()` chain is the same
-                // query and a shorter diff when one of them changes.
+                // Repeatable, and `AND`ed.
                 filters.push(meta.value()?.parse::<Expr>()?);
                 Ok(())
             } else {
@@ -668,9 +550,7 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
     })
 }
 
-/// Parse `#[resource(id)]` / `#[resource(attr)]` / `#[resource(attr =
-/// "key")]` / `#[resource(parent = "Folder")]` / `#[resource(key)]` /
-/// `#[resource(scope)]` off one field.
+/// One field's `#[resource(id | attr [= "key"] | parent = "…" | key … | scope)]` roles.
 fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
     let mut roles = Vec::new();
     let default_key = field
@@ -699,14 +579,8 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
                 roles.push(Role::Parent(meta.value()?.parse::<LitStr>()?));
                 Ok(())
             } else if meta.path.is_ident("key") {
-                // Bare `key` is the unnamed lookup, one column and one per
-                // struct, and the route parameter takes the field's own
-                // name. `key = "slug"` spells it differently — the column
-                // is still this field, but a route says `{slug}`, which is
-                // how one column serves a route that calls it something
-                // else. `key(A, B)` enrols this column in the named
-                // lookups `A` and `B` — so one column can serve several
-                // ways in, and several columns can compose one key.
+                // `key`: the unnamed lookup. `key = "slug"`: the same, with the route
+                // parameter renamed. `key(A, B)`: this column in the named lookups `A` and `B`.
                 if meta.input.peek(syn::token::Paren) {
                     let names;
                     syn::parenthesized!(names in meta.input);
@@ -721,7 +595,16 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
                     roles.extend(names.into_iter().map(Role::NamedKey));
                 } else {
                     let name = match meta.value() {
-                        Ok(value) => value.parse::<LitStr>()?.value(),
+                        Ok(value) => {
+                            let lit = value.parse::<LitStr>()?;
+                            if syn::parse_str::<Ident>(&lit.value()).is_err() {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "a key segment is a Rust identifier, like \"widget_id\"",
+                                ));
+                            }
+                            lit.value()
+                        }
                         Err(_) => default_key.clone(),
                     };
                     roles.push(Role::Key(name));
@@ -806,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn attrs_with_merges_after_the_field_attrs() {
+    fn attrs_with_merges_after_the_field_attrs_and_checks_for_collisions() {
         let out = expand_ok(quote! {
             #[resource(entity_type = "Connection", attrs_with = policy_attrs)]
             struct Model {
@@ -816,10 +699,23 @@ mod tests {
         });
 
         let inserted = out.find(r#"__map . insert ("name""#).expect("field attr");
-        let merged = out.find("__map . extend").expect("computed attrs");
+        let merged = out.find("self . policy_attrs ()").expect("computed attrs");
+        assert!(inserted < merged, "{out}");
+        assert!(out.contains("contains_key"), "{out}");
+    }
+
+    #[test]
+    fn a_key_segment_that_isnt_an_identifier_is_refused() {
+        let message = expand_err(quote! {
+            #[resource(entity_type = "Widget")]
+            struct Widget {
+                #[resource(id, key = "widget-id")]
+                name: String,
+            }
+        });
         assert!(
-            inserted < merged,
-            "the escape hatch must win on a collision: {out}"
+            message.contains("a key segment is a Rust identifier"),
+            "{message}"
         );
     }
 
@@ -839,8 +735,8 @@ mod tests {
     fn field_names_become_column_variants() {
         assert_eq!(column_variant(&parse_ident("name")), parse_ident("Name"));
         assert_eq!(
-            column_variant(&parse_ident("company_id")),
-            parse_ident("CompanyId"),
+            column_variant(&parse_ident("tenant_id")),
+            parse_ident("TenantId"),
         );
         assert_eq!(
             column_variant(&parse_ident("entity_uid")),
@@ -867,10 +763,7 @@ mod tests {
         assert!(message.contains("across every owner"), "{message}");
     }
 
-    /// A scope with no key is a table nothing addresses by a column — a
-    /// name resolved through logic rather than matched. It still has an
-    /// owner, so it still gets the listing and the attribute columns; what
-    /// it does not get is a lookup, because there is no key to look up by.
+    /// A scope with no key still gets the listing and attribute columns, but no key lookup.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn a_scope_without_a_key_is_a_table_and_not_a_lookup() {
@@ -882,7 +775,7 @@ mod tests {
                 #[resource(attr)]
                 region: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -890,7 +783,7 @@ mod tests {
             out.contains("impl :: doxa :: policy :: ScopedTable for Model"),
             "{out}",
         );
-        assert!(out.contains("Column :: CompanyId"), "{out}");
+        assert!(out.contains("Column :: TenantId"), "{out}");
         assert!(
             out.contains(r#""region" => :: std :: option :: Option :: Some (Column :: Region)"#),
             "a table without a key still resolves its policy attributes: {out}",
@@ -924,7 +817,7 @@ mod tests {
                 #[resource(id, attr, key)]
                 name: String,
                 #[resource(parent = "Tenant", scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -938,12 +831,9 @@ mod tests {
         );
         assert!(out.contains("type Key = String"), "{out}");
         assert!(out.contains("Column :: Name"), "{out}");
-        assert!(out.contains("Column :: CompanyId"), "{out}");
+        assert!(out.contains("Column :: TenantId"), "{out}");
     }
 
-    /// Each way in gets a key struct, and the field names are the field
-    /// idents the derive is already holding — so a route's parameter is
-    /// named once, here.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn the_key_and_identifier_columns_are_named_for_the_route() {
@@ -956,7 +846,7 @@ mod tests {
                 #[resource(attr, key)]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -982,7 +872,7 @@ mod tests {
                 #[sea_orm(primary_key)]
                 group_id: Uuid,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1003,7 +893,7 @@ mod tests {
                 #[resource(id, key)]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1013,11 +903,7 @@ mod tests {
         );
     }
 
-    /// The attributes a policy may name resolve to the columns they sit
-    /// in, so a residual mentioning `resource.region` can become a `WHERE`
-    /// clause. Written from the same fields as `cedar_attrs`, which is
-    /// what stops a policy referring to an attribute the filter half
-    /// cannot see.
+    /// So a residual on `resource.region` becomes a `WHERE` clause.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn cedar_attributes_resolve_to_their_columns() {
@@ -1029,7 +915,7 @@ mod tests {
                 #[resource(attr = "region")]
                 region_code: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1046,10 +932,8 @@ mod tests {
             ),
             "{out}",
         );
-        // The scope column is not an attribute and gets no entry: a policy
-        // naming it would be filtering on the tenant, which every lookup
-        // already confines.
-        assert!(!out.contains("Some (Column :: CompanyId)"), "{out}");
+        // The scope column is not an attribute.
+        assert!(!out.contains("Some (Column :: TenantId)"), "{out}");
     }
 
     /// The route's key and the Cedar id answer different questions, so a
@@ -1063,7 +947,7 @@ mod tests {
                 #[resource(key)]
                 id: Uuid,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1074,9 +958,7 @@ mod tests {
         );
     }
 
-    /// The feature this exists for: one column takes part in two lookups,
-    /// so a row reached both by `dataset` and by `(dataset, version)` keeps
-    /// both instead of giving one up to `load_with`.
+    /// A row reached by `dataset` and by `(dataset, version)` keeps both lookups.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn a_column_may_take_part_in_several_named_lookups() {
@@ -1111,11 +993,6 @@ mod tests {
         );
     }
 
-    /// A key struct needs the `RouteKey` impl that says what its segments
-    /// are called and what the spec should call their types.
-    ///
-    /// It is emitted here rather than by `scoped_lookup!` because that macro
-    /// lives in `doxa-policy`, which does not depend on `doxa-auth`.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn a_composite_key_gets_its_route_parsing() {
@@ -1154,9 +1031,6 @@ mod tests {
         );
     }
 
-    /// A single-column lookup gets a key struct too. A bare `String`
-    /// cannot say what the route's segment is called, and the name is what
-    /// binds.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn a_single_column_lookup_gets_a_key_struct_too() {
@@ -1180,9 +1054,6 @@ mod tests {
         );
     }
 
-    /// `key = "slug"` renames the route's segment without moving the
-    /// column: the lookup still matches `Column::Name`, and the key's field
-    /// — which is what a route binds — is `slug`.
     #[cfg(feature = "sea-orm")]
     #[test]
     fn a_renamed_key_moves_the_segment_and_not_the_column() {
@@ -1192,7 +1063,7 @@ mod tests {
                 #[resource(id, key = "slug")]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 
@@ -1357,7 +1228,7 @@ mod tests {
                 #[resource(id, key)]
                 name: String,
                 #[resource(scope)]
-                company_id: String,
+                tenant_id: String,
             }
         });
 

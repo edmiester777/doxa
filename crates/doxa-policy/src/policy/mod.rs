@@ -35,6 +35,11 @@ pub trait Policy<T: Send + Sync>: Send + Sync {
     /// Resolve the given tenant and roles into a session output.
     async fn resolve(&self, tenant_id: Option<&str>, roles: &[String]) -> Result<T, AuthError>;
 
+    /// Whether a token role makes its holder an administrator. None does by default.
+    fn is_admin_role(&self, _role: &str) -> bool {
+        false
+    }
+
     /// Flush all cached authorization state. Called by the admin cache-flush
     /// endpoint for emergency policy revocation. Default is a no-op for
     /// implementations without caching.

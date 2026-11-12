@@ -71,22 +71,8 @@ impl<S> Layer<S> for AuditLayer {
     }
 }
 
-/// Service produced by [`AuditLayer`].
-///
-/// On each request it:
-/// 1. Creates an [`AuditEventBuilder`], populates request metadata
-///    (source IP from `x-forwarded-for`, falling back to the
-///    [`ConnectInfo`] peer; user-agent; request ID), and stamps the HTTP
-///    method and path — all *before* the inner service runs, so a layer
-///    that emits a terminal event during the call (e.g. an auth
-///    rejection) still records the route.
-/// 2. Inserts the builder into request extensions so inner layers and
-///    handlers can enrich it.
-/// 3. Calls the inner service.
-/// 4. After the response, records the status and calls
-///    [`auto_emit`](AuditEventBuilder::auto_emit) which sends the event
-///    with [`Outcome::Allowed`](crate::Outcome::Allowed) if no prior
-///    explicit emission occurred.
+/// Service produced by [`AuditLayer`]: puts a layered [`AuditEventBuilder`] in the request,
+/// then stamps the status and [`auto_emit`](AuditEventBuilder::auto_emit)s after the response.
 #[derive(Clone)]
 pub struct AuditService<S> {
     logger: AuditLogger,
@@ -107,20 +93,13 @@ where
     }
 
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-        // `layered`, not `new`: a guard that refuses the request must
-        // leave the emission to the code below rather than take the
-        // builder before the response exists.
         let builder = AuditEventBuilder::layered(self.logger.clone());
         builder.set_request_metadata(req.headers());
         if let Some(ConnectInfo(addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
             builder.set_source_ip_fallback(*addr);
         }
 
-        // Stamp method and path *before* calling inner: a layer that emits
-        // a terminal event during the call (e.g. an `AuthLayer` rejecting a
-        // request before it reaches a handler) takes the builder then, so
-        // the post-response setters below would arrive too late to record
-        // the route. Status still comes from the response.
+        // Before the call: an inner layer that emits takes the builder then.
         builder.set_http_request(req.method().as_str(), req.uri().path());
 
         req.extensions_mut().insert(builder.clone());
@@ -146,6 +125,7 @@ where
                     doxa_docs::__private::ResponseAuditOutcome::Allowed => crate::Outcome::Allowed,
                     doxa_docs::__private::ResponseAuditOutcome::Denied => crate::Outcome::Denied,
                     doxa_docs::__private::ResponseAuditOutcome::Error => crate::Outcome::Error,
+                    doxa_docs::__private::ResponseAuditOutcome::Probe => crate::Outcome::Probe,
                 };
                 builder.set_outcome(outcome);
             }

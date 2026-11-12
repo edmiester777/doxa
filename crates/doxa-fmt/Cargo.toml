@@ -1,0 +1,20 @@
+[package]
+name = "doxa-fmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Formatter for the bodies of doxa `view!` macro invocations, complementing rustfmt."
+keywords = ["formatter", "rustfmt", "view", "jsx", "doxa"]
+categories = ["development-tools"]
+
+[dependencies]
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+syn = { workspace = true, features = ["visit", "printing", "parsing"] }
+quote = { workspace = true }
+rstml = { version = "0.12", default-features = false }
+prettyplease = "0.2"
+similar = "2"

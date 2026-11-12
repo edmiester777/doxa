@@ -1,0 +1,121 @@
+//! Plugins: views and providers added to an app from outside its own components.
+
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::rc::Rc;
+
+use crate::component::{required, Component, RenderFuture, Set, Unset};
+use crate::{IntoView, View};
+
+/// Something an app installs with `App::plugin`.
+///
+/// ```ignore
+/// struct Audit;
+/// impl Plugin for Audit {
+///     fn slots(&self, slots: &mut Slots) {
+///         slots.fill("sidebar", || view! { <AuditFeed/> });
+///     }
+/// }
+/// ```
+pub trait Plugin: 'static {
+    /// Add views to named `<Slot>`s.
+    fn slots(&self, slots: &mut Slots) {
+        let _ = slots;
+    }
+
+    /// Wrap the whole app, for example to `provide` a value to every component.
+    fn wrap(&self, app: View) -> View {
+        app
+    }
+}
+
+type Fill = Rc<dyn Fn() -> View>;
+
+/// What plugins put in each `<Slot name="…">`.
+#[derive(Default)]
+pub struct Slots(HashMap<&'static str, Vec<Fill>>);
+
+impl Slots {
+    /// Render `view` inside every `<Slot name={slot}>`, after earlier fills.
+    pub fn fill<V: IntoView>(&mut self, slot: &'static str, view: impl Fn() -> V + 'static) {
+        self.0
+            .entry(slot)
+            .or_default()
+            .push(Rc::new(move || view().into_view()));
+    }
+}
+
+/// One app's slot fills, provided at its root.
+#[derive(Clone)]
+pub(crate) struct Fills(Rc<Slots>);
+
+impl Fills {
+    pub fn collect(plugins: &[Box<dyn Plugin>]) -> Self {
+        let mut slots = Slots::default();
+        plugins.iter().for_each(|p| p.slots(&mut slots));
+        Fills(Rc::new(slots))
+    }
+}
+
+/// Where plugins' views go: `<Slot name="sidebar"/>`.
+pub struct Slot;
+
+/// Props of [`Slot`].
+#[derive(Clone)]
+pub struct SlotProps {
+    name: &'static str,
+}
+
+required!(
+    Slot_needs_name,
+    "`<Slot>` is missing the `name` prop",
+    "add `name=\"…\"` to the tag"
+);
+
+/// Builds [`SlotProps`].
+pub struct SlotBuilder<N> {
+    name: &'static str,
+    _set: PhantomData<N>,
+}
+
+impl Slot {
+    /// Start building its props.
+    pub fn props() -> SlotBuilder<Unset> {
+        SlotBuilder {
+            name: "",
+            _set: PhantomData,
+        }
+    }
+}
+
+impl<N> SlotBuilder<N> {
+    /// The slot's name.
+    pub fn name(self, name: &'static str) -> SlotBuilder<Set> {
+        SlotBuilder {
+            name,
+            _set: PhantomData,
+        }
+    }
+}
+
+impl<N> SlotBuilder<N> {
+    /// Finish; every required prop must be given.
+    pub fn build(self) -> SlotProps
+    where
+        N: Slot_needs_name,
+    {
+        SlotProps { name: self.name }
+    }
+}
+
+impl Component for Slot {
+    type Props = SlotProps;
+    const NAME: &'static str = "Slot";
+
+    fn render(props: SlotProps) -> RenderFuture {
+        let fills: Vec<Fill> = crate::try_context::<Fills>()
+            .and_then(|f| f.0 .0.get(props.name).cloned())
+            .unwrap_or_default();
+        RenderFuture::ready(Ok(fills.iter().map(|f| f()).collect()))
+    }
+}

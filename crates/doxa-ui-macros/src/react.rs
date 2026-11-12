@@ -1,0 +1,594 @@
+//! `#[react]`: a props struct becomes a component rendering a React component as an island.
+
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote, quote_spanned};
+use syn::ext::IdentExt;
+use syn::spanned::Spanned;
+use syn::{Fields, Ident, ItemStruct, LitStr, Type};
+
+use crate::component::{builder, Prop};
+
+pub(crate) struct Args {
+    pub module: LitStr,
+    /// Required on a struct; an enum's variants name their own exports.
+    pub export: Option<LitStr>,
+    pub lazy: bool,
+    /// `handle = Api`: what React's `ref` points at.
+    pub handle: Option<Type>,
+    /// `props = IconProps`: what each variant of an enum is given.
+    pub props: Option<Type>,
+    start: proc_macro2::Span,
+}
+
+impl syn::parse::Parse for Args {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let (mut module, mut export, mut lazy, mut handle) = (None, None, false, None);
+        let mut props = None;
+        let start = input.span();
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            match ident.to_string().as_str() {
+                "module" => {
+                    input.parse::<syn::Token![=]>()?;
+                    module = Some(input.parse::<LitStr>()?);
+                }
+                "export" => {
+                    input.parse::<syn::Token![=]>()?;
+                    export = Some(input.parse::<LitStr>()?);
+                }
+                "lazy" => lazy = true,
+                "handle" => {
+                    input.parse::<syn::Token![=]>()?;
+                    handle = Some(input.parse::<Type>()?);
+                }
+                "props" => {
+                    input.parse::<syn::Token![=]>()?;
+                    props = Some(input.parse::<Type>()?);
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!(
+                        "unknown option `{other}`; expected `module`, `export`, `lazy`, `handle` or `props`"
+                    ),
+                    ))
+                }
+            }
+            if !input.is_empty() {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        let module = module.ok_or_else(|| missing(start, "module"))?;
+        if let Some(export) = &export {
+            check_export(export)?;
+        }
+        Ok(Args {
+            module,
+            export,
+            lazy,
+            handle,
+            props,
+            start,
+        })
+    }
+}
+
+fn missing(at: proc_macro2::Span, what: &str) -> syn::Error {
+    syn::Error::new(
+        at,
+        format!("`#[react]` needs `{what} = \"…\"`, e.g. `#[react(module = \"@monaco-editor/react\", export = \"default\")]`"),
+    )
+}
+
+/// A JS name, `default`, or a dotted path like `Popover.Trigger`.
+pub(crate) fn check_export(export: &LitStr) -> syn::Result<()> {
+    let ident_like = |e: &str| {
+        e.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+            && e.chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    };
+    if export.value().split('.').all(ident_like) {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            export.span(),
+            "`export` is a JS name, `default`, or a dotted path like `Popover.Trigger`",
+        ))
+    }
+}
+
+/// The `package.json` files a module's npm check read, after checking it is declared.
+pub(crate) fn tracked(module: &LitStr, spec: &str) -> syn::Result<Vec<String>> {
+    if spec.starts_with("doxa-island:") {
+        return Ok(Vec::new());
+    }
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR").map(std::path::PathBuf::from);
+    let Some(declared) = dir.as_deref().and_then(crate::npm::declared) else {
+        return Ok(Vec::new());
+    };
+    crate::npm::check(spec, &declared).map_err(|e| syn::Error::new(module.span(), e))?;
+    Ok(declared
+        .package_json
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect())
+}
+
+enum Role {
+    Data,
+    Optional,
+    Event,
+    /// A `View` or `Option<View>`, rendered by doxa into a host React places.
+    Slot {
+        optional: bool,
+    },
+    /// `#[react(element)]`: a `View` of one element, which React renders itself.
+    Element,
+    /// `#[react(func)]`: a `Func` or `AsyncFunc` React calls for a value.
+    Func {
+        is_async: bool,
+    },
+    /// `#[react(render)]`: a `Render` React places as an element.
+    Render,
+    /// `#[react(component)]`: a `ComponentFn` React renders as a component, given its props.
+    Component,
+    /// `#[react(js)]`: a `Js`, `Vec<Js>` or `Option` of one, passed as it is.
+    Js,
+    /// `#[react(raw)]`: an `Rc<[number]>` copied into a JS typed array.
+    Raw,
+    /// `#[react(feed)]`: a `Feed<T>` JS subscribes to.
+    Feed,
+}
+
+struct Field {
+    name: Ident,
+    ty: Type,
+    js: String,
+    role: Role,
+}
+
+/// `./ts/x.tsx` is under the web crate root; anything else is an npm specifier.
+pub(crate) fn specifier(module: &LitStr) -> syn::Result<String> {
+    let m = module.value();
+    if let Some(rest) = m.strip_prefix("./") {
+        Ok(format!("doxa-island:{rest}"))
+    } else if m.starts_with("../") {
+        Ok(format!("doxa-island:{m}"))
+    } else if m.is_empty() || m.starts_with('/') {
+        Err(syn::Error::new(
+            module.span(),
+            "`module` is an npm package, or a path like `./ts/editor.tsx` under the web crate",
+        ))
+    } else {
+        Ok(m)
+    }
+}
+
+use crate::export::camel;
+use crate::ty::{inner_of, is_named};
+
+/// `outer<T>` where `T`'s last segment is `name`.
+fn generic_of(ty: &Type, outer: &str, name: &str) -> bool {
+    inner_of(ty, outer).is_some_and(|t| is_named(t, name))
+}
+
+/// `Option<T>` where `T`'s last segment is `name`.
+fn option_of(ty: &Type, name: &str) -> bool {
+    generic_of(ty, "Option", name)
+}
+
+pub(crate) fn expand(args: Args, mut item: ItemStruct) -> syn::Result<TokenStream> {
+    let Some(export) = &args.export else {
+        return Err(missing(args.start, "export"));
+    };
+    if let Some(props) = &args.props {
+        return Err(syn::Error::new(
+            props.span(),
+            "`props = …` is for an enum of components; a struct's fields are its props",
+        ));
+    }
+    if !item.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            item.generics.span(),
+            "`#[react]` components can't be generic",
+        ));
+    }
+    let Fields::Named(named) = &mut item.fields else {
+        return Err(syn::Error::new(
+            item.span(),
+            "`#[react]` goes on a struct with named fields, one per prop",
+        ));
+    };
+    let mut fields = Vec::new();
+    for f in named.named.iter_mut() {
+        let name = f.ident.clone().expect("named field");
+        if name == "key" {
+            return Err(syn::Error::new(
+                name.span(),
+                "`key` is reserved for list identity; rename the prop",
+            ));
+        }
+        let (mut optional, mut event, mut element, mut rename) = (false, false, false, None);
+        let (mut func, mut render, mut raw, mut feed) = (false, false, false, false);
+        let (mut component, mut js) = (false, false);
+        let mut kept = Vec::new();
+        for attr in f.attrs.drain(..) {
+            if !attr.path().is_ident("react") {
+                kept.push(attr);
+                continue;
+            }
+            attr.parse_nested_meta(|m| {
+                if m.path.is_ident("optional") {
+                    optional = true;
+                } else if m.path.is_ident("event") {
+                    event = true;
+                } else if m.path.is_ident("element") {
+                    element = true;
+                } else if m.path.is_ident("func") {
+                    func = true;
+                } else if m.path.is_ident("render") {
+                    render = true;
+                } else if m.path.is_ident("raw") {
+                    raw = true;
+                } else if m.path.is_ident("feed") {
+                    feed = true;
+                } else if m.path.is_ident("component") {
+                    component = true;
+                } else if m.path.is_ident("js") {
+                    js = true;
+                } else if m.path.is_ident("rename") {
+                    let lit = m.value()?.parse::<LitStr>()?;
+                    if lit.value().split('.').any(str::is_empty) {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "`rename` is a prop name, or a dotted path like `components.code`",
+                        ));
+                    }
+                    rename = Some(lit.value());
+                } else {
+                    return Err(m.error(
+                        "expected `optional`, `event`, `element`, `func`, `render`, `component`, `js`, `raw`, `feed` or `rename = \"…\"`",
+                    ));
+                }
+                Ok(())
+            })?;
+        }
+        f.attrs = kept;
+        crate::callback::desugar(&mut f.ty)?;
+        if [
+            optional, event, element, func, render, component, js, raw, feed,
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count()
+            > 1
+        {
+            return Err(syn::Error::new(
+                name.span(),
+                "a prop takes one of `optional`, `event`, `element`, `func`, `render`, `component`, `js`, `raw` and `feed`",
+            ));
+        }
+        if component && !is_named(&f.ty, "ComponentFn") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(component)]` field `{name}` must be a `ComponentFn<P>`"),
+            ));
+        }
+        let js_typed = is_named(&f.ty, "Js")
+            || generic_of(&f.ty, "Vec", "Js")
+            || option_of(&f.ty, "Js")
+            || matches!(inner_of(&f.ty, "Option"), Some(t) if generic_of(t, "Vec", "Js"));
+        if js && !js_typed {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(js)]` field `{name}` must be a `Js`, `Vec<Js>`, or an `Option` of one"),
+            ));
+        }
+        if raw && !is_named(&f.ty, "Rc") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(raw)]` field `{name}` must be an `Rc<[f64]>`, or of `f32`, `i32`, `u32` or `u8`"),
+            ));
+        }
+        if feed && !is_named(&f.ty, "Feed") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(feed)]` field `{name}` must be a `Feed<T>`"),
+            ));
+        }
+        if func && !is_named(&f.ty, "Func") && !is_named(&f.ty, "AsyncFunc") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!(
+                    "`#[react(func)]` field `{name}` must be a `Func<A, R>` or `AsyncFunc<A, R>`"
+                ),
+            ));
+        }
+        if render && !is_named(&f.ty, "Render") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(render)]` field `{name}` must be a `Render<A>`"),
+            ));
+        }
+        if element && !is_named(&f.ty, "View") {
+            return Err(syn::Error::new(
+                f.ty.span(),
+                format!("`#[react(element)]` field `{name}` must be a `View`"),
+            ));
+        }
+        let role = match (optional, event) {
+            _ if element => Role::Element,
+            _ if render => Role::Render,
+            _ if component => Role::Component,
+            _ if js => Role::Js,
+            _ if raw => Role::Raw,
+            _ if feed => Role::Feed,
+            _ if func => Role::Func {
+                is_async: is_named(&f.ty, "AsyncFunc"),
+            },
+            (true, true) => unreachable!("two roles are refused above"),
+            (true, false) if !is_named(&f.ty, "Option") => {
+                return Err(syn::Error::new(
+                    f.ty.span(),
+                    format!("`#[react(optional)]` field `{name}` must be an `Option<T>`"),
+                ))
+            }
+            (true, false) => Role::Optional,
+            (false, true)
+                if !crate::callback::signature(&f.ty)
+                    .is_some_and(|s| s.inputs.len() <= 1 && s.future_of.is_none()) =>
+            {
+                return Err(syn::Error::new(
+                    f.ty.span(),
+                    format!(
+                        "`#[react(event)]` field `{name}` must be an `impl Fn()` or `impl Fn(T)`"
+                    ),
+                ))
+            }
+            (false, true) => Role::Event,
+            (false, false) if is_named(&f.ty, "View") => Role::Slot { optional: false },
+            (false, false) if option_of(&f.ty, "View") => Role::Slot { optional: true },
+            (false, false) => Role::Data,
+        };
+        fields.push(Field {
+            js: rename.unwrap_or_else(|| camel(&name.unraw().to_string())),
+            name,
+            ty: f.ty.clone(),
+            role,
+        });
+    }
+
+    let vis = &item.vis;
+    let name = &item.ident;
+    let name_str = name.to_string();
+    let props_ty = format_ident!("{}Props", name);
+    let module = specifier(&args.module)?;
+    let tracked = tracked(&args.module, &module)?;
+    let export = export.value();
+    let lazy = args.lazy;
+    let spec = format!(
+        "doxa-react:{}:{export}:{module}",
+        if lazy { "lazy" } else { "eager" }
+    );
+    let bindings = format_ident!("__doxa_react_{}", name);
+
+    let (docs, others): (Vec<_>, Vec<_>) =
+        item.attrs.iter().partition(|a| a.path().is_ident("doc"));
+    let struct_fields = named.named.iter();
+
+    let mut props: Vec<Prop> = fields
+        .iter()
+        .map(|f| Prop {
+            name: f.name.clone(),
+            ty: f.ty.clone(),
+            default: (f.name == "children"
+                || matches!(f.role, Role::Optional | Role::Slot { optional: true })
+                || (matches!(f.role, Role::Data | Role::Js) && is_named(&f.ty, "Option")))
+            .then(|| quote!(::core::default::Default::default())),
+            optional: false,
+        })
+        .collect();
+    // `handle = Api` adds an optional `handle={h}` prop.
+    let handle_field = match &args.handle {
+        Some(api) => {
+            if let Some(f) = fields.iter().find(|f| f.name == "handle") {
+                return Err(syn::Error::new(
+                    f.name.span(),
+                    "`handle` is the prop `#[react(handle = …)]` adds; rename this field",
+                ));
+            }
+            let ty: Type =
+                syn::parse_quote!(::core::option::Option<::doxa::ui::react::Handle<#api>>);
+            props.push(Prop {
+                name: format_ident!("handle"),
+                ty: ty.clone(),
+                default: Some(quote!(::core::option::Option::None)),
+                optional: false,
+            });
+            Some(quote! { #[doc = "Where React's `ref` is published."] pub handle: #ty })
+        }
+        None => None,
+    };
+    let has_handle = args.handle.as_ref().map(|api| {
+        quote! {
+            impl ::doxa::ui::react::HasHandle for #name {
+                type Api = #api;
+            }
+        }
+    });
+    let handle_fn = args.handle.as_ref().map(|_| {
+        quote! {
+            fn handle(&self) -> ::core::option::Option<::doxa::ui::react::HandleSink> {
+                self.handle.as_ref().map(::doxa::ui::react::Handle::sink)
+            }
+        }
+    });
+    let builder = builder(
+        vis,
+        name,
+        &props_ty,
+        &props,
+        &syn::Generics::default(),
+        None,
+    );
+
+    let same = fields
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.role,
+                Role::Data | Role::Optional | Role::Raw | Role::Feed | Role::Js
+            )
+        })
+        .map(|f| {
+            let n = &f.name;
+            match f.role {
+                // The same allocation, not equal contents: comparing big arrays every render costs as much as copying.
+                Role::Raw => {
+                    quote_spanned! { f.ty.span() => && ::std::rc::Rc::ptr_eq(&self.#n, &other.#n) }
+                }
+                _ => quote_spanned! { f.ty.span() => && self.#n == other.#n },
+            }
+        });
+    let data = fields.iter().filter_map(|f| {
+        let (n, js) = (&f.name, &f.js);
+        match f.role {
+            Role::Data => Some(quote_spanned! { f.ty.span() => out.set(#js, &self.#n); }),
+            Role::Optional => Some(quote_spanned! { f.ty.span() => out.opt(#js, &self.#n); }),
+            Role::Raw => Some(quote_spanned! { f.ty.span() => out.raw(#js, &self.#n); }),
+            Role::Feed => Some(quote_spanned! { f.ty.span() => out.feed(#js, &self.#n); }),
+            Role::Js => Some(quote_spanned! { f.ty.span() => out.js(#js, &self.#n); }),
+            Role::Event
+            | Role::Slot { .. }
+            | Role::Element
+            | Role::Func { .. }
+            | Role::Render
+            | Role::Component => None,
+        }
+    });
+    let views = fields.iter().filter_map(|f| {
+        let (n, js) = (&f.name, &f.js);
+        match f.role {
+            Role::Slot { optional: false } => Some(quote! { out.slot(#js, &self.#n); }),
+            Role::Slot { optional: true } => Some(quote! { out.slot_opt(#js, &self.#n); }),
+            Role::Element => Some(quote! { out.element(#js, &self.#n); }),
+            _ => None,
+        }
+    });
+    let events = fields.iter().filter_map(|f| {
+        let (n, js) = (&f.name, &f.js);
+        let span = f.ty.span();
+        match f.role {
+            Role::Event => Some(quote_spanned! { span => out.event(#js, &self.#n); }),
+            Role::Func { is_async: false } => {
+                Some(quote_spanned! { span => out.func(#js, &self.#n); })
+            }
+            Role::Func { is_async: true } => {
+                Some(quote_spanned! { span => out.async_func(#js, &self.#n); })
+            }
+            Role::Render => Some(quote_spanned! { span => out.render(#js, &self.#n); }),
+            Role::Component => Some(quote_spanned! { span => out.component(#js, &self.#n); }),
+            _ => None,
+        }
+    });
+
+    Ok(quote! {
+        #(#docs)*
+        #vis struct #name;
+
+        #[doc = concat!("Props of [`", #name_str, "`].")]
+        #[derive(Clone)]
+        #(#others)*
+        #vis struct #props_ty { #(#struct_fields,)* #handle_field }
+
+        #builder
+
+        #(const _: &[u8] = ::core::include_bytes!(#tracked);)*
+
+        #[cfg(target_arch = "wasm32")]
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        mod #bindings {
+            use ::doxa::ui::__private::wasm_bindgen;
+            #[wasm_bindgen::prelude::wasm_bindgen(module = #spec, wasm_bindgen = ::doxa::ui::__private::wasm_bindgen)]
+            extern "C" {
+                pub fn load() -> wasm_bindgen::JsValue;
+            }
+        }
+
+        impl ::doxa::ui::react::IslandProps for #props_ty {
+            const ISLAND: ::doxa::ui::react::Island = ::doxa::ui::react::Island {
+                name: #name_str,
+                module: #module,
+                export: #export,
+                lazy: #lazy,
+                #[cfg(target_arch = "wasm32")]
+                load: #bindings::load,
+            };
+
+            fn same_data(&self, other: &Self) -> bool {
+                true #(#same)*
+            }
+
+            fn data(&self, out: &mut ::doxa::ui::react::Data) {
+                #(#data)*
+            }
+
+            #handle_fn
+
+            #[allow(unused_variables)]
+            fn views(&self, out: &mut ::doxa::ui::react::Views) {
+                #(#views)*
+            }
+
+            #[allow(unused_variables)]
+            fn events(&self, out: &mut ::doxa::ui::react::Events) {
+                #(#events)*
+            }
+        }
+
+        #has_handle
+
+        impl ::doxa::ui::Component for #name {
+            type Props = #props_ty;
+            const NAME: &'static str = #name_str;
+
+            fn render(props: #props_ty) -> ::doxa::ui::RenderFuture {
+                ::doxa::ui::react::render(props)
+            }
+        }
+
+        impl ::doxa::ui::ComponentProps for #props_ty {
+            type Of = #name;
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_camel_cased() {
+        assert_eq!(camel("on_change"), "onChange");
+        assert_eq!(camel("read_only_mode"), "readOnlyMode");
+        assert_eq!(camel("value"), "value");
+        assert_eq!(camel("_private"), "private");
+    }
+
+    #[test]
+    fn local_modules_resolve_under_the_crate() {
+        let lit = |s: &str| LitStr::new(s, proc_macro2::Span::call_site());
+        assert_eq!(
+            specifier(&lit("./ts/x.tsx")).unwrap(),
+            "doxa-island:ts/x.tsx"
+        );
+        assert_eq!(
+            specifier(&lit("@monaco-editor/react")).unwrap(),
+            "@monaco-editor/react"
+        );
+        assert!(specifier(&lit("/abs.tsx")).is_err());
+    }
+}

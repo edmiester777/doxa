@@ -183,3 +183,6 @@ async fn no_dangling_refs_remain() {
         "spec contains dangling $refs: {missing:?}"
     );
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

@@ -1,0 +1,1484 @@
+//! Rust types for the schemas a client's routes reach, with their serde shape and the
+//! constraints the client checks before sending.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
+
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::{format_ident, quote};
+
+use super::spec::{Additional, IdentityMeta, Scalar, Schema, Spec};
+use super::{GenerateError, TypeMap};
+
+/// Where a schema is being read, for naming inline types and for errors.
+pub(crate) struct At<'a> {
+    pub operation: &'a str,
+    pub hint: String,
+    /// The component the schema sits in, which is what a `.types(…)` mapping can replace.
+    pub owner: Option<String>,
+}
+
+impl At<'_> {
+    /// The component `schema` has no Rust type.
+    fn unsupported(&self, schema: &str, reason: impl Into<String>) -> GenerateError {
+        GenerateError::Unsupported {
+            schema: schema.to_owned(),
+            operation: self.operation.to_owned(),
+            reason: reason.into(),
+        }
+    }
+
+    /// The schema being read has no Rust type; an inline one is reported as its component.
+    fn here(&self, reason: impl Into<String>) -> GenerateError {
+        let reason = reason.into();
+        match &self.owner {
+            Some(owner) if pascal(owner) != self.hint => self.unsupported(
+                owner,
+                format!("has an inline `{}` that {reason}", self.hint),
+            ),
+            Some(owner) => self.unsupported(owner, reason),
+            None => self.unsupported(&self.hint, reason),
+        }
+    }
+
+    pub(crate) fn child(&self, hint: String) -> At<'_> {
+        At {
+            operation: self.operation,
+            hint,
+            owner: self.owner.clone(),
+        }
+    }
+}
+
+/// An `allOf`'s members as one object, and the ones serde flattens whole.
+struct Merged {
+    object: Schema,
+    flattened: Vec<Schema>,
+}
+
+/// A tagged `oneOf`'s branch: its fields, or the type its variant wraps.
+struct Branch {
+    name: Option<String>,
+    object: Schema,
+    flattened: Vec<Schema>,
+    newtype: Option<Schema>,
+}
+
+/// A type the client defines, from a component or an inline schema.
+struct Pending {
+    name: String,
+    ident: String,
+    component: bool,
+    schema: Schema,
+    operation: String,
+    owner: Option<String>,
+}
+
+/// What generated types derive beyond their wire shape.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Options {
+    pub exhaustive: bool,
+    pub forms: bool,
+}
+
+pub(crate) struct Types<'a> {
+    spec: &'a Spec,
+    map: &'a TypeMap,
+    options: Options,
+    queue: Vec<Pending>,
+    named: BTreeSet<String>,
+    /// Each component's type name, by schema name.
+    components: BTreeMap<String, String>,
+    identities: BTreeMap<String, IdentityMeta>,
+    mapped: BTreeSet<String>,
+    errors: Vec<GenerateError>,
+    /// The schema being rendered; a field that leads back to it is boxed.
+    current: Option<Schema>,
+    box_next: bool,
+}
+
+impl<'a> Types<'a> {
+    pub fn new(spec: &'a Spec, map: &'a TypeMap, options: Options) -> Result<Self, GenerateError> {
+        for path in map.formats.values().chain(map.schemas.values()) {
+            parse_path(path)?;
+        }
+        Ok(Types {
+            spec,
+            map,
+            options,
+            queue: Vec::new(),
+            named: BTreeSet::new(),
+            components: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            mapped: map
+                .formats
+                .values()
+                .chain(map.schemas.values())
+                .cloned()
+                .collect(),
+            errors: Vec::new(),
+            current: None,
+            box_next: false,
+        })
+    }
+
+    /// The type a field or variant holds `schema` as: boxed if it leads back to the type
+    /// being rendered without passing through a `Vec` or map.
+    fn held(&mut self, schema: &Schema, at: &At<'_>) -> Result<TokenStream, GenerateError> {
+        self.box_next = self
+            .current
+            .as_ref()
+            .is_some_and(|c| self.reaches(schema, c, &mut BTreeSet::new()));
+        let ty = self.ty(schema, at);
+        self.box_next = false;
+        ty
+    }
+
+    fn reaches(&self, s: &Schema, target: &Schema, seen: &mut BTreeSet<String>) -> bool {
+        if s == target {
+            return true;
+        }
+        if let Some(n) = s.ref_name() {
+            if self.map.schemas.contains_key(n) || !seen.insert(n.to_owned()) {
+                return false;
+            }
+            return self
+                .spec
+                .components
+                .schemas
+                .get(n)
+                .is_some_and(|c| self.reaches(c, target, seen));
+        }
+        s.all_of
+            .iter()
+            .chain(&s.one_of)
+            .chain(s.properties.values())
+            .any(|c| self.reaches(c, target, seen))
+    }
+
+    /// Note an error and carry on, so one run names every schema that needs a mapping.
+    pub fn record(&mut self, error: GenerateError) {
+        self.errors.push(error);
+    }
+
+    /// Every error recorded, as one.
+    pub fn finish(&mut self) -> Result<(), GenerateError> {
+        let mut errors = std::mem::take(&mut self.errors);
+        match errors.len() {
+            0 => Ok(()),
+            1 => Err(errors.remove(0)),
+            _ => Err(GenerateError::Many(errors)),
+        }
+    }
+
+    /// Mark the component `schema` as an entity the client cache stores by identity.
+    pub fn identity(&mut self, meta: &IdentityMeta) {
+        self.identities.insert(meta.schema.clone(), meta.clone());
+    }
+
+    /// The type a component, named by the server, becomes.
+    pub fn component(&mut self, name: &str, at: &At<'_>) -> Result<TokenStream, GenerateError> {
+        let schema = Schema {
+            reference: Some(format!("#/components/schemas/{name}")),
+            ..Schema::default()
+        };
+        self.ty(&schema, at)
+    }
+
+    /// The Rust type for `schema`, defining every type it reaches.
+    pub fn ty(&mut self, schema: &Schema, at: &At<'_>) -> Result<TokenStream, GenerateError> {
+        if let Some(name) = schema.ref_name() {
+            if let Some(path) = self.map.schemas.get(name) {
+                return parse_path(path);
+            }
+            let component = self
+                .spec
+                .components
+                .schemas
+                .get(name)
+                .ok_or_else(|| at.unsupported(name, "isn't in the document's components"))?;
+            if !nameable(component) {
+                return self.ty(component, &at.child(pascal(name)));
+            }
+            return Ok(self.define(name, component, at));
+        }
+        if let [only] = schema.all_of.as_slice() {
+            return self.ty(only, at);
+        }
+        if let Some(inner) = or_null(schema) {
+            let inner = self.ty(inner, at)?;
+            return Ok(quote!(::core::option::Option<#inner>));
+        }
+        let (ty, nullable) = match &schema.ty {
+            Some(t) => t.split(),
+            None => (None, false),
+        };
+        let inner = match ty {
+            Some("string") if !schema.values.is_empty() => self.inline(schema, at),
+            Some("string") => match schema.format.as_deref() {
+                Some("binary") => quote!(::std::vec::Vec<u8>),
+                Some(f) if self.map.formats.contains_key(f) => parse_path(&self.map.formats[f])?,
+                _ => quote!(::std::string::String),
+            },
+            Some("integer") => integer(schema),
+            Some("number") if schema.format.as_deref() == Some("float") => quote!(f32),
+            Some("number") => quote!(f64),
+            Some("boolean") => quote!(bool),
+            Some("array") => {
+                let items = match &schema.items {
+                    Some(items) => self.ty(items, &at.child(format!("{}Item", at.hint)))?,
+                    None => quote!(::doxa::wire::__Value),
+                };
+                quote!(::std::vec::Vec<#items>)
+            }
+            Some("object") | None
+                if !schema.properties.is_empty()
+                    || !schema.one_of.is_empty()
+                    || schema.all_of.len() > 1 =>
+            {
+                match self.component_like(schema) {
+                    Some(name) if self.map.schemas.contains_key(&name) => {
+                        parse_path(&self.map.schemas[&name])?
+                    }
+                    Some(name) => {
+                        let component = self.spec.components.schemas[&name].clone();
+                        self.define(&name, &component, at)
+                    }
+                    None => self.inline(schema, at),
+                }
+            }
+            Some("object") | None => match &schema.additional_properties {
+                Some(Additional::Schema(values)) => {
+                    let v = self.ty(values, &at.child(format!("{}Value", at.hint)))?;
+                    quote!(::std::collections::BTreeMap<::std::string::String, #v>)
+                }
+                _ if ty.is_none() && nullable => quote!(()),
+                _ => quote!(::doxa::wire::__Value),
+            },
+            Some(other) => return Err(at.here(format!("has type `{other}`"))),
+        };
+        Ok(if nullable {
+            quote!(::core::option::Option<#inner>)
+        } else {
+            inner
+        })
+    }
+
+    /// A component the inline `schema` is a copy of, as utoipa writes `Vec<T>`'s items.
+    fn component_like(&self, schema: &Schema) -> Option<String> {
+        self.spec
+            .components
+            .schemas
+            .iter()
+            .find(|(_, c)| *c == schema)
+            .map(|(n, _)| n.clone())
+    }
+
+    /// The type of component `name`, queued the first time it is reached.
+    fn define(&mut self, name: &str, schema: &Schema, at: &At<'_>) -> TokenStream {
+        self.keyed(name.to_owned(), name, true, schema, at)
+    }
+
+    fn keyed(
+        &mut self,
+        key: String,
+        name: &str,
+        component: bool,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> TokenStream {
+        let ident = match self.components.get(&key) {
+            Some(ident) => ident.clone(),
+            None => {
+                let ident = self.queue_type(name, component, schema, at);
+                self.components.insert(key, ident.clone());
+                ident
+            }
+        };
+        self.named_type(&ident)
+    }
+
+    /// A new type named `base`, or `base2`… when that is taken.
+    fn fresh(&mut self, base: &str, schema: &Schema, at: &At<'_>) -> TokenStream {
+        let ident = self.queue_type(base, false, schema, at);
+        self.named_type(&ident)
+    }
+
+    fn queue_type(&mut self, name: &str, component: bool, schema: &Schema, at: &At<'_>) -> String {
+        let ident = unique(pascal(name), &mut self.named);
+        self.queue.push(Pending {
+            name: name.to_owned(),
+            ident: ident.clone(),
+            component,
+            schema: schema.clone(),
+            operation: at.operation.to_owned(),
+            owner: at.owner.clone(),
+        });
+        ident
+    }
+
+    fn named_type(&mut self, ident: &str) -> TokenStream {
+        let ident = Ident::new(ident, Span::call_site());
+        if std::mem::take(&mut self.box_next) {
+            quote!(::std::boxed::Box<#ident>)
+        } else {
+            quote!(#ident)
+        }
+    }
+
+    fn inline(&mut self, schema: &Schema, at: &At<'_>) -> TokenStream {
+        let hint = at.hint.clone();
+        self.fresh(&hint, schema, at)
+    }
+
+    /// The type of `error` in the bodies doxa answers a failure with (`{ message, status, code,
+    /// error }`): the smallest component enum with every variant they name, else its own `name`.
+    pub fn error_of(
+        &mut self,
+        bodies: &[&Schema],
+        name: &str,
+        at: &At<'_>,
+    ) -> Result<Option<TokenStream>, GenerateError> {
+        let mut branches: BTreeMap<String, Schema> = BTreeMap::new();
+        for body in bodies {
+            let body = self.resolve(body);
+            let body = match body.all_of.len() {
+                0 | 1 => body,
+                _ => self.merge(&body, at)?.object,
+            };
+            let props = &body.properties;
+            if !(props.contains_key("code") && props.contains_key("message")) {
+                continue;
+            }
+            let Some(error) = props.get("error") else {
+                continue;
+            };
+            for b in &self.resolve(error).one_of {
+                if let Some(key) = self.single_key(b) {
+                    branches.entry(key).or_insert_with(|| self.resolve(b));
+                }
+            }
+        }
+        if branches.is_empty() {
+            return Ok(None);
+        }
+        let keys: BTreeSet<String> = branches.keys().cloned().collect();
+        let component = self
+            .spec
+            .components
+            .schemas
+            .iter()
+            .filter_map(|(n, c)| {
+                let ks = c
+                    .one_of
+                    .iter()
+                    .map(|b| self.single_key(b))
+                    .collect::<Option<BTreeSet<String>>>()?;
+                ks.is_superset(&keys).then(|| (ks.len(), n.clone()))
+            })
+            .min();
+        if let Some((_, n)) = component {
+            return self.component(&n, at).map(Some);
+        }
+        let schema = Schema {
+            one_of: branches.into_values().collect(),
+            ..Schema::default()
+        };
+        Ok(Some(self.fresh(name, &schema, at)))
+    }
+
+    /// The one key of a branch serde writes as `{ "Variant": … }`.
+    fn single_key(&self, b: &Schema) -> Option<String> {
+        let b = self.resolve(b);
+        match b.properties.keys().collect::<Vec<_>>()[..] {
+            [k] if b.all_of.is_empty() && b.one_of.is_empty() => Some(k.clone()),
+            _ => None,
+        }
+    }
+
+    /// A struct of query or header parameters, named `name`; `shared` names one several routes use.
+    pub fn query(
+        &mut self,
+        name: &str,
+        shared: bool,
+        params: Vec<(String, Schema, bool)>,
+        at: &At<'_>,
+    ) -> TokenStream {
+        let schema = Schema {
+            ty: Some(super::spec::Types::One("object".into())),
+            required: params
+                .iter()
+                .filter(|(_, _, req)| *req)
+                .map(|(n, _, _)| n.clone())
+                .collect(),
+            properties: params
+                .into_iter()
+                .map(|(n, s, _)| (n, non_null(s)))
+                .collect(),
+            ..Schema::default()
+        };
+        match shared {
+            true => self.keyed(format!("?{name}"), name, false, &schema, at),
+            false => self.fresh(name, &schema, at),
+        }
+    }
+
+    /// Every type defined so far, and the ones they reach.
+    pub fn render(&mut self) -> Result<TokenStream, GenerateError> {
+        let mut out = TokenStream::new();
+        while let Some(p) = self.queue.pop() {
+            let owner = match p.component {
+                true => Some(p.name.clone()),
+                false => p.owner.clone(),
+            };
+            let at = At {
+                operation: &p.operation,
+                hint: p.ident.clone(),
+                owner,
+            };
+            match self.render_one(&p.name, &p.ident, &p.schema, &at) {
+                Ok(item) => out.extend(item),
+                Err(e) => self.record(e),
+            }
+        }
+        let mut seen = BTreeSet::new();
+        let mapped = self
+            .mapped
+            .iter()
+            .filter(|p| {
+                let key = canonical(p);
+                !covered(&key) && seen.insert(key)
+            })
+            .map(|p| parse_path(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prelude = prelude(&mapped);
+        Ok(quote!(#prelude #out))
+    }
+
+    fn render_one(
+        &mut self,
+        name: &str,
+        ident: &str,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> Result<TokenStream, GenerateError> {
+        let ident = Ident::new(ident, Span::call_site());
+        self.current = Some(schema.clone());
+        let docs = doc(schema.description.as_deref());
+        if !schema.values.is_empty() {
+            return self.string_enum(&ident, &docs, schema, at);
+        }
+        if !schema.one_of.is_empty() {
+            return match &schema.discriminator {
+                Some(d) => self.tagged(&ident, &docs, schema, &d.property_name, at),
+                None => match self.inferred_tag(schema, at)? {
+                    Some(tag) => self.tagged(&ident, &docs, schema, &tag, at),
+                    None if self.externally_tagged(schema) => {
+                        self.external(&ident, &docs, schema, at)
+                    }
+                    None => self.untagged(&ident, &docs, schema, at),
+                },
+            };
+        }
+        let docs = match (&schema.description, schema.all_of.is_empty()) {
+            (None, false) => doc(self.merge(schema, at)?.object.description.as_deref()),
+            _ => docs,
+        };
+        let fields = self.object_fields(schema, at)?;
+        let default = match self.options.forms {
+            true => quote!(#[derive(::core::default::Default, ::doxa::ui::Form)]),
+            false => {
+                if fields.iter().all(|f| f.optional) {
+                    quote!(#[derive(::core::default::Default)])
+                } else {
+                    Default::default()
+                }
+            }
+        };
+        let checks = fields.iter().map(|f| f.check.clone());
+        let decls = fields.iter().map(|f| f.decl.clone());
+        let identity = match self.identities.get(name) {
+            Some(meta) => {
+                let entity = &meta.entity;
+                let id = field_ident(&meta.id).0;
+                let key = meta.key.as_ref().map(|k| {
+                    let ty = format_ident!("{}", k.ty);
+                    let fields = k.fields.iter().map(|f| field_ident(f).0);
+                    quote!(, key = #ty { #(#fields),* })
+                });
+                quote! {
+                    #[derive(::doxa::Identity)]
+                    #[identity(entity = #entity, id = #id #key)]
+                }
+            }
+            None => quote!(),
+        };
+        Ok(quote! {
+            #docs
+            #DERIVES
+            #default
+            #identity
+            pub struct #ident { #(#decls,)* }
+
+            impl __Constraints for #ident {
+                fn check_into(&self, path: &str, out: &mut ::doxa::wire::FieldErrors) {
+                    let _ = (&path, &out);
+                    #(#checks)*
+                }
+            }
+        })
+    }
+
+    /// Whether [`Types::ty`] wraps `schema`'s type in `Option` because it allows `null`.
+    fn nullable(&self, schema: &Schema) -> bool {
+        if let Some(name) = schema.ref_name() {
+            return !self.map.schemas.contains_key(name)
+                && self
+                    .spec
+                    .components
+                    .schemas
+                    .get(name)
+                    .is_some_and(|c| !nameable(c) && self.nullable(c));
+        }
+        if let [only] = schema.all_of.as_slice() {
+            return self.nullable(only);
+        }
+        or_null(schema).is_some() || schema.ty.as_ref().is_some_and(|t| t.split().1)
+    }
+
+    /// The fields of an object, with an `allOf`'s members merged in or flattened.
+    fn object_fields(&mut self, schema: &Schema, at: &At<'_>) -> Result<Vec<Field>, GenerateError> {
+        if schema.all_of.len() < 2 {
+            return self.fields(schema, at);
+        }
+        let merged = self.merge(schema, at)?;
+        let mut out = self.fields(&merged.object, at)?;
+        out.extend(self.flattened_fields(&merged.flattened, at)?);
+        Ok(out)
+    }
+
+    /// A `#[serde(flatten)]` field for each of `members`.
+    fn flattened_fields(
+        &mut self,
+        members: &[Schema],
+        at: &At<'_>,
+    ) -> Result<Vec<Field>, GenerateError> {
+        let mut out = Vec::new();
+        let mut kinds = 0;
+        for member in members {
+            let (name, hint) = match member.ref_name() {
+                Some(n) => (n.to_owned(), pascal(n)),
+                None => {
+                    kinds += 1;
+                    let n = if kinds == 1 {
+                        "kind".to_owned()
+                    } else {
+                        format!("kind{kinds}")
+                    };
+                    let hint = format!("{}{}", at.hint, pascal(&n));
+                    (n, hint)
+                }
+            };
+            let ident = field_ident(&name).0;
+            let ty = self.held(member, &at.child(hint))?;
+            out.push(Field {
+                optional: false,
+                ident: ident.clone(),
+                decl: quote!(#[serde(flatten)] pub #ident: #ty),
+                bare: quote!(#[serde(flatten)] #ident: #ty),
+                check: quote!(__Constraints::check_into(&self.#ident, path, out);),
+            });
+        }
+        Ok(out)
+    }
+
+    /// An `allOf` as one object: the members' properties, and the members serde flattens
+    /// whole (an enum, a map, a mapped type).
+    fn merge(&self, schema: &Schema, at: &At<'_>) -> Result<Merged, GenerateError> {
+        let mut out = Merged {
+            object: Schema {
+                description: schema.description.clone(),
+                properties: schema.properties.clone(),
+                required: schema.required.clone(),
+                ..Schema::default()
+            },
+            flattened: Vec::new(),
+        };
+        for member in &schema.all_of {
+            self.merge_member(member, &mut out, at)?;
+        }
+        Ok(out)
+    }
+
+    fn merge_member(
+        &self,
+        member: &Schema,
+        out: &mut Merged,
+        at: &At<'_>,
+    ) -> Result<(), GenerateError> {
+        let resolved = match member.ref_name() {
+            Some(n) if self.map.schemas.contains_key(n) => {
+                out.flattened.push(member.clone());
+                return Ok(());
+            }
+            Some(n) => self
+                .spec
+                .components
+                .schemas
+                .get(n)
+                .ok_or_else(|| at.unsupported(n, "isn't in the document's components"))?,
+            None => member,
+        };
+        if !resolved.all_of.is_empty() {
+            for m in &resolved.all_of {
+                self.merge_member(m, out, at)?;
+            }
+        } else if !resolved.one_of.is_empty()
+            || (resolved.properties.is_empty()
+                && matches!(resolved.additional_properties, Some(Additional::Schema(_))))
+        {
+            out.flattened.push(member.clone());
+            return Ok(());
+        } else if let Some(t) = resolved.ty.as_ref().and_then(|t| t.split().0) {
+            if t != "object" {
+                return Err(at.here(format!("is an `allOf` with a member of type `{t}`")));
+            }
+        }
+        for (k, v) in &resolved.properties {
+            out.object
+                .properties
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        for r in &resolved.required {
+            if !out.object.required.contains(r) {
+                out.object.required.push(r.clone());
+            }
+        }
+        if out.object.description.is_none() {
+            out.object.description = resolved.description.clone();
+        }
+        Ok(())
+    }
+
+    /// Each property by `required` and `nullable`; absent and nullable is `Option<Option<T>>`.
+    fn fields(&mut self, schema: &Schema, at: &At<'_>) -> Result<Vec<Field>, GenerateError> {
+        let mut out = Vec::new();
+        let mut taken = BTreeSet::new();
+        for (name, prop) in &schema.properties {
+            let required = schema.required.contains(name);
+            let nullable = self.nullable(prop);
+            let ty = self.held(prop, &at.child(format!("{}{}", at.hint, pascal(name))))?;
+            let (ident, renamed) = unique_field(name, &mut taken);
+            let rename = renamed.then(|| quote!(#[serde(rename = #name)]));
+            let docs = doc(prop.description.as_deref());
+            let (ty, default) = match (required, nullable) {
+                (true, _) => (ty, quote!()),
+                (false, false) => (
+                    quote!(::core::option::Option<#ty>),
+                    quote!(#[serde(default, skip_serializing_if = "Option::is_none")]),
+                ),
+                (false, true) => (
+                    quote!(::core::option::Option<#ty>),
+                    quote!(#[serde(
+                        default,
+                        skip_serializing_if = "Option::is_none",
+                        with = "::doxa::wire::double_option"
+                    )]),
+                ),
+            };
+            let layers = usize::from(!required) + usize::from(nullable);
+            let some = quote!(::core::option::Option::Some);
+            let rules = constraints(prop, name);
+            let body = quote! {
+                let at = __join(path, #name);
+                #rules
+                __Constraints::check_into(v, &at, out);
+            };
+            let check = match layers {
+                0 => quote!({ let v = &self.#ident; #body }),
+                1 => quote!(if let #some(v) = &self.#ident { #body }),
+                _ => quote!(if let #some(#some(v)) = &self.#ident { #body }),
+            };
+            let shape = match self.options.forms && layers == 0 {
+                true => self.form_shape(prop),
+                false => quote!(),
+            };
+            out.push(Field {
+                optional: layers > 0,
+                ident: ident.clone(),
+                decl: quote!(#docs #rename #default #shape pub #ident: #ty),
+                bare: quote!(#docs #rename #default #shape #ident: #ty),
+                check,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `#[form(nested)]` for a field of a generated type, `#[form(list)]` for a `Vec` of them;
+    /// nothing unless `.forms()`.
+    fn form_shape(&self, prop: &Schema) -> TokenStream {
+        if !self.options.forms {
+            return quote!();
+        }
+        let boxed = self
+            .current
+            .as_ref()
+            .is_some_and(|c| self.reaches(prop, c, &mut BTreeSet::new()));
+        if boxed {
+            return quote!();
+        }
+        if self.generated(prop) {
+            return quote!(#[form(nested)]);
+        }
+        let array = prop.ty.as_ref().map(super::spec::Types::split) == Some((Some("array"), false));
+        match &prop.items {
+            Some(items) if array && self.generated(items) => quote!(#[form(list)]),
+            _ => quote!(),
+        }
+    }
+
+    /// Whether `s` is a type this crate generates, which derives `Form` too.
+    fn generated(&self, s: &Schema) -> bool {
+        if let Some(n) = s.ref_name() {
+            return !self.map.schemas.contains_key(n)
+                && self
+                    .spec
+                    .components
+                    .schemas
+                    .get(n)
+                    .is_some_and(|c| nameable(c) || self.generated(c));
+        }
+        if let [only] = s.all_of.as_slice() {
+            return self.generated(only);
+        }
+        let (ty, nullable) = s.ty.as_ref().map_or((None, false), |t| t.split());
+        if or_null(s).is_some() || nullable {
+            return false;
+        }
+        match ty {
+            Some("string") => !s.values.is_empty(),
+            Some("object") | None => {
+                (!s.properties.is_empty() || !s.one_of.is_empty() || s.all_of.len() > 1)
+                    && !self
+                        .component_like(s)
+                        .is_some_and(|n| self.map.schemas.contains_key(&n))
+            }
+            _ => false,
+        }
+    }
+
+    /// One branch of a tagged `oneOf`, its `allOf` merged. A branch that is another type plus
+    /// the tag, as serde writes a newtype variant, keeps that type.
+    fn branch(&self, b: &Schema, tag: &str, at: &At<'_>) -> Result<Branch, GenerateError> {
+        let (name, resolved) = match b.ref_name() {
+            Some(n) => (
+                Some(n.to_owned()),
+                self.spec
+                    .components
+                    .schemas
+                    .get(n)
+                    .cloned()
+                    .ok_or_else(|| at.unsupported(n, "isn't in the document's components"))?,
+            ),
+            None => (None, b.clone()),
+        };
+        let mapped = name
+            .as_deref()
+            .is_some_and(|n| self.map.schemas.contains_key(n));
+        if resolved.all_of.len() < 2 {
+            return Ok(Branch {
+                name,
+                object: resolved,
+                flattened: Vec::new(),
+                newtype: mapped.then(|| b.clone()),
+            });
+        }
+        if mapped {
+            return Ok(Branch {
+                name,
+                object: self.merge(&resolved, at)?.object,
+                flattened: Vec::new(),
+                newtype: Some(b.clone()),
+            });
+        }
+        let merged = self.merge(&resolved, at)?;
+        let (refs, inline): (Vec<&Schema>, Vec<&Schema>) =
+            resolved.all_of.iter().partition(|m| m.ref_name().is_some());
+        let tag_only = inline.iter().all(|m| {
+            m.all_of.is_empty() && m.one_of.is_empty() && m.properties.keys().all(|k| k == tag)
+        });
+        let newtype = match refs.as_slice() {
+            [r] if tag_only => Some((*r).clone()),
+            _ => None,
+        };
+        Ok(Branch {
+            name,
+            object: merged.object,
+            flattened: merged.flattened,
+            newtype,
+        })
+    }
+
+    /// `oneOf` with a discriminator: the tag, and the rest inline or under one content key.
+    fn tagged(
+        &mut self,
+        ident: &Ident,
+        docs: &TokenStream,
+        schema: &Schema,
+        tag: &str,
+        at: &At<'_>,
+    ) -> Result<TokenStream, GenerateError> {
+        let branches: Vec<Branch> = schema
+            .one_of
+            .iter()
+            .map(|b| self.branch(b, tag, at))
+            .collect::<Result<_, _>>()?;
+        let others: BTreeSet<&String> = branches
+            .iter()
+            .flat_map(|b| b.object.properties.keys().filter(|k| *k != tag))
+            .collect();
+        let content = match others.iter().collect::<Vec<_>>().as_slice() {
+            [only] => Some((**only).clone()),
+            _ => None,
+        };
+        let mut variants = Vec::new();
+        let mut taken = BTreeSet::new();
+        for Branch {
+            name,
+            object: branch,
+            flattened,
+            newtype,
+        } in &branches
+        {
+            let value = branch
+                .properties
+                .get(tag)
+                .and_then(|t| t.values.first())
+                .and_then(|v| match v {
+                    Scalar::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    let reason =
+                        format!("is a `oneOf` branch whose `{tag}` isn't a string constant");
+                    match name {
+                        Some(n) => at.unsupported(n, reason),
+                        None => at.here(reason),
+                    }
+                })?;
+            let variant = Ident::new(&unique(pascal(&value), &mut taken), Span::call_site());
+            let hint = format!("{}{}", at.hint, variant);
+            let rename = quote!(#[serde(rename = #value)]);
+            variants.push(match &content {
+                Some(key) => match branch.properties.get(key) {
+                    None => Variant::unit(rename, variant),
+                    Some(c) if c.ref_name().is_none() && !c.properties.is_empty() => {
+                        let fields = self.fields(c, &at.child(hint))?;
+                        Variant::fields(rename, variant, &fields)
+                    }
+                    Some(c) => self.newtype(rename, variant, c, &at.child(hint))?,
+                },
+                None if newtype.is_some() => {
+                    let held = newtype.as_ref().expect("checked");
+                    self.newtype(rename, variant, held, &at.child(hint))?
+                }
+                None => {
+                    let mut rest = branch.clone();
+                    rest.properties.remove(tag);
+                    rest.required.retain(|r| r != tag);
+                    if rest.properties.is_empty() && flattened.is_empty() {
+                        Variant::unit(rename, variant)
+                    } else {
+                        let at = at.child(hint);
+                        let mut fields = self.fields(&rest, &at)?;
+                        fields.extend(self.flattened_fields(flattened, &at)?);
+                        Variant::fields(rename, variant, &fields)
+                    }
+                }
+            });
+        }
+        let repr = match &content {
+            Some(c) => quote!(#[serde(tag = #tag, content = #c)]),
+            None => quote!(#[serde(tag = #tag)]),
+        };
+        Ok(self.enum_items(ident, docs, repr, &variants))
+    }
+
+    /// `oneOf` without one, as serde writes an externally tagged enum.
+    fn external(
+        &mut self,
+        ident: &Ident,
+        docs: &TokenStream,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> Result<TokenStream, GenerateError> {
+        let mut variants = Vec::new();
+        let mut taken = BTreeSet::new();
+        // A mapped branch is a whole object, which only an untagged variant, after the rest, reads.
+        let mut mapped = Vec::new();
+        for raw in &schema.one_of {
+            if let Some(n) = raw.ref_name().filter(|n| self.map.schemas.contains_key(*n)) {
+                let variant = Ident::new(&unique(pascal(n), &mut taken), Span::call_site());
+                let ty = parse_path(&self.map.schemas[n])?;
+                mapped.push(Variant::tuple(
+                    quote!(#[serde(untagged)]),
+                    variant,
+                    quote!(#ty),
+                ));
+                continue;
+            }
+            let branch = self.resolve(raw);
+            if !branch.values.is_empty() {
+                for v in &branch.values {
+                    let Scalar::Str(v) = v else {
+                        return Err(at.here("has a non-string enum value"));
+                    };
+                    let variant = Ident::new(&unique(pascal(v), &mut taken), Span::call_site());
+                    variants.push(Variant::unit(quote!(#[serde(rename = #v)]), variant));
+                }
+                continue;
+            }
+            let [(key, payload)] = branch.properties.iter().collect::<Vec<_>>()[..] else {
+                return Err(at.here("is a `oneOf` that is neither tagged nor one key per branch"));
+            };
+            let variant = Ident::new(&unique(pascal(key), &mut taken), Span::call_site());
+            let at = at.child(format!("{}{}", at.hint, variant));
+            variants.push(self.newtype(quote!(#[serde(rename = #key)]), variant, payload, &at)?);
+        }
+        variants.extend(mapped);
+        Ok(self.enum_items(ident, docs, quote!(), &variants))
+    }
+
+    /// A variant holding `payload`'s type.
+    fn newtype(
+        &mut self,
+        attrs: TokenStream,
+        name: Ident,
+        payload: &Schema,
+        at: &At<'_>,
+    ) -> Result<Variant, GenerateError> {
+        let ty = self.held(payload, at)?;
+        let shape = self.form_shape(payload);
+        Ok(Variant::tuple(attrs, name, quote!(#shape #ty)))
+    }
+
+    /// `b`, through its `$ref`.
+    fn resolve(&self, b: &Schema) -> Schema {
+        match b.ref_name() {
+            Some(n) => self
+                .spec
+                .components
+                .schemas
+                .get(n)
+                .cloned()
+                .unwrap_or_default(),
+            None => b.clone(),
+        }
+    }
+
+    /// Whether every branch is string constants or an object of one key, as serde writes an
+    /// externally tagged enum.
+    fn externally_tagged(&self, schema: &Schema) -> bool {
+        schema.one_of.iter().all(|raw| {
+            if raw
+                .ref_name()
+                .is_some_and(|n| self.map.schemas.contains_key(n))
+            {
+                return true;
+            }
+            let b = self.resolve(raw);
+            if !b.values.is_empty() {
+                return b.values.iter().all(|v| matches!(v, Scalar::Str(_)));
+            }
+            b.properties.len() == 1 && b.all_of.is_empty() && b.one_of.is_empty()
+        })
+    }
+
+    /// The property serde's `#[serde(tag = …)]` writes, when the document names no
+    /// discriminator: required in every branch, one string constant each, all different.
+    fn inferred_tag(&self, schema: &Schema, at: &At<'_>) -> Result<Option<String>, GenerateError> {
+        let mut objects = Vec::new();
+        for b in &schema.one_of {
+            let b = self.resolve(b);
+            objects.push(match b.all_of.len() {
+                0 | 1 => b,
+                _ => self.merge(&b, at)?.object,
+            });
+        }
+        let Some(first) = objects.first() else {
+            return Ok(None);
+        };
+        let constant = |o: &Schema, k: &str| match o.properties.get(k).map(|p| p.values.as_slice())
+        {
+            Some([Scalar::Str(v)]) if o.required.iter().any(|r| r == k) => Some(v.clone()),
+            _ => None,
+        };
+        let candidates: Vec<&String> = first
+            .properties
+            .keys()
+            .filter(|k| {
+                let values: Option<BTreeSet<String>> =
+                    objects.iter().map(|o| constant(o, k)).collect();
+                values.is_some_and(|v| v.len() == objects.len())
+            })
+            .collect();
+        let preferred = ["type", "kind", "tag", "event"]
+            .iter()
+            .find_map(|p| candidates.iter().find(|c| c.as_str() == *p));
+        Ok(preferred.or(candidates.first()).map(|c| (*c).clone()))
+    }
+
+    /// `oneOf` with nothing to tell its branches apart by but their shape, as serde writes an
+    /// untagged enum: the first branch that reads wins.
+    fn untagged(
+        &mut self,
+        ident: &Ident,
+        docs: &TokenStream,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> Result<TokenStream, GenerateError> {
+        let mut used = BTreeSet::new();
+        let mut variants = Vec::new();
+        for branch in &schema.one_of {
+            let resolved = self.resolve(branch);
+            let base = match branch.ref_name() {
+                Some(n) => pascal(n),
+                None => match resolved.ty.as_ref().and_then(|t| t.split().0) {
+                    Some("string") => "String".into(),
+                    Some("integer") => "Integer".into(),
+                    Some("number") => "Number".into(),
+                    Some("boolean") => "Bool".into(),
+                    Some("array") => "List".into(),
+                    None if resolved.ty.as_ref().is_some_and(|t| t.split().1) => "Null".into(),
+                    _ => "Object".into(),
+                },
+            };
+            let name = unique(base, &mut used);
+            let variant = Ident::new(&name, Span::call_site());
+            if name == "Null" {
+                variants.push(Variant::unit(quote!(), variant));
+                continue;
+            }
+            let at = at.child(format!("{}{name}", at.hint));
+            variants.push(self.newtype(quote!(), variant, branch, &at)?);
+        }
+        Ok(self.enum_items(ident, docs, quote!(#[serde(untagged)]), &variants))
+    }
+}
+
+/// One variant of a generated enum, and the value it starts at in a form.
+struct Variant {
+    decl: TokenStream,
+    default: TokenStream,
+    unit: bool,
+}
+
+impl Variant {
+    fn unit(attrs: TokenStream, name: Ident) -> Self {
+        Variant {
+            decl: quote!(#attrs #name),
+            default: quote!(Self::#name),
+            unit: true,
+        }
+    }
+
+    fn tuple(attrs: TokenStream, name: Ident, field: TokenStream) -> Self {
+        Variant {
+            decl: quote!(#attrs #name(#field)),
+            default: quote!(Self::#name(::core::default::Default::default())),
+            unit: false,
+        }
+    }
+
+    fn fields(attrs: TokenStream, name: Ident, fields: &[Field]) -> Self {
+        let decls = fields.iter().map(|f| &f.bare);
+        let idents = fields.iter().map(|f| &f.ident);
+        Variant {
+            decl: quote!(#attrs #name { #(#decls,)* }),
+            default: quote!(Self::#name { #(#idents: ::core::default::Default::default(),)* }),
+            unit: false,
+        }
+    }
+}
+
+struct Field {
+    optional: bool,
+    ident: Ident,
+    decl: TokenStream,
+    /// Without `pub`, for an enum variant.
+    bare: TokenStream,
+    check: TokenStream,
+}
+
+const DERIVES: Derives = Derives;
+
+struct Derives;
+
+impl quote::ToTokens for Derives {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        tokens.extend(quote! {
+            #[derive(
+                ::core::fmt::Debug,
+                ::core::clone::Clone,
+                ::core::cmp::PartialEq,
+                ::doxa::__serde::Serialize,
+                ::doxa::__serde::Deserialize,
+            )]
+            #[serde(crate = "::doxa::__serde")]
+        });
+    }
+}
+
+impl Types<'_> {
+    fn enum_items(
+        &self,
+        ident: &Ident,
+        docs: &TokenStream,
+        repr: TokenStream,
+        variants: &[Variant],
+    ) -> TokenStream {
+        let open = (!self.options.exhaustive).then(|| quote!(#[non_exhaustive]));
+        let form = self.options.forms.then(|| {
+            let first = variants.iter().find(|v| v.unit).or(variants.first());
+            let default = first.map_or_else(|| quote!(unreachable!()), |v| v.default.clone());
+            quote! {
+                impl ::core::default::Default for #ident {
+                    fn default() -> Self {
+                        #default
+                    }
+                }
+            }
+        });
+        let derive = form.is_some().then(|| quote!(#[derive(::doxa::ui::Form)]));
+        let decls = variants.iter().map(|v| &v.decl);
+        quote! {
+            #docs
+            #DERIVES
+            #derive
+            #repr
+            #open
+            pub enum #ident { #(#decls,)* }
+
+            #form
+
+            impl ::core::fmt::Display for #ident {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    ::core::fmt::Debug::fmt(self, f)
+                }
+            }
+
+            impl __Constraints for #ident {}
+        }
+    }
+
+    fn string_enum(
+        &self,
+        ident: &Ident,
+        docs: &TokenStream,
+        schema: &Schema,
+        at: &At<'_>,
+    ) -> Result<TokenStream, GenerateError> {
+        let mut variants = Vec::new();
+        let mut taken = BTreeSet::new();
+        for v in &schema.values {
+            let Scalar::Str(v) = v else {
+                return Err(at.here("has a non-string enum value"));
+            };
+            let variant = Ident::new(&unique(pascal(v), &mut taken), Span::call_site());
+            variants.push(Variant::unit(quote!(#[serde(rename = #v)]), variant));
+        }
+        Ok(self.enum_items(ident, docs, quote!(), &variants))
+    }
+}
+
+/// The checks on one field whose value is `v` at path `at`, as garde words them.
+fn constraints(schema: &Schema, name: &str) -> TokenStream {
+    let _ = name;
+    let mut out = TokenStream::new();
+    let push = |message: TokenStream| {
+        quote! {
+            out.0.push(::doxa::wire::FieldError { path: at.clone(), message: #message });
+        }
+    };
+    if let Some(min) = schema.min_length {
+        let m = push(quote!(::std::format!("length is lower than {}", #min)));
+        out.extend(quote!(if (v.chars().count() as u64) < #min { #m }));
+    }
+    if let Some(max) = schema.max_length {
+        let m = push(quote!(::std::format!("length is greater than {}", #max)));
+        out.extend(quote!(if (v.chars().count() as u64) > #max { #m }));
+    }
+    if let Some(min) = schema.min_items {
+        let m = push(quote!(::std::format!("length is lower than {}", #min)));
+        out.extend(quote!(if (v.len() as u64) < #min { #m }));
+    }
+    if let Some(max) = schema.max_items {
+        let m = push(quote!(::std::format!("length is greater than {}", #max)));
+        out.extend(quote!(if (v.len() as u64) > #max { #m }));
+    }
+    // `minimum: 0` is how utoipa marks an unsigned type, which the type already enforces.
+    if let Some(min) = schema.minimum.filter(|m| *m != 0.0) {
+        let m = push(quote!(::std::format!("lower than {}", #min)));
+        out.extend(quote!(if (*v as f64) < #min { #m }));
+    }
+    if let Some(max) = schema.maximum {
+        let m = push(quote!(::std::format!("greater than {}", #max)));
+        out.extend(quote!(if (*v as f64) > #max { #m }));
+    }
+    out
+}
+
+/// What every generated client starts with: the constraint walk and its `Validates` wrapper.
+fn prelude(mapped: &[TokenStream]) -> TokenStream {
+    quote! {
+        /// The constraints a value's schema carries, checked as the client sends it.
+        pub trait __Constraints {
+            /// Push each failure under `path`.
+            fn check_into(&self, path: &str, out: &mut ::doxa::wire::FieldErrors) {
+                let _ = (path, out);
+            }
+        }
+
+        fn __join(path: &str, field: &str) -> ::std::string::String {
+            if path.is_empty() { field.to_owned() } else { ::std::format!("{path}.{field}") }
+        }
+
+        impl __Constraints for ::std::string::String {}
+        impl __Constraints for bool {}
+        impl __Constraints for u8 {}
+        impl __Constraints for i32 {}
+        impl __Constraints for i64 {}
+        impl __Constraints for u32 {}
+        impl __Constraints for u64 {}
+        impl __Constraints for f32 {}
+        impl __Constraints for f64 {}
+        impl __Constraints for () {}
+        impl __Constraints for ::doxa::wire::__Value {}
+        #(impl __Constraints for #mapped {})*
+        impl<T: __Constraints> __Constraints for ::std::vec::Vec<T> {
+            fn check_into(&self, path: &str, out: &mut ::doxa::wire::FieldErrors) {
+                for (i, v) in self.iter().enumerate() {
+                    v.check_into(&::std::format!("{path}[{i}]"), out);
+                }
+            }
+        }
+        impl<T: __Constraints> __Constraints for ::core::option::Option<T> {
+            fn check_into(&self, path: &str, out: &mut ::doxa::wire::FieldErrors) {
+                if let ::core::option::Option::Some(v) = self {
+                    v.check_into(path, out);
+                }
+            }
+        }
+        impl<T> __Constraints for ::std::collections::BTreeMap<::std::string::String, T> {}
+        impl<T: __Constraints> __Constraints for ::std::boxed::Box<T> {
+            fn check_into(&self, path: &str, out: &mut ::doxa::wire::FieldErrors) {
+                (**self).check_into(path, out);
+            }
+        }
+
+        /// A body the client checks against its schema's constraints before sending.
+        pub struct Spec<E>(pub E);
+
+        impl<T: __Constraints> ::doxa::wire::Validates for Spec<::doxa::client::Json<T>> {
+            type Value = T;
+            fn check(value: &T) -> ::core::result::Result<(), ::doxa::wire::FieldErrors> {
+                let mut out = ::doxa::wire::FieldErrors::default();
+                value.check_into("", &mut out);
+                if out.0.is_empty() { ::core::result::Result::Ok(()) } else { ::core::result::Result::Err(out) }
+            }
+        }
+
+        impl<T: __Constraints> ::doxa::wire::Validates for Spec<::doxa::client::Form<T>> {
+            type Value = T;
+            fn check(value: &T) -> ::core::result::Result<(), ::doxa::wire::FieldErrors> {
+                <Spec<::doxa::client::Json<T>> as ::doxa::wire::Validates>::check(value)
+            }
+        }
+    }
+}
+
+/// A type path without whitespace or the std prefixes, so two spellings of one type compare equal.
+fn canonical(path: &str) -> String {
+    let mut s: String = path.chars().filter(|c| !c.is_whitespace()).collect();
+    for prefix in [
+        "::",
+        "std::",
+        "alloc::",
+        "core::",
+        "string::",
+        "vec::",
+        "option::",
+        "boxed::",
+        "collections::",
+        "primitive::",
+    ] {
+        while let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.to_owned();
+        }
+    }
+    s
+}
+
+/// Whether the prelude already implements `__Constraints` for this canonical path.
+fn covered(path: &str) -> bool {
+    const OWN: &[&str] = &[
+        "String",
+        "bool",
+        "u8",
+        "i32",
+        "i64",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
+        "()",
+        "doxa::wire::__Value",
+    ];
+    OWN.contains(&path)
+        || ["Vec<", "Option<", "Box<", "BTreeMap<"]
+            .iter()
+            .any(|head| path.starts_with(head))
+}
+
+/// `name`, or `name2`, `name3`… when it is already in `taken`.
+fn unique(name: String, taken: &mut BTreeSet<String>) -> String {
+    let mut out = name.clone();
+    let mut n = 2;
+    while !taken.insert(out.clone()) {
+        out = format!("{name}{n}");
+        n += 1;
+    }
+    out
+}
+
+/// Whether a component gets a type of its own rather than being written inline.
+fn nameable(schema: &Schema) -> bool {
+    or_null(schema).is_none()
+        && (!schema.properties.is_empty()
+            || !schema.one_of.is_empty()
+            || !schema.values.is_empty()
+            || schema.all_of.len() > 1)
+}
+
+/// `schema` without `null`, which a query string can't carry.
+fn non_null(schema: Schema) -> Schema {
+    if let Some(inner) = or_null(&schema) {
+        return inner.clone();
+    }
+    let ty = match schema.ty {
+        Some(super::spec::Types::Many(ts)) => Some(super::spec::Types::Many(
+            ts.into_iter().filter(|t| t != "null").collect(),
+        )),
+        ty => ty,
+    };
+    Schema { ty, ..schema }
+}
+
+/// `X` in `oneOf: [{type: null}, X]`, as utoipa writes a nullable reference.
+fn or_null(schema: &Schema) -> Option<&Schema> {
+    let is_null = |s: &Schema| {
+        s.reference.is_none()
+            && s.one_of.is_empty()
+            && s.ty.as_ref().map(super::spec::Types::split) == Some((None, true))
+    };
+    match schema.one_of.as_slice() {
+        [a, b] if is_null(a) && !is_null(b) => Some(b),
+        [a, b] if is_null(b) && !is_null(a) => Some(a),
+        _ => None,
+    }
+}
+
+fn integer(schema: &Schema) -> TokenStream {
+    let unsigned = schema.minimum.is_some_and(|m| m >= 0.0);
+    match (schema.format.as_deref(), unsigned) {
+        (Some("int32"), true) => quote!(u32),
+        (Some("int32"), false) => quote!(i32),
+        (_, true) => quote!(u64),
+        (_, false) => quote!(i64),
+    }
+}
+
+fn doc(text: Option<&str>) -> TokenStream {
+    match text {
+        Some(t) => {
+            let lines = t.lines().map(|l| format!(" {l}"));
+            quote!(#(#[doc = #lines])*)
+        }
+        None => quote!(),
+    }
+}
+
+pub(crate) fn parse_path(path: &str) -> Result<TokenStream, GenerateError> {
+    TokenStream::from_str(path).map_err(|_| GenerateError::BadPath(path.to_owned()))
+}
+
+/// `WidgetEvent_Renamed`, `name_taken` and `listWidgets` as `WidgetEventRenamed`, `NameTaken`
+/// and `ListWidgets`; `self` as `Self_`, since `Self` is a keyword.
+pub(crate) fn pascal(name: &str) -> String {
+    let mut out = String::new();
+    for part in name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|p| !p.is_empty())
+    {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    match out.chars().next() {
+        Some(c) if c.is_ascii_digit() => format!("V{out}"),
+        None => "Unnamed".into(),
+        _ if out == "Self" => "Self_".into(),
+        _ => out,
+    }
+}
+
+/// [`field_ident`], suffixed when another property already took the name.
+fn unique_field(name: &str, taken: &mut BTreeSet<String>) -> (Ident, bool) {
+    let (ident, renamed) = field_ident(name);
+    let bare = ident.to_string().trim_start_matches("r#").to_owned();
+    match unique(bare.clone(), taken) {
+        free if free == bare => (ident, renamed),
+        free => (Ident::new(&free, Span::call_site()), true),
+    }
+}
+
+/// `createdAt` as `created_at`; the flag says whether serde needs a rename.
+pub(crate) fn field_ident(name: &str) -> (Ident, bool) {
+    let mut snake = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 && !snake.ends_with('_') {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        } else if c.is_ascii_alphanumeric() || c == '_' {
+            snake.push(c);
+        } else {
+            snake.push('_');
+        }
+    }
+    if snake.chars().next().is_none_or(|c| c.is_ascii_digit()) {
+        snake.insert(0, '_');
+    }
+    let renamed = snake != name;
+    let ident = match snake.as_str() {
+        "self" | "super" | "crate" | "Self" => format_ident!("{snake}_"),
+        s if KEYWORDS.contains(&s) => Ident::new_raw(s, Span::call_site()),
+        s => Ident::new(s, Span::call_site()),
+    };
+    (
+        ident,
+        renamed || matches!(snake.as_str(), "self" | "super" | "crate"),
+    )
+}
+
+const KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false",
+    "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+    "return", "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while",
+    "abstract", "become", "box", "do", "final", "macro", "override", "priv", "typeof", "unsized",
+    "virtual", "yield", "try", "gen",
+];

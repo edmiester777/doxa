@@ -67,10 +67,7 @@ mod audit_support {
                 return Self(Some(existing.clone()));
             }
 
-            // Fallback: create from AuthState's logger (backward compat
-            // when AuditLayer is not in the middleware stack). Without the
-            // layer nothing else stamps HTTP context, so do it here — auth
-            // failures emit from this builder before any handler runs.
+            // No `AuditLayer`: build from AuthState's logger and stamp HTTP context here.
             Self(auth.audit.as_ref().map(|logger| {
                 let builder = AuditEventBuilder::new(logger.clone());
                 builder.set_request_metadata(request.headers());
@@ -84,20 +81,8 @@ mod audit_support {
             }))
         }
 
-        /// Record a terminal auth-failure event if the session is active.
-        ///
-        /// Takes the builder out of the session so a pipeline that fails
-        /// twice records once, and so
-        /// [`take_with_actor`](Self::take_with_actor) cannot then hand a
-        /// spent builder downstream.
-        ///
-        /// The event is *settled*, not emitted: under an
-        /// [`AuditLayer`](doxa_audit::AuditLayer) the outcome is recorded
-        /// and the layer sends it after the response, with the real status
-        /// and a duration measured through it. Only when this session
-        /// built its own builder — an [`AuthState`] logger with no
-        /// `AuditLayer` above it — is there nobody else to send it, and
-        /// then `status` is what the rejection is about to return.
+        /// Settle a terminal auth failure once; an [`AuditLayer`](doxa_audit::AuditLayer)
+        /// sends it after the response, otherwise it is sent now with `status`.
         pub fn emit_failure(&mut self, action: &str, error: &str, status: u16) {
             if let Some(builder) = self.0.take() {
                 builder.set_event(EventType::AuthFailure, action);
@@ -113,9 +98,7 @@ mod audit_support {
         pub fn take_with_actor<C: Claims>(&mut self, claims: &C) -> Option<AuditEventBuilder> {
             let builder = self.0.take()?;
             builder.set_actor(Some(claims.sub()), claims.roles(), claims.audit_attrs());
-            // Same partition key the policy evaluator scopes by, so an
-            // audit trail can be filtered to exactly the tenant whose
-            // policies decided the request.
+            // The partition key the policy evaluator scopes by.
             builder.set_tenant(claims.scope());
             Some(builder)
         }
@@ -170,6 +153,7 @@ pub struct AuthLayer<S: Clone + Send + Sync + 'static, C: Claims> {
     /// per-route capabilities without being generic over the consumer's
     /// [`PolicyExtension`](doxa_policy::PolicyExtension) type.
     checker: Option<Arc<dyn CapabilityChecker>>,
+    cookie: Option<Arc<str>>,
 }
 
 impl<S: Clone + Send + Sync + 'static, C: Claims> Clone for AuthLayer<S, C> {
@@ -178,6 +162,7 @@ impl<S: Clone + Send + Sync + 'static, C: Claims> Clone for AuthLayer<S, C> {
             state: Arc::clone(&self.state),
             scheme_name: self.scheme_name.clone(),
             checker: self.checker.clone(),
+            cookie: self.cookie.clone(),
         }
     }
 }
@@ -192,7 +177,15 @@ impl<S: Clone + Send + Sync + 'static, C: Claims> AuthLayer<S, C> {
             state,
             scheme_name: Cow::Borrowed("bearer"),
             checker: None,
+            cookie: None,
         }
+    }
+
+    /// Also accept the token from cookie `name` when there is no `Authorization` header;
+    /// cookie-authenticated mutations then need `x-doxa-csrf`, which a cross-site form can't set.
+    pub fn with_cookie(mut self, name: impl Into<Arc<str>>) -> Self {
+        self.cookie = Some(name.into());
+        self
     }
 
     /// Override the OpenAPI security scheme name this layer contributes.
@@ -233,6 +226,7 @@ where
         AuthService {
             state: Arc::clone(&self.state),
             checker: self.checker.clone(),
+            cookie: self.cookie.clone(),
             inner,
             _claims: PhantomData,
         }
@@ -251,6 +245,7 @@ impl<S: Clone + Send + Sync + 'static, C: Claims> doxa::DocumentedLayer for Auth
 pub struct AuthService<S: Clone + Send + Sync + 'static, C: Claims, Inner> {
     state: Arc<AuthState<S, C>>,
     checker: Option<Arc<dyn CapabilityChecker>>,
+    cookie: Option<Arc<str>>,
     inner: Inner,
     _claims: PhantomData<fn() -> C>,
 }
@@ -265,6 +260,7 @@ where
         Self {
             state: Arc::clone(&self.state),
             checker: self.checker.clone(),
+            cookie: self.cookie.clone(),
             inner: self.inner.clone(),
             _claims: PhantomData,
         }
@@ -289,6 +285,7 @@ where
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let state = Arc::clone(&self.state);
         let checker = self.checker.clone();
+        let cookie = self.cookie.clone();
         // Canonical clone-and-swap pattern from the tower::Service
         // docs: poll_ready was called on `self.inner`, so we must
         // call `inner` (the readied one) inside the future and leave
@@ -296,33 +293,81 @@ where
         let inner_clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, inner_clone);
         Box::pin(async move {
-            match run_auth_pipeline::<S, C>(&state, checker, req).await {
-                Ok(req) => inner.call(req).await,
-                Err(err) => Ok(err.into_response()),
+            match run_auth_pipeline::<S, C>(&state, checker, cookie.as_deref(), req).await {
+                Ok((req, epoch)) => {
+                    let mut response = inner.call(req).await?;
+                    if let Ok(v) = axum::http::HeaderValue::from_str(&epoch) {
+                        response.headers_mut().insert(doxa_wire::SESSION_HEADER, v);
+                    }
+                    Ok(response)
+                }
+                Err(err) => {
+                    let mut response = err.into_response();
+                    if response.status() == axum::http::StatusCode::UNAUTHORIZED {
+                        response.headers_mut().insert(
+                            doxa_wire::SESSION_HEADER,
+                            axum::http::HeaderValue::from_static(ANONYMOUS_EPOCH),
+                        );
+                    }
+                    Ok(response)
+                }
             }
         })
     }
 }
 
-/// Status the pipeline is about to reject with.
-///
-/// Read off the error rather than assumed, so a `PolicyFailed` is
-/// recorded as the 500 it renders as and not as another 401. Only ever
-/// used when no [`AuditLayer`](doxa_audit::AuditLayer) is in the stack to
-/// take the status off the real response.
+/// The status a rejection renders as, for recording without an [`AuditLayer`](doxa_audit::AuditLayer).
 fn rejection_status(error: &AuthError) -> u16 {
     doxa::__private::HasApiMetadata::api_status(error)
 }
 
-/// Body of the auth pipeline. Returns the modified [`Request<Body>`] (with
-/// [`AuthContext`] injected into extensions) on success; the caller is
-/// responsible for invoking the inner service.
+/// The request's token: the bearer header, else the configured cookie. A
+/// cookie only authenticates a mutation or dry run that also sends `x-doxa-csrf`.
+fn credential<'r>(request: &'r Request<Body>, cookie: Option<&str>) -> Result<&'r str, AuthError> {
+    let headers = request.headers();
+    if let Some(bearer) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return Ok(bearer);
+    }
+    let name = cookie.ok_or(AuthError::MissingCredentials)?;
+    let token = headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find_map(|(k, v)| (k == name).then_some(v))
+        .ok_or(AuthError::MissingCredentials)?;
+    let safe = request.method().is_safe() && !headers.contains_key(doxa_wire::DRY_RUN_HEADER);
+    if !safe && !headers.contains_key(doxa_wire::CSRF_HEADER) {
+        return Err(AuthError::Forbidden);
+    }
+    Ok(token)
+}
+
+/// The epoch a `401` carries, so signing in or out changes what the client sees.
+const ANONYMOUS_EPOCH: &str = "anonymous";
+
+/// Who the caller is, as an opaque id that changes on sign-in, sign-out or a
+/// tenant switch; the browser client drops its cache when it changes.
+fn epoch<C: Claims>(claims: &C) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (claims.sub(), claims.scope()).hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// The auth pipeline: the request with [`AuthContext`] in its extensions, and the session epoch.
 #[tracing::instrument(skip_all, name = "auth")]
 async fn run_auth_pipeline<S, C>(
     auth: &AuthState<S, C>,
     checker: Option<Arc<dyn CapabilityChecker>>,
+    cookie: Option<&str>,
     mut request: Request<Body>,
-) -> Result<Request<Body>, AuthError>
+) -> Result<(Request<Body>, String), AuthError>
 where
     S: Clone + Send + Sync + 'static,
     C: Claims,
@@ -332,22 +377,23 @@ where
     // feature flag.
     let mut audit = AuditSession::start(auth, &request);
 
-    // 1. Extract Bearer token from Authorization header
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            let error = AuthError::MissingCredentials;
-            tracing::warn!("missing or malformed Authorization header");
-            audit.emit_failure(
+    // 1. The bearer token, or the session cookie with its CSRF header.
+    let token = credential(&request, cookie).inspect_err(|error| {
+        let (action, message) = match error {
+            AuthError::Forbidden => (
+                "csrf_missing",
+                "Cookie credential without the x-doxa-csrf header",
+            ),
+            _ => (
                 "missing_credentials",
                 "Missing or malformed Authorization header",
-                rejection_status(&error),
-            );
-            error
-        })?;
+            ),
+        };
+        tracing::warn!("{message}");
+        audit.emit_failure(action, message, rejection_status(error));
+    })?;
+    let token = token.to_owned();
+    let token = token.as_str();
 
     // 2. Stage 1 — cryptographic credential validation.
     let minimal = auth.validator.validate(token).await.inspect_err(|e| {
@@ -400,20 +446,8 @@ where
     #[cfg(not(feature = "audit"))]
     let _ = audit.take_with_actor(&claims);
 
-    // 5. Insert AuthContext into request extensions so handlers and
-    //    permission extractors can reach it.
-    //
-    //    Also stamp a type-erased `CapabilityContext` so the ship-ready
-    //    `Require<M>` extractor can read tenant + roles without being
-    //    generic over the consumer's `S` / `C`. The typed
-    //    `AuthContext<S, C>` stays available for handlers that want
-    //    claim-level access.
-    //
-    //    Behind an `Arc` because every extractor that reaches it takes it
-    //    by value: `Auth<S, C>` and each `Granted<T>` on the handler. The
-    //    session is whatever the consumer's policy extension assembled —
-    //    a per-resource grant map, typically — so deep-copying it once
-    //    per guard is the one avoidable cost on the request path.
+    // 5. The typed context behind an `Arc`, and a `CapabilityContext` for extractors not
+    //    generic over `S` / `C`.
     let cap_ctx = CapabilityContext {
         tenant_id: claims.scope().map(str::to_owned),
         roles: claims.roles().to_vec(),
@@ -422,13 +456,15 @@ where
     if let Some(checker) = checker {
         request.extensions_mut().insert(checker);
     }
+    let epoch = epoch(&claims);
+    let is_admin = claims.roles().iter().any(|r| auth.policy.is_admin_role(r));
     request.extensions_mut().insert(Arc::new(AuthContext {
         claims,
         session,
-        is_admin: false,
+        is_admin,
     }));
 
-    Ok(request)
+    Ok((request, epoch))
 }
 
 #[cfg(test)]
@@ -519,6 +555,76 @@ mod tests {
         AuthLayer::new(state).layer(inner)
     }
 
+    async fn with_cookie(method: &str, csrf: bool) -> Response {
+        let inner = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, Infallible>(Response::builder().body(Body::empty()).unwrap())
+        });
+        let svc = AuthLayer::new(make_state("good"))
+            .with_cookie("sid")
+            .layer(inner);
+        let mut req = Request::builder()
+            .method(method)
+            .uri("/x")
+            .header("cookie", "theme=dark; sid=good");
+        if csrf {
+            req = req.header(doxa_wire::CSRF_HEADER, "1");
+        }
+        svc.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_role_the_policy_names_admin_makes_the_caller_admin() {
+        struct AdminReaders;
+        #[async_trait]
+        impl Policy<()> for AdminReaders {
+            async fn resolve(&self, _: Option<&str>, _: &[String]) -> Result<(), AuthError> {
+                Ok(())
+            }
+            fn is_admin_role(&self, role: &str) -> bool {
+                role == "reader"
+            }
+        }
+        for (policy, admin) in [
+            (Box::new(AdminReaders) as Box<dyn Policy<()>>, true),
+            (Box::new(StubPolicy), false),
+        ] {
+            let state = Arc::new(AuthState {
+                validator: Arc::new(StubValidator { accept: "good" }),
+                resolver: Arc::new(StubResolver),
+                policy,
+                #[cfg(feature = "audit")]
+                audit: None,
+            });
+            let svc = build_service(state, move |req| {
+                let ctx = req.extensions().get::<Arc<AuthContext<(), OidcClaims>>>();
+                assert_eq!(ctx.unwrap().is_admin, admin);
+                Response::builder().body(Body::empty()).unwrap()
+            });
+            let req = Request::builder()
+                .uri("/x")
+                .header("authorization", "Bearer good")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(svc.oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cookie_authenticates_a_read() {
+        let resp = with_cookie("GET", false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().contains_key(doxa_wire::SESSION_HEADER));
+    }
+
+    #[tokio::test]
+    async fn a_cookie_mutation_needs_the_csrf_header() {
+        assert_eq!(
+            with_cookie("POST", false).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(with_cookie("POST", true).await.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn auth_layer_returns_401_when_authorization_header_missing() {
         let state = make_state("good");
@@ -528,6 +634,32 @@ mod tests {
         let req = Request::builder().uri("/x").body(Body::empty()).unwrap();
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_401_names_the_anonymous_session() {
+        let svc = build_service(make_state("good"), |_req| {
+            Response::builder().body(Body::empty()).unwrap()
+        });
+        let send = |auth: Option<&str>| {
+            let mut req = Request::builder().uri("/x");
+            if let Some(auth) = auth {
+                req = req.header("authorization", auth);
+            }
+            svc.clone().oneshot(req.body(Body::empty()).unwrap())
+        };
+        let session = |resp: &Response| {
+            resp.headers()
+                .get(doxa_wire::SESSION_HEADER)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+        let missing = send(None).await.unwrap();
+        let bad = send(Some("Bearer wrong")).await.unwrap();
+        let good = send(Some("Bearer good")).await.unwrap();
+        assert_eq!(session(&missing).as_deref(), Some(ANONYMOUS_EPOCH));
+        assert_eq!(session(&bad).as_deref(), Some(ANONYMOUS_EPOCH));
+        assert_ne!(session(&good), session(&missing));
+        assert!(session(&good).is_some());
     }
 
     #[tokio::test]
@@ -549,9 +681,6 @@ mod tests {
     async fn auth_layer_injects_auth_context_on_success() {
         let state = make_state("good");
         let svc = build_service(state, |req| {
-            // Assert AuthContext is in extensions and carries the
-            // expected claims. Shared, so every reader after this one
-            // pays a refcount bump rather than a copy of the session.
             let ctx = req
                 .extensions()
                 .get::<Arc<AuthContext<(), OidcClaims>>>()

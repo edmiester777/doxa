@@ -51,12 +51,14 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let into_responses = generate_into_responses(&enum_name, &variants);
     let audit_outcome = generate_audit_outcome(&enum_name, &variants);
     let api_metadata = generate_api_metadata(&enum_name, &variants);
+    let internal = generate_from_internal(&enum_name, &variants)?;
 
     Ok(quote! {
         #into_response
         #into_responses
         #audit_outcome
         #api_metadata
+        #internal
     })
 }
 
@@ -69,10 +71,10 @@ struct ParsedVariant {
     /// Audit outcome declared via `#[api(outcome = "denied")]`.
     /// Defaults to `"error"` when omitted.
     outcome: Option<String>,
-    /// Declared via `#[api(transparent)]`: status, code and audit
-    /// outcome are read off the nested value instead of literals, and
-    /// the nested type's responses merge into this enum's.
+    /// `#[api(transparent)]`: status, code and outcome come from the nested value.
     transparent: bool,
+    /// Declared via `#[api(internal)]`: the variant `doxa::Internal` converts into.
+    internal: bool,
 }
 
 impl ParsedVariant {
@@ -134,6 +136,31 @@ fn parse_variant(variant: &Variant) -> Result<ParsedVariant> {
                 "`#[api(transparent)]` reads the code from the nested value — drop `code`",
             ));
         }
+        if args.outcome.is_some() {
+            return Err(Error::new_spanned(
+                attr,
+                "`#[api(transparent)]` reads the outcome from the nested value — drop `outcome`",
+            ));
+        }
+    }
+    if args.internal {
+        if args.transparent {
+            return Err(Error::new_spanned(
+                attr,
+                "`#[api(internal)]` and `#[api(transparent)]` can't share a variant",
+            ));
+        }
+        let holds_message = match &variant.fields {
+            Fields::Unit => true,
+            Fields::Unnamed(f) => f.unnamed.len() == 1,
+            Fields::Named(_) => false,
+        };
+        if !holds_message {
+            return Err(Error::new_spanned(
+                variant,
+                "`#[api(internal)]` goes on a unit variant or one holding the message, `Internal(String)`",
+            ));
+        }
     }
 
     // Transparent variants carry no status of their own; the placeholder
@@ -156,6 +183,7 @@ fn parse_variant(variant: &Variant) -> Result<ParsedVariant> {
         code: args.code,
         outcome: args.outcome,
         transparent: args.transparent,
+        internal: args.internal,
     })
 }
 
@@ -177,10 +205,14 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
     let mut code: Option<String> = None;
     let mut outcome: Option<String> = None;
     let mut transparent = false;
+    let mut internal = false;
 
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("transparent") {
             transparent = true;
+            Ok(())
+        } else if meta.path.is_ident("internal") {
+            internal = true;
             Ok(())
         } else if meta.path.is_ident("status") {
             let value: Expr = meta.value()?.parse()?;
@@ -191,6 +223,9 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
             code = Some(parse_str_lit(&value)?);
             Ok(())
         } else if meta.path.is_ident("outcome") {
+            if outcome.is_some() {
+                return Err(meta.error("`outcome` is given twice"));
+            }
             let value: Expr = meta.value()?.parse()?;
             let s = parse_str_lit(&value)?;
             match s.as_str() {
@@ -204,8 +239,9 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
             outcome = Some(s);
             Ok(())
         } else {
-            Err(meta
-                .error("unknown api key — supported: `status`, `code`, `outcome`, `transparent`"))
+            Err(meta.error(
+                "unknown api key — supported: `status`, `code`, `outcome`, `transparent`, `internal`",
+            ))
         }
     })?;
 
@@ -217,6 +253,7 @@ fn parse_api_attr_args(attr: &Attribute, variant_ident: &Ident) -> Result<ApiAtt
         code_is_explicit,
         outcome,
         transparent,
+        internal,
     })
 }
 
@@ -229,6 +266,34 @@ struct ApiAttrArgs {
     code_is_explicit: bool,
     outcome: Option<String>,
     transparent: bool,
+    internal: bool,
+}
+
+/// `From<doxa::Internal>` for the one `#[api(internal)]` variant, if any.
+fn generate_from_internal(enum_name: &Ident, variants: &[ParsedVariant]) -> Result<TokenStream> {
+    let mut internal = variants.iter().filter(|v| v.internal);
+    let Some(v) = internal.next() else {
+        return Ok(TokenStream::new());
+    };
+    if let Some(again) = internal.next() {
+        return Err(Error::new_spanned(
+            &again.ident,
+            "only one variant can be `#[api(internal)]`",
+        ));
+    }
+    let ident = &v.ident;
+    let build = match v.shape {
+        VariantShape::Unit => quote!(Self::#ident),
+        _ => quote!(Self::#ident(::core::convert::From::from(internal.0))),
+    };
+    Ok(quote! {
+        impl ::core::convert::From<::doxa::Internal> for #enum_name {
+            #[allow(unused_variables)]
+            fn from(internal: ::doxa::Internal) -> Self {
+                #build
+            }
+        }
+    })
 }
 
 /// Convert a `PascalCase` identifier to `snake_case`. Used as the
@@ -325,9 +390,9 @@ fn generate_into_response(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
 
     quote! {
         #[automatically_derived]
-        impl ::axum::response::IntoResponse for #enum_name {
-            fn into_response(self) -> ::axum::response::Response {
-                use ::axum::response::IntoResponse as _;
+        impl ::doxa::__private::axum::response::IntoResponse for #enum_name {
+            fn into_response(self) -> ::doxa::__private::axum::response::Response {
+                use ::doxa::__private::axum::response::IntoResponse as _;
 
                 // Capture the Display string before the borrow in the match.
                 let detail: ::std::string::String = ::std::string::ToString::to_string(&self);
@@ -376,9 +441,9 @@ fn generate_into_response(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
                     error: self,
                 };
 
-                let status = ::axum::http::StatusCode::from_u16(status_u16)
-                    .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-                let response = (status, ::axum::Json(body)).into_response();
+                let status = ::doxa::__private::axum::http::StatusCode::from_u16(status_u16)
+                    .unwrap_or(::doxa::__private::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                let response = (status, ::doxa::__private::axum::Json(body)).into_response();
 
                 // Attach outcome to response extensions (when audit is enabled).
                 #audit_inject
@@ -404,7 +469,7 @@ fn variant_error_schema(v: &ParsedVariant) -> TokenStream {
                 ::utoipa::openapi::ObjectBuilder::new()
                     .schema_type(::utoipa::openapi::schema::Type::String)
                     .enum_values(::std::option::Option::Some([
-                        ::serde_json::json!(#variant_name),
+                        ::doxa::__private::serde_json::json!(#variant_name),
                     ]))
             }
         }
@@ -437,15 +502,15 @@ fn variant_example_error(v: &ParsedVariant) -> TokenStream {
     let variant_name_lit = LitStr::new(&v.ident.to_string(), proc_macro2::Span::call_site());
     match &v.shape {
         VariantShape::Unit => {
-            quote! { ::serde_json::json!(#variant_name_lit) }
+            quote! { ::doxa::__private::serde_json::json!(#variant_name_lit) }
         }
         VariantShape::SingleField(_) => {
             let msg = format!("example {} message", v.ident);
             let msg_lit = LitStr::new(&msg, proc_macro2::Span::call_site());
-            quote! { ::serde_json::json!({ #variant_name_lit: #msg_lit }) }
+            quote! { ::doxa::__private::serde_json::json!({ #variant_name_lit: #msg_lit }) }
         }
         VariantShape::Other => {
-            quote! { ::serde_json::json!({ #variant_name_lit: {} }) }
+            quote! { ::doxa::__private::serde_json::json!({ #variant_name_lit: {} }) }
         }
     }
 }
@@ -497,7 +562,7 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
         // Code enum values for the `code` property.
         let code_enum_values = group.iter().map(|v| {
             let code_lit = LitStr::new(&v.code, proc_macro2::Span::call_site());
-            quote! { ::serde_json::json!(#code_lit) }
+            quote! { ::doxa::__private::serde_json::json!(#code_lit) }
         });
 
         // Per-variant error schemas for the `oneOf`.
@@ -523,7 +588,7 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
                 {
                     let example_value = ::utoipa::openapi::example::ExampleBuilder::new()
                         .summary(#summary_lit)
-                        .value(::std::option::Option::Some(::serde_json::json!({
+                        .value(::std::option::Option::Some(::doxa::__private::serde_json::json!({
                             "message": #variant_name_lit,
                             "status": #status_lit,
                             "code": #code_lit,
@@ -563,7 +628,7 @@ fn generate_into_responses(enum_name: &Ident, variants: &[ParsedVariant]) -> Tok
                         ::utoipa::openapi::ObjectBuilder::new()
                             .schema_type(::utoipa::openapi::schema::Type::Integer)
                             .enum_values(::std::option::Option::Some([
-                                ::serde_json::json!(#status_lit),
+                                ::doxa::__private::serde_json::json!(#status_lit),
                             ])),
                     )
                     .required("status")
@@ -670,12 +735,7 @@ fn generate_audit_outcome(enum_name: &Ident, variants: &[ParsedVariant]) -> Toke
 // HasApiMetadata codegen
 // ---------------------------------------------------------------------------
 
-/// Generate `impl HasApiMetadata for Self`.
-///
-/// This is what `#[api(transparent)]` delegates *to*. `IntoResponse` is
-/// not enough to read from — it yields a rendered `Response`, and an
-/// outer enum needs the status and code as values. Emitting it for every
-/// derived enum is what makes them nest arbitrarily deep.
+/// `impl HasApiMetadata`: the status and code as values, for an outer `#[api(transparent)]`.
 fn generate_api_metadata(enum_name: &Ident, variants: &[ParsedVariant]) -> TokenStream {
     let arms: Vec<TokenStream> = variants
         .iter()
@@ -724,5 +784,23 @@ fn generate_api_metadata(enum_name: &Ident, variants: &[ParsedVariant]) -> Token
                 code
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    #[test]
+    fn an_outcome_beside_transparent_is_refused() {
+        let err = super::expand(quote! {
+            enum E {
+                #[api(transparent, outcome = "denied")]
+                Inner(Other),
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("drop `outcome`"), "{err}");
     }
 }

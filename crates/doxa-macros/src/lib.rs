@@ -70,6 +70,7 @@
 //! use futures_core::Stream;
 //! use serde::{Deserialize, Serialize};
 //! use std::convert::Infallible;
+//! # #[derive(Clone, doxa::State)] struct NoState;
 //!
 //! // -- ApiError: multi-variant-per-status grouping --------------------------
 //! #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
@@ -185,16 +186,52 @@
 //! See the `doxa` crate-level docs for the broader design.
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TS2;
+
+/// The expansion this crate's role needs: one of the two, or both behind `target_arch`.
+fn by_role(
+    server: impl FnOnce() -> syn::Result<TS2>,
+    client: impl FnOnce() -> syn::Result<TS2>,
+) -> TokenStream {
+    use doxa_macro_support::Role;
+    let out = match Role::current() {
+        Role::Server => server(),
+        Role::Client => client(),
+        Role::Api => server().and_then(|s| client().map(|c| doxa_macro_support::split(s, c))),
+    };
+    out.unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Fail if this option is already in `seen`, which collects across an item's attributes.
+fn given_once(
+    seen: &mut std::collections::HashSet<String>,
+    meta: &syn::meta::ParseNestedMeta,
+) -> syn::Result<()> {
+    let key = quote::ToTokens::to_token_stream(&meta.path).to_string();
+    if seen.insert(key.clone()) {
+        Ok(())
+    } else {
+        Err(meta.error(format!("`{key}` is given twice")))
+    }
+}
 
 mod actions;
 mod api_error;
+mod app;
 mod asset;
 mod capability;
+mod client_stub;
+mod dto;
+mod entity;
 mod grant;
 mod method;
+mod mirror;
 mod policy_resource;
+mod role;
 mod sig;
 mod sse_event;
+mod ty;
+mod validator;
 
 /// Derive [`axum::response::IntoResponse`] and [`utoipa::IntoResponses`]
 /// for an error enum from a single per-variant declaration.
@@ -244,12 +281,7 @@ mod sse_event;
 /// `IntoResponses` impl groups `Validation` and `Query` under one
 /// `400` response with two examples.
 ///
-/// # Sharing failure modes between enums
-///
-/// `#[api(transparent)]` delegates a variant's status, code and audit
-/// outcome to a nested error type instead of declaring literals, so a
-/// set of cross-cutting failure modes lives in one enum rather than
-/// being copy-pasted into every endpoint's:
+/// `#[api(transparent)]` takes a variant's status, code and audit outcome from a nested error:
 ///
 /// ```no_run
 /// # use doxa::{ApiError, ToSchema};
@@ -273,22 +305,37 @@ mod sse_event;
 /// }
 /// ```
 ///
-/// A transparent variant declares no `status` or `code` of its own —
-/// there is only one right answer and the nested value has it. Its
-/// statuses merge into the outer `IntoResponses` map, unioning the
-/// `code` enum and the `error` `oneOf` at any status both declare, so
-/// the document keeps every mode the endpoint can actually return.
+/// Its responses merge into the outer enum's. `#[serde(untagged)]` (last variant) keeps the body
+/// flat: `{"error": {"RateLimited": …}}`, not `{"error": {"Fault": {…}}}`.
 ///
-/// Pair it with serde's `#[serde(untagged)]` (which requires the variant
-/// to come last) to keep the emitted body flat — `{"error": {"RateLimited": …}}`
-/// rather than `{"error": {"Fault": {"RateLimited": …}}}` — so
-/// consolidating shared modes stays a non-breaking refactor rather than
-/// an SDK-visible one.
+/// `#[api(internal)]` marks the one variant `doxa::Internal` converts into:
+///
+/// ```
+/// # use doxa::{ApiError, ToSchema};
+/// #[derive(Debug, thiserror::Error, serde::Serialize, ToSchema, ApiError)]
+/// pub enum E {
+///     #[error("{0}")]
+///     #[api(status = 500, internal)]
+///     Internal(String),
+/// }
+/// let _: E = doxa::Internal("db down".into()).into();
+/// ```
+///
+/// ```compile_fail
+/// # use doxa::{ApiError, ToSchema};
+/// #[derive(Debug, thiserror::Error, serde::Serialize, ToSchema, ApiError)]
+/// pub enum E {
+///     #[error("{0}")]
+///     #[api(status = 500, internal)]
+///     Internal(String),
+///     #[error("again")]
+///     #[api(status = 503, internal)]
+///     Again,
+/// }
+/// ```
 #[proc_macro_derive(ApiError, attributes(api, api_error, api_default))]
 pub fn derive_api_error(input: TokenStream) -> TokenStream {
-    api_error::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    by_role(|| api_error::expand(input.into()), || Ok(TS2::new()))
 }
 
 /// Derive [`SseEventMeta`](../doxa/trait.SseEventMeta.html) for an
@@ -324,9 +371,7 @@ pub fn derive_api_error(input: TokenStream) -> TokenStream {
 /// `utoipa::PartialSchema`; wrap `chrono`/`uuid` fields in a payload type).
 #[proc_macro_derive(SseEvent, attributes(sse))]
 pub fn derive_sse_event(input: TokenStream) -> TokenStream {
-    sse_event::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    by_role(|| sse_event::expand(input.into()), || Ok(TS2::new()))
 }
 
 /// Shortcut for `#[utoipa::path(get, path = "...")]`.
@@ -346,6 +391,7 @@ pub fn derive_sse_event(input: TokenStream) -> TokenStream {
 ///
 /// ```no_run
 /// use doxa::get;
+/// # #[derive(Clone, doxa::State)] struct NoState;
 ///
 /// // Single tag (forwarded to utoipa as-is):
 /// #[get("/api/v1/models", tag = "Models")]
@@ -398,27 +444,11 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Derive Cedar entity identity so a type can be authorized by instance
-/// with `Granted<R>`.
+/// Cedar entity identity, for authorizing a type by instance with `Granted<R>`.
 ///
-/// `entity_type` is reused as the audit `resource_type`, so audit rows
-/// join to the decisions that produced them. Fields opt into a role:
-/// `#[resource(id)]` (exactly one, unless `id_with` supplies it),
-/// `#[resource(attr)]` to expose a field to policies as
-/// `resource.<name>` (`attr = "key"` renames), and
-/// `#[resource(parent = "Folder")]` for `in` checks.
-///
-/// Not every identity is a field. `#[resource(id_with = method)]` names a
-/// method that computes the Cedar id from several columns, and
-/// `#[resource(attrs_with = method)]` merges a map of attributes no field
-/// backs — a derived flag, say. Both take a method on the type; the
-/// merged attributes win on a key collision, being the deliberate ones.
-///
-/// The route's OpenAPI parameter type comes from the key
-/// (`RouteKey::SEGMENTS`), not from here — a resource is reached by
-/// whatever segments the route names, which is not always its own id.
-///
-/// # Example
+/// Fields take `#[resource(id)]`, `#[resource(attr)]` (`attr = "key"` renames) and
+/// `#[resource(parent = "Folder")]`. `id_with = method` computes the id; `attrs_with = method`
+/// merges extra attributes, panicking on a key a field already supplies.
 ///
 /// ```ignore
 /// #[derive(PolicyResource)]
@@ -431,22 +461,8 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// # The loader (`policy-sea-orm`)
-///
-/// On a SeaORM `Model`, `#[resource(scope)]` emits a `ScopedTable` impl
-/// and `#[resource(key)]` adds `ScopedRow` on top of it — the query a route
-/// runs before it can decide anything. `key` is the column the route's path
-/// segment matches; `scope` is the column every lookup is confined to, so a
-/// key belonging to another owner is indistinguishable from one that does
-/// not exist.
-///
-/// `scope` alone is a table no column addresses — a name resolved through
-/// logic rather than matched — and it is not the lesser half: listing, a
-/// residual read and the primary-key lookup all live on `ScopedTable`, so
-/// such a table still takes `list = tenant` and `key = pk`.
-///
-/// Both are independent of the Cedar id: a row reached by `{model_id}` and
-/// the same row reached by `{name}` are one entity with two loaders.
+/// With `policy-sea-orm`, `#[resource(scope)]` emits `ScopedTable` (every lookup confined to that
+/// column) and `#[resource(key)]` adds `ScopedRow`, keyed on the column the route matches.
 ///
 /// ```ignore
 /// #[derive(DeriveEntityModel, PolicyResource)]
@@ -461,19 +477,7 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// let row = Model::load_scoped("primary".to_owned(), &db, "acme").await?;
 /// ```
 ///
-/// Both roles require the `policy-sea-orm` feature; using one without it
-/// is an error naming the feature rather than a missing impl at the route.
-///
-/// ## More ways in than one
-///
-/// `#[resource(key)]` is the *unnamed* lookup, and there is one per struct.
-/// A row reached three ways — a uuid, a name, and a `(widget, revision)`
-/// pair — runs out of it, and used to give the surplus to `#[asset]`'s
-/// `load_with`, which is the one door that gives up the scope guarantee.
-///
-/// So name them. `#[resource(key(FindByPair))]` on every column that takes
-/// part emits a `Lookup` marker of that name; a column may carry several
-/// names, and several columns may carry one:
+/// `#[resource(key(FindByPair))]` on each column taking part emits a named `Lookup` marker:
 ///
 /// ```ignore
 /// #[resource(entity_type = "Revision")]
@@ -489,52 +493,21 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 /// pub struct RevisionByPair;
 /// ```
 ///
-/// A composite lookup also gets a key struct — `FindByPairKey` above, with
-/// a field per column and a `RouteKey` impl that parses it out of the
-/// route's path segments. It is a struct rather than a tuple because every
-/// hand-written call site builds the key by position, and two segments of
-/// the same type transpose silently. Route parsing stays positional, in
-/// declaration order, because path segments are. A single-column lookup
-/// keys on the bare scalar, exactly as `#[resource(key)]` does.
+/// A composite lookup gets a key struct (`FindByPairKey`) so same-typed segments can't transpose.
+/// Every lookup is built on `ScopedTable::scoped`, so all stay confined to the scope.
 ///
-/// Named or not, every lookup is built on `ScopedTable::scoped`, so the
-/// owning column reaches all of them: a second way in is not a way out.
-///
-/// ## A condition on every query
-///
-/// `#[resource(filter = …)]` adds a condition each query carries on top of
-/// the scope — the soft-delete tombstone being the case it exists for:
+/// `#[resource(filter = …)]`, repeatable and `AND`ed, adds a SeaORM condition to every query:
 ///
 /// ```ignore
 /// #[resource(entity_type = "Revision", filter = Column::DeletedAt.is_null())]
 /// ```
-///
-/// Repeatable, and `AND`ed. The expression is spliced rather than
-/// interpreted, so it is whatever SeaORM accepts in a `filter(…)` call and
-/// there is no operator vocabulary here to fall behind theirs.
-///
-/// It lands on the table rather than on a lookup, which is what makes it
-/// unforgettable: applied by hand it has to be applied to the key lookup,
-/// the id lookup, the listing *and* the residual filter, and missing one is
-/// not a compile error but a deleted row coming back on whichever route
-/// used it.
 #[proc_macro_derive(PolicyResource, attributes(resource))]
 pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
-    policy_resource::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    by_role(|| policy_resource::expand(input.into()), || Ok(TS2::new()))
 }
 
-/// Declare an asset's action vocabulary — every action it permits, and
-/// what each one costs — as one enum.
-///
-/// Emits a capability marker per variant (each registering itself in the
-/// catalog, exactly as `#[capability]` does), the `ACTIONS` table that
-/// `Granting` requires, and `ALL` / `as_static` so the enum is usable as
-/// a value.
-///
-/// Everything but the audit category is defaulted off the enum's own
-/// name, so `#[action(…)]` appears only where a default is wrong:
+/// An asset's action vocabulary as one enum: a marker per variant, `impl ActionTable`, and
+/// `ALL` / `as_static`. Every default but the audit category comes from the names:
 ///
 /// | | Default | Override |
 /// |---|---|---|
@@ -546,20 +519,8 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 /// | check entity type | `{Resource}Collection` | `#[actions(entity_type = …)]` |
 /// | check entity id | `"collection"` | `#[actions(entity_id = …)]` |
 ///
-/// The audit category has no default: what counts as one is the
-/// application's to say, which is why `doxa_audit::AuditEventType` is a
-/// trait rather than an enum. It takes any `&'static str` const
-/// expression, so name a variant of that enum rather than spelling the
-/// string — a typo is then a resolution error instead of a category
-/// nothing reads.
-///
-/// # Gating on a capability that already exists
-///
-/// `capability = "…"` *declares* one. An application with a catalog of
-/// its own already has the marker, and declaring a second over the same
-/// action would catalogue an entry that no route names and that therefore
-/// only looks enforced. `capable = <path>` gates on the existing marker
-/// instead, and mints nothing:
+/// `event = …` takes a `&'static str` const expression, such as `EventType::X.as_static()`.
+/// `capable = <path>` gates on an existing capability marker instead of declaring one:
 ///
 /// ```ignore
 /// #[derive(Actions)]
@@ -571,10 +532,6 @@ pub fn derive_policy_resource(input: TokenStream) -> TokenStream {
 ///     WriteConnection,
 /// }
 /// ```
-///
-/// When no variant declares a capability, no marker module is emitted.
-///
-/// # Example
 ///
 /// ```ignore
 /// #[derive(Actions)]
@@ -630,16 +587,15 @@ pub fn derive_actions(input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
-    capability::expand(args.into(), item.into()).into()
+    let item: TS2 = item.into();
+    by_role(
+        || Ok(capability::expand(args.into(), item.clone())),
+        || Ok(item.clone()),
+    )
 }
 
-/// One route's way into a resource: the `Granting` impl, written from the
-/// application's profile and the row's own lookup.
-///
-/// Six of `Granting`'s seven items are transcription. `Ctx`, `State`,
-/// `Source` and `Error` are the application's and identical across its
-/// assets; `Key` and `load` are the scoped lookup the row already declares
-/// through [`fetch`]. Only the vocabulary is a fact about this asset.
+/// One route's way into a resource: the `Granting` impl, from the application's profile and
+/// the row's own [`fetch`] lookup.
 ///
 /// [`fetch`]: https://docs.rs/doxa-policy/latest/doxa_policy/fetch/index.html
 ///
@@ -648,11 +604,7 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// pub struct Source { /* … */ }
 /// ```
 ///
-/// A second route key over the same row is a unit struct naming it. The
-/// row keeps one `PolicyResource` impl, so the two routes cannot come to
-/// disagree about the object's Cedar identity — which a newtype per key
-/// would allow, and which fails silently, as a policy that simply does not
-/// match:
+/// A second route key over the same row is a unit struct naming the row, which keeps one identity:
 ///
 /// ```ignore
 /// #[doxa::asset(row = Source, key = Uuid, profile = AppGrants, actions = WidgetAction)]
@@ -672,77 +624,25 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// | `error` | the profile's |
 /// | `load_with` | `FetchByKey::fetch`, confined to the caller's tenant |
 ///
-/// # No backend is assumed
+/// `load_with` is handed the whole `Ctx`, so confining it to the caller's tenant is its own job;
+/// prefer `with`, whose lookup sees only the scope.
 ///
-/// The lookups are named through [`fetch`], which no backend owns, so
-/// everything above reads the same whether the row is a SeaORM model, a
-/// document behind an HTTP control plane or an entry in a map.
-/// `#[derive(PolicyResource)]` answers those traits for a SeaORM model
-/// from `#[resource(key)]` and `#[resource(scope)]`; anything else answers
-/// them itself, which is one associated type and a method per lookup.
-///
-/// # A second way in
-///
-/// `with = FindByPair` names a `Lookup` — one of the markers
-/// `#[resource(key(FindByPair))]` emits — for the row reached more ways
-/// than its unnamed `FetchByKey` and `FetchById` can spell between them. A
-/// marker carries its row and its key, so `with` is the whole declaration:
-///
-/// ```ignore
-/// #[asset(with = FindByPair, profile = AppGrants, actions = RevisionAction)]
-/// pub struct RevisionByPair;
-/// ```
-///
-/// Reach for it before `load_with`, and for the reason below: a named
-/// lookup is still handed a `&str` scope and nothing else, so it is a
-/// second way in rather than a way out.
-///
-/// # `load_with`, and what taking the caller costs
-///
-/// `FetchByKey::fetch` is handed a `&str` scope and nothing else, which is
-/// the guarantee rather than a thin signature: a lookup that cannot see
-/// the caller cannot ignore the caller's tenant. `Lookup::fetch` takes the
-/// same, which is why naming one costs nothing here.
-///
-/// `load_with` is handed the whole `Ctx`, and exists for the lookup that
-/// needs more than the scope — one that varies by role, or reads the
-/// assembled session. Those are the same fact. Taking the `Ctx` is what
-/// makes such a lookup expressible, and it is what makes confinement
-/// yours to write: a `load_with` that takes `_ctx` and means it compiles,
-/// passes its tests, and serves one tenant's rows to another, with the
-/// capability gate and the instance check both passing on the way.
-///
-/// Nothing else moves. The coarse gate still runs first and still costs no
-/// load, the instance check still runs on whatever came back, and the
-/// verdict still reaches the audit trail under the row's Cedar identity.
-/// The scope is the only thing that becomes the loader's responsibility.
-///
-/// `source` is what a loader is handed and where it comes from, which move
-/// together: `source = Extension<Txn>` means the guard extracts the
-/// request's transaction and `load` receives `&Txn`. That is the case a
-/// router-state loader cannot serve — a pool does not see rows the request
-/// has written and not committed, so a lookup pinned to one answers `None`
-/// for an object the caller is holding.
-///
-/// `key = pk` is a word rather than a type because it selects a different
-/// lookup, not just a different key: `FetchById::fetch_by_id`, which keeps
-/// the scope filter that a hand-written `Entity::find_by_id(id).one(db)`
-/// silently drops. It reads `FetchById` and not `FetchByKey` deliberately
-/// — an identifier belongs to the collection — so a row that declares no
-/// `#[resource(key)]` still has an id route.
-///
-/// `list = tenant` names its filter for the same reason. The generated
-/// `Scoping` confines the listing to the caller's tenant and applies **no
-/// other policy condition** — it is not the policy's residual, which is
-/// per-row and which this cannot see. An asset that needs the residual
-/// writes `Scoping` itself, and without `list` there is no impl at all, so
-/// `Granted<Many<…>>` over an asset that never asked to be listed does not
-/// compile.
+/// `list = tenant` confines a listing to the tenant and applies no other policy condition.
 #[proc_macro_attribute]
 pub fn asset(args: TokenStream, item: TokenStream) -> TokenStream {
-    asset::expand(args.into(), item.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    use doxa_macro_support::{tag, Role, Side};
+    let (args, item): (TS2, TS2) = (args.into(), item.into());
+    // An API crate's browser names entities, never assets.
+    if Role::current() == Role::Api {
+        return asset::expand(args, item)
+            .map(|s| tag(Side::Server, s))
+            .unwrap_or_else(syn::Error::into_compile_error)
+            .into();
+    }
+    by_role(
+        || asset::expand(args.clone(), item.clone()),
+        || asset::expand_client(args.clone(), item.clone()),
+    )
 }
 
 /// Generic operation attribute for cases where the HTTP method must be
@@ -756,4 +656,326 @@ pub fn operation(args: TokenStream, item: TokenStream) -> TokenStream {
     method::expand_operation(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+/// Bring in the prelude for this crate's role: server or client.
+///
+/// ```ignore
+/// doxa::prelude!();
+/// ```
+#[proc_macro]
+pub fn prelude(input: TokenStream) -> TokenStream {
+    role::prelude(input.into(), proc_macro::Span::call_site().local_file())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A server's handlers in this module and below, wrapped in one layer stack.
+///
+/// ```ignore
+/// #[doxa::service(layers = admin)]
+/// pub struct WidgetsAdmin;
+/// ```
+#[proc_macro_attribute]
+pub fn service(args: TokenStream, item: TokenStream) -> TokenStream {
+    app::service(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A layer stack services share: `fn(Routes, &State) -> Routes`, documented by `docs`.
+///
+/// ```ignore
+/// #[doxa::layers(docs = [doxa::auth::AuthDocs])]
+/// pub fn protected(routes: Routes, state: &AppState) -> Routes { routes.layer(auth(state)) }
+/// ```
+#[proc_macro_attribute]
+pub fn layers(args: TokenStream, item: TokenStream) -> TokenStream {
+    app::layers(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The state this crate's handlers are mounted under; a crate has one.
+#[proc_macro_derive(State)]
+pub fn derive_state(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    app::derive_state(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A wire type: serde both ways, `ToSchema`, `Debug`, `PartialEq` and `Clone`, in both halves.
+///
+/// `#[dto(query)]` adds `IntoParams`; `#[dto(skip(Debug))]` drops a default. The client half
+/// keeps serde and `Clone` whatever `skip` says, and strips derives it has no use for.
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Rename { pub name: String }
+///
+/// #[dto(query)]
+/// pub struct Filter { pub contains: Option<String> }
+///
+/// let back: Rename = serde_json::from_str(&serde_json::to_string(&Rename { name: "a".into() }).unwrap()).unwrap();
+/// assert_eq!(back, Rename { name: "a".into() });
+/// ```
+///
+/// A `skip` it doesn't know is an error:
+///
+/// ```compile_fail
+/// doxa::prelude!();
+///
+/// #[dto(skip(Hash))]
+/// pub struct Rename { pub name: String }
+/// ```
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto(skip(Debug))]
+/// pub struct Rename { pub name: String }
+/// ```
+///
+/// `#[nullable]` on an `Option<Option<T>>` tells absent (`None`) from `null` (`Some(None)`);
+/// `#[omit_none]` on an `Option<T>` leaves `None` out rather than sending `null`:
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch {
+///     #[nullable] pub note: Option<Option<String>>,
+///     #[omit_none] pub name: Option<String>,
+/// }
+///
+/// let p: Patch = serde_json::from_str(r#"{"note":null}"#).unwrap();
+/// assert_eq!(p, Patch { note: Some(None), name: None });
+/// assert_eq!(serde_json::to_string(&Patch { note: None, name: None }).unwrap(), "{}");
+/// ```
+///
+/// Each needs its shape:
+///
+/// ```compile_fail
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[nullable] pub note: Option<String> }
+/// ```
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[nullable] pub note: Option<Option<String>> }
+/// ```
+///
+/// ```compile_fail
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[omit_none] pub name: String }
+/// ```
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto]
+/// pub struct Patch { #[omit_none] pub name: Option<String> }
+/// ```
+#[proc_macro_attribute]
+pub fn dto(args: TokenStream, item: TokenStream) -> TokenStream {
+    let (args, item): (TS2, TS2) = (args.into(), item.into());
+    by_role(
+        || dto::expand(args.clone(), item.clone(), false),
+        || dto::expand(args.clone(), item.clone(), true),
+    )
+}
+
+/// The function that builds this server's OpenAPI document, which a generated client crate's
+/// `build.rs` reads as `__doxa_spec()`. It must need no state or I/O.
+///
+/// ```ignore
+/// #[doxa::spec]
+/// pub fn api_doc() -> doxa::OpenApi {
+///     let (_, api) = routes().split_for_parts();
+///     ApiDocBuilder::new().title("Orders").merge(api).build()
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn spec(args: TokenStream, item: TokenStream) -> TokenStream {
+    let expand = || -> syn::Result<proc_macro2::TokenStream> {
+        if !args.is_empty() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`#[spec]` takes no arguments",
+            ));
+        }
+        let item: syn::ItemFn = syn::parse(item)?;
+        if !item.sig.inputs.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &item.sig.inputs,
+                "a client's build script calls this with nothing, so it takes no arguments",
+            ));
+        }
+        let name = &item.sig.ident;
+        Ok(quote::quote! {
+            #item
+
+            /// This server's OpenAPI document, for a generated client crate's `build.rs`.
+            #[doc(hidden)]
+            pub fn __doxa_spec() -> ::doxa::OpenApi {
+                ::doxa::__private::IntoSpec::into_spec(#name())
+            }
+        })
+    };
+    expand()
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A type a route's `Grant<…>` guards, named by `key`: `#[entity(key = OrderKey)]`.
+///
+/// Its entity type is its name unless `name = "…"` says otherwise; a server asset guarding it
+/// says `entity = …`, and both must agree on the name and the key's fields.
+#[proc_macro_attribute]
+pub fn entity(args: TokenStream, item: TokenStream) -> TokenStream {
+    entity::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `From` both ways between this type and its wire copy: `#[mirror(api::OnError)]`.
+///
+/// Every field converts through `Into`; a field or variant only one side has doesn't compile.
+#[proc_macro_attribute]
+pub fn mirror(args: TokenStream, item: TokenStream) -> TokenStream {
+    mirror::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Keep this item only in the server half, e.g. `#[server] use sea_orm::DatabaseConnection;`.
+#[proc_macro_attribute]
+pub fn server(args: TokenStream, item: TokenStream) -> TokenStream {
+    role::only(doxa_macro_support::Side::Server, args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Keep this item only in the client half.
+#[proc_macro_attribute]
+pub fn client(args: TokenStream, item: TokenStream) -> TokenStream {
+    role::only(doxa_macro_support::Side::Client, args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Expand the routes inside as the client half whatever this crate's role, for doctests.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __as_client(input: TokenStream) -> TokenStream {
+    method::expand_as_client(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The files of the dist in `DOXA_DIST` at compile time, or none when it is unset, so an
+/// `embed` build without `doxa build` still compiles. `option_env!` makes cargo track it.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __embedded_dist(_: TokenStream) -> TokenStream {
+    let files = match std::env::var("DOXA_DIST") {
+        Ok(dir) => {
+            let file = format!("{}/embed.rs", dir.trim_end_matches('/'));
+            quote::quote! { ::core::include!(#file) }
+        }
+        Err(_) => quote::quote! { &[] },
+    };
+    quote::quote! {{
+        const _: ::core::option::Option<&str> = ::core::option_env!("DOXA_DIST");
+        #files
+    }}
+    .into()
+}
+
+/// Keep these items only in the server half; unlike `#[server]`, works on `mod x;`.
+///
+/// ```ignore
+/// doxa::server_only! {
+///     mod store;
+/// }
+/// ```
+#[proc_macro]
+pub fn server_only(input: TokenStream) -> TokenStream {
+    doxa_macro_support::tag(doxa_macro_support::Side::Server, input.into()).into()
+}
+
+/// Make these items `pub` in the client half, which is the crate's public API, and leave
+/// them as written on the server.
+///
+/// ```ignore
+/// doxa::client_pub! {
+///     mod api;
+/// }
+/// ```
+#[proc_macro]
+pub fn client_pub(input: TokenStream) -> TokenStream {
+    role::client_pub(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Keep these items only in the client half.
+#[proc_macro]
+pub fn client_only(input: TokenStream) -> TokenStream {
+    doxa_macro_support::tag(doxa_macro_support::Side::Client, input.into()).into()
+}
+
+/// The id the client cache stores a value under.
+///
+/// `#[identity(entity = "Widget", id = id, key = WidgetKey { name })]`. `id` must
+/// never change; `key` also writes `From<&Widget> for WidgetKey`. In the client half
+/// it writes `From<Cached<Widget>> for Widget`, so the type must be `Clone`.
+#[proc_macro_derive(Identity, attributes(identity))]
+pub fn derive_identity(input: TokenStream) -> TokenStream {
+    role::derive_identity(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// A validating extractor wrapper: in the server half, `Json`, `Form` and `Query` inside it are
+/// extracted, checked by its [`Validates`](../doxa/wire/trait.Validates.html) impl, and refused
+/// with a `422` per failing field.
+///
+/// ```ignore
+/// #[derive(doxa::Validator)]
+/// pub struct Valid<E>(pub E);
+///
+/// impl<T: validator::Validate> doxa::wire::Validates for Valid<Json<T>> {
+///     type Value = T;
+///     fn check(v: &T) -> Result<(), FieldErrors> { v.validate().map_err(FieldErrors::from) }
+/// }
+/// ```
+#[proc_macro_derive(Validator)]
+pub fn derive_validator(input: TokenStream) -> TokenStream {
+    validator::expand(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `ToSchema` in the client half, where there is no OpenAPI document to describe.
+#[doc(hidden)]
+#[proc_macro_derive(ClientToSchema, attributes(schema))]
+pub fn derive_client_to_schema(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
+}
+
+/// `IntoParams` in the client half.
+#[doc(hidden)]
+#[proc_macro_derive(ClientIntoParams, attributes(param, into_params))]
+pub fn derive_client_into_params(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
 }

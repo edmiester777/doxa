@@ -27,13 +27,7 @@ use crate::claims::Claims;
 use crate::context::{AuthContext, CapabilityContext};
 use crate::record::{self, Denied};
 
-/// Extracts the authenticated user context. Returns 401 if missing.
-///
-/// Yields the shared context [`AuthLayer`](crate::AuthLayer) built for
-/// the request rather than a copy of it, so pairing this with a guard on
-/// the same handler costs one refcount bump instead of a second deep
-/// copy of the assembled session. `Auth(ctx)` still reads
-/// `ctx.claims` / `ctx.session` directly, through the `Arc`.
+/// The authenticated caller's context, shared with [`AuthLayer`](crate::AuthLayer); 401 if missing.
 #[derive(Debug, Clone)]
 pub struct Auth<S: Send + Sync + 'static, C: Claims>(pub Arc<AuthContext<S, C>>);
 
@@ -83,34 +77,8 @@ impl SchemeName for BearerScheme {
     const NAME: &'static str = "bearer";
 }
 
-/// Capability-gated axum extractor.
-///
-/// On every request `Require<M, S>`:
-/// 1. Pulls the [`CapabilityContext`] and the type-erased
-///    `Arc<dyn CapabilityChecker>` inserted by
-///    [`AuthLayer`](crate::AuthLayer).
-/// 2. Calls [`CapabilityChecker::check`] with the tenant + roles and
-///    the [`Capability`](doxa_policy::Capability) attached to `M`.
-/// 3. Returns [`AuthError::Forbidden`] on deny,
-///    [`AuthError::MissingCredentials`] if the layer never ran, or
-///    [`AuthError::PolicyFailed`] if the layer ran but no checker was
-///    configured.
-///
-/// A denial is logged at `warn` and recorded on the request's
-/// `AuditEventBuilder` when one is present, naming the capability and
-/// the check that refused it. No configuration is involved: a deployment
-/// with no audit layer installed still gets the log line.
-///
-/// On OpenAPI generation the same type stamps
-/// [`record_required_permission`](doxa::record_required_permission)
-/// against the operation — the scheme name comes from `S::NAME`, the
-/// required-permission badge from `M::CAPABILITY.name` /
-/// `.description`.
-///
-/// Because both type parameters are zero-sized, `Require<M, S>` is
-/// zero-cost at runtime and decomposes to a single async function call.
-///
-/// # Example
+/// Requires `M`'s capability: 403 on deny, logged and recorded; 401 without
+/// [`AuthLayer`](crate::AuthLayer). Documents the permission under scheme `S`.
 ///
 /// ```ignore
 /// use doxa_auth::Require;
@@ -191,6 +159,7 @@ where
                 resource_type,
                 resource_id: &resource_id,
                 reason: "capability denied",
+                status: 403,
             },
         );
         Err(AuthError::Forbidden)

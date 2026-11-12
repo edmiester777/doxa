@@ -1,0 +1,138 @@
+//! `#[page("/path/{param}", lazy)]`: a component reachable at a path.
+
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use syn::parse::{Parse, ParseStream};
+use syn::spanned::Spanned;
+use syn::{LitStr, Token};
+
+use crate::component::{self, Options, Parsed};
+
+pub(crate) struct Args {
+    path: LitStr,
+    lazy: bool,
+}
+
+impl Parse for Args {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let path: LitStr = input.parse()?;
+        let mut lazy = false;
+        while input.parse::<Option<Token![,]>>()?.is_some() && !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            match key.to_string().as_str() {
+                "lazy" => lazy = true,
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("unknown option `{other}`; expected `lazy`"),
+                    ))
+                }
+            }
+        }
+        Ok(Args { path, lazy })
+    }
+}
+
+fn template_names(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter_map(|s| s.strip_prefix('{')?.strip_suffix('}'))
+        .map(|s| s.trim_start_matches('*').to_owned())
+        .collect()
+}
+
+pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
+    let generics = &parsed.item.sig.generics;
+    if !generics.params.is_empty() {
+        return Err(syn::Error::new(
+            generics.span(),
+            "pages can't be generic: a path renders one type; make a generic component and render it from the page",
+        ));
+    }
+    if let Some(r) = &parsed.rest {
+        return Err(syn::Error::new(
+            r.span(),
+            "a page is reached by its path, not a tag, so it can't take `#[attrs]`",
+        ));
+    }
+    let name = &parsed.item.sig.ident;
+    let vis = &parsed.item.vis;
+    let props_ty = format_ident!("{}Props", name);
+    let path = &args.path;
+    let in_path = template_names(&path.value());
+
+    for t in &in_path {
+        if !parsed.props.iter().any(|p| p.name == t) {
+            return Err(syn::Error::new(
+                path.span(),
+                format!("`{{{t}}}` has no matching parameter on `{name}`"),
+            ));
+        }
+    }
+    let mut fields = Vec::new();
+    let mut route_params = Vec::new();
+    let mut fill = Vec::new();
+    for p in &parsed.props {
+        let (n, s) = (&p.name, p.name.to_string());
+        if parsed.query.as_ref() == Some(n) {
+            if in_path.contains(&s) {
+                return Err(syn::Error::new(
+                    n.span(),
+                    format!("`{s}` is in the path, so it can't also be the `#[query]`"),
+                ));
+            }
+            fields.push(quote! { #n: segments.query_as()? });
+        } else if in_path.contains(&s) {
+            fields.push(quote! { #n: segments.get(#s)?.parse().ok()? });
+            route_params.push(quote! { #n: impl ::std::string::ToString });
+            fill.push(quote! { (#s, &#n.to_string()) });
+        } else if p.optional {
+            fields.push(quote! { #n: match segments.query(#s) {
+                ::core::option::Option::Some(v) => ::core::option::Option::Some(v.parse().ok()?),
+                ::core::option::Option::None => ::core::option::Option::None,
+            } });
+        } else if let Some(default) = &p.default {
+            fields.push(quote! { #n: match segments.query(#s) {
+                ::core::option::Option::Some(v) => v.parse().ok()?,
+                ::core::option::Option::None => #default,
+            } });
+        } else {
+            return Err(syn::Error::new(
+                n.span(),
+                format!("`{s}` isn't in the path `{}`; make it an `Option` or `#[prop(default)]` to read it from the query", path.value()),
+            ));
+        }
+    }
+    let opts = Options {
+        lazy: args.lazy,
+        ..Options::default()
+    };
+    let component = component::expand(opts, parsed);
+    let chunk = args.lazy.then(|| {
+        let loader = component::lazy_mod(name);
+        quote! {
+            #[cfg(all(target_arch = "wasm32", not(doxa_hot)))]
+            fn chunk() -> ::core::option::Option<::doxa::ui::Prefetch> {
+                ::core::option::Option::Some(::doxa::ui::Prefetch::of(#loader::LOADER.load()))
+            }
+        }
+    });
+    Ok(quote! {
+        #component
+
+        #[allow(unexpected_cfgs)]
+        impl ::doxa::ui::Page for #name {
+            const PATH: &'static str = #path;
+            fn parse(segments: &::doxa::ui::Segments) -> ::core::option::Option<#props_ty> {
+                ::core::option::Option::Some(#props_ty { #(#fields),* })
+            }
+            #chunk
+        }
+
+        impl #name {
+            /// The URL of this page.
+            #vis fn route(#(#route_params),*) -> ::doxa::ui::Route {
+                ::doxa::ui::Route::fill(#path, &[#(#fill),*])
+            }
+        }
+    })
+}

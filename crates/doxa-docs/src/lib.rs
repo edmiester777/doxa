@@ -45,6 +45,7 @@
 //! use futures_core::Stream;
 //! use serde::{Deserialize, Serialize};
 //! use std::convert::Infallible;
+//! # #[derive(Clone, doxa::State)] struct NoState;
 //!
 //! // ----- Typed error envelope ----------------------------------------------
 //! //
@@ -185,12 +186,19 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod app;
+mod attachment;
 mod builder;
+mod client_meta;
 mod contribution;
+#[cfg(feature = "cors")]
+mod cors;
 mod doc_params;
 mod doc_responses;
 mod doc_traits;
+mod dry_run;
 mod error_responses;
+mod etag;
 mod extractor;
 mod handler_ops;
 mod headers;
@@ -198,34 +206,48 @@ mod inner_schema;
 mod mount;
 mod private_dispatch;
 mod problem;
+#[cfg(feature = "proxy")]
+mod proxy;
 mod router_ext;
 mod routes_macro;
+mod schemas;
+mod spa;
 mod sse;
 mod ui;
+mod valid;
 
+pub use app::{app, spec, Routes};
+pub use attachment::Attachment;
 pub use builder::{ApiDoc, ApiDocBuilder, BuildError, SseSpecVersion};
 pub use contribution::{
     apply_badge_to_operation, apply_contribution, record_required_permission, BadgeContribution,
     DocumentedLayer, LayerContribution, OperationContribution, ResponseContribution,
     SecurityContribution,
 };
+#[cfg(feature = "cors")]
+pub use cors::Cors;
 pub use doc_params::DocHeaderEntry;
 pub use doc_responses::DocResponseBody;
 pub use doc_traits::{
     DocHeaderParams, DocOperationContribution, DocOperationSecurity, DocPathParams, DocPathScalar,
     DocQueryParams, DocRequestBody, PathScalar,
 };
+pub use etag::{ETagLayer, ETagService};
 pub use extractor::Header;
 pub use handler_ops::{operation_for_method_mut, ApidocHandlerOps};
 pub use headers::{DocumentedHeader, HeaderParam};
 pub use inner_schema::{ApidocHandlerSchemas, InnerToSchema};
 pub use mount::{mount_docs, MountDocsExt, MountOpts};
 pub use problem::{ApiErrorBody, ProblemDetails};
+#[cfg(feature = "proxy")]
+pub use proxy::proxy;
 pub use router_ext::OpenApiRouterExt;
+pub use schemas::duplicate_schemas;
+pub use spa::{Dist, EmbeddedFiles, MountSpaExt, Spa};
 pub use sse::{SseEventMeta, SseStream};
 
-#[cfg(feature = "docs-scalar")]
 pub use ui::{DeveloperTools, DocumentDownload, ScalarConfig, ScalarLayout, ScalarTheme};
+pub use valid::{InnerRejection, ValidRejection};
 
 // Re-export the companion proc-macro crate so consumers only need
 // `doxa` on their dependency list to write an event-stream
@@ -234,8 +256,8 @@ pub use ui::{DeveloperTools, DocumentDownload, ScalarConfig, ScalarLayout, Scala
 // out of when the derives aren't needed.
 #[cfg(feature = "macros")]
 pub use doxa_macros::{
-    asset, capability, delete, get, operation, patch, post, put, Actions, ApiError, PolicyResource,
-    SseEvent,
+    asset, capability, delete, get, layers, operation, patch, post, put, spec, Actions, ApiError,
+    PolicyResource, SseEvent, State,
 };
 
 // Re-export the underlying utoipa types so consumers depend on a single
@@ -263,21 +285,43 @@ pub type ApiResult<T, E> = Result<T, E>;
 pub mod __private {
     pub use tracing;
 
+    /// What `#[dto]` registers its schema name with.
+    pub mod schemas {
+        pub use crate::schemas::Named;
+    }
+    pub use inventory;
+
+    pub use crate::dry_run::AnswerDryRun;
+
+    pub use crate::app::{
+        crate_key, describe, mount, stacked, Builtin, Key, Layers, Mount, Resolve, Service,
+        StackDocs, Stacked,
+    };
+
+    /// Named by `#[derive(Validator)]`'s extractor and doc impls.
+    pub use axum;
+    pub use utoipa;
+
+    pub use crate::client_meta::{
+        stamp as stamp_client_meta, ClientMeta, EntityKnown, EntityOf, EntityUnknown,
+        IdentityKnown, IdentityOf, IdentityUnknown, IntoSpec, SchemaKnown, SchemaOf, SchemaUnknown,
+    };
+
+    #[cfg(feature = "embed")]
+    pub use doxa_macros::__embedded_dist as embedded_dist;
+
     /// Referenced by `#[derive(PolicyResource)]` when building the
     /// attribute map, so consumers need not depend on `serde_json`.
     pub use serde_json;
 
-    /// Audit outcome attached to response extensions by
-    /// `#[derive(ApiError)]`'s generated `IntoResponse` impl.
-    ///
-    /// Lives here so the macro can reference it without depending on
-    /// `doxa-audit`. The `AuditLayer` reads this from response
-    /// extensions and maps it to `doxa_audit::Outcome`.
+    /// The audit outcome a response carries, here so macros need not depend on `doxa-audit`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ResponseAuditOutcome {
         Allowed,
         Denied,
         Error,
+        /// Set only by [`AnswerDryRun`]: the guards passed and nothing ran.
+        Probe,
     }
 
     /// Trait for error types that declare their audit outcome per variant.
@@ -289,14 +333,8 @@ pub mod __private {
         fn audit_outcome(&self) -> ResponseAuditOutcome;
     }
 
-    /// Trait for error types that can report their own status and code
-    /// as data, rather than only as a rendered response.
-    ///
-    /// `#[derive(ApiError)]` generates this impl automatically, and
-    /// `#[api(transparent)]` reads it off the nested value — `IntoResponse`
-    /// alone is not enough to delegate from, since it yields a `Response`
-    /// and the outer impl needs the status and code as values. A
-    /// hand-written error type can implement this to become nestable.
+    /// An error's status and code as values, which `#[api(transparent)]` reads off the nested
+    /// error; `#[derive(ApiError)]` implements it.
     pub trait HasApiMetadata {
         /// HTTP status this value renders with.
         fn api_status(&self) -> u16;
@@ -305,6 +343,7 @@ pub mod __private {
     }
 
     pub use crate::error_responses::merge_response_maps;
+    pub use crate::valid::document_rejections;
 
     // Autoref-specialized dispatch scaffolding referenced by the
     // method macro's generated per-handler `IntoParams` impls. Not
@@ -332,13 +371,8 @@ pub mod __private {
     // caller crate to declare `utoipa-axum` as a direct dependency.
     pub use utoipa_axum::routes as utoipa_axum_routes;
 
-    /// Rewrites every `#/components/schemas/{from}` reference to
-    /// `#/components/schemas/{to}` within `schema`, recursively.
-    ///
-    /// `#[derive(SseEvent)]` uses this so two monomorphizations of the same
-    /// generic payload base (e.g. `Wrap<A>` and `Wrap<B>`) reference distinct
-    /// components: utoipa emits the inner `$ref` under the base ident
-    /// (`Wrap`), which would otherwise collapse both onto one component.
+    /// Rewrites `#/components/schemas/{from}` refs to `{to}`, so `Wrap<A>` and `Wrap<B>`
+    /// payloads don't collapse onto utoipa's one `Wrap` component.
     pub fn rewrite_schema_refs(
         schema: &mut ::utoipa::openapi::RefOr<::utoipa::openapi::schema::Schema>,
         from: &str,

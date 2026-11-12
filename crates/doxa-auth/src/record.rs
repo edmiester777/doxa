@@ -1,36 +1,15 @@
-//! The shared audit path for the authorization guards.
-//!
-//! [`Require`](crate::Require) and [`Granted`](crate::Granted) both reach
-//! a verdict the request's audit event should carry, and both reach it
-//! before the handler runs. Neither builds the event: they deposit a
-//! [`Decision`](doxa_audit::Decision) naming what was checked and on what,
-//! and the audit layer folds it in after the response — alongside the
-//! status, the outcome and a duration measured through response
-//! completion, none of which a guard is in a position to know.
-//!
-//! Routing both verdicts through here keeps them symmetric. A refusal
-//! additionally writes one `warn`, reading from the same values as the
-//! audit row so the log line and the trail cannot drift; when each guard
-//! owned its own deny branch, both drifted to nothing and a refusal left
-//! no trace but the 403 the client received.
-//!
-//! Every function here is a no-op without an audit builder in extensions,
-//! and the whole audit half compiles out under `--no-default-features`.
+//! Where every guard's verdict goes: a [`Decision`](doxa_audit::Decision) deposited on the
+//! request's audit builder, which the audit layer folds into the event after the response.
+//! A refusal also logs one `warn` from the same values.
 
 use http::Extensions;
 
 /// A guard let the request through: what was checked, and on what.
-///
-/// Unlike [`Denied`] nothing here feeds a log line — a granted check is
-/// the ordinary case — so with the `audit` feature off every field is
-/// genuinely unread.
 #[cfg_attr(not(feature = "audit"), allow(dead_code))]
 pub(crate) struct Grant {
-    /// Domain event category the subject declares for this action, if
-    /// any.
+    /// The audit category the action declares, if any.
     pub event_type: Option<&'static str>,
-    /// Capability name for a coarse gate, Cedar action for an instance
-    /// check.
+    /// Capability name for a coarse gate, Cedar action for an instance check.
     pub action: std::borrow::Cow<'static, str>,
     /// Cedar entity type of the authorized resource.
     pub resource_type: std::borrow::Cow<'static, str>,
@@ -42,31 +21,24 @@ pub(crate) struct Grant {
 pub(crate) struct Denied<'a> {
     /// Tenant the check ran against. `None` for an unscoped caller.
     pub tenant: Option<&'a str>,
-    /// Capability name for a coarse gate, Cedar action for an instance
-    /// check.
+    /// Capability name for a coarse gate, Cedar action for an instance check.
     pub action: &'a str,
     /// Cedar entity type of the refused resource.
     pub resource_type: &'a str,
     /// Cedar entity id of the refused resource.
     pub resource_id: &'a str,
-    /// Short reason, used verbatim as the log field and the audit
-    /// event's error text so the two cannot disagree.
+    /// The log field and the audit event's error text.
     pub reason: &'static str,
+    /// The status the refusal answers with.
+    pub status: u16,
 }
 
-/// Deposit an authorization the request may go on to use.
-///
-/// Nothing is logged: a granted check is the ordinary case, and the trail
-/// is where it belongs.
+/// Deposit a granted check; nothing is logged.
 pub(crate) fn grant(extensions: &Extensions, grant: Grant) {
     deposit_grant(extensions, grant);
 }
 
-/// Log the refusal and deposit it on the request's audit builder.
-///
-/// Safe to call without an audit layer in the stack — the log line is
-/// unconditional and the audit half is skipped when no builder is
-/// present.
+/// Log the refusal and deposit it on the request's audit builder, if there is one.
 pub(crate) fn record(extensions: &Extensions, denial: Denied<'_>) {
     tracing::warn!(
         tenant_id = denial.tenant.unwrap_or("-"),
@@ -106,12 +78,8 @@ fn deposit_denial(extensions: &Extensions, denial: Denied<'_>) {
         denial.reason,
     ));
 
-    // Under an `AuditLayer` this is a no-op and the fold happens after the
-    // response. Without one — an `AuthLayer` carrying its own logger, and
-    // nothing above it — this builder is never terminated by anyone else,
-    // so close it out here. Every refusal recorded becomes an
-    // `AuthError::Forbidden`, so the status is already known.
-    audit.settle(403);
+    // Emits only when no `AuditLayer` will close the builder after the response.
+    audit.settle(denial.status);
 }
 
 #[cfg(not(feature = "audit"))]

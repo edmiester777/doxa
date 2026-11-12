@@ -60,15 +60,7 @@ pub enum EventType {
 }
 
 impl EventType {
-    /// The persisted string, standing on its own.
-    ///
-    /// [`AuditEventType::as_str`] borrows from `&self`, which a temporary
-    /// cannot outlive — so a caller naming a variant inline
-    /// (`EventType::DataAccess.as_str()`) cannot keep the result. The
-    /// strings are literals, so this hands back the `'static` one
-    /// instead. An application's own event enum wanting the same reach
-    /// can do exactly this: a `const fn` returning the literal, with
-    /// [`AuditEventType`] delegating to it.
+    /// The persisted string as `'static`, which `as_str` on a temporary can't return.
     pub const fn as_static(&self) -> &'static str {
         match self {
             Self::DataAccess => "data_access",
@@ -99,6 +91,8 @@ pub enum Outcome {
     Allowed,
     Denied,
     Error,
+    /// A dry run asking whether the caller could; nothing was done.
+    Probe,
 }
 
 impl fmt::Display for Outcome {
@@ -114,6 +108,7 @@ impl std::str::FromStr for Outcome {
             "allowed" => Ok(Self::Allowed),
             "denied" => Ok(Self::Denied),
             "error" => Ok(Self::Error),
+            "probe" => Ok(Self::Probe),
             other => Err(format!("unknown outcome: {other}")),
         }
     }
@@ -125,22 +120,13 @@ impl Outcome {
             Self::Allowed => "allowed",
             Self::Denied => "denied",
             Self::Error => "error",
+            Self::Probe => "probe",
         }
     }
 }
 
-/// Trait for types that carry an audit outcome.
-///
-/// Implement this on error types so the [`AuditLayer`](crate::AuditLayer) can
-/// read the outcome from response extensions without status-code heuristics.
-///
-/// `#[derive(ApiError)]` generates this impl automatically when the `audit`
-/// feature is enabled on `doxa-macros`. Each variant declares its outcome
-/// via `#[api(outcome = "denied")]`; omitted variants default to
-/// [`Outcome::Error`]. Declare `denied` on authorization failures so a
-/// policy denial is not recorded as a system fault.
-///
-/// # Example
+/// An error's audit outcome, read by [`AuditLayer`](crate::AuditLayer) from the response.
+/// `#[derive(ApiError)]` implements it from `#[api(outcome = "…")]`, defaulting to `Error`.
 ///
 /// ```
 /// use doxa_audit::{AuditOutcome, Outcome};
@@ -167,12 +153,6 @@ pub trait AuditOutcome {
 }
 
 /// A fully-populated audit event ready for persistence.
-///
-/// Actor fields are limited to `tenant_id`, `sub`, `roles`, and an
-/// opaque `attrs` JSON map. Tenancy is the one identity dimension the
-/// library promotes to a real column — every other scoping concern
-/// (project, department, …) stays in `actor_attrs`, which the library
-/// has no opinion about.
 #[derive(Debug, Clone)]
 pub struct AuditEvent {
     /// String representation of the event type (e.g. `"data_access"`).
@@ -180,17 +160,11 @@ pub struct AuditEvent {
     pub event_type: String,
     pub action: String,
     pub outcome: Outcome,
-    /// Tenancy boundary the event occurred within — tenant id,
-    /// organization id, workspace id, whatever partitions the
-    /// deployment. `None` for single-tenant deployments and for events
-    /// recorded before a principal was resolved.
+    /// `None` when single-tenant, or recorded before a principal was resolved.
     pub tenant_id: Option<String>,
     pub actor_sub: Option<String>,
     pub actor_roles: Option<Vec<String>>,
-    /// Consumer-defined JSON map carrying identity attributes beyond
-    /// the promoted `tenant_id` (project id, department, …). Opaque to
-    /// the library — persisted verbatim into the `actor_attrs` JSONB
-    /// column.
+    /// Consumer-defined identity attributes, persisted verbatim.
     pub actor_attrs: serde_json::Value,
     pub resource_type: Option<String>,
     pub resource_id: Option<String>,

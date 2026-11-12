@@ -105,9 +105,7 @@ pub trait CapabilityChecker: Send + Sync {
         cap: &Capability,
     ) -> Result<bool, crate::AuthError>;
 
-    /// Evaluate `action` against one concrete object, with its
-    /// attributes in scope. The instance-level counterpart to
-    /// [`check`](Self::check), whose resource ids are constants or the tenant.
+    /// Evaluate `action` against one concrete object, with its attributes in scope.
     async fn check_instance(
         &self,
         tenant_id: &str,
@@ -116,22 +114,8 @@ pub trait CapabilityChecker: Send + Sync {
         resource: &crate::ResourceEntity,
     ) -> Result<bool, crate::AuthError>;
 
-    /// The same question about several objects at once, in order.
-    ///
-    /// A request that names its resources in a body names several of them:
-    /// a pipeline declaring the models it reads, a document declaring the
-    /// folders it links. Asked one at a time that is one entity-set
-    /// assembly per object, and the set is the same every time — so an
-    /// implementation that can hoist the assembly should override this,
-    /// and one that cannot loses nothing by the default.
-    ///
-    /// Returns one verdict per resource, positionally. Whether a refusal
-    /// anywhere refuses the whole request is the caller's to decide; this
-    /// only answers.
-    ///
-    /// The default asks [`check_instance`](Self::check_instance) in turn,
-    /// so every existing implementation keeps working and gains the batch
-    /// the day it wants to.
+    /// [`check_instance`](Self::check_instance) for each resource, in order; override to build
+    /// the entity set once.
     async fn check_instance_many(
         &self,
         tenant_id: &str,
@@ -148,41 +132,27 @@ pub trait CapabilityChecker: Send + Sync {
         }
         Ok(out)
     }
-}
 
-// ---------------------------------------------------------------------------
-// The catalog
-// ---------------------------------------------------------------------------
+    /// [`check`](Self::check) for each of `caps`, in order; override to share one evaluation.
+    async fn check_capabilities(
+        &self,
+        tenant_id: &str,
+        roles: &[String],
+        caps: &[&Capability],
+    ) -> Result<Vec<bool>, crate::AuthError> {
+        let mut out = Vec::with_capacity(caps.len());
+        for cap in caps {
+            out.push(self.check(tenant_id, roles, cap).await?);
+        }
+        Ok(out)
+    }
+}
 
 #[cfg(feature = "catalog")]
 inventory::collect!(&'static Capability);
 
-/// Every capability declared anywhere in the linked binary, sorted by
-/// name.
-///
-/// `#[capability]` registers each declaration as it defines it, so this
-/// answers without anyone maintaining a list — which is the point. A
-/// hand-written catalog const is a third place the same facts live, and
-/// the failure mode of forgetting an entry is silent: the capability
-/// works everywhere it is named in code and is simply missing from
-/// whatever the client is told it has.
-///
-/// The usual consumers are a `/me`-style endpoint reporting what the
-/// caller holds, and an OAuth2 scope vocabulary. Both want the whole set
-/// and neither can name it.
-///
-/// Ordering is by name rather than by link order, which is unspecified —
-/// a published OpenAPI document that reshuffled between builds would be
-/// unreadable in review.
-///
-/// ## What it cannot see
-///
-/// A crate that is not linked. Capabilities behind a disabled feature, or
-/// in a dependency the binary never pulls in, are absent with no error,
-/// because there is nothing left to ask. Assert the count in a test if
-/// the set matters.
-///
-/// Requires the `catalog` feature, on by default.
+/// Every capability `#[capability]` declared in the linked binary, sorted by name. A crate that
+/// isn't linked is silently absent.
 #[cfg(feature = "catalog")]
 pub fn capabilities() -> Vec<&'static Capability> {
     let mut all: Vec<&'static Capability> = inventory::iter::<&'static Capability>
@@ -193,23 +163,8 @@ pub fn capabilities() -> Vec<&'static Capability> {
     all
 }
 
-/// The Cedar id a coarse check asks about.
-///
-/// A coarse gate runs before anything is loaded, so there is no object to
-/// name: the id is either a constant the application chose, or the tenant
-/// the request is being made in. Those are the only two forms because the
-/// tenant is the only identity doxa holds at that point — roles are a
-/// list, and whatever sits behind them is the consumer's own session
-/// type.
-///
-/// [`Tenant`](Self::Tenant) is resolved before
-/// [`PolicyExtension::build_resource_uid`](crate::extension::PolicyExtension::build_resource_uid)
-/// is called, so that hook receives a real id and never a marker to
-/// decode. It is the extension point for the *consumer's* UID hierarchy —
-/// `{tenant}::{name}` composition, flat namespaces, per-type prefixes —
-/// and it keeps all of that. What it no longer has to do is recognize a
-/// sentinel doxa invented and substitute a value doxa had already passed
-/// it as an argument.
+/// The Cedar id a coarse check asks about. [`Tenant`](Self::Tenant) is resolved before
+/// [`build_resource_uid`](crate::extension::PolicyExtension::build_resource_uid) sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceId {
     /// A fixed id: `"collection"` for a whole collection, `"singleton"`
@@ -221,9 +176,6 @@ pub enum ResourceId {
 
 impl ResourceId {
     /// The id as the policy engine should see it.
-    ///
-    /// Borrows from whichever side supplied it, so resolving costs
-    /// nothing for either form.
     pub const fn resolve<'a>(&'a self, tenant_id: &'a str) -> &'a str {
         match self {
             ResourceId::Literal(id) => id,

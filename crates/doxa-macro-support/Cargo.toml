@@ -1,0 +1,17 @@
+[package]
+name = "doxa-macro-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Lets a proc macro emit the server half, the client half, or both, of what it generates for a doxa app."
+keywords = ["doxa", "proc-macro"]
+categories = ["development-tools::procedural-macro-helpers"]
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }

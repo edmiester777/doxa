@@ -39,6 +39,9 @@ use utoipa::openapi::path::Operation;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+#[derive(Clone, doxa::State)]
+struct NoState;
+
 // ---------------------------------------------------------------------------
 // Test-local Valid<T> wrapper representative of a typical consumer's validation
 // extractor. Keeping the definition local keeps the test self-contained.

@@ -1,0 +1,25 @@
+[package]
+name = "doxa-ui-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "view!, #[component] and #[page] for doxa-ui."
+keywords = ["doxa", "ui", "macros"]
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["visit"] }
+rstml = "0.12"
+roxmltree = "0.20"
+serde_json = { workspace = true }
+toml = "0.9"
+doxa-build = { workspace = true, features = ["tool"] }

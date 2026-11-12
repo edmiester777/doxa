@@ -212,3 +212,6 @@ async fn handlers_remain_callable_after_inference_expansion() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["id"], 7);
 }
+
+#[derive(Clone, doxa::State)]
+struct NoState;

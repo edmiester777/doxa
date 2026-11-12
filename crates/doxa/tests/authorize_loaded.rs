@@ -1,14 +1,5 @@
-//! Authorizing an object the guard never saw.
-//!
-//! A guard runs in `FromRequestParts`, before a body exists, and it
-//! *loads* through `Granting::State`. Neither fits a row the handler
-//! already holds — one it resolved inside an open transaction that the
-//! state's own connection cannot see. `AuthorizeLoaded` decides about
-//! such a row without loading it, and records the verdict through the
-//! same path the guard does.
-//!
-//! The asset below panics in `load`, so every test here is also an
-//! assertion that nothing on this path goes back to the database.
+//! `AuthorizeLoaded`: deciding about a row the handler already holds, recorded as the guard
+//! records. The asset panics in `load`, so nothing here may reload it.
 
 #![cfg(feature = "full")]
 
@@ -42,10 +33,7 @@ const SOURCES_READ: Capability = Capability {
     }],
 };
 
-/// `tenant_parent` rather than a `#[resource(parent)]` field: which
-/// tenant a decision is made in is a fact about the *request*, so there
-/// is no column to read it from — and for a row that belongs to no
-/// tenant, a nullable column would not answer the question either.
+/// `tenant_parent`: the tenant comes from the request, not a column.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema, PolicyResource)]
 #[resource(entity_type = "Source", tenant_parent = "Tenant")]
 struct Source {
@@ -57,9 +45,7 @@ struct Source {
 
 doxa::auth::route_key!(pub SourceKey { name: String });
 
-/// A vocabulary written out, which is what `#[derive(Actions)]` would
-/// otherwise emit. The row is a named const so the table and the marker
-/// below point at the same one.
+/// What `#[derive(Actions)]` would emit, written out.
 const READ_SOURCE: Action = Action::new("read_source")
     .capability(&SOURCES_READ)
     .event("data_access");
@@ -79,10 +65,6 @@ impl Granting for Source {
     type Error = StatusCode;
     type Actions = SourceActions;
 
-    /// The panic is the point. `AuthorizeLoaded` decides about a row the
-    /// caller already has, so reaching for `State` — which for a real
-    /// consumer is a pool that cannot see the request's open transaction
-    /// — would be the defect this whole path exists to avoid.
     async fn load(
         SourceKey { name: _ }: SourceKey,
         _state: &(),
@@ -92,13 +74,7 @@ impl Granting for Source {
     }
 }
 
-/// The marker `#[derive(Actions)]` would have generated, written out.
-///
-/// `Table` is what ties it to this asset: a marker whose table is another
-/// vocabulary's does not resolve on `Source`'s doors, even if the two
-/// spell the action identically. `ROW` is the table's own row by
-/// reference, so the capability the gate checks and the category the
-/// audit records are read off the type rather than searched for by name.
+/// The marker `#[derive(Actions)]` would generate; `Table` ties it to this asset.
 struct ReadSource;
 
 impl DeclaredAction for ReadSource {
@@ -132,11 +108,7 @@ impl CapabilityChecker for Regional {
         _: &str,
         resource: &ResourceEntity,
     ) -> Result<bool, AuthError> {
-        // The parent doxa supplied from the request, which no column on
-        // `Source` carries. A policy would spell this `resource in
-        // Tenant::"acme"`; here it is asserted directly, because a
-        // hierarchy check that silently had nothing to resolve against
-        // would still have let every test below pass.
+        // Asserted directly: a missing parent would still let every test below pass.
         assert_eq!(
             resource.parents,
             [("Tenant".to_owned(), tenant.to_owned())],
@@ -149,9 +121,7 @@ impl CapabilityChecker for Regional {
 
 // ---- harness ----------------------------------------------------------------
 
-/// Request parts as `AuthLayer` would leave them, with an audit builder
-/// nothing else writes to — so whatever the event ends up saying, this
-/// path said it.
+/// Request parts as `AuthLayer` leaves them, with an audit builder only this path writes to.
 fn parts(
     roles: &[&str],
 ) -> (
@@ -204,9 +174,7 @@ async fn the_authorized_object_comes_back() {
     assert_eq!(authorized, source("us"));
 }
 
-/// `authorize` is the same check `Granted<One<R>>` runs, coarse half
-/// included — so a handler reaching for it on an unguarded route is not
-/// quietly getting less than the extractor would have given it.
+/// `authorize` runs the coarse half too, as `Granted<One<R>>` does.
 #[tokio::test]
 async fn the_coarse_gate_still_runs() {
     let (parts, _rx) = parts(&[]);
@@ -226,9 +194,7 @@ async fn the_coarse_gate_still_runs() {
         panic!("the capability was refused, so this is a denial");
     };
 
-    // The capability's own check, not the object: the caller was turned
-    // away before the object was ever considered, and the trail should
-    // say which question they failed.
+    // The trail names the capability the caller failed, not the object.
     assert_eq!(action, "sources.read");
     assert_eq!(resource_type, "SourceCollection");
     assert_eq!(resource_id, "collection");
@@ -237,10 +203,7 @@ async fn the_coarse_gate_still_runs() {
 
 // ---- the dependency half ----------------------------------------------------
 
-/// The reason `authorize_dependency` exists. This caller may not *list*
-/// sources, and the route they are on never asked them to — its own guard
-/// answered a different coarse question. Asking this one would refuse a
-/// caller who is plainly permitted on the object itself.
+/// `authorize_dependency` skips the coarse question this caller would fail.
 #[tokio::test]
 async fn a_dependency_skips_the_coarse_gate() {
     let (parts, _rx) = parts(&[]);
@@ -279,27 +242,13 @@ async fn a_dependency_is_still_held_to_the_instance_check() {
     assert_eq!(reason, "instance denied");
 }
 
-/// An action from a different vocabulary cannot be smuggled past the gate
-/// by calling the dependency form.
-///
-/// There is no runtime test because there is no longer a runtime failure
-/// to observe. `Purge` is a perfectly good [`DeclaredAction`] — it just
-/// belongs to `OtherActions`, and both doors bound their action on
-/// `Table = Source::Actions`, so neither line below resolves. Both are
-/// pinned as `compile_fail` doctests on `AuthorizeLoaded::authorize`,
-/// where the error they produce is also on show.
+/// Another vocabulary's action doesn't compile on `Source`'s doors; the `compile_fail`
+/// doctests on `AuthorizeLoaded::authorize` pin that.
 ///
 /// ```ignore
 /// source("us").authorize::<Source, _>(Purge, &parts.extensions).await
 /// source("us").authorize_dependency::<Source, _>(Purge, &parts.extensions).await
 /// ```
-///
-/// This is what the typed action bought. Before it, both lines compiled
-/// and answered `403 action not declared` — a status indistinguishable,
-/// to the caller and in the audit trail, from a caller who was genuinely
-/// refused. And a `Purge` spelled the same as one of `Source`'s own
-/// actions would have passed the check outright, because the check was on
-/// the name.
 const PURGE: Action = Action::new("purge");
 
 pub enum OtherActions {}
@@ -335,9 +284,7 @@ async fn an_unauthenticated_request_reaches_no_verdict() {
 
 // ---- what the trail says ----------------------------------------------------
 
-/// A decision reached here is indistinguishable in the trail from one the
-/// extractor reached — same action, same object, and the category off the
-/// asset's own `Action` row rather than anything the handler said.
+/// Recorded exactly as the extractor records, category from the asset's `Action` row.
 #[tokio::test]
 async fn a_grant_is_recorded_like_the_guard_would() {
     let (parts, mut rx) = parts(&["sources.read"]);
@@ -359,9 +306,6 @@ async fn a_grant_is_recorded_like_the_guard_would() {
     );
 }
 
-/// The dependency form records too. Skipping the coarse gate is not
-/// permission to skip the trail — a check that left no row would be
-/// exactly the hole the sealed chain was built to close.
 #[tokio::test]
 async fn a_dependency_grant_is_recorded_too() {
     let (parts, mut rx) = parts(&[]);
@@ -378,10 +322,7 @@ async fn a_dependency_grant_is_recorded_too() {
     assert_eq!(event.resource_id.as_deref(), Some("primary"));
 }
 
-/// One request may authorize several things, and an event names one
-/// resource. The route's own subject is decided first, so it is the one
-/// the event keeps — a dependency checked afterwards does not displace
-/// it, and the handler coordinates nothing to get that.
+/// The event keeps the route's own subject over a later dependency.
 #[tokio::test]
 async fn a_dependency_does_not_displace_the_route_s_own_subject() {
     let (parts, mut rx) = parts(&["sources.read"]);
@@ -407,9 +348,7 @@ async fn a_dependency_does_not_displace_the_route_s_own_subject() {
     );
 }
 
-/// Except when the later one is a refusal. A request that ends on a
-/// denial is about that denial, whatever it was allowed to touch getting
-/// there.
+/// Unless the later one is a refusal.
 #[tokio::test]
 async fn a_refused_dependency_displaces_the_grant() {
     let (parts, mut rx) = parts(&["sources.read"]);

@@ -1,0 +1,693 @@
+//! React's hooks: `state`, `memo`, `effect`, `action`, `provide` / `context`, and `Singleton`.
+//!
+//! Each hook, and each GET awaited in a render, claims the next slot of the component. The call site is
+//! recorded, and in debug builds a render reaching a slot from a different call
+//! site panics naming both, which catches conditional hooks.
+
+use std::any::{Any, TypeId};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::panic::Location;
+use std::rc::Rc;
+
+use crate::runtime::{self, current_or_panic, Cancel, Hook, Instance, Readers};
+use crate::{Callback, Result, Thrown};
+
+#[track_caller]
+pub(crate) fn slot<T: 'static>(
+    hook: &str,
+    init: impl FnOnce() -> T,
+) -> (Rc<Instance>, usize, Rc<T>) {
+    slot_at(hook, Location::caller(), init)
+}
+
+/// The hook slot a GET awaited in a render claims; its answer is kept in the client cache.
+pub(crate) struct CallSlot;
+
+pub(crate) fn slot_at<T: 'static>(
+    hook: &str,
+    at: &'static Location<'static>,
+    init: impl FnOnce() -> T,
+) -> (Rc<Instance>, usize, Rc<T>) {
+    let inst = current_or_panic(hook);
+    let i = inst.cursor.get();
+    inst.cursor.set(i + 1);
+    let mut hooks = inst.hooks.borrow_mut();
+    if let Some(h) = hooks.get(i) {
+        if cfg!(debug_assertions) && (h.at != at || h.type_id != TypeId::of::<T>()) {
+            panic!(
+                "hook order changed in <{}>: `{hook}` at {at} ran where the hook at {} ran last render. \
+                 Hooks must run in the same order every render: don't call them conditionally, in loops, \
+                 or after an early return",
+                inst.name, h.at
+            );
+        }
+        let value = h
+            .value
+            .clone()
+            .downcast::<T>()
+            .expect("slot type checked above");
+        drop(hooks);
+        return (inst, i, value);
+    }
+    let value = Rc::new(init());
+    hooks.push(Hook {
+        at,
+        type_id: TypeId::of::<T>(),
+        value: value.clone(),
+    });
+    drop(hooks);
+    (inst, i, value)
+}
+
+/// A piece of component state. `Copy`, so closures take it without cloning.
+pub struct State<T: 'static> {
+    instance: u64,
+    slot: usize,
+    _t: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for State<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for State<T> {}
+
+/// Component state, like React's `useState`: `init` is used on the first render only.
+#[track_caller]
+pub fn state<T: 'static>(init: T) -> State<T> {
+    state_with(|| init)
+}
+
+/// [`state`] with an initial value computed on the first render only.
+#[track_caller]
+pub(crate) fn state_with<T: 'static>(init: impl FnOnce() -> T) -> State<T> {
+    let (inst, slot, _) = slot("state", || RefCell::new(init()));
+    State {
+        instance: inst.id,
+        slot,
+        _t: PhantomData,
+    }
+}
+
+/// The value in hook `slot` of a still-mounted instance.
+fn hook_value<T: 'static>(instance: u64, slot: usize) -> Option<Rc<T>> {
+    let inst = Instance::find(instance)?;
+    let value = inst.hooks.borrow().get(slot)?.value.clone();
+    value.downcast::<T>().ok()
+}
+
+impl<T: 'static> State<T> {
+    fn with_cell<R>(&self, f: impl FnOnce(&RefCell<T>) -> R) -> Option<R> {
+        hook_value::<RefCell<T>>(self.instance, self.slot).map(|c| f(&c))
+    }
+
+    /// Read the value without cloning it.
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        self.with_cell(|c| f(&c.borrow()))
+            .expect("state read after its component unmounted")
+    }
+
+    /// Change the value without re-rendering; `None` once unmounted.
+    pub(crate) fn update_silently<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        self.with_cell(|c| f(&mut c.borrow_mut()))
+    }
+
+    /// Replace the value and re-render.
+    pub fn set(&self, value: T) {
+        self.update(|v| *v = value);
+    }
+
+    /// Change the value in place and re-render.
+    pub fn update(&self, f: impl FnOnce(&mut T)) {
+        if self.with_cell(|c| f(&mut c.borrow_mut())).is_some() {
+            if let Some(inst) = Instance::find(self.instance) {
+                runtime::schedule(&inst);
+            }
+        }
+    }
+}
+
+impl<T: Clone + 'static> State<T> {
+    /// A copy of the value.
+    pub fn get(&self) -> T {
+        self.with(T::clone)
+    }
+}
+
+impl State<bool> {
+    /// Flip it.
+    pub fn toggle(&self) {
+        self.update(|b| *b = !*b);
+    }
+}
+
+/// A value kept between renders that doesn't re-render when changed, like React's `useRef`.
+/// `Copy`, like [`State`]; once its component unmounts, reads are `None` and writes do nothing.
+pub struct Reference<T: 'static>(State<T>);
+
+impl<T> Clone for Reference<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Reference<T> {}
+
+/// A [`Reference`]; `init` is used on the first render only.
+#[track_caller]
+pub fn reference<T: 'static>(init: T) -> Reference<T> {
+    Reference(state(init))
+}
+
+/// A [`Reference`] holding this render's `value`, for code that outlives the render to read.
+#[track_caller]
+pub fn latest<T: 'static>(value: T) -> Reference<T> {
+    let mut value = Some(value);
+    let held = state_with(|| value.take().expect("taken once"));
+    let held = Reference(held);
+    if let Some(value) = value {
+        held.set(value);
+    }
+    held
+}
+
+impl<T: 'static> Reference<T> {
+    /// Read it without cloning.
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        self.0.with_cell(|c| f(&c.borrow()))
+    }
+
+    /// Replace it.
+    pub fn set(&self, value: T) {
+        self.0.update_silently(|v| *v = value);
+    }
+
+    /// Change it in place.
+    pub fn update(&self, f: impl FnOnce(&mut T)) {
+        self.0.update_silently(f);
+    }
+}
+
+impl<T: Clone + 'static> Reference<T> {
+    /// A copy of it.
+    pub fn get(&self) -> Option<T> {
+        self.with(T::clone)
+    }
+}
+
+/// A closure [`callback`] can hold, by its arguments.
+#[doc(hidden)]
+pub trait CallbackFn<Args>: 'static {
+    type Sig: ?Sized + 'static;
+    fn shared(self) -> Rc<Self::Sig>;
+    fn forwarding(latest: Rc<RefCell<Rc<Self::Sig>>>) -> Rc<Self::Sig>;
+}
+
+struct StableCell<F: ?Sized> {
+    latest: Rc<RefCell<Rc<F>>>,
+    stable: Callback<F>,
+}
+
+/// A callback that keeps its identity across renders and always runs the latest closure.
+/// `Copy`, like [`State`]: call it with `.call(…)`, or pass it as a prop.
+pub struct StableCallback<F: ?Sized + 'static> {
+    instance: u64,
+    slot: usize,
+    _f: PhantomData<fn() -> Rc<F>>,
+}
+
+impl<F: ?Sized> Clone for StableCallback<F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: ?Sized> Copy for StableCallback<F> {}
+
+/// A [`StableCallback`] running `f`; annotate its parameters, as nothing else names their types.
+#[track_caller]
+pub fn callback<Args, F: CallbackFn<Args>>(f: F) -> StableCallback<F::Sig> {
+    let next = f.shared();
+    let (inst, slot, cell) = slot("callback", || {
+        let latest = Rc::new(RefCell::new(next.clone()));
+        StableCell {
+            stable: Callback::from_rc(F::forwarding(latest.clone())),
+            latest,
+        }
+    });
+    *cell.latest.borrow_mut() = next;
+    StableCallback {
+        instance: inst.id,
+        slot,
+        _f: PhantomData,
+    }
+}
+
+impl<F: ?Sized + 'static> StableCallback<F> {
+    pub(crate) fn current(&self) -> Option<Callback<F>> {
+        hook_value::<StableCell<F>>(self.instance, self.slot).map(|c| c.stable.clone())
+    }
+}
+
+impl<F: ?Sized + 'static> From<StableCallback<F>> for Callback<F>
+where
+    Callback<F>: Default,
+{
+    fn from(f: StableCallback<F>) -> Self {
+        f.current().unwrap_or_default()
+    }
+}
+
+/// The element `ref={r}` is on, once it mounts. `Copy`, like [`State`].
+pub struct ElementRef(State<Option<crate::NodeRef>>);
+
+impl Clone for ElementRef {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for ElementRef {}
+
+/// A handle to an element, like React's `useRef` on a DOM node: pass it as `ref={r}`.
+/// The component re-renders when the element mounts or goes.
+#[track_caller]
+pub fn node_ref() -> ElementRef {
+    ElementRef(state(None))
+}
+
+impl ElementRef {
+    /// The element, while it is mounted.
+    pub fn get(&self) -> Option<crate::NodeRef> {
+        self.0.with_cell(|c| *c.borrow()).flatten()
+    }
+
+    fn point_at(&self, node: Option<crate::NodeRef>) {
+        if self.get() != node {
+            self.0.set(node);
+        }
+    }
+}
+
+impl crate::Directive for ElementRef {
+    fn mounted(&mut self, node: crate::NodeRef) {
+        self.point_at(Some(node));
+    }
+    fn update(&mut self, next: Self) {
+        if next.0.instance != self.0.instance || next.0.slot != self.0.slot {
+            self.point_at(None);
+        }
+        *self = next;
+    }
+    fn updated(&mut self, node: crate::NodeRef) {
+        self.point_at(Some(node));
+    }
+    fn unmounted(&mut self, _: crate::NodeRef) {
+        self.point_at(None);
+    }
+}
+
+/// Dependencies of a `memo` or `effect`: values, references, or tuples of them.
+pub trait Deps {
+    /// The owned copy compared between renders.
+    type Owned: PartialEq + Clone + 'static;
+    /// Take the copy.
+    fn to_deps(&self) -> Self::Owned;
+}
+
+impl<T: Clone + PartialEq + 'static> Deps for &T {
+    type Owned = T;
+    fn to_deps(&self) -> T {
+        (*self).clone()
+    }
+}
+
+impl<T: Clone + PartialEq + 'static> Deps for State<T> {
+    type Owned = T;
+    fn to_deps(&self) -> T {
+        self.get()
+    }
+}
+
+impl Deps for () {
+    type Owned = ();
+    fn to_deps(&self) {}
+}
+
+macro_rules! tuple_deps {
+    ($($n:ident $i:tt),+) => {
+        impl<$($n: Deps),+> Deps for ($($n,)+) {
+            type Owned = ($($n::Owned,)+);
+            fn to_deps(&self) -> Self::Owned {
+                ($(self.$i.to_deps(),)+)
+            }
+        }
+    };
+}
+
+tuple_deps!(A 0);
+tuple_deps!(A 0, B 1);
+tuple_deps!(A 0, B 1, C 2);
+tuple_deps!(A 0, B 1, C 2, D 3);
+
+struct MemoCell<D, T> {
+    entry: RefCell<Option<(D, T)>>,
+}
+
+/// A value recomputed only when `deps` change, like React's `useMemo`.
+#[track_caller]
+pub fn memo<D: Deps, T: Clone + 'static>(deps: D, compute: impl FnOnce(&D::Owned) -> T) -> T {
+    let (_, _, cell) = slot("memo", || MemoCell::<D::Owned, T> {
+        entry: RefCell::new(None),
+    });
+    let now = deps.to_deps();
+    let mut entry = cell.entry.borrow_mut();
+    match &*entry {
+        Some((d, v)) if *d == now => v.clone(),
+        _ => {
+            let v = compute(&now);
+            *entry = Some((now, v.clone()));
+            v
+        }
+    }
+}
+
+pub(crate) struct EffectSlot {
+    deps: RefCell<Option<Box<dyn Any>>>,
+    running: RefCell<Option<Cancel>>,
+}
+
+impl EffectSlot {
+    pub fn stop(&self) {
+        if let Some(c) = self.running.borrow_mut().take() {
+            c.cancel();
+        }
+    }
+}
+
+/// Run `f` after the render commits whenever `deps` change, like `useEffect`; dropping the previous
+/// run is its cleanup. An `Err` it returns goes to the nearest `<Catch>`.
+#[track_caller]
+pub fn effect<D, F, R>(deps: D, f: F)
+where
+    D: Deps,
+    F: AsyncFnOnce(&D::Owned) -> R + 'static,
+    R: crate::Outcome,
+{
+    let (inst, _, cell) = slot("effect", || EffectSlot {
+        deps: RefCell::new(None),
+        running: RefCell::new(None),
+    });
+    let now = deps.to_deps();
+    let same = cell
+        .deps
+        .borrow()
+        .as_ref()
+        .and_then(|d| d.downcast_ref::<D::Owned>())
+        .is_some_and(|d| *d == now);
+    if same {
+        return;
+    }
+    let owner = Rc::downgrade(&inst);
+    // Deps are stored on commit, so a cancelled or failed render leaves them stale.
+    inst.effects.borrow_mut().push(Box::new(move || {
+        *cell.deps.borrow_mut() = Some(Box::new(now.clone()));
+        cell.stop();
+        let task = runtime::spawn_cancellable(async move {
+            if let Err(e) = f(&now).await.into_result() {
+                if let Some(inst) = owner.upgrade() {
+                    runtime::throw(Some(&inst), e);
+                }
+            }
+        });
+        *cell.running.borrow_mut() = Some(task);
+    }));
+}
+
+type Runner<A, T> = Rc<dyn Fn(A) -> futures_util::future::LocalBoxFuture<'static, Result<T>>>;
+
+struct ActionCell<A, T> {
+    run: RefCell<Runner<A, T>>,
+    pending: Cell<bool>,
+    error: RefCell<Option<Thrown>>,
+    value: RefCell<Option<T>>,
+}
+
+/// An async operation started by an event, with its pending and error state.
+/// `Copy`, like [`State`].
+pub struct Action<A: 'static, T: 'static> {
+    instance: u64,
+    slot: usize,
+    _t: PhantomData<fn(A) -> T>,
+}
+
+impl<A, T> Clone for Action<A, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A, T> Copy for Action<A, T> {}
+
+/// An operation run from event handlers, like a form submit. `run` is ignored while one is in
+/// flight, and the runtime owns it, so unmounting doesn't lose its effects.
+#[track_caller]
+pub fn action<A, T, F>(f: F) -> Action<A, T>
+where
+    A: 'static,
+    T: 'static,
+    F: AsyncFn(A) -> Result<T> + 'static,
+{
+    let f = Rc::new(f);
+    let run: Runner<A, T> = Rc::new(move |a| {
+        let f = f.clone();
+        Box::pin(async move { f(a).await })
+    });
+    let (inst, slot, cell) = slot("action", || ActionCell::<A, T> {
+        run: RefCell::new(run.clone()),
+        pending: Cell::new(false),
+        error: RefCell::new(None),
+        value: RefCell::new(None),
+    });
+    // Each render's closure sees that render's captures.
+    *cell.run.borrow_mut() = run;
+    Action {
+        instance: inst.id,
+        slot,
+        _t: PhantomData,
+    }
+}
+
+impl<A: 'static, T: 'static> Action<A, T> {
+    fn cell(&self) -> Option<Rc<ActionCell<A, T>>> {
+        hook_value(self.instance, self.slot)
+    }
+
+    /// Start it, unless it is already running.
+    pub fn run(&self, arg: A) {
+        let Some(cell) = self.cell() else { return };
+        if cell.pending.replace(true) {
+            return;
+        }
+        cell.error.borrow_mut().take();
+        self.rerender();
+        let run = cell.run.borrow().clone();
+        let fut = run(arg);
+        let this = *self;
+        doxa_client::task::spawn(async move {
+            let out = fut.await;
+            if let Some(cell) = this.cell() {
+                cell.pending.set(false);
+                match out {
+                    Ok(v) => *cell.value.borrow_mut() = Some(v),
+                    Err(e) => *cell.error.borrow_mut() = Some(e),
+                }
+                this.rerender();
+            }
+        });
+    }
+
+    fn rerender(&self) {
+        if let Some(inst) = Instance::find(self.instance) {
+            runtime::schedule(&inst);
+        }
+    }
+
+    /// Whether it is running.
+    pub fn pending(&self) -> bool {
+        self.cell().is_some_and(|c| c.pending.get())
+    }
+
+    /// The last run's error, until it runs again.
+    pub fn error(&self) -> Option<Thrown> {
+        self.cell().and_then(|c| c.error.borrow().clone())
+    }
+}
+
+impl<A: 'static, T: Clone + 'static> Action<A, T> {
+    /// The last successful result.
+    pub fn value(&self) -> Option<T> {
+        self.cell().and_then(|c| c.value.borrow().clone())
+    }
+}
+
+/// Make `value` available to every component below this one, like a React context provider.
+pub fn provide<T: Clone + 'static>(value: T) {
+    let inst = current_or_panic("provide");
+    let mut provided = inst.provided.borrow_mut();
+    provided.retain(|(t, _)| *t != TypeId::of::<T>());
+    provided.push((TypeId::of::<T>(), Rc::new(value)));
+}
+
+/// The nearest `T` an ancestor provided.
+#[track_caller]
+pub fn context<T: Clone + 'static>() -> T {
+    try_context().unwrap_or_else(|| {
+        panic!(
+            "no `{}` was provided above this component; call `provide(…)` in an ancestor or `App::provide`",
+            std::any::type_name::<T>()
+        )
+    })
+}
+
+/// The nearest `T` an ancestor provided, if any.
+pub fn try_context<T: Clone + 'static>() -> Option<T> {
+    let inst = current_or_panic("context");
+    let find = |list: &[(TypeId, Rc<dyn Any>)]| {
+        list.iter()
+            .find(|(t, _)| *t == TypeId::of::<T>())
+            .and_then(|(_, v)| v.downcast_ref::<T>().cloned())
+    };
+    let own = find(&inst.provided.borrow());
+    own.or_else(|| {
+        std::iter::successors(Some(inst), |i| i.parent()).find_map(|i| find(&i.contexts.borrow()))
+    })
+}
+
+/// App-wide state: one value per page, read and written from any component.
+///
+/// ```ignore
+/// pub static CART: Singleton<Cart> = Singleton::new(Cart::default);
+/// let items = CART.get().items;
+/// CART.update(|c| c.items.push(item));
+/// ```
+///
+/// Readers re-render when it changes. It resets when any service's session changes, or
+/// only [one's](Singleton::resets_with).
+pub struct Singleton<T: 'static> {
+    init: fn() -> T,
+    owner: Option<&'static str>,
+}
+
+struct SingletonCell {
+    value: Box<dyn Any>,
+    readers: Readers,
+    owner: Option<&'static str>,
+}
+
+type Cells = HashMap<usize, Rc<RefCell<SingletonCell>>>;
+
+thread_local! {
+    static SINGLETONS: RefCell<Cells> = RefCell::new(HashMap::new());
+    static HOOKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn hook_sessions() {
+    if !HOOKED.with(|h| h.replace(true)) {
+        doxa_client::on_any_session_change(reset_singletons);
+    }
+}
+
+fn reset_singletons(package: &'static str) {
+    let cells: Vec<_> = SINGLETONS.with(|s| {
+        let mut s = s.borrow_mut();
+        let ids: Vec<_> = s
+            .iter()
+            .filter(|(_, c)| c.borrow().owner.is_none_or(|o| o == package))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.iter().filter_map(|id| s.remove(id)).collect()
+    });
+    for cell in cells {
+        let readers = cell.borrow_mut().readers.live();
+        runtime::schedule_all(readers);
+    }
+}
+
+impl<T: 'static> Singleton<T> {
+    /// A singleton built by `init` on first use.
+    pub const fn new(init: fn() -> T) -> Self {
+        Self { init, owner: None }
+    }
+
+    /// Reset only when the session of client crate `package`'s service changes.
+    pub const fn resets_with(mut self, package: &'static str) -> Self {
+        self.owner = Some(package);
+        self
+    }
+
+    // Each cell is its own `RefCell`, so `init` and `f` may use other singletons.
+    fn cell(&'static self) -> Rc<RefCell<SingletonCell>> {
+        hook_sessions();
+        let id = self as *const Self as usize;
+        if let Some(c) = SINGLETONS.with(|s| s.borrow().get(&id).cloned()) {
+            return c;
+        }
+        let cell = Rc::new(RefCell::new(SingletonCell {
+            value: Box::new((self.init)()),
+            readers: Readers::default(),
+            owner: self.owner,
+        }));
+        SINGLETONS.with(|s| s.borrow_mut().entry(id).or_insert(cell).clone())
+    }
+
+    /// Read it without cloning, re-rendering this component when it changes.
+    pub fn with<R>(&'static self, f: impl FnOnce(&T) -> R) -> R {
+        let cell = self.cell();
+        let mut c = cell.borrow_mut();
+        c.readers.track();
+        f(c.value.downcast_ref::<T>().expect("singleton type"))
+    }
+
+    /// Change it and re-render its readers.
+    pub fn update(&'static self, f: impl FnOnce(&mut T)) {
+        let cell = self.cell();
+        let readers = {
+            let mut c = cell.borrow_mut();
+            f(c.value.downcast_mut::<T>().expect("singleton type"));
+            c.readers.live()
+        };
+        runtime::schedule_all(readers);
+    }
+
+    /// Replace it.
+    pub fn set(&'static self, value: T) {
+        self.update(|v| *v = value);
+    }
+}
+
+impl<T: Clone + 'static> Singleton<T> {
+    /// A copy of the value.
+    pub fn get(&'static self) -> T {
+        self.with(T::clone)
+    }
+}
+
+/// Mark the calling component as a `<Catch>` boundary; returns the error it caught.
+pub(crate) fn catch_boundary() -> Option<Thrown> {
+    let inst = current_or_panic("Catch");
+    inst.catcher.set(true);
+    let caught = inst.caught.borrow().clone();
+    caught
+}
+
+/// Mark the calling component as a `<Suspense>` boundary; returns how many below it are loading.
+pub(crate) fn suspense_boundary() -> usize {
+    let inst = current_or_panic("Suspense");
+    inst.suspense.set(true);
+    inst.waiting.get()
+}

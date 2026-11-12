@@ -1,0 +1,54 @@
+name: Pages
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BASE: /${{ github.event.repository.name }}
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Add the wasm target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Install wasm-opt
+      run: sudo apt-get install -y binaryen
+    - name: Build the site
+      run: cargo run -q -p doxa-cli -- build --release -p site --out _site --base $BASE/
+    - name: Build the shop's story gallery
+      run: cargo run -q -p doxa-cli -- gallery -p shop-web --out _site/gallery --base $BASE/gallery/
+    - name: Write the shop's API reference
+      run: cargo run -q -p shop-api --bin export-docs -- --base $BASE/api/ _site/api
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: _site
+
+  deploy:
+
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+    - uses: actions/configure-pages@v5
+    - id: deployment
+      uses: actions/deploy-pages@v4

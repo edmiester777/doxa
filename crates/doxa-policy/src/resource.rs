@@ -1,24 +1,9 @@
-//! Instance-level resource identity.
-//!
-//! [`Capability`](crate::Capability) checks name a resource with a
-//! [`ResourceId`](crate::ResourceId), which can only describe a
-//! collection, a singleton or the tenant. A [`PolicyResource`] names one
-//! concrete object, so a policy can be evaluated against the row the
-//! request actually touches — and the same
-//! [`ENTITY_TYPE`](PolicyResource::ENTITY_TYPE) becomes the audit trail's
-//! `resource_type`, joining the audit row to the decision that produced
-//! it.
-//!
-//! Identity is not entirely intrinsic to the object, though, which is why
-//! [`ResourceEntity::of`] takes the tenant: see
-//! [`TENANT_PARENT`](PolicyResource::TENANT_PARENT).
+//! Instance-level resource identity: a [`PolicyResource`] names one concrete object, and its
+//! [`ENTITY_TYPE`](PolicyResource::ENTITY_TYPE) is also the audit trail's `resource_type`.
 
 use serde_json::{Map, Value};
 
-/// Primitive an id serializes as in OpenAPI.
-///
-/// Named rather than expressed as a `utoipa` schema so this crate stays
-/// framework-neutral; the doc layer maps it to a real schema.
+/// Primitive an id serializes as in OpenAPI; the doc layer maps it to a schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceIdType {
     /// `type: string`.
@@ -37,18 +22,7 @@ pub trait PolicyResource: Send + Sync + Sized + 'static {
     /// Cedar entity type (e.g. `"Widget"`).
     const ENTITY_TYPE: &'static str;
 
-    /// Cedar entity type this instance is `in` by virtue of the *request*
-    /// rather than of any column, if any.
-    ///
-    /// [`cedar_parents`](Self::cedar_parents) reads parents off the
-    /// object, which is right for a parent the row records — a folder id,
-    /// an owner. It cannot express the tenant. A request is made *in* a
-    /// tenant, and a row belonging to no tenant at all is still decided
-    /// about inside the asking one, so there may be no column to read and
-    /// a nullable one would not answer the question anyway.
-    ///
-    /// Naming the type here lets doxa supply that parent from the
-    /// request, where it is known:
+    /// The entity type this instance is `in` by virtue of the request's tenant, not a column.
     ///
     /// ```
     /// # use doxa_policy::{PolicyResource, ResourceEntity};
@@ -80,14 +54,7 @@ pub trait PolicyResource: Send + Sync + Sized + 'static {
     }
 }
 
-/// One instance injected into the request-scoped Cedar entity set.
-///
-/// The evaluator builds its entity set per request, so adding an object
-/// the policy store does not hold costs one more JSON value. Without
-/// it, a `when { resource.owner == … }` clause has nothing to
-/// dereference and survives partial evaluation as a residual — which
-/// [`check_action`](crate::PolicyRouter::check_instance) reads as a
-/// denial.
+/// One instance injected into the request's Cedar entity set, so `resource.<attr>` resolves.
 #[derive(Debug, Clone)]
 pub struct ResourceEntity {
     /// Cedar entity type.
@@ -111,13 +78,7 @@ impl ResourceEntity {
         }
     }
 
-    /// Describe a loaded [`PolicyResource`], attributes and parents
-    /// included.
-    ///
-    /// The tenant is a parameter because half of a resource's Cedar
-    /// identity comes from the request rather than from the row — see
-    /// [`PolicyResource::TENANT_PARENT`], which is what consumes it. An
-    /// empty tenant adds no parent: there is no tenant to be `in`.
+    /// Describe a loaded [`PolicyResource`]; `tenant_id` becomes its `TENANT_PARENT` unless empty.
     pub fn of<R: PolicyResource>(resource: &R, tenant_id: &str) -> Self {
         let mut parents: Vec<(String, String)> = resource
             .cedar_parents()
@@ -156,9 +117,7 @@ impl ResourceEntity {
 mod tests {
     use super::*;
 
-    /// A row that records its own parent *and* belongs to a tenant. The
-    /// two are different kinds of fact, which is the whole reason one is
-    /// a method and the other a const.
+    /// A row that records its own parent and belongs to a tenant.
     struct Report {
         folder: Option<String>,
     }
@@ -198,10 +157,6 @@ mod tests {
         );
     }
 
-    /// The case the column could not express. A row with no parent of its
-    /// own is still decided about inside the asking tenant, so the
-    /// hierarchy check has something to resolve against — where a
-    /// nullable `parent` column would have contributed nothing.
     #[test]
     fn a_row_with_no_parent_of_its_own_still_has_the_tenant() {
         let entity = ResourceEntity::of(&report(None), "acme");
@@ -209,9 +164,7 @@ mod tests {
         assert_eq!(entity.parents, [("Tenant".to_owned(), "acme".to_owned())]);
     }
 
-    /// No tenant, no parent. An unscoped caller is not `in` the empty
-    /// tenant, and naming `Tenant::""` would be a real entity that no
-    /// policy means to match.
+    /// `Tenant::""` would be a real entity no policy means to match.
     #[test]
     fn an_empty_tenant_adds_nothing() {
         let entity = ResourceEntity::of(&report(None), "");
@@ -219,8 +172,7 @@ mod tests {
         assert!(entity.parents.is_empty());
     }
 
-    /// The default is off: an asset that says nothing gets the behaviour
-    /// it had before there was anything to say.
+    /// Off by default.
     #[test]
     fn an_asset_that_declares_no_tenant_parent_is_unchanged() {
         struct Loose;

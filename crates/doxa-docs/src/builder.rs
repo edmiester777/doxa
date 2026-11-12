@@ -55,35 +55,19 @@ pub enum BuildError {
     /// non-finite floats or otherwise invalid JSON values.
     Serialize(serde_json::Error),
     /// An operation requires a security scheme that no
-    /// [`ApiDocBuilder::bearer_security`] or
-    /// [`ApiDocBuilder::security_scheme`] call registered.
-    ///
-    /// The reference would be dangling, which makes the document invalid
-    /// — and quietly so: every half is individually well-formed, and a
-    /// client only finds out when it tries to authenticate. A guard's
-    /// scheme name defaults to `"bearer"`, so this is what an application
-    /// registering its scheme under a different name would otherwise ship.
+    /// [`ApiDocBuilder::bearer_security`] or [`ApiDocBuilder::security_scheme`] call registered.
     DanglingSecurityScheme {
         /// The name the operations referenced.
         scheme: String,
         /// The names that were registered, so the message can suggest one.
         registered: Vec<String>,
     },
-    /// An operation declares an `in: header` parameter whose name
-    /// OpenAPI reserves for one of its own keywords.
-    ///
-    /// The document is not merely redundant, it is ambiguous: OAS 3.x
-    /// says the parameter definition SHALL be ignored, so a reader that
-    /// honours the rule drops it and one that does not takes it
-    /// literally — the same document describes two different APIs
-    /// depending on who reads it. Generators are squarely in the second
-    /// camp, and turn a reserved header into an argument every call site
-    /// has to pass. Refuse rather than publish it.
+    /// An operation declares an `in: header` parameter OpenAPI reserves, which OAS 3.x
+    /// readers ignore and generators turn into an argument.
     ReservedHeaderParameter {
         /// The reserved name, in the spelling OpenAPI uses for it.
         header: String,
-        /// The operations declaring it, as `METHOD /path`, so the
-        /// message says where to look.
+        /// The operations declaring it, as `METHOD /path`.
         operations: Vec<String>,
     },
 }
@@ -554,11 +538,7 @@ impl ApiDocBuilder {
             }
         }
 
-        // Every requirement must resolve to a scheme that was registered.
-        // A guard's scheme name is a `GrantSite` const defaulting to
-        // `"bearer"`, and the registration is a builder call somewhere
-        // else entirely — so the two can be individually right and still
-        // not meet. Refuse here rather than publish a dangling `$ref`.
+        // A guard's scheme name defaults to `"bearer"`, registered elsewhere; refuse a mismatch.
         {
             let registered: Vec<String> = doc
                 .components
@@ -573,15 +553,7 @@ impl ApiDocBuilder {
             }
         }
 
-        // No operation may describe as a parameter what OpenAPI has a
-        // keyword for. Deleting the one contribution that did it fixes
-        // today; the check is what stops the next layer author from
-        // writing `HeaderParam::required("Authorization")` by hand and
-        // shipping a document whose meaning depends on which generator
-        // reads it. Every header on every operation funnels through the
-        // document eventually, so this is the one place that sees them
-        // all — including the ones handlers declare directly, which no
-        // contribution ever passes through.
+        // Checked on the document, the one place that sees handler-declared headers too.
         if let Some((header, operations)) = crate::contribution::reserved_header_parameters(&doc)
             .into_iter()
             .next()
@@ -589,10 +561,6 @@ impl ApiDocBuilder {
             return Err(BuildError::ReservedHeaderParameter { header, operations });
         }
 
-        // Guards compose their scope strings per call site, so the
-        // schemes just registered do not know about them yet. Declare
-        // what was actually stamped, or the document references scopes
-        // its own scheme never defines.
         crate::contribution::declare_stamped_scopes(&mut doc);
 
         // --- Tag discovery and grouping ---
@@ -1235,9 +1203,6 @@ mod tests {
         OpenApiBuilder::new().paths(paths.build()).build()
     }
 
-    /// A guard's scheme name defaults to `"bearer"`, and the registration
-    /// is a builder call somewhere else. Both halves are individually
-    /// well-formed when they disagree, so nothing but this catches it.
     #[test]
     fn a_scheme_no_one_registered_is_refused() {
         let error = ApiDocBuilder::new()
@@ -1285,9 +1250,7 @@ mod tests {
         );
     }
 
-    /// The counterpart: the names agree, so the document builds. Without
-    /// this the test above would pass just as well on a check that
-    /// refused everything.
+    /// The counterpart, so the check cannot pass by refusing everything.
     #[test]
     fn a_registered_scheme_builds() {
         let doc = ApiDocBuilder::new()
@@ -1324,11 +1287,6 @@ mod tests {
         OpenApiBuilder::new().paths(paths.build()).build()
     }
 
-    /// The credential belongs to `securitySchemes`. Declared as a
-    /// parameter as well, the document says one thing to a reader that
-    /// applies the reserved-name rule and another to a generator that
-    /// does not — so it is refused, and the message says where to put it
-    /// instead.
     #[test]
     fn an_authorization_header_parameter_is_refused() {
         let error = ApiDocBuilder::new()
@@ -1376,9 +1334,6 @@ mod tests {
         );
     }
 
-    /// `Accept` and `Content-Type` are reserved for the same reason but
-    /// have a different answer — the `content` maps — so the message
-    /// must not send the reader to the security schemes.
     #[test]
     fn a_content_negotiation_header_parameter_is_refused_and_points_at_content() {
         for name in ["Accept", "Content-Type"] {
@@ -1403,9 +1358,7 @@ mod tests {
         }
     }
 
-    /// The counterpart: an ordinary header is still a parameter, and the
-    /// refusal above would pass just as well on a check that refused
-    /// every header there is.
+    /// The counterpart, so the check cannot pass by refusing every header.
     #[test]
     fn an_ordinary_header_parameter_builds() {
         let doc = ApiDocBuilder::new()

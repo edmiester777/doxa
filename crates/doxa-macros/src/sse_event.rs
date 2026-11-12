@@ -325,7 +325,7 @@ struct ParsedVariant {
 
 enum VariantKind {
     Unit,
-    Newtype(Type),
+    Newtype(Box<Type>),
     Struct(Vec<StructField>),
 }
 
@@ -350,7 +350,7 @@ fn parse_variant(variant: &Variant, rename_all: Option<&str>) -> Result<ParsedVa
     let kind = match &variant.fields {
         Fields::Unit => VariantKind::Unit,
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-            VariantKind::Newtype(fields.unnamed[0].ty.clone())
+            VariantKind::Newtype(Box::new(fields.unnamed[0].ty.clone()))
         }
         Fields::Named(fields) => VariantKind::Struct(
             fields
@@ -567,10 +567,7 @@ fn payload_name_expr(ty: &Type) -> TokenStream {
 fn emit_registration(ty: &Type, name_expr: TokenStream) -> Vec<TokenStream> {
     let args = generic_args(ty);
 
-    // utoipa emits the inner `$ref` for a generic argument under its base ident
-    // (`Wrap<A>` -> `$ref Wrap`), so sibling monomorphizations collapse onto one
-    // component. Rewrite each such ref to the argument's composed name to keep
-    // them distinct.
+    // utoipa refs a generic argument by its base ident (`Wrap<A>` -> `Wrap`); use the composed name.
     let rewrites = args.iter().filter_map(|arg| {
         let composed = composed_generic_name(arg)?;
         Some(quote! {

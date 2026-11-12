@@ -8,6 +8,20 @@ members = [
     "crates/doxa-audit",
     "crates/doxa-auth",
     "crates/doxa-policy",
+    "crates/doxa-wire",
+    "crates/doxa-role",
+    "crates/doxa-macro-support",
+    "crates/doxa-client",
+    "crates/doxa-ui",
+    "crates/doxa-ui-macros",
+    "crates/doxa-tailwind",
+    "crates/doxa-build",
+    "crates/doxa-wasm-split",
+    "crates/doxa-cli",
+    "examples/shop/api",
+    "examples/shop/web",
+    "examples/site",
+    "crates/doxa-fmt",
 ]
 
 [workspace.metadata.release]
@@ -28,7 +42,7 @@ license = "Apache-2.0"
 authors = ["edmiester777"]
 repository = "https://github.com/edmiester777/doxa"
 homepage = "https://github.com/edmiester777/doxa"
-rust-version = "1.80"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Internal crates
@@ -39,6 +53,16 @@ doxa-protected = { path = "crates/doxa-protected", version = "0.1.6" }
 doxa-audit = { path = "crates/doxa-audit", version = "0.1.6", default-features = false }
 doxa-auth = { path = "crates/doxa-auth", version = "0.1.6", default-features = false }
 doxa-policy = { path = "crates/doxa-policy", version = "0.1.6", default-features = false }
+doxa-wire = { path = "crates/doxa-wire", version = "0.1.6" }
+doxa-role = { path = "crates/doxa-role", version = "0.1.6" }
+doxa-macro-support = { path = "crates/doxa-macro-support", version = "0.1.6" }
+doxa-client = { path = "crates/doxa-client", version = "0.1.6" }
+doxa-ui = { path = "crates/doxa-ui", version = "0.1.6" }
+doxa-tailwind = { path = "crates/doxa-tailwind", version = "0.1.6" }
+doxa-ui-macros = { path = "crates/doxa-ui-macros", version = "0.1.6" }
+doxa-fmt = { path = "crates/doxa-fmt", version = "0.1.6" }
+doxa-build = { path = "crates/doxa-build", version = "0.1.6", default-features = false }
+doxa-cli = { path = "crates/doxa-cli", version = "0.1.6" }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
@@ -46,7 +70,7 @@ serde_json = "1"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
+async-trait = "0.1.92"
 futures = "0.3"
 futures-core = "0.3"
 
@@ -56,6 +80,10 @@ http-body-util = "0.1"
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
 reqwest = { version = "0.13", features = ["json", "form"] }
+tower-http = "0.6"
+garde = { version = "0.23", default-features = false }
+validator = { version = "0.21", default-features = false }
+serde_valid = { version = "3.2", default-features = false }
 
 # OpenAPI
 utoipa = { version = "5", features = ["macros", "uuid", "chrono"] }

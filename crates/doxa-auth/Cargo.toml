@@ -29,13 +29,15 @@ uuid = ["dep:uuid"]
 # Self-registering action catalog, so `doxa::auth::actions()` answers
 # without a hand-maintained list. The sibling of `doxa-policy/catalog`,
 # and separate because the two vocabularies are: a capability is what a
-# client is told it holds, an action is what Cedar is asked about.
-catalog = ["dep:inventory"]
+# client is told it holds, an action is what Cedar is asked about. It
+# turns the capability catalog on too, for `GET /doxa/capabilities`.
+catalog = ["dep:inventory", "doxa-policy/catalog"]
 
 [dependencies]
 doxa-policy = { workspace = true }
 doxa-audit = { workspace = true, optional = true, default-features = false }
 doxa-protected = { workspace = true }
+doxa-wire = { workspace = true }
 doxa = { package = "doxa-docs", path = "../doxa-docs", version = "0.1.6", optional = true }
 cedar-policy = { workspace = true }
 axum = { workspace = true, optional = true }

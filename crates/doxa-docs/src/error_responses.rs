@@ -1,16 +1,5 @@
-//! Unioning the response maps of nested `ApiError` enums.
-//!
-//! `#[api(transparent)]` lets one variant delegate to a nested error
-//! type. `IntoResponses` then has to answer for both: the outer enum's
-//! own variants *and* everything the nested type can return. Statuses
-//! that appear in only one side are a plain insert; a status both sides
-//! declare has to be merged, or the document loses whichever half lost
-//! the race.
-//!
-//! Merging happens here, on built `utoipa` values, rather than in the
-//! derive — the shape is the same envelope
-//! `#[derive(ApiError)]` emits, so the union is ordinary code over
-//! ordinary structs instead of `quote!` generating it.
+//! Unioning the response maps of nested `ApiError` enums, for `#[api(transparent)]`:
+//! a status both sides declare is merged rather than overwritten.
 
 use std::collections::BTreeMap;
 
@@ -20,13 +9,8 @@ use utoipa::openapi::{RefOr, Response};
 /// Response map as `IntoResponses` returns it.
 type ResponseMap = BTreeMap<String, RefOr<Response>>;
 
-/// Merge `inner` into `outer`, unioning any status both declare.
-///
-/// The outer enum owns its statuses: on a collision the outer response's
-/// description and examples stay, and the inner's `code` enum values and
-/// `error` variants are added to them. That keeps an endpoint's own
-/// documentation authoritative while making the nested type's failure
-/// modes reachable.
+/// Merge `inner` into `outer`; on a shared status the outer description stays and the
+/// inner's `code` values and `error` variants are added.
 pub fn merge_response_maps(outer: &mut ResponseMap, inner: ResponseMap) {
     for (status, incoming) in inner {
         match outer.remove(&status) {
@@ -40,11 +24,7 @@ pub fn merge_response_maps(outer: &mut ResponseMap, inner: ResponseMap) {
     }
 }
 
-/// Union two responses at one status.
-///
-/// A `Ref` on either side has nothing to merge into — the schema lives
-/// elsewhere in the document — so the outer one is kept rather than
-/// silently replaced.
+/// Union two responses at one status; a `Ref` on either side keeps the outer.
 fn merge_responses(outer: RefOr<Response>, inner: RefOr<Response>) -> RefOr<Response> {
     let (mut outer_response, inner_response) = match (outer, inner) {
         (RefOr::T(outer), RefOr::T(inner)) => (outer, inner),
@@ -73,10 +53,7 @@ fn merge_responses(outer: RefOr<Response>, inner: RefOr<Response>) -> RefOr<Resp
     RefOr::T(outer_response)
 }
 
-/// Union the `code` enum and the `error` `oneOf` of two envelopes.
-///
-/// Anything that is not the object envelope this derive emits is left
-/// alone — a consumer who replaced the schema wholesale meant it.
+/// Union the `code` enum and `error` `oneOf` of two envelopes; any other schema is left alone.
 fn merge_envelopes(outer: &mut RefOr<Schema>, inner: RefOr<Schema>) {
     let (RefOr::T(Schema::Object(outer_object)), RefOr::T(Schema::Object(inner_object))) =
         (outer, inner)
@@ -123,19 +100,21 @@ fn union_enum_values(outer: &mut RefOr<Schema>, inner: RefOr<Schema>) {
     }
 }
 
-/// Append the inner property's `oneOf` items to the outer's.
-///
-/// A non-`oneOf` schema on either side is treated as a single item, so a
-/// status carrying exactly one variant still merges.
+/// Append the inner `oneOf` items to the outer's; a non-`oneOf` schema counts as one item.
 fn union_one_of(outer: &mut RefOr<Schema>, inner: RefOr<Schema>) {
     let mut items = match std::mem::replace(outer, RefOr::T(Schema::OneOf(OneOf::new()))) {
         RefOr::T(Schema::OneOf(one_of)) => one_of.items,
         other => vec![other],
     };
 
-    match inner {
-        RefOr::T(Schema::OneOf(one_of)) => items.extend(one_of.items),
-        other => items.push(other),
+    let incoming = match inner {
+        RefOr::T(Schema::OneOf(one_of)) => one_of.items,
+        other => vec![other],
+    };
+    for item in incoming {
+        if !items.contains(&item) {
+            items.push(item);
+        }
     }
 
     let mut merged = OneOf::new();

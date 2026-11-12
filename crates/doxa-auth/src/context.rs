@@ -1,21 +1,6 @@
-//! Authenticated caller context injected into request extensions.
-//!
-//! [`AuthContext`] is injected into axum request extensions by the auth
-//! middleware. It carries the caller's resolved claims ([`Claims`]), a
-//! domain-specific resolved session of type `S`, and an optional admin
-//! flag. Handlers and extractors read this to enforce access control.
-//!
-//! `AuthContext` is generic over **two** type parameters:
-//!
-//! - `S` — the resolved session output produced by
-//!   [`Policy<S>`](doxa_policy::Policy). Consumers choose whatever session
-//!   shape their service needs (a set of allowed resources, a rate-limit
-//!   token, an OAuth scope set, …). `S = ()` is a reasonable default for
-//!   services that don't need a session beyond the identity.
-//! - `C` — the consumer-defined claim type implementing [`Claims`]. Deployments
-//!   own the full claim vocabulary; the library only reads the trait methods
-//!   (`sub`, `scope`, `roles`, `audit_attrs`) and never inspects the concrete
-//!   type.
+//! [`AuthContext`]: the caller's claims `C`, the session `S` their
+//! [`Policy<S>`](doxa_policy::Policy) resolved, and whether they are an admin, put in request
+//! extensions by the auth middleware.
 
 use crate::claims::Claims;
 
@@ -35,8 +20,7 @@ pub struct AuthContext<S, C: Claims> {
     /// whatever per-request authorization state the consumer's extension
     /// produces.
     pub session: S,
-    /// Convenience flag mirroring whatever the policy considered to be
-    /// "admin" — extensions that don't model admin can leave this `false`.
+    /// Whether a token role passes [`Policy::is_admin_role`](doxa_policy::Policy::is_admin_role).
     pub is_admin: bool,
 }
 
@@ -106,9 +90,6 @@ mod tests {
         assert!(c.is_admin);
     }
 
-    /// An unscoped caller reports no tenant rather than a placeholder —
-    /// a consumer that needs a fallback has to name it itself, where the
-    /// choice is visible.
     #[test]
     fn a_caller_without_a_scope_has_no_tenant() {
         let c = ctx(vec!["viewer"], false, None);

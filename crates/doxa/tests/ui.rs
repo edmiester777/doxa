@@ -1,0 +1,1269 @@
+//! The renderer against an in-memory document.
+
+use std::rc::Rc;
+
+use doxa::client::transport::MockTransport;
+use doxa::ui::dom::MemDom;
+use doxa::ui::prelude::*;
+
+fn mount<V: IntoView>(root: impl Fn() -> V + 'static) -> MemDom {
+    let dom = MemDom::new();
+    App::new(root)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    dom
+}
+
+fn settle() {
+    doxa::client::task::run_until_stalled();
+}
+
+#[component]
+fn Counter(start: i32) -> View {
+    let n = state(start);
+    view! { <button on:click={move |_| n.update(|n| *n += 1)}>{n.get()}</button> }
+}
+
+#[test]
+fn state_rerenders_in_place() {
+    let dom = mount(|| view! { <Counter start={1}/> });
+    let b = dom.find_tag("button").unwrap();
+    dom.click(b);
+    settle();
+    assert_eq!(dom.text(b), "2");
+    assert_eq!(
+        dom.find_tag("button"),
+        Some(b),
+        "the same element is patched"
+    );
+}
+
+#[test]
+fn a_script_url_set_as_a_plain_attribute_is_left_unset() {
+    let user = "  JavaScript:alert(1)".to_owned();
+    let dom = mount(move || {
+        let user = user.clone();
+        doxa::ui::el("a")
+            .attr("HREF", user.clone())
+            .attr("title", user)
+            .into_view()
+    });
+    let a = dom.find_tag("a").unwrap();
+    assert_eq!(dom.attr(a, "HREF"), None);
+    assert!(
+        dom.attr(a, "title").is_some(),
+        "only URL attributes are checked"
+    );
+}
+
+thread_local! {
+    static CLICKS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[component]
+fn TwoHandlers() -> View {
+    let tick = state(0);
+    let _ = tick.get();
+    doxa::ui::el("button")
+        .on("click", |_| CLICKS.with(|c| c.borrow_mut().push("a")))
+        .on("click", |_| CLICKS.with(|c| c.borrow_mut().push("b")))
+        .on("focus", move |_| tick.update(|t| *t += 1))
+        .into_view()
+}
+
+#[test]
+fn two_handlers_for_one_event_both_survive_a_rerender() {
+    let dom = mount(|| view! { <TwoHandlers/> });
+    let button = dom.find_tag("button").unwrap();
+    dom.dispatch(button, "focus", Default::default());
+    settle();
+    dom.click(button);
+    assert_eq!(CLICKS.with(|c| c.borrow().clone()), ["a", "b"]);
+}
+
+#[component]
+fn RawThenKid() -> View {
+    let raw = state(true);
+    let div = doxa::ui::el("div").on("click", move |_| raw.set(false));
+    let div = if raw.get() {
+        div.inner_html(DangerousHtml::trust("<i>raw</i>"))
+    } else {
+        div.child("kid")
+    };
+    div.into_view()
+}
+
+#[test]
+fn children_replace_inner_html_when_it_goes() {
+    let dom = mount(|| view! { <RawThenKid/> });
+    let div = dom.find_tag("div").unwrap();
+    dom.click(div);
+    settle();
+    assert_eq!(dom.html(div), "<div>kid</div>");
+}
+
+#[component]
+fn Chip(#[attrs] rest: Attrs) -> View {
+    view! { <a {..rest}>"x"</a> }
+}
+
+#[test]
+fn a_spread_checks_the_attributes_it_carries() {
+    let dom = mount(|| view! { <Chip href={SafeUrl::parse("/ok").unwrap()} data-x="1"/> });
+    let a = dom.find_tag("a").unwrap();
+    assert_eq!(dom.attr(a, "href").as_deref(), Some("/ok"));
+}
+
+#[test]
+#[should_panic(expected = "runs script")]
+fn an_event_handler_attribute_panics() {
+    let _ = doxa::ui::el("a").attr("onclick", "alert(1)");
+}
+
+thread_local! {
+    static ORDER: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[component]
+fn Item(id: u32) -> View {
+    view! { <li id={id.to_string()}>{id}</li> }
+}
+
+#[component]
+fn List() -> View {
+    let ids = ORDER.with(|o| o.borrow().clone());
+    let tick = state(0);
+    let _ = tick.get();
+    view! {
+        <button on:click={move |_| tick.update(|t| *t += 1)}>"x"</button>
+        <ul>{ids.iter().map(|&id| view! { <Item key={id} id={id}/> }).collect::<View>()}</ul>
+    }
+}
+
+#[test]
+fn keyed_children_move_instead_of_being_recreated() {
+    ORDER.with(|o| *o.borrow_mut() = vec![1, 2, 3]);
+    let dom = mount(|| view! { <List/> });
+    let three = dom.find("id", "3").unwrap();
+    ORDER.with(|o| *o.borrow_mut() = vec![3, 1, 2]);
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "312");
+    assert_eq!(dom.find("id", "3"), Some(three));
+}
+
+#[component]
+fn Bullets(children: View) -> View {
+    view! { <ul>{children}</ul> }
+}
+
+#[test]
+fn an_array_is_a_view_of_its_items() {
+    let dom = mount(|| {
+        view! {
+            <Bullets>
+                {[view! { <li>"a"</li> }, view! { <li>"b"</li> }]}
+                {["c", "d"]}
+            </Bullets>
+        }
+    });
+    assert_eq!(
+        dom.html(dom.find_tag("ul").unwrap()),
+        "<ul><li>a</li><li>b</li>cd</ul>"
+    );
+}
+
+#[component]
+fn Flaky(fail: bool) -> Result<View> {
+    if fail {
+        return Err(Thrown::msg("boom"));
+    }
+    Ok(view! { <p>"fine"</p> })
+}
+
+#[test]
+fn catch_shows_its_fallback_for_a_child_error() {
+    let dom = mount(|| {
+        view! {
+            <Catch fallback={|e: &Thrown| view! { <p class="err">{e.to_string()}</p> }}>
+                <Flaky fail={true}/>
+            </Catch>
+        }
+    });
+    settle();
+    assert_eq!(dom.text(dom.find("class", "err").unwrap()), "boom");
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("refused")]
+struct Refused;
+
+async fn refuse() -> std::result::Result<(), Refused> {
+    Err(Refused)
+}
+
+#[component]
+fn AsyncButton() -> View {
+    view! {
+        <button
+            on:click={async move |_| {
+                refuse().await?;
+                Ok(())
+            }}
+        >
+            "go"
+        </button>
+    }
+}
+
+#[test]
+fn question_mark_in_an_async_handler_reaches_catch() {
+    let dom = mount(|| {
+        view! {
+            <Catch fallback={|e: &Thrown| view! { <p class="err">{e.to_string()}</p> }}>
+                <AsyncButton/>
+            </Catch>
+        }
+    });
+    settle();
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert_eq!(dom.text(dom.find("class", "err").unwrap()), "refused");
+}
+
+#[component]
+fn Saver() -> View {
+    let save = action(async |n: u32| {
+        if n == 0 {
+            return Err(Thrown::msg("zero"));
+        }
+        Ok(n)
+    });
+    view! {
+        <button on:click={move |_| save.run(0)}>"save"</button>
+        <span>{if save.pending() { "pending" } else { "idle" }}</span>
+        {save.error().map(|e| view! { <em>{e.to_string()}</em> })}
+    }
+}
+
+#[test]
+fn an_action_reports_its_error_inline() {
+    let dom = mount(|| view! { <Saver/> });
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert_eq!(dom.text(dom.find_tag("span").unwrap()), "idle");
+    assert_eq!(dom.text(dom.find_tag("em").unwrap()), "zero");
+}
+
+#[component]
+fn Conditional() -> View {
+    let flip = state(false);
+    if flip.get() {
+        let _extra = state(0u8);
+    }
+    let _after = state(String::new());
+    view! { <button on:click={move |_| flip.set(true)}>"flip"</button> }
+}
+
+#[test]
+#[should_panic(expected = "hook order changed in <Conditional>")]
+fn a_conditional_hook_panics_with_both_locations() {
+    let dom = mount(|| view! { <Conditional/> });
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+}
+
+#[page("/things/{id}")]
+fn Thing(id: u32, tab: Option<String>) -> View {
+    view! {
+        <p>
+            {id}
+            {tab.unwrap_or_default()}
+        </p>
+    }
+}
+
+#[test]
+fn a_page_parses_its_path_and_query() {
+    assert_eq!(Thing::route(7).as_str(), "/things/7");
+    let s = doxa::ui::match_path(Thing::PATH, "/things/7?tab=info").unwrap();
+    assert!(
+        <Thing as Page>::parse(&s).is_some_and(|p| p.id == 7 && p.tab.as_deref() == Some("info"))
+    );
+    let bad = doxa::ui::match_path(Thing::PATH, "/things/seven").unwrap();
+    assert!(<Thing as Page>::parse(&bad).is_none());
+}
+
+thread_local! {
+    static LIFE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static DOC: std::cell::RefCell<Option<MemDom>> = const { std::cell::RefCell::new(None) };
+}
+
+#[component]
+fn Tracked() -> View {
+    let on = state(true);
+    let n = state(0);
+    let probe = doxa::ui::el("p").lifecycle(|phase, node| {
+        let attached = DOC.with(|d| d.borrow().as_ref().unwrap().find_tag("p")) == Some(node.id());
+        LIFE.with(|l| l.borrow_mut().push(format!("{phase:?} {attached}")));
+    });
+    view! {
+        <button id="n" on:click={move |_| n.update(|n| *n += 1)}>{n.get()}</button>
+        <button id="off" on:click={move |_| on.set(false)}>"off"</button>
+        <div>{on.get().then_some(probe)}</div>
+    }
+}
+
+#[test]
+fn lifecycle_sees_the_node_attached_until_it_is_removed() {
+    let dom = MemDom::new();
+    DOC.with(|d| *d.borrow_mut() = Some(dom.clone()));
+    App::new(|| view! { <Tracked/> })
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    dom.click(dom.find("id", "n").unwrap());
+    settle();
+    dom.click(dom.find("id", "off").unwrap());
+    settle();
+    assert_eq!(
+        LIFE.with(|l| l.take()),
+        ["Mounted true", "Patched true", "Unmounting true"]
+    );
+}
+
+#[page("/gizmos/{name}")]
+fn Gizmo(name: String) -> View {
+    let editing = state(false);
+    let draft = state(name.clone());
+    view! {
+        <h1>{name}</h1>
+        <button on:click={move |_| editing.set(true)}>"rename"</button>
+        {editing.get().then(|| view! { <input bind:value={draft}/> })}
+    }
+}
+
+#[test]
+fn a_page_remounts_when_its_params_change() {
+    let dom = MemDom::new();
+    App::new(Router::new().page::<Gizmo>())
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    navigate("/gizmos/cog");
+    settle();
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert!(dom.find_tag("input").is_some());
+
+    navigate("/gizmos/gear");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("h1").unwrap()), "gear");
+    assert!(dom.find_tag("input").is_none(), "cog's open form is gone");
+}
+
+#[page("/shop/{store}")]
+fn Shop(store: String) -> View {
+    let visits = state(0);
+    view! {
+        <h2>{store}</h2>
+        <button id="visit" on:click={move |_| visits.update(|v| *v += 1)}>{visits.get()}</button>
+        <main>
+            <Outlet/>
+        </main>
+    }
+}
+
+#[page("/shop/{store}")]
+fn ShopHome(store: String) -> View {
+    view! { <p>{format!("home of {store}")}</p> }
+}
+
+#[page("/shop/{store}/items")]
+fn Items(store: String) -> View {
+    view! { <p>{format!("items of {store}")}</p> }
+}
+
+#[page("/shop/{store}/admin")]
+fn Admin(store: String) -> View {
+    view! {
+        <h3>{format!("admin of {store}")}</h3>
+        <section>
+            <Outlet/>
+        </section>
+    }
+}
+
+#[page("/shop/{store}/admin/users")]
+fn Users(store: String) -> View {
+    view! { <p>{format!("users of {store}")}</p> }
+}
+
+fn shop() -> MemDom {
+    let dom = MemDom::new();
+    let router = Router::new()
+        .layout::<Shop>(|r| {
+            r.page::<ShopHome>()
+                .page::<Items>()
+                .layout::<Admin>(|r| r.page::<Users>())
+        })
+        .not_found(|| view! { <p>"no such page"</p> });
+    App::new(router)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    dom
+}
+
+#[test]
+fn a_layout_stays_mounted_while_its_pages_change() {
+    let dom = shop();
+    navigate("/shop/acme");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("main").unwrap()), "home of acme");
+    let visit = dom.find("id", "visit").unwrap();
+    dom.click(visit);
+    settle();
+
+    navigate("/shop/acme/items");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("main").unwrap()), "items of acme");
+    assert_eq!(dom.find("id", "visit"), Some(visit), "the same node");
+    assert_eq!(dom.text(visit), "1", "and the same state");
+}
+
+#[test]
+fn a_layout_remounts_when_its_own_params_change() {
+    let dom = shop();
+    navigate("/shop/acme/items");
+    settle();
+    dom.click(dom.find("id", "visit").unwrap());
+    settle();
+
+    navigate("/shop/zenith/items");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("h2").unwrap()), "zenith");
+    assert_eq!(dom.text(dom.find("id", "visit").unwrap()), "0");
+}
+
+#[test]
+fn layouts_nest() {
+    let dom = shop();
+    navigate("/shop/acme/admin/users");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("h2").unwrap()), "acme");
+    assert_eq!(dom.text(dom.find_tag("h3").unwrap()), "admin of acme");
+    assert_eq!(dom.text(dom.find_tag("section").unwrap()), "users of acme");
+}
+
+#[test]
+fn an_unmatched_path_under_a_layout_is_not_found() {
+    let dom = shop();
+    navigate("/shop/acme/nope");
+    settle();
+    assert!(dom.find_tag("h2").is_none());
+    assert_eq!(dom.text(dom.find_tag("p").unwrap()), "no such page");
+}
+
+#[test]
+fn an_outlet_outside_a_layout_is_empty() {
+    let dom = mount(|| {
+        view! {
+            <div>
+                <Outlet/>
+            </div>
+        }
+    });
+    assert_eq!(dom.text(dom.find_tag("div").unwrap()), "");
+}
+
+#[test]
+#[should_panic(expected = "`/gizmos/{name}` isn't under the layout `Shop` at `/shop/{store}`")]
+fn a_page_outside_its_layout_is_refused() {
+    let _ = Router::new().layout::<Shop>(|r| r.page::<Gizmo>());
+}
+
+struct Sidebar;
+
+impl Plugin for Sidebar {
+    fn slots(&self, slots: &mut Slots) {
+        slots.fill("side", || view! { <i>"x"</i> });
+    }
+}
+
+#[test]
+fn a_slot_shows_each_fill_once_however_often_apps_mount() {
+    for _ in 0..2 {
+        let dom = MemDom::new();
+        App::new(|| {
+            view! {
+                <aside>
+                    <Slot name="side"/>
+                </aside>
+            }
+        })
+        .plugin(Sidebar)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+        assert_eq!(dom.text(dom.find_tag("aside").unwrap()), "x");
+    }
+}
+
+static VISITS: Singleton<u32> = Singleton::new(|| 0);
+static OWNED: Singleton<u32> = Singleton::new(|| 0).resets_with("other-client");
+
+mod probes {
+    use doxa::client::Probe;
+    use doxa::wire::{Method, RouteSpec};
+
+    pub static GUARDED: RouteSpec = RouteSpec {
+        method: Method::Get,
+        path: "/guarded",
+        operation_id: "guarded",
+        entities: &[],
+        dry_run: true,
+        invalidates: true,
+        package: "",
+    };
+    pub static OTHER: RouteSpec = RouteSpec {
+        method: Method::Get,
+        path: "/other",
+        operation_id: "other",
+        entities: &[],
+        dry_run: true,
+        invalidates: true,
+        package: "",
+    };
+    pub static OPAQUE: RouteSpec = RouteSpec {
+        method: Method::Get,
+        path: "/opaque",
+        operation_id: "opaque",
+        entities: &[],
+        dry_run: false,
+        invalidates: true,
+        package: "",
+    };
+
+    pub mod guarded {
+        pub fn can() -> super::Probe {
+            super::Probe::new(&super::GUARDED)
+        }
+    }
+
+    pub mod other {
+        pub fn can() -> super::Probe {
+            super::Probe::new(&super::OTHER)
+        }
+    }
+
+    pub mod opaque {
+        pub fn can() -> super::Probe {
+            super::Probe::new(&super::OPAQUE)
+        }
+    }
+}
+
+fn answer(mock: &MockTransport, status: u16, session: &str) {
+    mock.respond(
+        status,
+        vec![
+            (doxa::wire::SESSION_HEADER.into(), session.into()),
+            (
+                doxa::wire::DRY_RUN_HEADER.into(),
+                doxa::wire::DRY_RUN_OK.into(),
+            ),
+        ],
+        Vec::new(),
+    );
+}
+
+fn mount_with(mock: &MockTransport, root: impl Fn() -> View + 'static) -> MemDom {
+    let dom = MemDom::new();
+    service("")
+        .layers()
+        .push(doxa::client::layer::transport(mock.clone()));
+    App::new(root)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    dom
+}
+
+#[test]
+fn a_singleton_resets_with_any_session_or_only_its_owners() {
+    let mock = MockTransport::new();
+    let _ = mount_with(&mock, View::empty);
+    VISITS.set(2);
+    OWNED.set(2);
+    answer(&mock, 204, "a");
+    answer(&mock, 204, "b");
+    doxa::client::task::block_on(async {
+        let _ = probes::guarded::can().await;
+        let _ = probes::other::can().await;
+    });
+    assert_eq!(VISITS.get(), 0, "a new session starts the singleton over");
+    assert_eq!(OWNED.get(), 2, "another service's session reset it");
+    service("other-client").end_session();
+    assert_eq!(OWNED.get(), 0);
+}
+
+#[test]
+fn can_shows_children_fallback_or_unknown() {
+    let mock = MockTransport::new();
+    answer(&mock, 403, "s");
+    let dom = mount_with(&mock, || {
+        view! {
+            <p id="denied">
+                <Can route={probes::guarded} fallback={"no"} unknown={"?"}>"yes"</Can>
+            </p>
+            <p id="unknown">
+                <Can route={probes::opaque} fallback={"no"} unknown={"?"}>"yes"</Can>
+            </p>
+        }
+    });
+    settle();
+    assert_eq!(dom.text(dom.find("id", "denied").unwrap()), "no");
+    assert_eq!(dom.text(dom.find("id", "unknown").unwrap()), "?");
+}
+
+#[test]
+fn can_is_recognised_by_its_path() {
+    let mock = MockTransport::new();
+    answer(&mock, 204, "s");
+    let dom = mount_with(&mock, || {
+        view! {
+            <p>
+                <doxa::ui::Can route={probes::guarded}>"yes"</doxa::ui::Can>
+            </p>
+        }
+    });
+    settle();
+    assert_eq!(dom.text(dom.find_tag("p").unwrap()), "yes");
+}
+
+thread_local! {
+    /// 0 renders normally, 1 waits forever, 2 fails.
+    static MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static RAN: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[component]
+async fn Effected() -> Result<View> {
+    let n = state(0u32);
+    let tick = state(0u32);
+    let _ = tick.get();
+    effect(n, async |n: &u32| {
+        RAN.with(|r| r.borrow_mut().push(*n));
+        Ok(())
+    });
+    match MODE.with(|m| m.get()) {
+        1 => std::future::pending::<()>().await,
+        2 => return Err(Thrown::msg("render failed")),
+        _ => {}
+    }
+    Ok(view! {
+        <button id="n" on:click={move |_| n.set(1)}>"n"</button>
+        <button id="tick" on:click={move |_| tick.update(|t| *t += 1)}>"tick"</button>
+    })
+}
+
+fn effect_survives_an_uncommitted_render(mode: u8) {
+    MODE.with(|m| m.set(0));
+    RAN.with(|r| r.take());
+    let dom = mount(|| view! { <Effected/> });
+    settle();
+    MODE.with(|m| m.set(mode));
+    dom.click(dom.find("id", "n").unwrap());
+    settle();
+    MODE.with(|m| m.set(0));
+    dom.click(dom.find("id", "tick").unwrap());
+    settle();
+    assert_eq!(RAN.with(|r| r.take()), [0, 1]);
+}
+
+#[test]
+fn an_effect_runs_after_a_cancelled_render() {
+    effect_survives_an_uncommitted_render(1);
+}
+
+#[test]
+fn an_effect_runs_after_a_failed_render() {
+    effect_survives_an_uncommitted_render(2);
+}
+
+#[derive(Clone)]
+struct Label(&'static str);
+
+#[component]
+async fn Provider() -> Result<View> {
+    let tick = state(0u32);
+    let _ = tick.get();
+    match MODE.with(|m| m.get()) {
+        1 => std::future::pending::<()>().await,
+        2 => return Err(Thrown::msg("render failed")),
+        _ => {}
+    }
+    provide(Label("ctx"));
+    Ok(view! {
+        <button id="tick" on:click={move |_| tick.update(|t| *t += 1)}>"tick"</button>
+        <Reader/>
+    })
+}
+
+#[component]
+fn Reader() -> View {
+    let n = state(0u32);
+    let label = context::<Label>().0;
+    view! {
+        <b on:click={move |_| n.update(|n| *n += 1)}>
+            {label}
+            {n.get()}
+        </b>
+    }
+}
+
+fn context_survives_an_uncommitted_render(mode: u8) {
+    MODE.with(|m| m.set(0));
+    let dom = mount(|| view! { <Provider/> });
+    MODE.with(|m| m.set(mode));
+    dom.click(dom.find("id", "tick").unwrap());
+    settle();
+    dom.click(dom.find_tag("b").unwrap());
+    settle();
+    assert_eq!(dom.text(dom.find_tag("b").unwrap()), "ctx1");
+}
+
+#[test]
+fn context_survives_a_cancelled_render() {
+    context_survives_an_uncommitted_render(1);
+}
+
+#[test]
+fn context_survives_a_failed_render() {
+    context_survives_an_uncommitted_render(2);
+}
+
+#[component]
+fn Tally() -> View {
+    let n = state(0u32);
+    view! { <b on:click={move |_| n.update(|n| *n += 1)}>{n.get()}</b> }
+}
+
+#[component]
+fn MixedList() -> View {
+    let ids = ORDER.with(|o| o.borrow().clone());
+    let tick = state(0);
+    let _ = tick.get();
+    view! {
+        <div>
+            <input/>
+            {ids.iter().map(|&id| view! { <Item key={id} id={id}/> }).collect::<View>()}
+            <Tally/>
+            <button on:click={move |_| tick.update(|t| *t += 1)}>"x"</button>
+        </div>
+    }
+}
+
+#[test]
+fn unkeyed_siblings_of_a_keyed_list_are_kept() {
+    ORDER.with(|o| *o.borrow_mut() = vec![1, 2]);
+    let dom = mount(|| view! { <MixedList/> });
+    let input = dom.find_tag("input").unwrap();
+    dom.click(dom.find_tag("b").unwrap());
+    settle();
+    ORDER.with(|o| *o.borrow_mut() = vec![2, 1, 3]);
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert_eq!(dom.find_tag("input"), Some(input));
+    assert_eq!(
+        dom.text(dom.find_tag("b").unwrap()),
+        "1",
+        "Tally kept its state"
+    );
+    assert_eq!(dom.text(dom.find_tag("div").unwrap()), "2131x");
+}
+
+#[page("/plain")]
+fn Plain() -> View {
+    view! { <Link to={Target::route()}>"go"</Link> }
+}
+
+#[page("/target")]
+fn Target() -> View {
+    view! { <p>"target"</p> }
+}
+
+#[test]
+fn a_modified_link_click_is_left_to_the_browser() {
+    use doxa::ui::dom::MemEvent;
+    let dom = MemDom::new();
+    App::new(Router::new().page::<Plain>().page::<Target>())
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    navigate("/plain");
+    settle();
+    let a = dom.find_tag("a").unwrap();
+    let modified = [
+        MemEvent {
+            ctrl_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            meta_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            shift_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            alt_key: true,
+            ..MemEvent::default()
+        },
+        MemEvent {
+            button: 1,
+            ..MemEvent::default()
+        },
+    ];
+    for ev in modified {
+        assert!(dom.dispatch(a, "click", ev), "default not prevented");
+        settle();
+        assert!(dom.find_tag("p").is_none(), "did not navigate");
+    }
+    assert!(!dom.click(a), "a plain click is handled");
+    settle();
+    assert_eq!(dom.text(dom.find_tag("p").unwrap()), "target");
+}
+
+thread_local! {
+    static PREFS: std::cell::Cell<Option<doxa::ui::Stored<u32>>> = const { std::cell::Cell::new(None) };
+}
+
+#[component]
+fn Prefs() -> View {
+    PREFS.set(Some(stored("prefs", || 0)));
+    view! { <i>"prefs"</i> }
+}
+
+#[component]
+fn PrefsUntilClick() -> View {
+    let shown = state(true);
+    view! {
+        <button on:click={move |_| shown.set(false)}>"close"</button>
+        {shown.get().then(|| view! { <Prefs/> })}
+    }
+}
+
+#[test]
+fn a_stored_update_after_unmount_is_ignored() {
+    let dom = mount(|| view! { <PrefsUntilClick/> });
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert!(dom.find_tag("i").is_none());
+    PREFS.get().unwrap().update(|n| *n += 1);
+}
+
+#[page("/elsewhere")]
+fn Elsewhere() -> View {
+    view! {
+        <Link to={Target::route()} target="_blank" data-k="tab">"tab"</Link>
+        <Link to={Target::route()} download="" data-k="file">"file"</Link>
+        <Link to="https://example.com/x" data-k="site">"site"</Link>
+    }
+}
+
+#[test]
+fn a_link_leaving_the_app_is_left_to_the_browser() {
+    let dom = MemDom::new();
+    App::new(Router::new().page::<Elsewhere>().page::<Target>())
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    navigate("/elsewhere");
+    settle();
+    for text in ["tab", "file", "site"] {
+        let a = dom.find("data-k", text).unwrap();
+        assert!(dom.click(a), "{text}: default not prevented");
+        settle();
+        assert!(dom.find_tag("p").is_none(), "{text}: did not navigate");
+    }
+}
+
+const LIGHT: Theme = Theme::new("light", &[("--bg", "white"), ("--fg", "black")]);
+const DIM: Theme = Theme::new("dim", &[("--bg", "grey")]);
+
+#[test]
+fn a_theme_sets_only_its_own_variables() {
+    let dom = MemDom::new();
+    doxa::ui::dom::Dom::set_attr(&dom, dom.body(), "style", "color: red;");
+    App::new(View::empty)
+        .theme(LIGHT)
+        .mount_on(Rc::new(dom.clone()), dom.body())
+        .keep();
+    assert_eq!(
+        dom.attr(dom.body(), "style").as_deref(),
+        Some("color: red; --bg: white; --fg: black;")
+    );
+    set_theme(DIM);
+    assert_eq!(
+        dom.attr(dom.body(), "style").as_deref(),
+        Some("color: red; --bg: grey;")
+    );
+}
+
+thread_local! {
+    static STOPPED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct OnStop;
+
+impl Drop for OnStop {
+    fn drop(&mut self) {
+        STOPPED.with(|s| s.set(s.get() + 1));
+    }
+}
+
+#[component]
+fn Ticking(name: &'static str) -> View {
+    effect((), async |_: &()| {
+        let _running = OnStop;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    view! { <p id={name}>{name}</p> }
+}
+
+fn element(dom: &MemDom, id: &str) -> doxa::ui::dom::NodeId {
+    use doxa::ui::dom::Dom;
+    let el = dom.create_element("div", None);
+    dom.set_attr(el, "id", id);
+    dom.insert(dom.body(), el, None);
+    el
+}
+
+#[test]
+fn two_roots_live_side_by_side_and_each_unmounts_alone() {
+    let dom = MemDom::new();
+    let doc: Rc<dyn doxa::ui::dom::Dom> = Rc::new(dom.clone());
+    let (a, b) = (element(&dom, "a"), element(&dom, "b"));
+    let first = App::new(|| view! { <Ticking name="one"/> }).mount_on(doc.clone(), a);
+    let second = App::embedded(|| view! { <Ticking name="two"/> }).mount_on(doc, b);
+    settle();
+    assert_ne!(first.id(), second.id());
+    assert!(dom.find("id", "one").is_some() && dom.find("id", "two").is_some());
+
+    drop(first);
+    settle();
+    assert!(dom.find("id", "one").is_none(), "its nodes are gone");
+    assert_eq!(STOPPED.with(|s| s.get()), 1, "its effects stopped");
+    assert!(
+        dom.find("id", "two").is_some(),
+        "the other root is untouched"
+    );
+    second.keep();
+}
+
+#[test]
+fn an_embedded_root_keeps_its_theme_on_its_own_element() {
+    let dom = MemDom::new();
+    let doc: Rc<dyn doxa::ui::dom::Dom> = Rc::new(dom.clone());
+    let widget = element(&dom, "widget");
+    let root = App::embedded(View::empty).theme(DIM).mount_on(doc, widget);
+    assert_eq!(dom.attr(widget, "data-theme").as_deref(), Some("dim"));
+    assert_eq!(dom.attr(dom.body(), "data-theme"), None);
+    drop(root);
+    set_theme(LIGHT);
+    assert_eq!(
+        dom.attr(widget, "data-theme").as_deref(),
+        Some("dim"),
+        "an unmounted root's element is no longer themed"
+    );
+}
+
+thread_local! {
+    static HEARD: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static GATES: std::cell::RefCell<Vec<futures::channel::oneshot::Sender<()>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn heard() -> Vec<String> {
+    HEARD.with(|h| h.take())
+}
+
+/// Records each call; with `hold`, keeps a leaving node until its gate opens.
+#[derive(Clone)]
+struct Record {
+    tag: String,
+    hold: bool,
+}
+
+/// `use:track={(tag, hold)}`.
+fn track((tag, hold): (String, bool)) -> Record {
+    Record { tag, hold }
+}
+
+impl Directive for Record {
+    fn mounted(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("mounted {}", self.tag)));
+    }
+    fn update(&mut self, next: Self) {
+        HEARD.with(|h| {
+            h.borrow_mut()
+                .push(format!("update {}->{}", self.tag, next.tag))
+        });
+        *self = next;
+    }
+    fn updated(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("updated {}", self.tag)));
+    }
+    fn before_move(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("before {}", self.tag)));
+    }
+    fn after_move(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("after {}", self.tag)));
+    }
+    fn leaving(&mut self, _: NodeRef) -> Option<futures::future::LocalBoxFuture<'static, ()>> {
+        HEARD.with(|h| h.borrow_mut().push(format!("leaving {}", self.tag)));
+        if !self.hold {
+            return None;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        GATES.with(|g| g.borrow_mut().push(tx));
+        Some(Box::pin(async move {
+            let _ = rx.await;
+        }))
+    }
+    fn unmounted(&mut self, _: NodeRef) {
+        HEARD.with(|h| h.borrow_mut().push(format!("unmounted {}", self.tag)));
+    }
+}
+
+thread_local! {
+    static ITEMS: std::cell::RefCell<Option<State<Vec<u32>>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn items() -> State<Vec<u32>> {
+    ITEMS.with(|i| i.borrow().expect("mounted"))
+}
+
+#[component]
+fn Listed(hold: bool) -> View {
+    let list = state(vec![1u32, 2]);
+    ITEMS.with(|i| *i.borrow_mut() = Some(list));
+    view! {
+        <ul>
+            {list.get().into_iter().map(|n| view! {
+                <li key={n} id={format!("i{n}")} use:track={(n.to_string(), hold)}>{n}</li>
+            }).collect::<Vec<_>>()}
+        </ul>
+    }
+}
+
+#[test]
+fn directives_hear_mount_update_move_and_leave_in_order() {
+    let dom = mount(|| view! { <Listed hold={false}/> });
+    settle();
+    assert_eq!(heard(), ["mounted 1", "mounted 2"]);
+
+    items().set(vec![1, 2]);
+    settle();
+    assert_eq!(
+        heard(),
+        [
+            "before 1",
+            "before 2",
+            "update 1->1",
+            "update 2->2",
+            "after 1",
+            "after 2",
+            "updated 1",
+            "updated 2"
+        ]
+    );
+
+    items().set(vec![2]);
+    settle();
+    let log = heard();
+    assert!(
+        log.contains(&"leaving 1".to_owned()) && log.contains(&"unmounted 1".to_owned()),
+        "{log:?}"
+    );
+    assert!(dom.find("id", "i1").is_none(), "nothing held it");
+}
+
+#[test]
+fn a_leaving_node_stays_until_its_future_resolves() {
+    let dom = mount(|| view! { <Listed hold={true}/> });
+    settle();
+    heard();
+    items().set(vec![2]);
+    settle();
+    assert!(dom.find("id", "i1").is_some(), "held while it leaves");
+    GATES.with(|g| g.borrow_mut().drain(..).for_each(|tx| tx.send(()).unwrap()));
+    settle();
+    assert!(dom.find("id", "i1").is_none());
+}
+
+#[test]
+fn a_returning_key_mounts_fresh_beside_the_leaving_node() {
+    let dom = mount(|| view! { <Listed hold={true}/> });
+    settle();
+    items().set(vec![2]);
+    settle();
+    heard();
+    items().set(vec![1, 2]);
+    settle();
+    assert_eq!(heard().iter().filter(|l| *l == "mounted 1").count(), 1);
+    let ul = dom.find_tag("ul").unwrap();
+    assert_eq!(dom.text(ul), "112", "the old 1 is still leaving");
+    dom.finish_leaving();
+    assert_eq!(dom.text(ul), "12");
+}
+
+#[component]
+fn Nest(show: State<bool>) -> View {
+    view! {
+        <section>
+            {show.get().then(|| view! {
+                <div id="outer" use:track={("outer".to_owned(), true)}>
+                    <p id="inner" use:track={("inner".to_owned(), true)}>"x"</p>
+                </div>
+            })}
+        </section>
+    }
+}
+
+thread_local! {
+    static SHOW: std::cell::RefCell<Option<State<bool>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[component]
+fn NestRoot() -> View {
+    let show = state(true);
+    let outer = state(true);
+    SHOW.with(|s| *s.borrow_mut() = Some(show));
+    OUTER.with(|s| *s.borrow_mut() = Some(outer));
+    view! { {outer.get().then(|| view! { <Nest show={show}/> })} }
+}
+
+thread_local! {
+    static OUTER: std::cell::RefCell<Option<State<bool>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[test]
+fn only_the_outermost_node_holds_and_its_parent_releases_it() {
+    let dom = mount(|| view! { <NestRoot/> });
+    settle();
+    heard();
+    SHOW.with(|s| s.borrow().unwrap().set(false));
+    settle();
+    let log = heard();
+    assert!(log.contains(&"leaving outer".to_owned()), "{log:?}");
+    assert!(!log.contains(&"leaving inner".to_owned()), "{log:?}");
+    assert!(dom.find("id", "outer").is_some());
+
+    OUTER.with(|s| s.borrow().unwrap().set(false));
+    settle();
+    assert!(
+        dom.find("id", "outer").is_none(),
+        "removing its parent released it"
+    );
+    assert!(
+        GATES.with(|g| g.borrow().iter().all(|tx| tx.is_canceled())),
+        "its future was dropped"
+    );
+}
+
+#[derive(Clone)]
+struct Tone(&'static str);
+
+#[component]
+fn ToneText() -> View {
+    view! { <i id="tone">{context::<Tone>().0}</i> }
+}
+
+thread_local! {
+    static PORTAL_ORDER: std::cell::RefCell<Option<State<Vec<u32>>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[component]
+fn Portaled(layer: doxa::ui::dom::NodeId) -> View {
+    let order = state(vec![1u32, 2, 3]);
+    PORTAL_ORDER.with(|o| *o.borrow_mut() = Some(order));
+    provide(Tone("warm"));
+    let layer = doxa::ui::NodeRef::from_id(layer);
+    view! {
+        <ul>
+            {order.get().into_iter().map(|n| view! {
+                <li key={n}>
+                    {n}
+                    {(n == 2).then(|| view! {
+                        <Portal to={layer}>
+                            <p id="popover">"over"</p>
+                            <ToneText/>
+                        </Portal>
+                    })}
+                </li>
+            }).collect::<Vec<_>>()}
+        </ul>
+    }
+}
+
+#[test]
+fn a_portal_renders_elsewhere_with_its_context_and_ignores_reorders() {
+    let dom = MemDom::new();
+    let layer = element(&dom, "layer");
+    let doc: Rc<dyn doxa::ui::dom::Dom> = Rc::new(dom.clone());
+    App::new(move || view! { <Portaled layer={layer}/> })
+        .mount_on(doc, dom.body())
+        .keep();
+    settle();
+    let popover = dom.find("id", "popover").unwrap();
+    assert_eq!(
+        dom.text(layer),
+        "overwarm",
+        "rendered into the layer, with the context"
+    );
+    assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "123");
+
+    PORTAL_ORDER.with(|o| o.borrow().unwrap().set(vec![3, 2, 1]));
+    settle();
+    assert_eq!(dom.text(dom.find_tag("ul").unwrap()), "321");
+    assert_eq!(
+        dom.find("id", "popover"),
+        Some(popover),
+        "the reorder left it alone"
+    );
+    assert_eq!(dom.text(layer), "overwarm");
+
+    PORTAL_ORDER.with(|o| o.borrow().unwrap().set(vec![3]));
+    settle();
+    assert_eq!(
+        dom.text(layer),
+        "",
+        "removing its <li> removed what it rendered"
+    );
+}
+
+#[component]
+fn Refd() -> View {
+    let input = node_ref();
+    let shown = state(true);
+    SHOWN.with(|s| *s.borrow_mut() = Some(shown));
+    SEEN_REF.with(|s| s.borrow_mut().push(input.get().is_some()));
+    view! { {shown.get().then(|| view! { <input id="field" ref={input}/> })} }
+}
+
+thread_local! {
+    static SHOWN: std::cell::RefCell<Option<State<bool>>> = const { std::cell::RefCell::new(None) };
+    static SEEN_REF: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[test]
+fn a_node_ref_points_at_its_element_while_mounted() {
+    let dom = mount(|| view! { <Refd/> });
+    settle();
+    assert_eq!(
+        SEEN_REF.with(|s| s.take()),
+        [false, true],
+        "mounting re-rendered it"
+    );
+    let _ = dom;
+    SHOWN.with(|s| s.borrow().unwrap().set(false));
+    settle();
+    assert_eq!(SEEN_REF.with(|s| s.take()), [true, false]);
+}

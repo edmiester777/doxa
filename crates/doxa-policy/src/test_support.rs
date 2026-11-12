@@ -172,13 +172,7 @@ pub(crate) fn build_stub_router_with_entities(
     Arc::new(PolicyRouter::new(store, StubExtension))
 }
 
-/// What a resolved session holds, for the [`SessionChecker`] suite.
-///
-/// [`SessionExtension`] enumerates exactly one action — `read_widget` —
-/// which is what makes the fall-through case testable: any other action is
-/// one the session never recorded, so it has to reach the policy.
-///
-/// [`SessionChecker`]: crate::session::SessionChecker
+/// A resolved session for the `SessionChecker` suite; it records only `read_widget`.
 #[derive(Clone, Default)]
 pub(crate) struct SessionFlags {
     /// Bypasses the policy entirely, as an administrator's session does.
@@ -259,9 +253,7 @@ impl PolicyExtension for SessionExtension {
     }
 }
 
-/// A [`SessionExtension`] router over a permit-everything policy, so a
-/// check that reaches the policy is allowed and one refused by the session
-/// is visibly the session's doing.
+/// A [`SessionExtension`] router over a permit-everything policy.
 pub(crate) fn session_extension_router() -> PolicyRouter<SessionExtension> {
     let store: SharedPolicyStore = Arc::new(StubStore {
         policy_text: "permit(principal, action, resource);",

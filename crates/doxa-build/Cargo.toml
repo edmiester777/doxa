@@ -1,0 +1,57 @@
+[package]
+name = "doxa-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "The asset pipeline behind `doxa build`: wasm, bindings, JS bundle, CSS, and a hashed dist."
+keywords = ["doxa", "wasm", "bundler", "build"]
+categories = ["development-tools::build-utils", "wasm"]
+
+[features]
+default = ["pipeline"]
+# `doxa build`: wasm, bindings, the JS bundle, CSS and a hashed dist.
+pipeline = [
+    "tool", "dep:toml", "dep:brotli", "dep:lightningcss", "dep:wasm-bindgen-cli-support", "dep:doxa-wasm-split",
+    "dep:anyhow", "dep:walrus", "dep:wasmparser", "dep:object", "dep:subsecond-types",
+    "dep:syn", "dep:proc-macro2",
+]
+# The managed esbuild and Tailwind binaries, which `#[icons]` also resolves through.
+tool = ["dep:sha2", "dep:hex", "dep:reqwest", "dep:base64", "dep:tar", "dep:flate2"]
+# `ClientSpec`: a client crate generated from a server's OpenAPI document, in its `build.rs`.
+client = ["dep:utoipa", "dep:proc-macro2", "dep:quote"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["blocking"], optional = true }
+base64 = { version = "0.22", optional = true }
+toml = { version = "0.9", optional = true }
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
+brotli = { version = "8", optional = true }
+lightningcss = { version = "1.0.0-alpha.68", default-features = false, features = ["bundler"], optional = true }
+# Must equal the `wasm-bindgen` in the app's Cargo.lock; see `bindgen::WASM_BINDGEN_VERSION`.
+wasm-bindgen-cli-support = { version = "=0.2.117", optional = true }
+# Its walrus differs from wasm-bindgen's; they only exchange bytes.
+doxa-wasm-split = { path = "../doxa-wasm-split", version = "0.1.6", optional = true }
+anyhow = { version = "1", optional = true }
+# Hot-patching: the walrus doxa-wasm-split already uses, and subsecond's jump table.
+walrus = { version = "=0.23.3", optional = true }
+wasmparser = { version = "0.214", optional = true }
+object = { version = "0.37", default-features = false, features = ["std", "read_core", "archive"], optional = true }
+subsecond-types = { version = "=0.7.10", optional = true }
+utoipa = { workspace = true, optional = true }
+# Line numbers, for a story's source.
+proc-macro2 = { workspace = true, features = ["span-locations"], optional = true }
+quote = { workspace = true, optional = true }
+syn = { workspace = true, features = ["visit"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

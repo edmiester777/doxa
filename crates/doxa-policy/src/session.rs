@@ -1,32 +1,10 @@
-//! The checker a guard reaches, bound to the session the policy already
-//! assembled.
-//!
-//! [`CapabilityChecker`] sees a tenant and a set of roles, because that is
-//! all a *generic* check needs. A service whose policy resolves into a
-//! session up front needs more: the allow-lists that resolution produced
-//! are frequently the answer, and an administrator's session bypasses the
-//! question entirely. Neither fact is reachable from tenant and roles.
-//!
-//! The usual response is a per-request checker written by hand, closing
-//! over the session and delegating everything else. [`SessionChecker`] is
-//! that object, written once. What it asks the session comes off the
-//! [`PolicyExtension`] — [`session_is_admin`] and [`decide_from_session`]
-//! — so the shortcuts stay the extension's to define while the wiring
-//! stops being the consumer's to write.
-//!
-//! The tenant is not among them. It arrives from the guard, which read it
-//! from the auth layer, and a deployment whose callers carry no tenant
-//! claim configures that layer to supply one rather than teaching the
-//! policy a second place to look.
+//! [`SessionChecker`]: the guard's checker, answering from the caller's assembled session where
+//! the extension's [`session_is_admin`] or [`decide_from_session`] can, else the router.
 //!
 //! ```ignore
 //! let checker = SessionChecker::new(Arc::clone(&router), session.clone());
 //! request.extensions_mut().insert(checker.into_extension());
 //! ```
-//!
-//! Nothing here decides anything the policy would not. A shortcut is an
-//! assertion that the session already asked, and the extension is where
-//! that assertion is made.
 //!
 //! [`session_is_admin`]: PolicyExtension::session_is_admin
 //! [`decide_from_session`]: PolicyExtension::decide_from_session
@@ -39,22 +17,8 @@ use crate::extension::PolicyExtension;
 use crate::resource::ResourceEntity;
 use crate::router::PolicyRouter;
 
-/// A shared [`PolicyRouter`] bound to one caller's assembled session.
-///
-/// Built per request — the router is shared, the session is not — and
-/// erased to `Arc<dyn CapabilityChecker>` for the extensions map through
-/// [`into_extension`](Self::into_extension), which is the key every guard
-/// looks under.
-///
-/// ## The order it asks in
-///
-/// 1. [`PolicyExtension::session_is_admin`] — allowed, nothing else runs.
-/// 2. [`PolicyExtension::decide_from_session`] — the session's own verdict
-///    for this `(action, resource)`, when it holds one. Instance checks
-///    only; a capability is not a pair the session enumerated.
-/// 3. The tenant the guard passed. Empty is a refusal rather than an
-///    evaluation against no tenant.
-/// 4. The router.
+/// A shared [`PolicyRouter`] bound to one caller's session. Asks admin, then the session's
+/// verdict (instance checks only), then refuses an empty tenant, then the router.
 pub struct SessionChecker<E: PolicyExtension> {
     router: Arc<PolicyRouter<E>>,
     session: E::SessionOutput,
@@ -88,10 +52,7 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for SessionChecker<E> {
         if self.router.extension().session_is_admin(&self.session) {
             return Ok(true);
         }
-        // No `decide_from_session` here: a capability names an action on a
-        // collection or a singleton, which is not one of the resources
-        // `assemble_session` enumerated, so the session has no recorded
-        // verdict to offer.
+        // A capability isn't a resource the session enumerated, so no `decide_from_session`.
         if tenant_id.is_empty() {
             return Ok(false);
         }
@@ -122,10 +83,7 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for SessionChecker<E> {
             .allowed)
     }
 
-    /// The two shortcuts answer per resource, so the batch splits: what
-    /// the session already knows is filled in without a policy call, and
-    /// only what is left reaches the router — as one evaluation rather
-    /// than one each.
+    /// What the session knows is filled in; the rest reaches the router as one batch.
     async fn check_instance_many(
         &self,
         tenant_id: &str,
@@ -169,10 +127,7 @@ impl<E: PolicyExtension + 'static> CapabilityChecker for SessionChecker<E> {
             }
         }
 
-        // Every slot was either answered from the session or filled from
-        // the router, and both produce exactly one verdict per resource —
-        // but a `None` surviving here would read as a grant if defaulted,
-        // so it refuses instead.
+        // Every slot is filled; a surviving `None` refuses rather than grants.
         Ok(answers
             .into_iter()
             .map(|answer| answer.unwrap_or(false))
@@ -220,9 +175,7 @@ mod tests {
             .expect("checker ok"));
     }
 
-    /// A verdict the session holds is authoritative, in both directions —
-    /// so a resource the session refused stays refused even though the
-    /// stub policy permits everything.
+    /// The session's refusal stands even though the stub policy permits everything.
     #[tokio::test]
     async fn the_sessions_own_verdict_answers_without_the_policy() {
         let checker = checker(SessionFlags {
@@ -240,9 +193,6 @@ mod tests {
             .expect("checker ok"));
     }
 
-    /// An action the session does not enumerate falls through to the
-    /// policy, which is what keeps the shortcut a shortcut rather than a
-    /// second, narrower policy.
     #[tokio::test]
     async fn an_unenumerated_action_reaches_the_policy() {
         let checker = checker(SessionFlags {
@@ -272,12 +222,7 @@ mod tests {
             .expect("checker ok"));
     }
 
-    /// The tenant is the guard's and the extension has no say in it, so a
-    /// caller who arrives without one is refused however much the session
-    /// holds. A deployment whose callers carry no tenant claim gives the
-    /// auth layer a default; it does not teach the policy a second place to
-    /// look, which is how the two would come to disagree about which
-    /// partition a request was decided in.
+    /// Refused without a tenant however much the session holds.
     #[tokio::test]
     async fn a_populated_session_does_not_supply_a_missing_tenant() {
         let checker = checker(SessionFlags {
@@ -301,9 +246,7 @@ mod tests {
         );
     }
 
-    /// The batch answers positionally, mixing both sources: `w-1` from the
-    /// session's allow-list, `w-2` refused by it, and the unenumerated
-    /// action from the policy.
+    /// `w-1` allowed and `w-2` refused by the session; the unenumerated action by the policy.
     #[tokio::test]
     async fn the_batch_mixes_session_answers_and_policy_answers() {
         let checker = checker(SessionFlags {

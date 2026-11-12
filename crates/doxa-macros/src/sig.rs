@@ -50,6 +50,8 @@ pub struct InferredAttrs {
     /// Inner type of the first `Json<T>` parameter, searched through
     /// recognized transparent wrappers.
     pub request_body: Option<Type>,
+    /// The `Json<T>` body is under an `Option`, so a request may leave it out.
+    pub optional_body: bool,
     /// Full argument types in declaration order. Emitted into the
     /// per-handler `IntoParams` dispatch struct for trait-based
     /// contribution.
@@ -107,6 +109,7 @@ pub fn infer(item_fn: &ItemFn) -> InferredAttrs {
         if inferred.request_body.is_none() {
             if let Some(body_ty) = find_json_inner(&pat_type.ty) {
                 inferred.request_body = Some(body_ty.clone());
+                inferred.optional_body = optional_json(&pat_type.ty);
             }
         }
 
@@ -275,9 +278,28 @@ fn wrapper_and_inner(ty: &Type) -> Option<(&'static str, &Type)> {
     Some((wrapper, inner))
 }
 
-/// Walk through single-generic wrappers (Valid, Authenticated, …) to
-/// find the inner type of the first `Json<T>` reached. Returns `None`
-/// if no `Json` is present in the type tree.
+/// Whether the `Json<T>` in `ty` is under an `Option`, so the body may be left out.
+fn optional_json(ty: &Type) -> bool {
+    let Type::Path(TypePath { path, .. }) = ty else {
+        return false;
+    };
+    let Some(last) = path.segments.last() else {
+        return false;
+    };
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    let Some(GenericArgument::Type(inner)) = args.args.first() else {
+        return false;
+    };
+    match last.ident.to_string().as_str() {
+        "Json" => false,
+        "Option" => matches!(wrapper_and_inner(inner), Some(("Json", _))),
+        _ => optional_json(inner),
+    }
+}
+
+/// The `T` of the first `Json<T>` under single-generic wrappers (`Valid`, …), if any.
 fn find_json_inner(ty: &Type) -> Option<&Type> {
     // Direct Json<T>?
     if let Some(("Json", inner)) = wrapper_and_inner(ty) {
@@ -381,6 +403,7 @@ impl InferredAttrs {
         self,
         fn_ident: &syn::Ident,
         path_param_names: &[String],
+        declared_path: Option<&TokenStream>,
         user_keys: &[&str],
     ) -> InferredTokens {
         let mut attr_additions = TokenStream::new();
@@ -526,6 +549,15 @@ impl InferredAttrs {
         // resolves to the autoref-fallback no-op and the operation
         // is left unchanged.
         let arg_types_for_ops = self.arg_types.clone();
+        let optional_body = self.optional_body.then(|| {
+            quote! {
+                if let ::core::option::Option::Some(__body) = __op.request_body.as_mut() {
+                    __body.required = ::core::option::Option::Some(
+                        ::utoipa::openapi::Required::False,
+                    );
+                }
+            }
+        });
         pre_items.extend(quote! {
             impl ::doxa::ApidocHandlerOps for #path_struct_ident {
                 fn augment(
@@ -579,6 +611,11 @@ impl InferredAttrs {
                         )> = ::std::vec::Vec::new();
                         #response_body_ops_tt
                         drop(__schemas);
+                        #optional_body
+                        ::doxa::__private::stamp_client_meta(
+                            __op,
+                            <Self as ::doxa::__private::ClientMeta>::meta(),
+                        );
                     }
                 }
             }
@@ -634,6 +671,15 @@ impl InferredAttrs {
             if !self.arg_types.is_empty() {
                 let arg_types = &self.arg_types;
                 let names_lits: Vec<_> = path_param_names.iter().map(|s| s.as_str()).collect();
+                let path_names = match declared_path {
+                    Some(path) => quote! {
+                        let __names: ::std::vec::Vec<&'static str> =
+                            ::doxa::wire::path_names(#path).collect();
+                        #[allow(non_snake_case)]
+                        let __PATH_NAMES: &[&'static str] = &__names;
+                    },
+                    None => quote! { const __PATH_NAMES: &[&'static str] = &[#(#names_lits),*]; },
+                };
 
                 // Build the IntoParams body: one adhoc-dispatched
                 // `__collect()` call per arg per role, extending a
@@ -646,7 +692,7 @@ impl InferredAttrs {
                             _: impl ::core::ops::Fn()
                                 -> ::core::option::Option<::utoipa::openapi::path::ParameterIn>,
                         ) -> ::std::vec::Vec<::utoipa::openapi::path::Parameter> {
-                            const __PATH_NAMES: &[&'static str] = &[#(#names_lits),*];
+                            #path_names
                             let mut __out: ::std::vec::Vec<::utoipa::openapi::path::Parameter> =
                                 ::std::vec::Vec::new();
                             #(

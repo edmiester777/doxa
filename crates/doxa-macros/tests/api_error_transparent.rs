@@ -1,10 +1,5 @@
 //! `#[api(transparent)]` — a variant that delegates its status, code and
 //! audit outcome to a nested error type.
-//!
-//! Without it, "one shared error taxonomy" and "typed per-variant status
-//! codes" are mutually exclusive: a cross-cutting set of failure modes
-//! either gets copy-pasted into every endpoint enum, or gets nested under
-//! one variant whose single literal status flattens all of them.
 
 use axum::body::to_bytes;
 use axum::response::IntoResponse;
@@ -13,8 +8,7 @@ use utoipa::{IntoResponses, ToSchema};
 
 use doxa::ApiError;
 
-/// The shared taxonomy: raised by a middleware stack, not by any one
-/// endpoint, and reused across every endpoint enum.
+/// The shared taxonomy, reused across endpoint enums.
 #[derive(Debug, thiserror::Error, Serialize, ApiError, ToSchema)]
 enum ApiFault {
     #[error("rate limited")]
@@ -33,14 +27,12 @@ enum SyncError {
     #[api(status = 404, code = "pipeline_not_found")]
     PipelineNotFound(String),
 
-    /// Same status as a nested variant, so the two have to merge rather
-    /// than one winning.
+    /// Same status as a nested variant, so the two must merge.
     #[error("pipeline is already running")]
     #[api(status = 409, code = "pipeline_running")]
     PipelineRunning,
 
-    // serde requires untagged variants last, which is also where a
-    // catch-all belongs.
+    // serde requires untagged variants last.
     #[error(transparent)]
     #[api(transparent)]
     #[serde(untagged)]
@@ -56,8 +48,6 @@ async fn rendered(error: SyncError) -> (u16, serde_json::Value) {
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-/// The whole point: the nested variant's own status reaches the wire,
-/// rather than collapsing to whatever the wrapper declared.
 #[tokio::test]
 async fn a_nested_variant_keeps_its_own_status_and_code() {
     let (status, body) = rendered(SyncError::Fault(ApiFault::RateLimited)).await;
@@ -67,8 +57,6 @@ async fn a_nested_variant_keeps_its_own_status_and_code() {
     assert_eq!(body["code"], "rate_limited");
 }
 
-/// Two nested variants with different statuses stay different — the bug
-/// this replaces rendered both with one status.
 #[tokio::test]
 async fn nested_variants_do_not_collapse_to_one_status() {
     let (busy, _) = rendered(SyncError::Fault(ApiFault::TableBusy("t".into()))).await;
@@ -86,8 +74,7 @@ async fn the_outer_variants_still_use_their_literals() {
     assert_eq!(body["code"], "pipeline_not_found");
 }
 
-/// At a status both sides declare, each still renders as itself — the
-/// merge is a documentation concern, not a runtime one.
+/// The merge is documentation only: each side still renders as itself.
 #[tokio::test]
 async fn a_shared_status_still_renders_each_side_distinctly() {
     let (outer_status, outer) = rendered(SyncError::PipelineRunning).await;
@@ -99,10 +86,7 @@ async fn a_shared_status_still_renders_each_side_distinctly() {
     assert_eq!(nested["code"], "table_busy");
 }
 
-/// Pairing `#[api(transparent)]` with `#[serde(untagged)]` keeps the
-/// body flat, so consolidating shared modes into a nested enum is not an
-/// SDK-visible change: `{"error": {"TableBusy": …}}`, not
-/// `{"error": {"Fault": {"TableBusy": …}}}`.
+/// With `#[serde(untagged)]`: `{"error": {"TableBusy": …}}`, not `{"error": {"Fault": {…}}}`.
 #[tokio::test]
 async fn the_wire_shape_does_not_gain_a_wrapper_level() {
     let (_, body) = rendered(SyncError::Fault(ApiFault::TableBusy("orders".into()))).await;
@@ -116,8 +100,6 @@ async fn the_wire_shape_does_not_gain_a_wrapper_level() {
 
 // ---- IntoResponses merges --------------------------------------------------
 
-/// A status only the nested type declares still reaches the document —
-/// otherwise the endpoint's spec omits statuses it can actually return.
 #[test]
 fn a_nested_only_status_is_documented() {
     let responses = SyncError::responses();
@@ -128,8 +110,6 @@ fn a_nested_only_status_is_documented() {
     );
 }
 
-/// A status both sides declare merges: the `code` enum carries both
-/// codes rather than whichever half was inserted last.
 #[test]
 fn a_shared_status_unions_both_sides() {
     let responses = SyncError::responses();
@@ -147,7 +127,6 @@ fn a_shared_status_unions_both_sides() {
     assert!(codes.contains(&"table_busy"), "{codes:?}");
 }
 
-/// The `error` schema at a shared status offers both sides' variants.
 #[test]
 fn a_shared_status_unions_the_error_variants() {
     let responses = SyncError::responses();
@@ -161,8 +140,6 @@ fn a_shared_status_unions_the_error_variants() {
     );
 }
 
-/// The transparent variant contributes no status of its own — it is a
-/// wrapper, not a failure mode.
 #[test]
 fn the_transparent_variant_declares_no_status_itself() {
     let responses = SyncError::responses();

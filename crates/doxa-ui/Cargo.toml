@@ -1,0 +1,53 @@
+[package]
+name = "doxa-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "A client-rendered, async-native UI for doxa apps: components are async functions, hooks are React's."
+keywords = ["doxa", "wasm", "ui", "frontend", "react"]
+categories = ["web-programming", "wasm", "gui"]
+
+[dependencies]
+doxa-client = { workspace = true }
+doxa-wire = { workspace = true }
+doxa-ui-macros = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = "0.7"
+
+[features]
+# `#[react]`: React components rendered as portals of one shared root.
+react = ["dep:serde-wasm-bindgen"]
+# `#[component(export)]`: components a foreign React host mounts, built by `doxa build --lib`.
+export = ["dep:serde-wasm-bindgen"]
+# `form()` and `#[derive(Form)]`, checked by a route's rules.
+forms = []
+# `session()` and `SignInGuard`, over `doxa_client::oidc`.
+oidc = ["doxa-client/oidc"]
+# `#[npm]`: plain JS modules bound as typed Rust.
+npm = ["dep:serde-wasm-bindgen"]
+# The `doxa gallery` interface, around the app's `#[story]` exports.
+gallery = []
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde-wasm-bindgen = { version = "0.6", optional = true }
+# `#[page(lazy)]` split points; `doxa build` splits the module along them.
+wasm-splitter = "=0.7.0"
+# Debug builds render through its jump table, which `doxa dev` patches.
+subsecond = "=0.7.10"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Comment", "Event", "EventTarget", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "KeyboardEvent", "MouseEvent", "History", "Location", "PopStateEvent", "CssStyleDeclaration", "DomTokenList", "NodeList", "DomRect", "AddEventListenerOptions", "ResizeObserver", "IntersectionObserver", "MediaQueryList", "Storage", "BroadcastChannel", "MessageEvent", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator", "FocusEvent", "ScrollToOptions", "ScrollBehavior", "ScrollIntoViewOptions", "ScrollLogicalPosition", "HtmlIFrameElement", "PointerEvent", "HtmlHeadElement"] }
+
+[dev-dependencies]
+# Path-only, so publishing strips it.
+doxa = { path = "../doxa", default-features = false, features = ["ui", "gallery"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

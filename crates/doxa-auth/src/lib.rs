@@ -38,6 +38,8 @@ pub mod config;
 pub mod context;
 pub mod provider;
 
+#[cfg(all(feature = "axum", feature = "catalog"))]
+mod capabilities;
 #[cfg(feature = "axum")]
 pub mod extractors;
 #[cfg(feature = "axum")]
@@ -46,8 +48,7 @@ pub mod granted;
 pub mod layer;
 #[cfg(feature = "axum")]
 pub mod middleware;
-/// Requires `audit`: the door exists to guarantee a verdict is recorded,
-/// which is not a promise it could keep with the audit half compiled out.
+/// Requires `audit`, since its guarantee is that every verdict is recorded.
 #[cfg(all(feature = "axum", feature = "audit"))]
 pub mod off_request;
 #[cfg(feature = "axum")]
@@ -55,15 +56,12 @@ pub mod openapi;
 #[cfg(feature = "axum")]
 pub(crate) mod record;
 
-/// Re-exported so `#[derive(Actions)]`'s output can register itself
-/// without the declaring crate taking a direct dependency on `inventory`.
+/// For `#[derive(Actions)]`'s registration, so the declaring crate needn't depend on `inventory`.
 #[cfg(feature = "catalog")]
 #[doc(hidden)]
 pub use inventory;
 
-/// Stand-in for the above when the `catalog` feature is off, so the
-/// derive expands to the same tokens either way and the registration
-/// simply evaporates.
+/// Without `catalog`, the derive's registration expands to nothing.
 #[cfg(not(feature = "catalog"))]
 #[doc(hidden)]
 pub mod inventory {
@@ -78,6 +76,9 @@ macro_rules! __doxa_action_submit {
     ($($tt:tt)*) => {};
 }
 
+#[doc(hidden)]
+pub use doxa_wire as __wire;
+
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};
 pub use context::{AuthContext, CapabilityContext};
@@ -90,10 +91,10 @@ pub use granted::actions;
 #[cfg(feature = "axum")]
 pub use granted::{
     authorize, distinct, key_names, names_within, resolved_params, verb, Action, ActionTable,
-    AuthorizeLoaded, AuthorizeLoadedAll, AuthorizeScope, Cap, DeclaredAction, DefaultSite, Denial,
-    FromAuthExtensions, FromState, GrantProfile, GrantSite, Granted, Granting, KeyError, KeyIn,
-    KeySegment, LoaderSource, Many, NoState, One, Refusal, RouteKey, Scoped, Scoping, Subject,
-    SubjectForm,
+    AssetFor, AuthorizeLoaded, AuthorizeLoadedAll, AuthorizeScope, Cap, DeclaredAction,
+    DefaultSite, Denial, FromAuthExtensions, FromState, GrantProfile, GrantSite, Granted, Granting,
+    KeyError, KeyIn, KeySegment, LoaderSource, Many, NoState, One, Refusal, RouteKey, Scoped,
+    Scoping, Subject, SubjectForm,
 };
 #[cfg(feature = "axum")]
 pub use layer::{AuthLayer, AuthService};
@@ -102,4 +103,4 @@ pub use middleware::AuthState;
 #[cfg(all(feature = "axum", feature = "audit"))]
 pub use off_request::OffRequest;
 #[cfg(feature = "axum")]
-pub use openapi::auth_contribution;
+pub use openapi::{auth_contribution, AuthDocs};

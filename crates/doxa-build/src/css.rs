@@ -1,0 +1,650 @@
+//! Stylesheets: Tailwind when asked for, then lightningcss to bundle and minify.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use lightningcss::bundler::{Bundler, FileProvider};
+use lightningcss::dependencies::{Dependency, DependencyOptions};
+use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
+
+use std::collections::BTreeMap;
+
+use crate::config::Preprocess;
+use crate::error::{run, Error, IoContext, Result};
+
+/// A built stylesheet and the local files its `url()`s point at, under hashed names.
+#[derive(Debug, Default)]
+pub struct Built {
+    /// The CSS text, with each local `url()` pointing at its hashed file.
+    pub css: String,
+    /// `(original file name, hashed name, bytes)` for each referenced file.
+    pub assets: Vec<(String, String, Vec<u8>)>,
+}
+
+/// Whether a stylesheet asks for Tailwind.
+pub fn uses_tailwind(css: &str) -> bool {
+    css.contains("@import \"tailwindcss\"") || css.contains("@import 'tailwindcss'")
+}
+
+/// A stylesheet that imports `input` and adds `sources` to Tailwind's scan.
+pub fn tailwind_wrapper(input: &Path, sources: &[PathBuf]) -> String {
+    let lit =
+        |p: &Path| serde_json::to_string(&p.to_string_lossy().replace('\\', "/")).expect("json");
+    let mut css = format!("@import {};\n", lit(input));
+    for s in sources {
+        css.push_str(&format!("@source {};\n", lit(s)));
+    }
+    css
+}
+
+/// What a stylesheet entry is built from.
+#[derive(Debug, Clone, Copy)]
+pub struct Inputs<'a> {
+    /// The web crate's directory.
+    pub web_dir: &'a Path,
+    /// Extra directories Tailwind scans.
+    pub sources: &'a [String],
+    /// Preprocessors by extension.
+    pub preprocess: &'a BTreeMap<String, Preprocess>,
+    /// Where npm installed the tools a preprocessor runs.
+    pub node_modules: Option<&'a Path>,
+    /// For a library: no Preflight, and `url()`s relative to the stylesheet.
+    pub library: bool,
+    /// What an app's `url()`s start with: the path it is served under.
+    pub base: &'a str,
+    /// The workspace, which every local `url()` must resolve inside (or inside `node_modules`).
+    pub workspace: &'a Path,
+}
+
+/// Where a preprocessor writes `input`'s CSS: beside it, so relative paths still resolve.
+pub fn preprocessed_path(input: &Path) -> PathBuf {
+    let mut name = input.file_name().unwrap_or_default().to_owned();
+    name.push(".css");
+    input.with_file_name(name)
+}
+
+/// Run the preprocessor for `input`'s extension, if there is one, returning its output.
+fn preprocess(at: &Inputs<'_>, input: &Path) -> Result<Option<PathBuf>> {
+    let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let Some(pre) = at.preprocess.get(ext) else {
+        return Ok(None);
+    };
+    let Some((program, args)) = pre.command.split_first() else {
+        return Err(Error::config(
+            format!("[package.metadata.doxa.preprocess.{ext}] has an empty command"),
+            "set `command = [\"program\", \"{input}\", \"{output}\"]`",
+        ));
+    };
+    let output = preprocessed_path(input);
+    let fill = |a: &String| {
+        a.replace("{input}", &input.to_string_lossy())
+            .replace("{output}", &output.to_string_lossy())
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(args.iter().map(fill)).current_dir(at.web_dir);
+    if let Some(bin) = at.node_modules.map(|d| d.join("node_modules").join(".bin")) {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
+            .unwrap_or(path);
+        cmd.env("PATH", joined);
+    }
+    run(
+        "preprocessor",
+        &mut cmd,
+        &format!("fix the error above, or the `{ext}` preprocess command"),
+    )?;
+    if !output.is_file() {
+        return Err(Error::config(
+            format!(
+                "the `{ext}` preprocessor wrote nothing to {}",
+                output.display()
+            ),
+            "pass `{output}` where the command expects its output file",
+        ));
+    }
+    Ok(Some(output))
+}
+
+/// Build one stylesheet entry of the web crate, returning the CSS text.
+pub fn build(at: &Inputs<'_>, entry: &str, stage: &Path, release: bool) -> Result<Built> {
+    let source = at.web_dir.join(entry);
+    let pre = preprocess(at, &source)?;
+    let built = build_css(at, &source, pre.as_deref(), stage, release);
+    if let Some(out) = pre {
+        let _ = std::fs::remove_file(out);
+    }
+    built
+}
+
+fn build_css(
+    at: &Inputs<'_>,
+    source: &Path,
+    pre: Option<&Path>,
+    stage: &Path,
+    release: bool,
+) -> Result<Built> {
+    let mut input = pre.unwrap_or(source).to_owned();
+    let text = std::fs::read_to_string(&input).at(&input)?;
+    // Beside the entry, so its relative imports still resolve; removed once built.
+    let mut unstyled = None;
+    if at.library && uses_tailwind(&text) {
+        let path = input.with_extension("lib.css");
+        std::fs::write(&path, without_preflight(&text)).at(&path)?;
+        input = path.clone();
+        unstyled = Some(path);
+    }
+    let built = tailwind_and_bundle(at, &input, &text, stage, release);
+    if let Some(path) = unstyled {
+        let _ = std::fs::remove_file(path);
+    }
+    built
+}
+
+/// Tailwind's theme and utilities without Preflight, which would restyle the host's page.
+pub fn without_preflight(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(at) = ["@import \"tailwindcss\"", "@import 'tailwindcss'"]
+        .iter()
+        .filter_map(|p| rest.find(p).map(|i| (i, p.len())))
+        .min()
+    {
+        let (start, len) = at;
+        let end = rest[start..].find(';').map_or(rest.len(), |e| start + e);
+        let modifiers = rest[start + len..end].trim();
+        out.push_str(&rest[..start]);
+        out.push_str("@layer theme, base, components, utilities;\n");
+        out.push_str("@import \"tailwindcss/theme.css\" layer(theme);\n");
+        out.push_str("@import \"tailwindcss/utilities.css\" layer(utilities)");
+        if !modifiers.is_empty() {
+            out.push(' ');
+            out.push_str(modifiers);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The Tailwind CLI over `wrapper`. It finds `@import` and `@plugin` packages through `NODE_PATH`,
+/// since a synced install isn't above the stylesheet.
+fn tailwind_command(
+    program: &Path,
+    at: &Inputs<'_>,
+    wrapper: &Path,
+    output: &Path,
+    release: bool,
+) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.arg("--input")
+        .arg(wrapper)
+        .arg("--output")
+        .arg(output)
+        .current_dir(at.web_dir);
+    if release {
+        cmd.arg("--minify");
+    }
+    if let Some(dir) = at.node_modules {
+        cmd.env("NODE_PATH", dir.join("node_modules"));
+    }
+    cmd
+}
+
+fn tailwind_and_bundle(
+    at: &Inputs<'_>,
+    input: &Path,
+    text: &str,
+    stage: &Path,
+    release: bool,
+) -> Result<Built> {
+    let web_dir = at.web_dir;
+    let input = input.to_owned();
+    let to_bundle = if uses_tailwind(text) {
+        std::fs::create_dir_all(stage).at(stage)?;
+        let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+        let wrapper = stage.join(format!("{stem}.tailwind-in.css"));
+        let output = stage.join(format!("{stem}.tailwind-out.css"));
+        let sources: Vec<_> = at.sources.iter().map(|s| web_dir.join(s)).collect();
+        std::fs::write(&wrapper, tailwind_wrapper(&input, &sources)).at(&wrapper)?;
+        let tool = crate::tool::tailwind()?;
+        let mut cmd = tailwind_command(&tool, at, &wrapper, &output, release);
+        run(
+            "tailwindcss",
+            &mut cmd,
+            "fix the stylesheet error reported above",
+        )?;
+        output
+    } else {
+        input.clone()
+    };
+    let entry_dir = input.parent().unwrap_or(web_dir);
+    let mut roots = vec![at.workspace, stage];
+    roots.extend(at.node_modules);
+    bundle(
+        &to_bundle,
+        entry_dir,
+        release,
+        if at.library { "./" } else { at.base },
+        &roots,
+    )
+}
+
+/// Inline `@import`s (minified on release) and point each local `url()` at `prefix` plus its hash.
+/// A url resolves against its file, then `fallback` (for Tailwind's output), and must stay in `roots`.
+pub fn bundle(
+    path: &Path,
+    fallback: &Path,
+    release: bool,
+    prefix: &str,
+    roots: &[&Path],
+) -> Result<Built> {
+    let fs = FileProvider::new();
+    let mut bundler = Bundler::new(&fs, None, ParserOptions::default());
+    let fail = |detail: String| Error::Tool {
+        tool: "lightningcss",
+        command: format!("bundle {}", path.display()),
+        detail,
+        fix: "fix the CSS at the location above".into(),
+    };
+    let mut sheet = bundler.bundle(path).map_err(|e| fail(e.to_string()))?;
+    if release {
+        sheet
+            .minify(MinifyOptions::default())
+            .map_err(|e| fail(e.to_string()))?;
+    }
+    let out = sheet
+        .to_css(PrinterOptions {
+            minify: release,
+            analyze_dependencies: Some(DependencyOptions {
+                remove_imports: false,
+            }),
+            ..PrinterOptions::default()
+        })
+        .map_err(|e| fail(e.to_string()))?;
+    let mut built = Built {
+        css: out.code,
+        assets: Vec::new(),
+    };
+    for dep in out.dependencies.unwrap_or_default() {
+        let Dependency::Url(dep) = dep else { continue };
+        let target = match local(&dep.url) {
+            Some((file, suffix)) => {
+                let from = Path::new(&dep.loc.file_path).parent().unwrap_or(fallback);
+                let found = [from.join(file), fallback.join(file)]
+                    .into_iter()
+                    .find(|p| p.is_file())
+                    .ok_or_else(|| {
+                        fail(format!(
+                            "`url({})` in {}: no such file",
+                            dep.url, dep.loc.file_path
+                        ))
+                    })?;
+                let Some(logical) = crate::dist::relative(&found, roots) else {
+                    return Err(fail(format!(
+                        "`url({})` in {} reaches outside the workspace and node_modules",
+                        dep.url, dep.loc.file_path
+                    )));
+                };
+                let bytes = std::fs::read(&found).at(&found)?;
+                let name = found.file_name().unwrap_or_default().to_string_lossy();
+                let hashed = crate::dist::hashed_name(&name, &bytes);
+                let url = format!("{prefix}{hashed}{suffix}");
+                built.assets.push((logical, hashed, bytes));
+                url
+            }
+            None => dep.url.clone(),
+        };
+        built.css = built.css.replace(&dep.placeholder, &target);
+    }
+    Ok(built)
+}
+
+/// `css` with every style rule inside `@scope (scope)`, root selectors meaning the scope's root;
+/// `@font-face`, `@property`, `@keyframes` and imports stay global.
+pub fn scope(css: &str, scope: &str) -> String {
+    let mut global = String::new();
+    let mut out = String::new();
+    let mut rules = String::new();
+    let flush = |rules: &mut String, out: &mut String| {
+        if !rules.trim().is_empty() {
+            out.push_str(&format!("@scope ({scope}) {{{rules}}}"));
+        }
+        rules.clear();
+    };
+    for stmt in statements(css) {
+        let t = stmt.trim_start();
+        let name: String = t
+            .strip_prefix('@')
+            .map(|r| {
+                r.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '-')
+                    .collect()
+            })
+            .unwrap_or_default();
+        let open = t.find('{');
+        match (name.as_str(), open) {
+            ("", Some(open)) => {
+                rules.push_str(&root_selectors(&t[..open]));
+                rules.push_str(&t[open..]);
+            }
+            ("media" | "supports" | "container" | "layer" | "starting-style", Some(open))
+                if t.ends_with('}') =>
+            {
+                flush(&mut rules, &mut out);
+                let inner = &t[open + 1..t.len() - 1];
+                out.push_str(&t[..=open]);
+                out.push_str(&self::scope(inner, scope));
+                out.push('}');
+            }
+            ("import" | "charset" | "namespace", _) => global.push_str(t),
+            _ => {
+                flush(&mut rules, &mut out);
+                out.push_str(t);
+            }
+        }
+    }
+    flush(&mut rules, &mut out);
+    global + &out
+}
+
+/// `:root`, `:host`, `html` and `body` in a selector list, as `:scope`.
+fn root_selectors(prelude: &str) -> String {
+    let mut out = String::with_capacity(prelude.len());
+    let b = prelude.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let rest = &prelude[i..];
+        let boundary_before =
+            i == 0 || matches!(b[i - 1], b' ' | b',' | b'>' | b'+' | b'~' | b'\n' | b'(');
+        let hit = [":root", ":host", "html", "body"].into_iter().find(|w| {
+            rest.starts_with(w)
+                && (w.starts_with(':') || boundary_before)
+                && rest[w.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        });
+        match hit {
+            Some(w) => {
+                out.push_str(":scope");
+                i += w.len();
+            }
+            None => {
+                let c = rest.chars().next().expect("in bounds");
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// The top-level statements of `css`: rules with their blocks, and `;`-ended at-rules.
+fn statements(css: &str) -> Vec<&str> {
+    let b = css.as_bytes();
+    let (mut out, mut start, mut depth, mut i) = (Vec::new(), 0, 0usize, 0);
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = css[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 1);
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    out.push(&css[start..=i]);
+                    start = i + 1;
+                }
+            }
+            b';' if depth == 0 => {
+                out.push(&css[start..=i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if !css[start..].trim().is_empty() {
+        out.push(&css[start..]);
+    }
+    out
+}
+
+/// A url naming a file beside the stylesheet: its path and any `?query` / `#fragment`.
+fn local(url: &str) -> Option<(&str, &str)> {
+    let external = url.contains(':') || url.starts_with('/') || url.starts_with('#');
+    if external || url.is_empty() {
+        return None;
+    }
+    let at = url.find(['?', '#']).unwrap_or(url.len());
+    Some(url.split_at(at))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static NONE: BTreeMap<String, Preprocess> = BTreeMap::new();
+
+    fn plain(web_dir: &Path) -> Inputs<'_> {
+        Inputs {
+            web_dir,
+            sources: &[],
+            preprocess: &NONE,
+            node_modules: None,
+            library: false,
+            base: "/",
+            workspace: web_dir,
+        }
+    }
+
+    fn with(web_dir: &Path, pre: &BTreeMap<String, Preprocess>) -> String {
+        let at = Inputs {
+            preprocess: pre,
+            ..plain(web_dir)
+        };
+        match build(&at, "style/app.scss", &web_dir.join("stage"), true) {
+            Ok(b) => b.css,
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    fn command(argv: &[&str]) -> BTreeMap<String, Preprocess> {
+        let pre = Preprocess {
+            command: argv.iter().map(|a| a.to_string()).collect(),
+            watch: vec![],
+        };
+        BTreeMap::from([("scss".to_owned(), pre)])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_preprocessed_entry_resolves_imports_beside_its_source_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("style")).unwrap();
+        std::fs::write(dir.path().join("style/base.css"), "body { color: red; }\n").unwrap();
+        std::fs::write(
+            dir.path().join("style/app.scss"),
+            "@import \"base.css\";\n.a { margin: 0px; }\n",
+        )
+        .unwrap();
+        let css = with(dir.path(), &command(&["cp", "{input}", "{output}"]));
+        assert_eq!(css, "body{color:red}.a{margin:0}");
+        assert!(!dir.path().join("style/app.scss.css").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_preprocessor_fails_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("style")).unwrap();
+        std::fs::write(dir.path().join("style/app.scss"), "a {}").unwrap();
+        let css = with(dir.path(), &command(&["false"]));
+        assert!(
+            css.starts_with("error:") && css.contains("preprocessor"),
+            "{css}"
+        );
+        let css = with(dir.path(), &command(&["true"]));
+        assert!(css.contains("wrote nothing"), "{css}");
+    }
+
+    #[test]
+    fn a_library_stylesheet_is_scoped_and_keeps_global_at_rules_global() {
+        let css =
+            "@import url(x.css);@font-face{font-family:A}:root,html{--c:red}.btn{color:var(--c)}\
+                   @media (width>1px){body .btn{margin:0}}@keyframes k{0%{opacity:0}}.htmlish{}";
+        assert_eq!(
+            scope(css, ".kit"),
+            "@import url(x.css);@font-face{font-family:A}\
+             @scope (.kit) {:scope,:scope{--c:red}.btn{color:var(--c)}}\
+             @media (width>1px){@scope (.kit) {:scope .btn{margin:0}}}\
+             @keyframes k{0%{opacity:0}}@scope (.kit) {.htmlish{}}"
+        );
+    }
+
+    #[test]
+    fn preflight_is_left_out_of_a_library() {
+        assert_eq!(
+            without_preflight("@import \"tailwindcss\" source(none);\n.a{}"),
+            "@layer theme, base, components, utilities;\n\
+             @import \"tailwindcss/theme.css\" layer(theme);\n\
+             @import \"tailwindcss/utilities.css\" layer(utilities) source(none);\n.a{}"
+        );
+    }
+
+    #[test]
+    fn tailwind_resolves_packages_from_the_install() {
+        let web = Path::new("/w");
+        let installed = Inputs {
+            node_modules: Some(Path::new("/t/js")),
+            ..plain(web)
+        };
+        let env = |at: &Inputs<'_>| {
+            let cmd = tailwind_command(Path::new("tw"), at, Path::new("i"), Path::new("o"), false);
+            cmd.get_envs()
+                .find(|(k, _)| *k == "NODE_PATH")
+                .and_then(|(_, v)| v.map(ToOwned::to_owned))
+        };
+        assert_eq!(env(&installed), Some("/t/js/node_modules".into()));
+        assert_eq!(env(&plain(web)), None);
+    }
+
+    #[test]
+    fn tailwind_detection() {
+        assert!(uses_tailwind("@import \"tailwindcss\";\n"));
+        assert!(uses_tailwind("@import 'tailwindcss' source(none);"));
+        assert!(!uses_tailwind("@import \"./base.css\";"));
+    }
+
+    #[test]
+    fn wrapper_imports_the_entry_and_adds_sources() {
+        let css = tailwind_wrapper(Path::new("/w/style/app.css"), &[PathBuf::from("/w/../api")]);
+        assert_eq!(
+            css,
+            "@import \"/w/style/app.css\";\n@source \"/w/../api\";\n"
+        );
+    }
+
+    #[test]
+    fn imports_are_inlined_and_minified() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("base.css"), "body { color: red; }\n").unwrap();
+        std::fs::write(
+            dir.path().join("app.css"),
+            "@import \"base.css\";\n.a  {  margin: 0px; }\n",
+        )
+        .unwrap();
+        let out = build(
+            &plain(dir.path()),
+            "app.css",
+            &dir.path().join("stage"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(out.css, "body{color:red}.a{margin:0}");
+    }
+
+    #[test]
+    fn a_local_url_points_at_a_hashed_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("style/fonts")).unwrap();
+        std::fs::write(dir.path().join("style/fonts/inter.woff2"), b"font").unwrap();
+        std::fs::write(
+            dir.path().join("style/fonts.css"),
+            "@font-face { src: url(fonts/inter.woff2?v=2); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("style/app.css"),
+            "@import \"fonts.css\";\n.a { background: url(\"https://x.test/a.png\"), url(#g), url(/logo.svg); }\n",
+        )
+        .unwrap();
+        let out = build(
+            &plain(dir.path()),
+            "style/app.css",
+            &dir.path().join("stage"),
+            true,
+        )
+        .unwrap();
+        let hashed = crate::dist::hashed_name("inter.woff2", b"font");
+        assert_eq!(
+            out.assets,
+            [(
+                "style/fonts/inter.woff2".to_owned(),
+                hashed.clone(),
+                b"font".to_vec()
+            )]
+        );
+        assert!(
+            out.css.contains(&format!("url(\"/{hashed}?v=2\")")),
+            "{}",
+            out.css
+        );
+        for kept in ["https://x.test/a.png", "#g", "/logo.svg"] {
+            assert!(out.css.contains(kept), "{kept} in {}", out.css);
+        }
+    }
+
+    #[test]
+    fn a_url_reaching_outside_the_workspace_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), b"key").unwrap();
+        std::fs::write(
+            web.join("app.css"),
+            ".a { background: url(../secret.txt); }\n",
+        )
+        .unwrap();
+        let err = build(&plain(&web), "app.css", &web.join("stage"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the workspace"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_url_target_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("app.css"),
+            ".a { background: url(gone.png); }\n",
+        )
+        .unwrap();
+        let err = build(
+            &plain(dir.path()),
+            "app.css",
+            &dir.path().join("stage"),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("url(gone.png)"), "{err}");
+    }
+}

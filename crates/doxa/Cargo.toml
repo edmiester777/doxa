@@ -15,14 +15,28 @@ default = ["docs", "macros", "docs-scalar", "policy-catalog", "auth-catalog"]
 
 # OpenAPI documentation, Scalar UI hosting, and the core doxa-docs
 # surface (ApiDocBuilder, MountDocsExt, ProblemDetails, etc.).
-docs = ["dep:doxa-docs"]
+docs = ["dep:doxa-docs", "dep:axum"]
 
 # Forward Scalar UI feature to doxa-docs.
 docs-scalar = ["docs", "doxa-docs/docs-scalar"]
 
+# `doxa::Cors`, for a server a doxa client reaches cross-origin.
+cors = ["docs", "doxa-docs/cors"]
+
+# `doxa::proxy`, to serve another server's routes same-origin.
+proxy = ["docs", "doxa-docs/proxy"]
+
+# `doxa::Valid<Json<T>>`: garde rules, checked by the server (`422` per failing field) and by
+# the client before it sends.
+garde = ["dep:garde", "doxa-wire/garde"]
+# `doxa::validator::Valid<Json<T>>`, the same for the `validator` crate.
+validator = ["dep:validator", "doxa-wire/validator"]
+# `doxa::serde_valid::Valid<Json<T>>`, the same for `serde_valid`.
+serde-valid = ["dep:serde_valid", "doxa-wire/serde_valid"]
+
 # Re-export doxa-macros proc-macros (#[derive(ApiError)],
 # #[derive(SseEvent)], #[get]/#[post]/…) through doxa-docs.
-macros = ["docs", "doxa-docs/macros"]
+macros = ["docs", "dep:doxa-macros", "doxa-docs/macros"]
 
 # Zeroize-on-drop secret string type with [REDACTED] display.
 protected = ["dep:doxa-protected"]
@@ -62,20 +76,56 @@ auth-catalog = ["doxa-auth?/catalog"]
 # into the policy layer, so it stays opt-in even under `full`'s siblings.
 policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-sea-orm"]
 
+# Compile the built SPA into the binary via `dist!()`; needs `DOXA_DIST`,
+# which `doxa build` sets. Not part of `full`.
+embed = ["docs", "doxa-docs/embed"]
+
+client = ["dep:doxa-client", "dep:doxa-macros"]
+# `doxa::client::oidc`: sign-in in the browser with authorization code and PKCE.
+oidc = ["client", "doxa-client/oidc", "doxa-ui?/oidc"]
+# Drive client calls through an in-process axum `Router`, for native tests.
+client-router = ["client", "doxa-client/router"]
+ui = ["client", "dep:doxa-ui"]
+# `#[react]`: React components inside `view!`.
+react = ["ui", "doxa-ui/react"]
+# `#[npm]`: plain JS modules bound as typed Rust.
+npm = ["ui", "doxa-ui/npm"]
+# `form()` and `#[derive(Form)]`: forms checked by a route's rules, with field-level errors.
+forms = ["ui", "doxa-ui/forms"]
+# `#[component(export)]`: components a foreign React host mounts, from `doxa build --lib`.
+export = ["ui", "doxa-ui/export"]
+# The `doxa gallery` interface; `doxa gallery` turns it on.
+gallery = ["ui", "doxa-ui/gallery"]
+# `cn![]`: Tailwind class lists merged so the last conflicting class wins.
+tailwind = ["ui", "dep:doxa-tailwind"]
+
 # Everything.
-full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm"]
+full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm", "client", "ui", "react"]
 
 [dependencies]
-doxa-docs = { workspace = true, optional = true }
+doxa-wire = { workspace = true }
+doxa-macros = { workspace = true, optional = true }
+doxa-client = { workspace = true, optional = true }
+doxa-ui = { workspace = true, optional = true }
+doxa-tailwind = { workspace = true, optional = true }
 doxa-protected = { workspace = true, optional = true }
+serde = { workspace = true }
+garde = { workspace = true, optional = true }
+validator = { workspace = true, optional = true }
+serde_valid = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+doxa-docs = { workspace = true, optional = true }
 doxa-audit = { workspace = true, optional = true }
 doxa-auth = { workspace = true, optional = true, default-features = false }
 doxa-policy = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
+futures = { workspace = true }
 futures-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -87,6 +137,12 @@ tokio = { workspace = true }
 tower = { workspace = true }
 utoipa = { workspace = true }
 uuid = { workspace = true }
+garde = { workspace = true, features = ["derive"] }
+validator = { workspace = true, features = ["derive"] }
+serde_valid = { workspace = true }
+sha2 = { workspace = true }
+serde_urlencoded = "0.7"
+http-body-util = { workspace = true }
 
 [[example]]
 name = "full_test"
@@ -103,6 +159,46 @@ required-features = ["full"]
 [[test]]
 name = "grants"
 required-features = ["full"]
+
+[[test]]
+name = "ui"
+required-features = ["ui"]
+
+[[test]]
+name = "props"
+required-features = ["ui"]
+
+[[test]]
+name = "browser"
+required-features = ["ui"]
+
+[[test]]
+name = "router"
+required-features = ["ui"]
+
+[[test]]
+name = "stream_bench"
+required-features = ["ui"]
+
+[[test]]
+name = "forms"
+required-features = ["forms", "garde"]
+
+[[test]]
+name = "oidc"
+required-features = ["oidc", "client-router", "ui"]
+
+[[test]]
+name = "validates"
+required-features = ["client", "garde", "validator", "serde-valid"]
+
+[[test]]
+name = "react"
+required-features = ["react"]
+
+[[test]]
+name = "gallery"
+required-features = ["gallery"]
 
 [[test]]
 name = "granted"
@@ -135,3 +231,19 @@ required-features = ["full"]
 [[test]]
 name = "authorize_loaded"
 required-features = ["full"]
+
+[[test]]
+name = "dry_run"
+required-features = ["full"]
+
+[[test]]
+name = "dry_run_audit"
+required-features = ["full"]
+
+[[test]]
+name = "optional_body"
+required-features = ["client-router", "garde"]
+
+[[test]]
+name = "touches"
+required-features = ["client"]

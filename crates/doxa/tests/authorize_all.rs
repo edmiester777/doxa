@@ -1,17 +1,6 @@
-//! Authorizing several objects a request named at once.
-//!
-//! A body that names its references names more than one of them. Decided
-//! a row at a time that is one policy call each, and each one rebuilds the
-//! same entity hierarchy before evaluating anything. `AuthorizeLoadedAll`
-//! asks once, through
-//! [`CapabilityChecker::check_instance_many`](doxa::policy::CapabilityChecker::check_instance_many)
-//! — and the checker below records what it was asked, so these tests are
-//! also the assertion that it really is one call.
-//!
-//! What must *not* change is the verdict or the trail: a refusal still
-//! names the row that caused it, and a grant is still filed per row. That
-//! is the difference from `AuthorizeScope`, which answers about a
-//! collection.
+//! `AuthorizeLoadedAll`: several loaded rows in one
+//! [`check_instance_many`](doxa::policy::CapabilityChecker::check_instance_many) call (the
+//! checker below counts), with verdicts and the trail still per row.
 
 #![cfg(feature = "full")]
 
@@ -55,9 +44,7 @@ struct Source {
     region: String,
 }
 
-/// A descriptor over the row rather than the row itself, which is the
-/// shape an entity crate forces and the one the plural door has to work
-/// with: the rows arrive already loaded, so nothing here is `Self`.
+/// A descriptor over the row, as an entity crate forces.
 struct SourceByName;
 
 doxa::auth::route_key!(pub SourceKey { name: String });
@@ -72,9 +59,6 @@ impl Granting for SourceByName {
 
     type Actions = SourceActions;
 
-    /// As in the singular case: reaching the state would mean going back
-    /// to a pool that cannot see the caller's open transaction, which is
-    /// the whole reason this door exists.
     async fn load(
         SourceKey { name: _ }: SourceKey,
         _state: &(),
@@ -165,9 +149,7 @@ impl CapabilityChecker for Regional {
     }
 }
 
-/// A checker whose batch answers a different number of verdicts than it
-/// was asked about — the one failure that cannot be lined up with the
-/// rows.
+/// A checker whose batch answers the wrong number of verdicts.
 struct Miscounting;
 
 #[async_trait]
@@ -252,9 +234,6 @@ fn recorded(
 
 // ---- the whole check --------------------------------------------------------
 
-/// The rows come back, in the order they went in — a handler that zips
-/// them against what it asked for would otherwise pair the wrong name
-/// with the wrong row.
 #[tokio::test]
 async fn the_authorized_rows_come_back_in_order() {
     let (parts, _rx, _checker) = parts(&["sources.read"]);
@@ -288,9 +267,6 @@ async fn several_rows_cost_one_pass_through_the_policy() {
     );
 }
 
-/// A refusal still names the row that caused it. This is the whole reason
-/// to reach for this rather than a scope filter, which can only say that
-/// *something* was outside the caller's subset.
 #[tokio::test]
 async fn the_refusal_names_the_row_that_caused_it() {
     let (parts, _rx, _checker) = parts(&["sources.read"]);
@@ -315,9 +291,6 @@ async fn the_refusal_names_the_row_that_caused_it() {
     assert_eq!(reason, "instance denied");
 }
 
-/// One request carries one decision, and a refusal outranks any grant
-/// deposited before it — so the event names the row that was refused,
-/// which is the one worth naming.
 #[tokio::test]
 async fn the_refused_row_is_what_the_trail_carries() {
     let (parts, mut rx, _checker) = parts(&["sources.read"]);
@@ -361,9 +334,6 @@ async fn a_granted_set_is_recorded_as_a_grant_on_the_asset() {
     );
 }
 
-/// The coarse gate is a question about the asset, so it runs once for the
-/// set rather than once per row — and refusing it refuses everything
-/// before any row is considered.
 #[tokio::test]
 async fn the_coarse_gate_runs_once_for_the_set() {
     let (parts, _rx, checker) = parts(&[]);
@@ -385,10 +355,6 @@ async fn the_coarse_gate_runs_once_for_the_set() {
     );
 }
 
-/// The dependency form skips the coarse gate and nothing else, for the
-/// reason the singular one does: a caller who may write a pipeline naming
-/// sources they may read should not be refused because they may not
-/// *list* sources.
 #[tokio::test]
 async fn the_dependency_form_skips_only_the_coarse_gate() {
     let (granted, _rx, _checker) = parts(&[]);
@@ -405,9 +371,6 @@ async fn the_dependency_form_skips_only_the_coarse_gate() {
         .expect_err("the instance check still runs");
 }
 
-/// Nothing named is nothing decided. Depositing a grant here would file a
-/// verdict about rows that do not exist — the request's event still gets
-/// emitted, it just carries no decision about this asset.
 #[tokio::test]
 async fn an_empty_set_decides_and_records_nothing() {
     let (parts, mut rx, checker) = parts(&["sources.read"]);
@@ -427,9 +390,6 @@ async fn an_empty_set_decides_and_records_nothing() {
     );
 }
 
-/// A checker that answers a different number of verdicts than it was asked
-/// about cannot be lined up with the rows, and pairing them anyway is how
-/// a grant lands on the wrong object. Refuse instead.
 #[tokio::test]
 async fn a_miscounted_batch_is_an_error_rather_than_a_guess() {
     let (parts, _rx) = parts_with(&["sources.read"], Arc::new(Miscounting));
@@ -445,9 +405,6 @@ async fn a_miscounted_batch_is_an_error_rather_than_a_guess() {
     );
 }
 
-/// The plural door and the singular one are the same decision. A shared
-/// entity set that let one row's attributes bleed into another's verdict
-/// would show up here.
 #[tokio::test]
 async fn the_plural_door_agrees_with_the_singular() {
     use doxa::auth::AuthorizeLoaded;

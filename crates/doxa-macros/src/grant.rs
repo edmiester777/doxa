@@ -1,55 +1,7 @@
-//! `#[grant(...)]` handling for the `Granted<T>` guard extractor.
-//!
-//! A route states two things the handler body never does: which action to
-//! authorize, and which OpenAPI security scheme to reference. This module
-//! resolves both per call site and rewrites the argument to name them:
-//!
-//! ```ignore
-//! #[get("/folders/{fid}/widgets/{id}")]
-//! async fn get_widget(widget: Granted<Widget>) -> Json<Widget>
-//! ```
-//!
-//! becomes `Granted<One<Widget, ReadAction, __Site>>`. The action and the
-//! site both ride on the subject rather than on `Granted` itself, which is
-//! what leaves the guard a two-field pair a handler can destructure.
-//!
-//! # Which action
-//!
-//! A type, always — one of the asset's own `DeclaredAction` markers, which
-//! `#[derive(Actions)]` emits per variant. Naming it as a path rather than
-//! a string is what lets `One`'s bound hold it to *this* asset's
-//! vocabulary: an action belonging to another asset does not resolve, even
-//! where the two spell it the same.
-//!
-//! Unannotated, it resolves through the verb: `#[get]` asks the asset's
-//! vocabulary for its `ReadAction`, `#[delete]` for its `DeleteAction`, and
-//! so on. That mapping is declared once on the vocabulary itself —
-//! `#[action(verb = get)]` — rather than derived from a name here, so a
-//! vocabulary calling its read action `View` needs no special case and one
-//! with no read action at all fails the build naming the missing impl.
-//!
-//! # Which parameter carries the key
-//!
-//! The key's own field names. A key is a struct deriving `Deserialize` and
-//! the guard reads it with axum's `Path` or `Query`, so `{id}` binds
-//! `struct WidgetKey { id: Uuid }` and no route says so. A route whose
-//! parameters do not include the key's fails the build, on the
-//! `names_within` assertion emitted below.
-//!
-//! Renaming happens at the row — `#[resource(key = "slug")]` — rather than
-//! per route: the name is one fact about a way into a row, and restating it
-//! per call site is how the two came to disagree.
-//!
-//! # Where the key comes from
-//!
-//! Inferred, and not sayable. An instance route with no path parameters
-//! cannot be reading its key from the path, so it reads it from the query
-//! string and `GrantSite::IN` says so — which is what keeps the guard and
-//! the published parameter from disagreeing about where to look. With a
-//! path parameter present the key comes from the path, and the assertion
-//! below holds the route to having the ones the key is named after.
-//!
-//! `Many<R>` and `Cap<M>` name no object, so they read no key at all.
+//! `#[grant(...)]`: rewrites `Granted<Widget>` to `Granted<One<Widget, Action, __Site>>`.
+//! The action is a `DeclaredAction` marker, else the one the route's verb selects
+//! (`#[action(verb = get)]`). The key's field names are the route parameters, read from the
+//! path, or from the query when the template has none.
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
@@ -92,10 +44,6 @@ impl Parse for GrantArgs {
             }
             first = false;
 
-            // A bare string used to rename the route's parameter. A key
-            // is a struct whose field names *are* the parameters, so
-            // there is nothing left for a route to rename — say it here
-            // rather than letting the name be silently ignored.
             if input.peek(LitStr) {
                 return Err(input.error(
                     "a route does not name its key's segments: the key struct's field names \
@@ -107,9 +55,6 @@ impl Parse for GrantArgs {
             let key: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
             match key.to_string().as_str() {
-                // A path, not a string: the marker is a type that already
-                // exists, so a typo is a resolution error naming the
-                // vocabulary rather than an action nothing declares.
                 "action" => {
                     if input.peek(LitStr) {
                         let literal: LitStr = input.parse()?;
@@ -143,11 +88,7 @@ impl Parse for GrantArgs {
     }
 }
 
-/// A snake_case action name as its marker would be spelled, for the
-/// diagnostic that points a string at the type to write instead.
-///
-/// Only ever used in an error message — nothing resolves through it, which
-/// is the whole point of the change it is explaining.
+/// A snake_case action name as its marker is spelled; diagnostics only.
 fn upper_camel(name: &str) -> String {
     name.split('_')
         .filter(|part| !part.is_empty())
@@ -172,9 +113,7 @@ fn verb_trait(method: &str) -> Ident {
     format_ident!("{}", name)
 }
 
-/// Number of generic arguments on a `Granted<…>` type, or `None` if this
-/// isn't one. Matches on the last path segment so `Granted<T>`,
-/// `doxa::auth::Granted<T>` and `doxa_auth::Granted<T>` all resolve.
+/// Number of generic arguments on a `Granted<…>` type (matched by last segment), else `None`.
 fn granted_arity(ty: &Type) -> Option<usize> {
     let Type::Path(type_path) = ty else {
         return None;
@@ -191,22 +130,10 @@ fn granted_arity(ty: &Type) -> Option<usize> {
 
 /// The subject named inside `Granted<…>`.
 fn subject_arg(ty: &Type) -> Option<&Type> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-    let last = type_path.path.segments.last()?;
-    let PathArguments::AngleBracketed(args) = &last.arguments else {
-        return None;
-    };
-    match args.args.first()? {
-        GenericArgument::Type(inner) => Some(inner),
-        _ => None,
-    }
+    crate::ty::first_type_arg(ty)
 }
 
-/// The mode wrapper the subject already names, with the number of
-/// arguments it carries — two of them means the site is spelled out by
-/// hand and there is nothing here to generate.
+/// The subject's mode wrapper (`One`, `Many`, `Cap`) and its argument count.
 fn subject_mode(ty: &Type) -> Option<(String, usize)> {
     let Type::Path(type_path) = ty else {
         return None;
@@ -238,13 +165,7 @@ fn subject_arg_mut(ty: &mut Type) -> Option<&mut Type> {
     }
 }
 
-/// Complete the subject: give it a mode wrapper if it had none, then
-/// append whatever of the action and the site it is still missing.
-///
-/// A bare `Granted<Widget>` is the instance form written short, so it
-/// gains `One<…>` on the way in. `One<Widget>` is missing both its action
-/// and its site; `One<Widget, Delete>` named the action itself and is
-/// missing only the site.
+/// Wrap a bare subject in `One<…>` and append the missing action and site.
 fn complete_subject(ty: &mut Type, appended: &[TokenStream], wrap: bool) {
     let Some(inner) = subject_arg_mut(ty) else {
         return;
@@ -268,13 +189,9 @@ fn complete_subject(ty: &mut Type, appended: &[TokenStream], wrap: bool) {
     }
 }
 
-/// The asset behind an instance-form `Granted<…>`, for the assertion that
-/// checks its key names against the route.
-///
-/// `Granted<Widget>` and `Granted<One<Widget>>` are the same subject
-/// written two ways, so both answer `Widget`. A subject that already names
-/// its site never reaches here, and `Many` / `Cap` have no key to check.
-fn instance_asset(ty: &Type) -> Option<Type> {
+/// The asset behind `Granted<Widget>` or `Granted<One<Widget>>`; `None` for `Many` and `Cap`.
+pub(crate) fn instance_asset(ty: &Type) -> Option<Type> {
+    granted_arity(ty)?;
     let subject = subject_arg(ty)?;
     match subject_mode(subject) {
         Some((name, _)) if name == "One" => subject_arg(subject).cloned(),
@@ -283,11 +200,7 @@ fn instance_asset(ty: &Type) -> Option<Type> {
     }
 }
 
-/// The asset a subject is about, for resolving its action from the verb.
-///
-/// Wider than [`instance_asset`] because a collection authorizes an action
-/// on an asset too — it just reads no key while doing it. Only `Cap` has
-/// no asset to name, and it has no action either.
+/// The asset a subject is about, `Many` included; `None` for `Cap`.
 fn subject_asset(ty: &Type) -> Option<Type> {
     let subject = subject_arg(ty)?;
     match subject_mode(subject) {
@@ -295,6 +208,56 @@ fn subject_asset(ty: &Type) -> Option<Type> {
         Some(_) => None,
         None => Some(subject.clone()),
     }
+}
+
+/// The asset a `Granted<…>` argument is about, for any form but `Cap`.
+pub(crate) fn guarded_asset(ty: &Type) -> Option<Type> {
+    granted_arity(ty)?;
+    subject_asset(ty)
+}
+
+/// Extractors that authorize, in any form.
+const GUARDS: &[&str] = &[
+    "Granted",
+    "Require",
+    "Auth",
+    "AuthContext",
+    "CapabilityContext",
+    "Scoped",
+];
+
+/// Whether `ty` is an extractor that authorizes.
+pub(crate) fn is_guard(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else { return false };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|s| GUARDS.contains(&s.ident.to_string().as_str()))
+}
+
+/// The last argument that authorizes.
+pub(crate) fn last_guard(item_fn: &ItemFn) -> Option<usize> {
+    item_fn
+        .sig
+        .inputs
+        .iter()
+        .rposition(|arg| matches!(arg, FnArg::Typed(pt) if is_guard(&pt.ty)))
+}
+
+/// Stop a dry run once every guard has passed, so it never reaches the handler. Call this
+/// last: docs, mounting and client checks must not see the added argument.
+pub fn stop_dry_runs(item_fn: &mut ItemFn) {
+    // Seven written arguments are within clippy's default limit; only the added one crosses it.
+    if item_fn.sig.inputs.len() == 7 {
+        item_fn
+            .attrs
+            .push(syn::parse_quote!(#[allow(clippy::too_many_arguments)]));
+    }
+    let at = last_guard(item_fn).map_or(0, |i| i + 1);
+    item_fn
+        .sig
+        .inputs
+        .insert(at, syn::parse_quote!(_: ::doxa::__private::AnswerDryRun));
 }
 
 /// Binding name for marker naming; falls back to the position for
@@ -306,9 +269,8 @@ fn binding_name(pat: &Pat, index: usize) -> String {
     }
 }
 
-/// Strip `#[grant(...)]` off every argument, generate a `GrantSite` impl
-/// per `Granted<…>` argument, and rewrite those arguments to name their
-/// action and their site. Returns the generated items.
+/// Strip `#[grant(...)]`, rewrite each `Granted<…>` to name its action and site, and return
+/// the generated `GrantSite` items.
 pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Result<TokenStream> {
     let fn_ident = item_fn.sig.ident.clone();
     let verb = verb_trait(method);
@@ -376,9 +338,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             _ => 3,
         };
 
-        // A subject that spells out its own site was written by hand.
-        // Leave it alone, and refuse an annotation that would contradict
-        // what it already names.
+        // A hand-written site: leave it, and refuse an annotation.
         if mode.as_ref().is_some_and(|(_, a)| *a >= sited_arity) {
             if let Some((_, span)) = &annotation {
                 return Err(syn::Error::new(
@@ -395,10 +355,6 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
         // Only the instance form reads segments out of the route.
         let takes_key = !matches!(mode.as_deref(), Some("Many") | Some("Cap"));
 
-        // An instance route whose template names nothing cannot be
-        // reading its key from the path, so it reads it from the query
-        // string. Nothing to infer where there is a parameter to bind, or
-        // for a form that reads no key at all.
         let source = if takes_key && path_names.is_empty() {
             Source::Query
         } else {
@@ -413,9 +369,6 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             .and_then(|(args, _)| args.action.as_ref());
         let is_capability = mode.as_deref() == Some("Cap");
 
-        // A capability gates on a capability, not on an action against an
-        // asset — so there is no action for one to name, and `Cap` has no
-        // parameter to put it in.
         if is_capability {
             if let (Some(_), Some((_, span))) = (named_action, annotation.as_ref()) {
                 return Err(syn::Error::new(
@@ -455,9 +408,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             None => quote! {},
         };
 
-        // One constant the guard and the OpenAPI parameter both read, so
-        // a route documented `in: query` cannot be one that looks in the
-        // path. `Path` is the default and stays unwritten.
+        // The guard and the OpenAPI parameter both read this.
         let in_const = match source {
             Source::Path => quote! {},
             Source::Query => {
@@ -465,10 +416,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             }
         };
 
-        // The asset names its key's parameters and this is where they
-        // meet the template. Without it an asset keyed on a column the
-        // route does not expose would be a 500 on the first request
-        // instead of a build failure.
+        // A key field the route does not expose fails the build, not the first request.
         let route_check = match (source, takes_key) {
             (Source::Path, true) => instance_asset(&pat_type.ty).map(|asset| {
                 let route_lits = path_names
@@ -506,9 +454,7 @@ pub fn rewrite(item_fn: &mut ItemFn, method: &str, path_names: &[String]) -> Res
             #route_check
         });
 
-        // A bare `Granted<Widget>` means the instance form; the mode
-        // marker is what the extractor actually dispatches on. A subject
-        // that named its own action keeps it and gains only the site.
+        // A subject that named its own action gains only the site.
         let wrap = mode.is_none();
         let mut appended = Vec::new();
         if let Some(action) = action {
@@ -546,6 +492,25 @@ mod tests {
             )),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    fn lint_allowed_with(written: usize) -> bool {
+        let args = (0..written).map(|i| format_ident!("a{i}"));
+        let mut item_fn: ItemFn = syn::parse_quote!(async fn handler(#(#args: u8),*) {});
+        stop_dry_runs(&mut item_fn);
+        assert_eq!(item_fn.sig.inputs.len(), written + 1);
+        item_fn.attrs.iter().any(|attr| {
+            quote::ToTokens::to_token_stream(attr)
+                .to_string()
+                .contains("too_many_arguments")
+        })
+    }
+
+    #[test]
+    fn only_the_added_argument_crossing_the_limit_is_allowed() {
+        assert!(!lint_allowed_with(6));
+        assert!(lint_allowed_with(7));
+        assert!(!lint_allowed_with(8));
     }
 
     #[test]
@@ -778,9 +743,6 @@ mod tests {
         );
     }
 
-    /// Several path parameters are not a choice the macro makes: the
-    /// asset's key names which one it is, and the route is only checked
-    /// for having them.
     #[test]
     fn several_path_parameters_defer_to_the_assets_key_names() {
         let (items, _) = run(

@@ -1,36 +1,7 @@
-//! `#[derive(Actions)]` — an asset's action vocabulary, declared once.
-//!
-//! An action needs a Cedar name, a capability to gate it, a description
-//! for the catalog and the OpenAPI badge, and a resource for the
-//! coarse check. All but the audit category can be worked out from the
-//! variant and the enum it sits in, so the common case is a bare list of
-//! variants with doc comments, and `#[action(…)]` appears only where a
-//! default is wrong.
-//!
-//! What it emits, for `enum SourceAction { Read, Delete }`:
-//!
-//! - `mod source_action` holding one marker struct per variant. Each
-//!   implements `DeclaredAction`, so it can be handed to
-//!   `AuthorizeLoaded::authorize` and the asset's vocabulary is checked at
-//!   build time rather than at request time. Where the variant declares a
-//!   capability the marker carries that too, registering in the catalog
-//!   like any `#[capability]` and namable as `Granted<Cap<…>>`.
-//! - One `Action` const per variant, registered so `doxa::auth::actions()`
-//!   can answer without a hand-maintained list.
-//! - `impl ActionTable for SourceAction`, holding the vocabulary
-//!   `Granting::Actions` names, plus `SourceAction::ACTIONS` forwarding to
-//!   it. The trait is what an asset points at and what code generic over a
-//!   vocabulary bounds on.
-//! - One `verb::…Action` impl per variant that claims a verb, so a route
-//!   with no `#[grant(action = …)]` resolves through the one its method
-//!   selects.
-//! - `SourceAction::ALL` and `as_static`, so the enum is usable as a
-//!   value too.
-//!
-//! Deliberately no `impl Granting`: an asset's loader and context are its
-//! own, and a resource that is generic over a descriptor rather than a
-//! concrete struct is not something a derive can attach to at all.
-//! Wiring is one line: `type Actions = SourceAction;`.
+//! `#[derive(Actions)]`: an asset's action vocabulary. For `enum SourceAction` it emits
+//! `mod source_action` with a `DeclaredAction` marker per variant (and its capability), one
+//! registered `Action` row each, `impl ActionTable`, the `verb::…Action` impls, and `ALL` /
+//! `as_static`. The asset wires it with `type Actions = SourceAction;`.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -64,18 +35,11 @@ struct Variant {
     entity_type: Option<LitStr>,
     entity_id: Option<EntityId>,
     instance_only: bool,
-    /// The HTTP verb this action is what a route means, when the route
-    /// does not say. Written as a bare ident — `verb = get` — because it
-    /// is one of five, not an arbitrary string.
+    /// `verb = get`: what a route with that method means when it names no action.
     verb: Option<Verb>,
 }
 
-/// A verb a route can imply an action from, and the trait that carries the
-/// mapping.
-///
-/// `PUT` and `PATCH` are one slot: both mean "update", and a vocabulary
-/// that wanted to tell them apart would be naming two actions, which is
-/// what `#[grant(action = …)]` is for.
+/// A verb a route can imply an action from; `PUT` and `PATCH` share the update slot.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Read,
@@ -118,13 +82,7 @@ impl Verb {
     }
 }
 
-/// The Cedar id a coarse check asks about, when the enum does not say.
-///
-/// A coarse gate runs before anything is loaded, so there is no object to
-/// name: the collection is the default, and it says *which* one rather
-/// than whose. An asset whose collections are per-tenant writes
-/// `#[actions(entity_id = tenant)]`, and doxa substitutes the request's
-/// tenant rather than asking the consumer's UID builder to.
+/// The Cedar id a coarse check asks about by default; `#[actions(entity_id = tenant)]` uses the caller's tenant.
 const DEFAULT_ENTITY_ID: &str = "collection";
 
 pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
@@ -183,6 +141,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let module = Ident::new(&snake_case(&enum_name.to_string()), enum_name.span());
 
     let mut markers = Vec::new();
+    let mut shared_markers = Vec::new();
     let mut consts = Vec::new();
     let mut rows = Vec::new();
     let mut arms = Vec::new();
@@ -210,12 +169,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             None => snake_case(&ident.to_string()),
         };
 
-        // A coarse gate has only the action to decide on, so two rows
-        // naming one action are not two permissions — the first shadows
-        // the second, and the second's capability is never checked
-        // despite looking enforced. Reject it here, where the span can
-        // name the variant; `doxa::auth::distinct` catches the same
-        // mistake in a hand-written table.
+        // The second row's capability would never be checked.
         if let Some((_, first)) = claimed.iter().find(|(name, _)| name == &action) {
             return Err(syn::Error::new(
                 ident.span(),
@@ -233,22 +187,12 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         all.push(quote!(Self::#ident));
 
         let event = match &parsed.event {
-            // The audit vocabulary is the application's to define —
-            // `doxa_audit::AuditEventType` says so — so this is the one
-            // field with no defensible default. Taken as an expression
-            // rather than a string so `EventType::DataAccess.as_static()`
-            // is checked, where `"data_acess"` would compile and file
-            // every event of this action under a category nothing reads.
+            // An expression, so `EventType::DataAccess.as_static()` is checked.
             Some(expr) => quote!(.event(#expr)),
             None => quote!(),
         };
 
-        // The coarse half, which is the only part a variant can opt out
-        // of: an `instance_only` action has no capability, and a
-        // `capable` one gates on a capability that already exists.
-        // Minting a second marker over that name would put two entries in
-        // the catalog and leave whichever the routes did not name looking
-        // enforced.
+        // `instance_only` has no capability; `capable` reuses an existing one rather than minting a twin.
         let (capability, declaration, cap_name) = if parsed.instance_only {
             (quote!(), quote!(), None)
         } else if let Some(path) = &parsed.capable {
@@ -300,19 +244,8 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             )
         };
 
-        // A const rather than an inline row, because a registration needs
-        // something with an address. `ACTIONS` then points at the same
-        // value the catalog holds, so the two cannot describe one action
-        // differently.
-        //
-        // Emitted beside the enum rather than inside the module: `event`
-        // is an arbitrary expression and `capable` an arbitrary path, and
-        // both are written where the enum is. Resolving them one module
-        // deeper would break every table that names its own event enum.
-        //
-        // Named after the enum as well as the variant, because that is the
-        // scope it lands in: two vocabularies in one module may each have
-        // a `Read`, and they are different actions on different assets.
+        // Beside the enum, where `event` and `capable` resolve; named for both, since two enums
+        // in one module may each have a `Read`.
         let row_const = Ident::new(&format!("_DOXA_ACTION_{enum_name}_{ident}"), ident.span());
 
         let marker_doc = match &cap_name {
@@ -320,25 +253,34 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             None => format!("The `{action}` action."),
         };
 
-        markers.push(quote! {
+        let pkg_name = crate::role::package();
+        let named = cap_name.as_ref().map(|cap| {
+            quote! {
+                impl ::doxa::wire::Capability for #ident {
+                    const NAME: &'static str = #cap;
+                    const ENTITY_TYPE: &'static str = #resource;
+                    const PACKAGE: &'static str = #pkg_name;
+                }
+            }
+        });
+        shared_markers.push(quote! {
             #[doc = #marker_doc]
+            #[derive(Debug, Clone, Copy)]
             pub struct #ident;
 
+            #named
+        });
+
+        markers.push(quote! {
             impl ::doxa::auth::DeclaredAction for #ident {
                 type Table = super::#enum_name;
 
-                // The row the table and the catalog already hold, by
-                // reference — not a second copy that could describe this
-                // action differently.
                 const ROW: &'static ::doxa::auth::Action = &super::#row_const;
             }
 
             #declaration
         });
 
-        // The verb mapping, where the variant claims one. Emitted beside
-        // the enum rather than in the module: it is an impl on the enum,
-        // and the marker it names is one module deeper.
         if let Some(verb) = parsed.verb {
             if let Some((_, first)) = claimed_verbs.iter().find(|(v, _)| *v == verb) {
                 return Err(syn::Error::new(
@@ -367,10 +309,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             const #row_const: ::doxa::auth::Action =
                 ::doxa::auth::Action::new(#action) #capability #event;
 
-            // Declaring the action is what puts it in the catalog, so
-            // `doxa::auth::actions()` can answer without anyone
-            // maintaining a list. Expands to nothing without the
-            // `catalog` feature.
+            // For `doxa::auth::actions()`; nothing without the `catalog` feature.
             ::doxa::auth::inventory::submit! { &#row_const }
         });
 
@@ -385,16 +324,16 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
          capability the marker carries that too — it registers in the \
          catalog and can be named as `Granted<Cap<{module}::…>>`."
     );
-    let markers = quote! {
+    let markers = doxa_macro_support::tag(doxa_macro_support::Side::Server, quote!(#(#markers)*));
+    let module = quote! {
         #[doc = #module_doc]
         #vis mod #module {
-            #(#markers)*
+            #(#shared_markers)*
+            #markers
         }
     };
 
-    Ok(quote! {
-        #markers
-
+    let server = quote! {
         #(#consts)*
 
         impl ::doxa::auth::ActionTable for #enum_name {
@@ -404,15 +343,22 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         #(#verb_impls)*
 
         impl #enum_name {
-            /// Every action this asset permits, as `ActionTable`
-            /// holds them.
-            ///
-            /// The same table as `ActionTable::ACTIONS` and not a copy of
-            /// it, spelled without the trait so the common wiring needs no
-            /// import.
+            /// Every action this asset permits, as `ActionTable` holds them.
             pub const ACTIONS: &'static [::doxa::auth::Action] =
                 <Self as ::doxa::auth::ActionTable>::ACTIONS;
+        }
+    };
 
+    let server = doxa_macro_support::tag(doxa_macro_support::Side::Server, server);
+    Ok(quote! {
+        #module
+        #server
+
+        impl ::doxa::wire::Vocabulary for #enum_name {
+            const ENTITY_TYPE: &'static str = #resource;
+        }
+
+        impl #enum_name {
             /// Every variant, in declaration order.
             pub const ALL: &'static [Self] = &[#(#all),*];
 
@@ -428,9 +374,11 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
 fn parse_container(attrs: &[Attribute]) -> syn::Result<Container> {
     let mut out = Container::default();
+    let mut seen = std::collections::HashSet::new();
 
     for attr in attrs.iter().filter(|a| a.path().is_ident("actions")) {
         attr.parse_nested_meta(|meta| {
+            crate::given_once(&mut seen, &meta)?;
             if meta.path.is_ident("entity_id") {
                 out.entity_id = Some(parse_entity_id(meta.value()?)?);
                 return Ok(());
@@ -458,17 +406,17 @@ fn parse_container(attrs: &[Attribute]) -> syn::Result<Container> {
 
 fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
     let mut out = Variant::default();
+    let mut seen = std::collections::HashSet::new();
 
     for attr in attrs.iter().filter(|a| a.path().is_ident("action")) {
         attr.parse_nested_meta(|meta| {
+            crate::given_once(&mut seen, &meta)?;
             if meta.path.is_ident("instance_only") {
                 out.instance_only = true;
                 return Ok(());
             }
 
-            // A type, not a string: the marker exists already, and
-            // naming it as a path is what makes a typo a resolution
-            // error rather than a silently duplicated catalog entry.
+            // A path, so a typo fails to resolve.
             if meta.path.is_ident("capable") {
                 out.capable = Some(meta.value()?.parse::<Path>()?);
                 return Ok(());
@@ -479,9 +427,6 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
                 return Ok(());
             }
 
-            // A bare ident rather than a string: the set is closed, so a
-            // typo should be caught here and named, not carried through
-            // as a slot nothing maps to.
             if meta.path.is_ident("verb") {
                 let ident = meta.value()?.parse::<Ident>()?;
                 out.verb = Some(Verb::parse(&ident).ok_or_else(|| {
@@ -548,9 +493,7 @@ fn parse_variant(attrs: &[Attribute]) -> syn::Result<Variant> {
     Ok(out)
 }
 
-/// The variant's doc comment, as the capability description. Lines are
-/// joined with a space: a description is one line in a catalog listing
-/// and in an OpenAPI badge, however it was written.
+/// The variant's doc comment as a one-line capability description.
 fn doc_comment(attrs: &[Attribute]) -> Option<String> {
     let mut lines = Vec::new();
 
@@ -628,6 +571,18 @@ mod tests {
     }
 
     #[test]
+    fn an_option_given_twice_is_an_error() {
+        let err = expand_err(quote! {
+            pub enum SourceAction {
+                #[action(name = "a")]
+                #[action(name = "b")]
+                Read,
+            }
+        });
+        assert!(err.contains("`name` is given twice"), "{err}");
+    }
+
+    #[test]
     fn defaults_come_off_the_enum_name() {
         let out = expand_ok(quote! {
             pub enum SourceAction {
@@ -649,9 +604,6 @@ mod tests {
         assert!(out.contains("pub mod source_action"), "{out}");
     }
 
-    /// The tenant is written as a bare word, not as the string
-    /// `"tenant"`. It names no id — it says there is one to substitute,
-    /// and doxa does that before the consumer's UID builder is reached.
     #[test]
     fn the_container_overrides_every_default() {
         let out = expand_ok(quote! {
@@ -665,9 +617,6 @@ mod tests {
         assert!(out.contains("ResourceId :: Tenant"), "{out}");
     }
 
-    /// A misspelling is caught at the attribute rather than becoming a
-    /// literal id that matches nothing — which is what a bare string
-    /// would have silently produced.
     #[test]
     fn an_unknown_entity_id_word_is_refused() {
         let message = expand_err(quote! {
@@ -681,9 +630,6 @@ mod tests {
         assert!(message.contains("bare word `tenant`"), "{message}");
     }
 
-    /// No capability, but still a marker: the action exists, so there is
-    /// something to name at a call site and something to check it
-    /// against. Only the coarse half is absent.
     #[test]
     fn instance_only_declares_no_capability() {
         let out = expand_ok(quote! {
@@ -695,9 +641,6 @@ mod tests {
 
         assert!(!out.contains("CapabilityCheck"), "{out}");
         assert!(out.contains("pub struct Ping"), "{out}");
-        // The marker carries the vocabulary it belongs to and the row
-        // itself — by reference, so the table and the catalog cannot come
-        // to describe one action differently.
         assert!(
             out.contains("type Table = super :: WidgetAction ;"),
             "{out}"
@@ -714,9 +657,6 @@ mod tests {
         assert!(!out.contains(". capability ("), "{out}");
     }
 
-    /// Every variant reaches the catalog, including the two that declare
-    /// no capability — which is the gap this closes. A capability-derived
-    /// list can see neither.
     #[test]
     fn every_variant_registers_its_action() {
         let out = expand_ok(quote! {
@@ -739,11 +679,6 @@ mod tests {
         }
     }
 
-    /// The action const lands beside the enum, not inside the module, so
-    /// its name has to carry the enum too. Two vocabularies in one module
-    /// each having a `Read` is ordinary — they are different actions on
-    /// different assets — and a shared const name would be a redefinition
-    /// the user never wrote.
     #[test]
     fn two_vocabularies_in_one_module_do_not_collide() {
         let sources = expand_ok(quote! {
@@ -763,10 +698,6 @@ mod tests {
         );
     }
 
-    /// The table lands in the trait impl, and the inherent const forwards
-    /// to it rather than repeating the array. Two arrays would be two
-    /// tables, and a generic caller and a direct one could disagree about
-    /// what the asset permits.
     #[test]
     fn the_table_is_a_trait_impl_the_inherent_const_forwards_to() {
         let out = expand_ok(quote! {
@@ -822,9 +753,6 @@ mod tests {
         assert!(message.contains("admin_write"), "{message}");
     }
 
-    /// The collision is on the Cedar action, not the variant name, so
-    /// two differently-named variants that default to one action are the
-    /// same mistake.
     #[test]
     fn a_repeat_through_defaults_is_refused() {
         let err = expand(quote! {
@@ -862,9 +790,6 @@ mod tests {
         assert!(!out.contains("Capable for Read"), "{out}");
     }
 
-    /// The module is emitted even when no variant declares a capability:
-    /// every action has a marker now, because every action is something a
-    /// call site may need to name and have checked.
     #[test]
     fn an_enum_that_declares_no_capability_still_has_markers() {
         let out = expand_ok(quote! {
