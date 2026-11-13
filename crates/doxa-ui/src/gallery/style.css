@@ -3,7 +3,7 @@
   --border: rgba(15, 23, 42, .09); --text: #1f2933; --muted: #6b7785; --faint: #9aa4af;
   --accent: #5b5bd6; --accent-soft: rgba(91, 91, 214, .12); --on-accent: #fff;
   --canvas: #eef0f3; --dot: rgba(15, 23, 42, .08); --frame: #fff;
-  --str: #1a7f37; --num: #b35900; --kw: #8250df; --ty: #0b69c7; --mac: #c2410c; --com: #8b949e; --attr: #6e7781;
+  --str: #1a7f37; --num: #b35900; --kw: #8250df; --ty: #0b69c7; --mac: #c2410c; --com: #8b949e; --attr: #6e7781; --tag: #cf222e; --at: #0e7490;
   --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 8px 24px rgba(15, 23, 42, .08);
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light;
@@ -14,7 +14,7 @@
     --border: rgba(255, 255, 255, .08); --text: #e6e8eb; --muted: #9ba3ad; --faint: #6c737c;
     --accent: #8b8bf5; --accent-soft: rgba(139, 139, 245, .16); --on-accent: #0f0f1a;
     --canvas: #101114; --dot: rgba(255, 255, 255, .06); --frame: #1b1c20;
-    --str: #7ee787; --num: #ffa657; --kw: #d2a8ff; --ty: #79c0ff; --mac: #ffa198; --com: #6e7681; --attr: #8b949e;
+    --str: #7ee787; --num: #ffa657; --kw: #d2a8ff; --ty: #79c0ff; --mac: #ffa198; --com: #6e7681; --attr: #8b949e; --tag: #ff7b72; --at: #56d4dd;
     --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .35);
     color-scheme: dark;
   }
@@ -114,7 +114,7 @@ kbd { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--borde
 .src .l { display: block; padding-right: 16px; white-space: pre; min-height: 1.6em; }
 .src .l::before { counter-increment: line; content: counter(line); display: inline-block; width: 3.5em; padding-right: 1.25em; text-align: right; color: var(--faint); user-select: none; }
 .t-com { color: var(--com); font-style: italic; } .t-str { color: var(--str); } .t-num { color: var(--num); } .t-kw { color: var(--kw); }
-.t-ty { color: var(--ty); } .t-mac { color: var(--mac); } .t-attr { color: var(--attr); } .t-life { color: var(--kw); font-style: italic; }
+.t-ty { color: var(--ty); } .t-mac { color: var(--mac); } .t-pun { color: var(--attr); } .t-tag { color: var(--tag); } .t-at { color: var(--at); } .t-life { color: var(--kw); font-style: italic; }
 
 .mnav, .scrim, .tool.close { display: none; }
 @media (min-width: 600px) {
