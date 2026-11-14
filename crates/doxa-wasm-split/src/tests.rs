@@ -122,6 +122,96 @@ fn an_aliased_symbol_resolves_to_the_function_at_its_index() {
     );
 }
 
+fn named(module: &mut Module, name: &str) -> FunctionId {
+    let id = func_calling(module, None);
+    module.funcs.get_mut(id).name = Some(name.into());
+    id
+}
+
+#[test]
+fn every_copy_of_a_duplicated_name_keeps_the_data_any_copy_reads() {
+    let mut old = Module::default();
+    let reads = named(&mut old, "shim");
+    let _twin = named(&mut old, "shim");
+    let other = named(&mut old, "other");
+    let mut new = Module::default();
+    let main = named(&mut new, "main");
+    let copies = [named(&mut new, "shim"), named(&mut new, "shim")];
+    let other_new = named(&mut new, "other");
+    let graph = [
+        (Node::Function(reads), [Node::DataSymbol(7)].into()),
+        (Node::Function(other), [Node::DataSymbol(8)].into()),
+    ]
+    .into();
+    let remapped = remap_call_graph(&graph, &old.funcs, &new.funcs, main);
+    for copy in copies {
+        assert!(remapped[&Node::Function(copy)].contains(&Node::DataSymbol(7)));
+        assert!(!remapped[&Node::Function(copy)].contains(&Node::DataSymbol(8)));
+    }
+    assert_eq!(
+        remapped[&Node::Function(other_new)],
+        [Node::DataSymbol(8)].into()
+    );
+}
+
+#[test]
+fn what_a_dissolved_function_reaches_and_new_functions_hang_off_main() {
+    let mut old = Module::default();
+    let describe = named(&mut old, "describe");
+    let mut new = Module::default();
+    let main = named(&mut new, "main");
+    let shim = named(&mut new, "shim");
+    let graph = [(Node::Function(describe), [Node::DataSymbol(9)].into())].into();
+    let remapped = remap_call_graph(&graph, &old.funcs, &new.funcs, main);
+    let root = &remapped[&Node::Function(main)];
+    assert!(root.contains(&Node::DataSymbol(9)));
+    assert!(root.contains(&Node::Function(shim)));
+}
+
+#[test]
+fn an_offset_past_a_symbols_end_also_reaches_the_symbol_it_lands_in() {
+    let data = |offset, size| SymbolInfo::Data {
+        flags: wasmparser::SymbolFlags::empty(),
+        name: "data",
+        symbol: Some(wasmparser::DefinedDataSymbol {
+            index: 0,
+            offset,
+            size,
+        }),
+    };
+    let symbol = |index, segment_offset, symbol_size| DataSymbol {
+        index,
+        range: 0..0,
+        segment_offset,
+        symbol_size,
+        which_data_segment: 0,
+    };
+    let relocations = ModuleWithRelocations {
+        module: Module::default(),
+        symbols: vec![data(0, 624), data(632, 12)],
+        funcs_by_index: vec![],
+        call_graph: HashMap::new(),
+        parents: HashMap::new(),
+        relocation_map: HashMap::new(),
+        data_symbols: [(0, symbol(0, 0, 624)), (1, symbol(1, 632, 12))].into(),
+        data_section_range: 0..0,
+    };
+    let reloc = |addend| RelocationEntry {
+        ty: wasmparser::RelocationType::MemoryAddrSleb,
+        offset: 0,
+        index: 0,
+        addend,
+    };
+    assert_eq!(
+        relocations.reloc_targets(&reloc(636)).unwrap(),
+        vec![Node::DataSymbol(0), Node::DataSymbol(1)],
+    );
+    assert_eq!(
+        relocations.reloc_targets(&reloc(16)).unwrap(),
+        vec![Node::DataSymbol(0)],
+    );
+}
+
 #[test]
 fn a_table_entry_nothing_reaches_keeps_its_callees_in_main() {
     let (module, graph, orphan, callee) = orphaned_table_entry();

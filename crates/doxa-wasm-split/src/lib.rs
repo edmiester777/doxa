@@ -15,7 +15,8 @@ use std::{
 use walrus::{
     ir::{self, dfs_in_order, Visitor},
     ConstExpr, ElementItems, ElementKind, ExportId, ExportItem, FunctionBuilder, FunctionId,
-    FunctionKind, ImportId, ImportKind, Module, ModuleConfig, RefType, TableId, TypeId,
+    FunctionKind, ImportId, ImportKind, Module, ModuleConfig, ModuleFunctions, RefType, TableId,
+    TypeId,
 };
 use wasmparser::{
     BinaryReader, Linking, LinkingSectionReader, Payload, RelocSectionReader, RelocationEntry,
@@ -658,114 +659,15 @@ impl<'a> Splitter<'a> {
     /// that to our *new* module's symbols.
     fn build_call_graph(&mut self) -> Result<()> {
         let original = ModuleWithRelocations::new(self.original)?;
-
-        let old_names: HashMap<String, FunctionId> = original
-            .module
-            .funcs
-            .iter()
-            .flat_map(|f| Some((f.name.clone()?, f.id())))
-            .collect();
-
-        let new_names: HashMap<String, FunctionId> = self
-            .source_module
-            .funcs
-            .iter()
-            .flat_map(|f| Some((f.name.clone()?, f.id())))
-            .collect();
-
-        let mut old_to_new = HashMap::new();
-        let mut new_call_graph: HashMap<Node, HashSet<Node>> = HashMap::new();
-
-        for (new_name, new_func) in new_names.iter() {
-            if let Some(old_func) = old_names.get(new_name) {
-                old_to_new.insert(*old_func, new_func);
-            } else {
-                new_call_graph.insert(Node::Function(*new_func), HashSet::new());
-            }
-        }
-
-        let get_old = |old: &Node| -> Option<Node> {
-            match old {
-                Node::Function(id) => old_to_new.get(id).map(|new_id| Node::Function(**new_id)),
-                Node::DataSymbol(id) => Some(Node::DataSymbol(*id)),
-            }
-        };
-
-        // A symbol wasm-bindgen dissolved (describe functions into shims) can't be placed, so its
-        // descendants are attached to the root and stay in main.
-        let mut lost_children = HashSet::new();
-        self.call_graph = original
-            .call_graph
-            .iter()
-            .flat_map(|(old, children)| {
-                // If the old function isn't in the new module, we need to move all its descendents into the main chunk
-                let Some(new) = get_old(old) else {
-                    for child in children {
-                        fn descend(
-                            lost_children: &mut HashSet<Node>,
-                            old_graph: &HashMap<Node, HashSet<Node>>,
-                            node: Node,
-                        ) {
-                            if !lost_children.insert(node) {
-                                return;
-                            }
-
-                            if let Some(children) = old_graph.get(&node) {
-                                for child in children {
-                                    descend(lost_children, old_graph, *child);
-                                }
-                            }
-                        }
-
-                        descend(&mut lost_children, &original.call_graph, *child);
-                    }
-                    return None;
-                };
-
-                let mut new_children = HashSet::new();
-                for child in children {
-                    if let Some(new) = get_old(child) {
-                        new_children.insert(new);
-                    }
-                }
-
-                Some((new, new_children))
-            })
-            .collect();
-
-        let mut recovered_children = HashSet::new();
-        for lost in lost_children {
-            match lost {
-                // Functions need to be found - the wasm describe functions are usually completely dissolved
-                Node::Function(id) => {
-                    let func = original.module.funcs.get(id);
-                    let name = func.name.as_ref().unwrap();
-                    if let Some(entry) = new_names.get(name) {
-                        recovered_children.insert(Node::Function(*entry));
-                    }
-                }
-
-                // Data symbols are unchanged and fine to remap
-                Node::DataSymbol(id) => {
-                    recovered_children.insert(Node::DataSymbol(id));
-                }
-            }
-        }
-
-        // We're going to attach the recovered children to the main function
         let main_fn = self.source_module.funcs.by_name("main").context("Failed to find `main` function - was this built with LTO, --emit-relocs, and debug symbols?")?;
-        let main_fn_entry = new_call_graph.entry(Node::Function(main_fn)).or_default();
-        main_fn_entry.extend(recovered_children);
+        self.call_graph = remap_call_graph(
+            &original.call_graph,
+            &original.module.funcs,
+            &self.source_module.funcs,
+            main_fn,
+        );
 
-        // Also attach any truly new symbols to the main function. Usually these are the shim functions
-        for (name, new) in new_names.iter() {
-            if !old_names.contains_key(name) {
-                main_fn_entry.insert(Node::Function(*new));
-            }
-        }
-
-        // Walk the functions and try to disconnect any holes manually
-        // This will attempt to resolve any of the new symbols like the shim functions
+        // Edges into wasm-bindgen's own shims, which have no relocations.
         for func in self.source_module.funcs.iter() {
             struct CallGrapher<'a> {
                 cur: FunctionId,
@@ -985,9 +887,10 @@ impl<'a> ModuleWithRelocations<'a> {
                 assert!(reloc_range.start >= range.start);
                 assert!(reloc_range.end <= range.end);
 
-                if let Some(target) = self.get_symbol_dep_node(entry.index as usize)? {
+                let targets = self.reloc_targets(entry)?;
+                if !targets.is_empty() {
                     let us = Node::Function(func_id);
-                    self.call_graph.entry(us).or_default().insert(target);
+                    self.call_graph.entry(us).or_default().extend(targets);
                     self.relocation_map.entry(us).or_default().push(*entry);
                 }
             }
@@ -1019,9 +922,10 @@ impl<'a> ModuleWithRelocations<'a> {
                 assert!(reloc_range.start >= range.start);
                 assert!(reloc_range.end <= range.end);
 
-                if let Some(target) = self.get_symbol_dep_node(entry.index as usize)? {
+                let targets = self.reloc_targets(entry)?;
+                if !targets.is_empty() {
                     let dep = Node::DataSymbol(symbol.index);
-                    self.call_graph.entry(dep).or_default().insert(target);
+                    self.call_graph.entry(dep).or_default().extend(targets);
                     self.relocation_map.entry(dep).or_default().push(*entry);
                 }
             }
@@ -1069,6 +973,40 @@ impl<'a> ModuleWithRelocations<'a> {
 
         Ok(res)
     }
+
+    /// The relocation's symbol, and with an offset past its end, the symbols holding the bytes
+    /// actually addressed.
+    fn reloc_targets(&self, entry: &RelocationEntry) -> Result<Vec<Node>> {
+        let Some(target) = self.get_symbol_dep_node(entry.index as usize)? else {
+            return Ok(vec![]);
+        };
+        let mut targets = vec![target];
+        if let Some(symbol) = self.data_symbols.get(&(entry.index as usize)) {
+            let at = symbol.segment_offset as i64 + entry.addend;
+            if !(0..symbol.symbol_size as i64).contains(&entry.addend) && at >= 0 {
+                targets.extend(
+                    symbols_at(&self.data_symbols, symbol.which_data_segment, at as usize)
+                        .map(Node::DataSymbol),
+                );
+            }
+        }
+        Ok(targets)
+    }
+}
+
+/// The data symbols covering byte `offset` of data segment `segment`.
+fn symbols_at(
+    symbols: &BTreeMap<usize, DataSymbol>,
+    segment: usize,
+    offset: usize,
+) -> impl Iterator<Item = usize> + '_ {
+    symbols
+        .values()
+        .filter(move |s| {
+            s.which_data_segment == segment
+                && (s.segment_offset..s.segment_offset + s.symbol_size).contains(&offset)
+        })
+        .map(|s| s.index)
 }
 
 #[derive(Debug, Clone)]
@@ -1145,6 +1083,75 @@ fn accumulate_split_points(module: &Module) -> Vec<SplitPoint> {
 pub enum Node {
     Function(FunctionId),
     DataSymbol(usize),
+}
+
+/// The linker's call graph over wasm-bindgen's functions, matched by name. A name can belong to
+/// several functions, so each copy takes every copy's edges.
+fn remap_call_graph(
+    old_graph: &HashMap<Node, HashSet<Node>>,
+    old_funcs: &ModuleFunctions,
+    new_funcs: &ModuleFunctions,
+    main: FunctionId,
+) -> HashMap<Node, HashSet<Node>> {
+    fn by_name(funcs: &ModuleFunctions) -> HashMap<&str, Vec<FunctionId>> {
+        let mut names: HashMap<&str, Vec<FunctionId>> = HashMap::new();
+        for f in funcs.iter() {
+            if let Some(name) = &f.name {
+                names.entry(name).or_default().push(f.id());
+            }
+        }
+        names
+    }
+    fn descend(lost: &mut HashSet<Node>, graph: &HashMap<Node, HashSet<Node>>, node: Node) {
+        if lost.insert(node) {
+            for child in graph.get(&node).into_iter().flatten() {
+                descend(lost, graph, *child);
+            }
+        }
+    }
+
+    let old_names = by_name(old_funcs);
+    let new_names = by_name(new_funcs);
+    let copies = |node: Node| -> Vec<Node> {
+        match node {
+            Node::Function(id) => old_funcs
+                .get(id)
+                .name
+                .as_deref()
+                .and_then(|name| new_names.get(name))
+                .into_iter()
+                .flatten()
+                .map(|f| Node::Function(*f))
+                .collect(),
+            Node::DataSymbol(_) => vec![node],
+        }
+    };
+
+    let mut graph: HashMap<Node, HashSet<Node>> = HashMap::new();
+    let mut lost = HashSet::new();
+    for (old, children) in old_graph {
+        let news = copies(*old);
+        if news.is_empty() {
+            // Dissolved by wasm-bindgen, so what it reached stays in main.
+            for child in children {
+                descend(&mut lost, old_graph, *child);
+            }
+            continue;
+        }
+        let mapped: HashSet<Node> = children.iter().flat_map(|c| copies(*c)).collect();
+        for new in news {
+            graph.entry(new).or_default().extend(&mapped);
+        }
+    }
+
+    let root = graph.entry(Node::Function(main)).or_default();
+    root.extend(lost.into_iter().flat_map(copies));
+    for (name, funcs) in &new_names {
+        if !old_names.contains_key(name) {
+            root.extend(funcs.iter().map(|f| Node::Function(*f)));
+        }
+    }
+    graph
 }
 
 fn reachable_graph(deps: &HashMap<Node, HashSet<Node>>, roots: &HashSet<Node>) -> HashSet<Node> {
