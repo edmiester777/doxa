@@ -50,6 +50,23 @@ pub(crate) fn record(extensions: &Extensions, denial: Denied<'_>) {
     deposit_denial(extensions, denial);
 }
 
+/// Note on the request's audit event which admin tier waived the policy.
+pub(crate) fn via(extensions: &Extensions, reach: crate::granted::Reach) {
+    let tier = match reach {
+        crate::granted::Reach::Super => "super_admin",
+        crate::granted::Reach::Tenant => "tenant_admin",
+        crate::granted::Reach::Policy => return,
+    };
+    deposit_via(extensions, tier);
+}
+
+#[cfg(feature = "audit")]
+fn deposit_via(extensions: &Extensions, tier: &'static str) {
+    if let Some(audit) = extensions.get::<doxa_audit::AuditEventBuilder>() {
+        audit.set_via(tier);
+    }
+}
+
 #[cfg(feature = "audit")]
 fn deposit_grant(extensions: &Extensions, grant: Grant) {
     let Some(audit) = extensions.get::<doxa_audit::AuditEventBuilder>() else {
@@ -81,6 +98,9 @@ fn deposit_denial(extensions: &Extensions, denial: Denied<'_>) {
     // Emits only when no `AuditLayer` will close the builder after the response.
     audit.settle(denial.status);
 }
+
+#[cfg(not(feature = "audit"))]
+fn deposit_via(_extensions: &Extensions, _tier: &'static str) {}
 
 #[cfg(not(feature = "audit"))]
 fn deposit_grant(_extensions: &Extensions, _grant: Grant) {}

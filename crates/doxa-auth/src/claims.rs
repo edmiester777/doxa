@@ -49,7 +49,7 @@ pub trait Claims: Clone + Send + Sync + 'static {
     /// represents the tenancy boundary (tenant id, organization id,
     /// workspace id, …).
     ///
-    /// `None` refuses every guard but an admin's; a single-tenant or dev deployment returns a constant
+    /// `None` refuses every guard but a super admin's; a single-tenant or dev deployment returns a constant
     /// such as `Some("default")`.
     fn scope(&self) -> Option<&str> {
         None

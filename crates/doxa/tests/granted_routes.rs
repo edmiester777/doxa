@@ -83,8 +83,12 @@ impl Granting for Widget {
 impl Scoping for Widget {
     type Filter = ();
 
-    fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
-        Ok(Some(()))
+    fn owned(_tenant: &str, _ctx: &CapabilityContext) -> Result<(), AuthError> {
+        Ok(())
+    }
+
+    fn narrow(_action: &str, rows: (), _ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
+        Ok(Some(rows))
     }
 }
 

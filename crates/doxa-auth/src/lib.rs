@@ -81,7 +81,7 @@ pub use doxa_wire as __wire;
 
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};
-pub use context::{Admin, AuthContext, CapabilityContext};
+pub use context::{AuthContext, CapabilityContext, SuperAdmin, TenantAdmin};
 pub use provider::{ClaimResolver, MinimalClaims, OidcClaimConfig, TokenValidator};
 
 #[cfg(feature = "axum")]
@@ -93,8 +93,8 @@ pub use granted::{
     authorize, distinct, key_names, names_within, resolved_params, verb, Action, ActionTable,
     AssetFor, AuthorizeLoaded, AuthorizeLoadedAll, AuthorizeScope, Cap, DeclaredAction,
     DefaultSite, Denial, FromAuthExtensions, FromState, GrantProfile, GrantSite, Granted, Granting,
-    KeyError, KeyIn, KeySegment, LoaderSource, Many, NoState, One, Refusal, RouteKey, Scoped,
-    Scoping, Subject, SubjectForm,
+    KeyError, KeyIn, KeySegment, ListRule, LoaderSource, Many, NoState, One, Refusal, RouteKey,
+    RowRule, Scoped, Scoping, Subject, SubjectForm,
 };
 #[cfg(feature = "axum")]
 pub use layer::{AuthLayer, AuthService};

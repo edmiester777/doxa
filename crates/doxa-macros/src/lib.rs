@@ -620,6 +620,7 @@ pub fn capability(args: TokenStream, item: TokenStream) -> TokenStream {
 /// | `key` | `<Row as FetchByKey<State>>::Key`; `key = pk` for the row's own id |
 /// | `with` | none — names a `Lookup`, which carries the row and the key |
 /// | `list` | none — `list = tenant` adds a tenant-confined `Scoping` |
+/// | `confine` | none — a `RowRule` (and `ListRule`, with `list`) for everyone but a super admin |
 /// | `ctx` | the profile's |
 /// | `source` | the profile's — and the state follows it |
 /// | `error` | the profile's |

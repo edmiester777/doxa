@@ -96,7 +96,8 @@ pub trait Capable: Send + Sync + 'static {
 /// being generic over the extension.
 #[async_trait::async_trait]
 pub trait CapabilityChecker: Send + Sync {
-    /// Whether this checker allows everything, so a listing's scope is everything too.
+    /// Whether this checker allows every check. Informational: a caller's reach comes from the
+    /// app's admin markers, never from the checker.
     fn unrestricted(&self) -> bool {
         false
     }
@@ -153,7 +154,7 @@ pub trait CapabilityChecker: Send + Sync {
     }
 }
 
-/// Allows everything; what an admin caller is checked against.
+/// Allows every check; what a super admin is checked against.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Unrestricted;
 
@@ -175,6 +176,53 @@ impl CapabilityChecker for Unrestricted {
         _: &crate::ResourceEntity,
     ) -> Result<bool, crate::AuthError> {
         Ok(true)
+    }
+}
+
+/// Allows every check, but not every row: what a tenant admin is checked against. Handed to
+/// a caller without the marker, it waives Cedar only; tenant and owner confinement still apply.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TenantUnrestricted;
+
+#[async_trait::async_trait]
+impl CapabilityChecker for TenantUnrestricted {
+    async fn check(&self, _: &str, _: &[String], _: &Capability) -> Result<bool, crate::AuthError> {
+        Ok(true)
+    }
+
+    async fn check_instance(
+        &self,
+        _: &str,
+        _: &[String],
+        _: &str,
+        _: &crate::ResourceEntity,
+    ) -> Result<bool, crate::AuthError> {
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ANY: Capability = Capability {
+        name: "platform.write",
+        description: "",
+        checks: &[],
+    };
+
+    #[tokio::test]
+    async fn a_tenant_checker_allows_every_check_without_claiming_everything() {
+        let checker = TenantUnrestricted;
+        let entity = crate::ResourceEntity::new("Widget", "w");
+
+        assert!(checker.check("acme", &[], &ANY).await.unwrap());
+        assert!(checker
+            .check_instance("acme", &[], "delete", &entity)
+            .await
+            .unwrap());
+        assert!(!checker.unrestricted());
+        assert!(Unrestricted.unrestricted());
     }
 }
 

@@ -171,7 +171,8 @@ pub mod mirror_diagnostics {}
 /// # impl Scoping for Note {
 /// #     type Filter = ();
 /// #     const FROM_POLICY: bool = false;
-/// #     fn scope(_: &str, _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(())) }
+/// #     fn owned(_: &str, _: &CapabilityContext) -> Result<(), AuthError> { Ok(()) }
+/// #     fn narrow(_: &str, r: (), _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(r)) }
 /// # }
 /// #[get("/notes", mount = false)]
 /// async fn notes(_: Granted<Many<Note, note_action::List>>) {}
@@ -201,7 +202,8 @@ pub mod mirror_diagnostics {}
 /// # impl Scoping for Note {
 /// #     type Filter = ();
 /// #     const FROM_POLICY: bool = false;
-/// #     fn scope(_: &str, _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(())) }
+/// #     fn owned(_: &str, _: &CapabilityContext) -> Result<(), AuthError> { Ok(()) }
+/// #     fn narrow(_: &str, r: (), _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(r)) }
 /// # }
 /// #[get("/notes", mount = false)]
 /// async fn notes(_: Granted<Many<Note, note_action::Peek>>) {}

@@ -4,14 +4,17 @@
 #![cfg(all(feature = "full", feature = "policy-sea-orm"))]
 
 use axum::http::StatusCode;
-use doxa::auth::{ActionTable, CapabilityContext, FromState, GrantProfile, Granted, Granting, One};
+use doxa::auth::{
+    ActionTable, CapabilityContext, FromAuthExtensions, FromState, GrantProfile, Granted, Granting,
+    ListRule, One, RowRule, SuperAdmin, TenantAdmin,
+};
 use doxa::policy::{
     AuthError, Capability, CapabilityChecker, DbLoadError, PolicyResource, ResourceEntity,
     ScopedRow,
 };
 use doxa::{asset, Actions, PolicyResource, ToSchema};
 use sea_orm::entity::prelude::*;
-use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
+use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase, Select};
 use serde::{Deserialize, Serialize};
 
 // ---- the row ----------------------------------------------------------------
@@ -278,9 +281,10 @@ fn the_generated_listing_is_confined_to_the_same_tenant() {
     use doxa::auth::Scoping;
     use sea_orm::QueryTrait;
 
-    let filter = <WidgetByName as Scoping>::scope("read", &caller("acme"))
+    let owned = <WidgetByName as Scoping>::owned("acme", &caller("acme")).expect("scoping runs");
+    let filter = <WidgetByName as Scoping>::narrow("read", owned, &caller("acme"))
         .expect("scoping runs")
-        .expect("the tenant is always a scope");
+        .expect("the generated listing asks no policy");
 
     let sql = filter.build(DatabaseBackend::Postgres).to_string();
     assert!(sql.contains(r#""widgets"."tenant_id" = 'acme'"#), "{sql}");
@@ -311,18 +315,21 @@ async fn a_caller_without_a_tenant_reaches_nothing() {
     assert_eq!(found, None);
 }
 
+/// No tenant is refused before any scope is built, rather than listing `tenant_id = ''`.
 #[test]
 fn a_listing_without_a_tenant_grants_no_scope() {
-    use doxa::auth::Scoping;
+    use doxa::auth::{AuthorizeScope, Denial};
 
-    let ctx = CapabilityContext {
+    let mut extensions = axum::http::Extensions::new();
+    extensions.insert(CapabilityContext {
         tenant_id: None,
         roles: Vec::new(),
-    };
+    });
+    extensions.insert(std::sync::Arc::new(Allow) as std::sync::Arc<dyn CapabilityChecker>);
 
-    assert!(<WidgetByName as Scoping>::scope("widgets.read", &ctx)
-        .expect("not an error")
-        .is_none(),);
+    let denial = WidgetByName::authorize_scope_dependency(widget_action::Read, &extensions)
+        .expect_err("no tenant, no scope");
+    assert!(matches!(denial, Denial::Auth(AuthError::Forbidden)));
 }
 
 /// A failed query converts through the profile's error, so the asset owes
@@ -452,4 +459,274 @@ async fn an_action_the_caller_does_not_hold_is_refused() {
 
     let response = call::<DeleteWidget>(db, &["widgets.read"]).await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+// ---- ownership and confinement ----------------------------------------------
+
+/// Posts: an owner column, and a flag that hides a row from everyone but a moderator.
+pub mod post {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, PolicyResource)]
+    #[sea_orm(table_name = "posts")]
+    #[resource(entity_type = "Post")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+
+        #[resource(id, attr, key)]
+        pub name: String,
+
+        pub flagged: bool,
+
+        #[resource(parent = "Tenant", scope)]
+        pub tenant_id: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    #[derive(Debug, Clone, Copy, Actions)]
+    #[actions(resource = "Post", prefix = "posts")]
+    pub enum PostAction {
+        /// Read posts.
+        #[action(verb = get)]
+        Read,
+    }
+
+    impl FlaggedRow for Model {
+        fn flagged(&self) -> bool {
+            self.flagged
+        }
+    }
+
+    impl FlaggedTable for Entity {
+        fn flag_column() -> Column {
+            Column::Flagged
+        }
+    }
+}
+
+/// What the rule reads off a loaded row.
+pub trait FlaggedRow {
+    fn flagged(&self) -> bool;
+}
+
+/// The same fact as a column, for listings.
+pub trait FlaggedTable: EntityTrait {
+    fn flag_column() -> Self::Column;
+}
+
+/// Flagged rows are hidden from everyone but a moderator, and a super admin.
+pub struct HideFlagged;
+
+fn moderates(ctx: &impl FromAuthExtensions) -> bool {
+    ctx.roles().iter().any(|role| role == "moderator")
+}
+
+impl<M: FlaggedRow, C: FromAuthExtensions> RowRule<M, C> for HideFlagged {
+    fn admits(row: &M, _tenant: &str, ctx: &C) -> bool {
+        !row.flagged() || moderates(ctx)
+    }
+}
+
+impl<E: FlaggedTable, C: FromAuthExtensions> ListRule<Select<E>, C> for HideFlagged {
+    fn confine(rows: Select<E>, _tenant: &str, ctx: &C) -> Select<E> {
+        if moderates(ctx) {
+            rows
+        } else {
+            rows.filter(E::flag_column().eq(false))
+        }
+    }
+}
+
+#[asset(row = post::Model, profile = AppGrants, actions = post::PostAction, list = tenant, confine = HideFlagged)]
+pub struct PostByName;
+
+/// The same rule on an unlisted descriptor: only its row half applies.
+#[asset(row = post::Model, key = pk, profile = AppGrants, actions = post::PostAction, confine = HideFlagged)]
+pub struct PostById;
+
+fn post(tenant: &str, flagged: bool) -> post::Model {
+    post::Model {
+        id: Uuid::nil(),
+        name: "hello".to_owned(),
+        flagged,
+        tenant_id: tenant.to_owned(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Tier {
+    Super,
+    Tenant,
+    Ordinary,
+}
+
+fn extensions(tier: Tier) -> axum::http::Extensions {
+    let mut extensions = axum::http::Extensions::new();
+    extensions.insert(CapabilityContext {
+        tenant_id: Some("acme".to_owned()),
+        roles: vec!["posts.read".to_owned()],
+    });
+    extensions.insert(std::sync::Arc::new(Allow) as std::sync::Arc<dyn CapabilityChecker>);
+    match tier {
+        Tier::Super => {
+            extensions.insert(SuperAdmin);
+        }
+        Tier::Tenant => {
+            extensions.insert(TenantAdmin);
+        }
+        Tier::Ordinary => {}
+    }
+    extensions
+}
+
+/// The mock answers whatever was asked, standing in for a loader that forgot the tenant.
+async fn load_post(row: post::Model, tier: Tier) -> StatusCode {
+    use axum::response::IntoResponse;
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_results([vec![row]])
+        .into_connection();
+    match doxa::auth::authorize::<One<PostByName, post::post_action::Read>>(
+        post::ModelKey {
+            name: "hello".to_owned(),
+        },
+        &db,
+        &extensions(tier),
+    )
+    .await
+    {
+        Ok(_) => StatusCode::OK,
+        Err(refusal) => refusal.into_response().status(),
+    }
+}
+
+#[test]
+fn the_scope_column_says_who_owns_the_row() {
+    assert_eq!(post("acme", false).owned_by("acme"), Some(true));
+    assert_eq!(post("globex", false).owned_by("acme"), Some(false));
+}
+
+#[tokio::test]
+async fn another_tenant_s_row_is_hidden_from_all_but_a_super_admin() {
+    let foreign = || post("globex", false);
+
+    assert_eq!(
+        load_post(foreign(), Tier::Ordinary).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        load_post(foreign(), Tier::Tenant).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(load_post(foreign(), Tier::Super).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_asset_s_rule_hides_a_row_from_all_but_a_super_admin() {
+    let flagged = || post("acme", true);
+
+    assert_eq!(
+        load_post(flagged(), Tier::Ordinary).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        load_post(flagged(), Tier::Tenant).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(load_post(flagged(), Tier::Super).await, StatusCode::OK);
+    assert_eq!(
+        load_post(post("acme", false), Tier::Tenant).await,
+        StatusCode::OK
+    );
+}
+
+/// Admits every row it is asked about.
+pub struct Everything;
+
+impl<M, C> RowRule<M, C> for Everything {
+    fn admits(_: &M, _: &str, _: &C) -> bool {
+        true
+    }
+}
+
+#[asset(row = post::Model, key = pk, profile = AppGrants, actions = post::PostAction, confine = Everything)]
+pub struct PostAnyhow;
+
+/// The rule only narrows: one that admits everything still can't admit another tenant's row.
+#[tokio::test]
+async fn a_rule_cannot_widen_past_the_owner() {
+    use doxa::auth::AuthorizeLoaded;
+
+    post("globex", false)
+        .authorize::<PostAnyhow, _>(post::post_action::Read, &extensions(Tier::Tenant))
+        .await
+        .expect_err("the owner check runs whatever the rule says");
+}
+
+/// A loaded-row door answers 403, since the handler already holds the row.
+#[tokio::test]
+async fn a_loaded_row_from_another_tenant_is_refused() {
+    use axum::response::IntoResponse;
+    use doxa::auth::AuthorizeLoaded;
+
+    let denial = post("globex", false)
+        .authorize::<PostById, _>(post::post_action::Read, &extensions(Tier::Tenant))
+        .await
+        .expect_err("another tenant's row");
+    assert_eq!(denial.into_response().status(), StatusCode::FORBIDDEN);
+
+    post("acme", false)
+        .authorize::<PostById, _>(post::post_action::Read, &extensions(Tier::Tenant))
+        .await
+        .expect("its own tenant's row");
+}
+
+#[tokio::test]
+async fn a_batch_stops_at_the_first_row_outside_confinement() {
+    use doxa::auth::{AuthorizeLoadedAll, Denial};
+
+    let rows = vec![
+        post("acme", false),
+        post("acme", true),
+        post("globex", false),
+    ];
+    let denial = rows
+        .authorize_all::<PostById, _>(post::post_action::Read, &extensions(Tier::Tenant))
+        .await
+        .expect_err("the flagged row comes first");
+
+    let Denial::Denied { reason, .. } = denial else {
+        panic!("expected a denial");
+    };
+    assert_eq!(reason, "outside confinement");
+}
+
+fn listing(tier: Tier) -> String {
+    use doxa::auth::AuthorizeScope;
+    use sea_orm::QueryTrait;
+
+    PostByName::authorize_scope_dependency(post::post_action::Read, &extensions(tier))
+        .expect("listed")
+        .build(DatabaseBackend::Postgres)
+        .to_string()
+}
+
+#[test]
+fn the_asset_s_rule_narrows_every_listing_but_a_super_admin_s() {
+    let ordinary = listing(Tier::Ordinary);
+    let tenant = listing(Tier::Tenant);
+    let sup = listing(Tier::Super);
+
+    for sql in [&ordinary, &tenant] {
+        assert!(sql.contains(r#""posts"."tenant_id" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""posts"."flagged" = FALSE"#), "{sql}");
+    }
+    // The derived `FetchSubset` has no `everything`, so a super admin keeps the tenant.
+    assert!(sup.contains(r#""posts"."tenant_id" = 'acme'"#), "{sup}");
+    assert!(!sup.contains(r#""posts"."flagged" = FALSE"#), "{sup}");
 }

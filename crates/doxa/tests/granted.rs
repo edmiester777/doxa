@@ -14,7 +14,10 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLayer, AuditLogger, Outcome};
-use doxa::auth::{Cap, CapabilityContext, FromState, Granted, Granting, Many, One, Scoping};
+use doxa::auth::{
+    AuthorizeLoaded, Cap, CapabilityContext, FromState, Granted, Granting, Many, One, Scoping,
+    SuperAdmin, TenantAdmin,
+};
 use doxa::policy::{
     AuthError, Capability, CapabilityCheck, CapabilityChecker, Capable, ResourceEntity, ResourceId,
 };
@@ -96,14 +99,22 @@ impl Granting for Widget {
 impl Scoping for Widget {
     type Filter = Filter;
 
+    fn owned(_tenant: &str, _ctx: &CapabilityContext) -> Result<Filter, AuthError> {
+        Ok(Filter("tenant = acme"))
+    }
+
     /// Keys off a role, so a test can clear the coarse gate with no scope.
-    fn scope(action: &str, ctx: &CapabilityContext) -> Result<Option<Filter>, AuthError> {
+    fn narrow(
+        action: &str,
+        rows: Filter,
+        ctx: &CapabilityContext,
+    ) -> Result<Option<Filter>, AuthError> {
         if !ctx.roles.iter().any(|r| r == "viewer") {
             return Ok(None);
         }
         Ok(match action {
             "purge" => None,
-            _ => Some(Filter("tenant = acme")),
+            _ => Some(rows),
         })
     }
 }
@@ -145,9 +156,17 @@ impl Granting for Gadget {
 impl Scoping for Gadget {
     type Filter = Filter;
 
+    fn owned(_tenant: &str, _ctx: &CapabilityContext) -> Result<Filter, AuthError> {
+        Ok(Filter("tenant = acme"))
+    }
+
     /// Grants nothing, ever — which `empty_scope` below then turns into
     /// an empty page rather than a refusal.
-    fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<Filter>, AuthError> {
+    fn narrow(
+        _action: &str,
+        _rows: Filter,
+        _ctx: &CapabilityContext,
+    ) -> Result<Option<Filter>, AuthError> {
         Ok(None)
     }
 
@@ -500,7 +519,15 @@ impl Granting for Ledger {
 impl Scoping for Ledger {
     type Filter = &'static str;
 
-    fn scope(_action: &str, ctx: &Self::Ctx) -> Result<Option<&'static str>, AuthError> {
+    fn owned(_tenant: &str, _ctx: &Self::Ctx) -> Result<&'static str, AuthError> {
+        Ok("tenant")
+    }
+
+    fn narrow(
+        _action: &str,
+        _rows: &'static str,
+        ctx: &Self::Ctx,
+    ) -> Result<Option<&'static str>, AuthError> {
         // Straight through the `Arc` — the field access is unchanged by
         // the sharing.
         Ok(ctx.session.grants.first().copied())
@@ -568,23 +595,145 @@ async fn a_caller_without_a_scope_is_refused() {
     assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
 }
 
-/// The app's layer marks an admin: no scope needed, and no policy asked.
-#[tokio::test]
-async fn an_admin_marked_by_the_app_is_unrestricted() {
-    let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
-    caller(&mut request, &["stranger"]);
-    request
-        .extensions_mut()
-        .get_mut::<CapabilityContext>()
+// ---- admin tiers ------------------------------------------------------------
+
+/// A stranger the app's layer marked, with or without a tenant.
+fn marked<M: Clone + Send + Sync + 'static>(
+    marker: M,
+    tenant: bool,
+) -> (
+    axum::http::request::Parts,
+    tokio::sync::mpsc::Receiver<AuditEvent>,
+) {
+    let (mut parts, rx) = parts(&["stranger"]);
+    if !tenant {
+        parts
+            .extensions
+            .get_mut::<CapabilityContext>()
+            .unwrap()
+            .tenant_id = None;
+    }
+    parts.extensions.insert(marker);
+    (parts, rx)
+}
+
+fn emitted(
+    parts: &axum::http::request::Parts,
+    rx: &mut tokio::sync::mpsc::Receiver<AuditEvent>,
+) -> AuditEvent {
+    parts
+        .extensions
+        .get::<AuditEventBuilder>()
         .unwrap()
-        .tenant_id = None;
-    request.extensions_mut().insert(doxa::auth::Admin);
-    let mut parts = request.into_parts().0;
+        .auto_emit();
+    rx.try_recv().expect("the decision was recorded")
+}
+
+#[tokio::test]
+async fn a_super_admin_holds_every_capability_with_or_without_a_tenant() {
+    let (mut parts, _rx) = marked(SuperAdmin, false);
 
     let grant = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
         .await
-        .expect("an admin holds every capability, with or without a scope");
+        .expect("no policy is asked");
     assert_eq!(grant.tenant(), "");
+}
+
+#[tokio::test]
+async fn a_tenant_admin_holds_every_capability_in_its_tenant() {
+    let (mut parts, mut rx) = marked(TenantAdmin, true);
+
+    let grant = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
+        .await
+        .expect("no policy is asked");
+    assert_eq!(grant.tenant(), "acme");
+    assert_eq!(
+        emitted(&parts, &mut rx).actor_attrs,
+        json!({ "via": "tenant_admin" }),
+        "the trail says who skipped the policy",
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_admin_without_a_tenant_is_refused() {
+    let (mut parts, _rx) = marked(TenantAdmin, false);
+
+    let rejection = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
+        .await
+        .err()
+        .expect("only a super admin may be tenantless");
+    assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
+}
+
+/// The policy's `narrow` would refuse a stranger; a tenant admin gets the tenant's rows instead.
+#[tokio::test]
+async fn a_tenant_admin_lists_the_tenant_without_the_policy() {
+    let (mut parts, _rx) = marked(TenantAdmin, true);
+
+    let granted = Granted::<Many<Widget, GetWidget>>::from_request_parts(&mut parts, &())
+        .await
+        .expect("narrow is never asked");
+    assert_eq!(granted.1, Filter("tenant = acme"));
+}
+
+/// `Widget` records no owner, so only the policy vouched for it; a tenant admin skips that.
+#[tokio::test]
+async fn a_tenant_admin_is_refused_a_row_that_records_no_owner() {
+    let (parts, mut rx) = marked(TenantAdmin, true);
+
+    let refused = doxa::auth::authorize::<One<Widget, GetWidget>>(
+        WidgetKey { id: 1 },
+        &(),
+        &parts.extensions,
+    )
+    .await
+    .expect_err("no owner, no policy");
+
+    assert_eq!(refused.into_response().status(), StatusCode::NOT_FOUND);
+    let event = rx.try_recv().expect("the refusal is recorded");
+    assert_eq!(event.error_message.as_deref(), Some("outside confinement"));
+    assert_eq!(event.actor_attrs, json!({ "via": "tenant_admin" }));
+}
+
+/// The loaded-row door refuses the same row, as a 403 since the handler already holds it.
+#[tokio::test]
+async fn a_loaded_row_with_no_owner_is_refused_a_tenant_admin_too() {
+    let widget = || Widget {
+        id: 1,
+        region: "us".into(),
+    };
+
+    let (admin, _rx) = marked(TenantAdmin, true);
+    let denial = widget()
+        .authorize::<Widget, _>(GetWidget, &admin.extensions)
+        .await
+        .expect_err("no owner, no policy");
+    assert_eq!(denial.into_response().status(), StatusCode::FORBIDDEN);
+
+    let (viewer, _rx) = parts(&["viewer"]);
+    widget()
+        .authorize::<Widget, _>(GetWidget, &viewer.extensions)
+        .await
+        .expect("an ordinary caller is still decided by the policy");
+}
+
+/// `eu` is refused by the policy, which a super admin never asks.
+#[tokio::test]
+async fn a_super_admin_reaches_a_row_the_policy_would_refuse() {
+    let (parts, mut rx) = marked(SuperAdmin, true);
+
+    let widget = doxa::auth::authorize::<One<Widget, GetWidget>>(
+        WidgetKey { id: 2 },
+        &(),
+        &parts.extensions,
+    )
+    .await
+    .expect("no policy, no confinement");
+    assert_eq!(widget.region, "eu");
+    assert_eq!(
+        emitted(&parts, &mut rx).actor_attrs,
+        json!({ "via": "super_admin" })
+    );
 }
 
 /// Without the marker the same caller is refused, so it is the marker that admits.

@@ -67,10 +67,18 @@ impl<C: FromAuthExtensions> OffRequest<C> {
         self
     }
 
-    /// Run this work as an [`Admin`](crate::Admin), as a request marked by the app's layer would.
+    /// Run this work as a [`SuperAdmin`](crate::SuperAdmin), as a request marked by the app's layer would.
     #[must_use]
-    pub fn admin(mut self) -> Self {
-        self.extensions.insert(crate::Admin);
+    pub fn super_admin(mut self) -> Self {
+        self.extensions.insert(crate::SuperAdmin);
+        self
+    }
+
+    /// Run this work as a [`TenantAdmin`](crate::TenantAdmin): no policy, but confined to the
+    /// caller's tenant, and refused without one.
+    #[must_use]
+    pub fn tenant_admin(mut self) -> Self {
+        self.extensions.insert(crate::TenantAdmin);
         self
     }
 
@@ -108,5 +116,35 @@ impl<C: FromAuthExtensions> Drop for OffRequest<C> {
     /// Send the event, its outcome folded from every decision (a denial outranks a grant).
     fn drop(&mut self) {
         self.audit.auto_emit();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CapabilityContext;
+
+    fn work() -> OffRequest<CapabilityContext> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let caller = CapabilityContext {
+            tenant_id: Some("acme".into()),
+            roles: Vec::new(),
+        };
+        OffRequest::new(
+            caller,
+            Arc::new(doxa_policy::Unrestricted),
+            AuditLogger::from_sender(tx),
+        )
+    }
+
+    #[test]
+    fn each_tier_inserts_its_own_marker() {
+        let sup = work().super_admin();
+        assert!(sup.extensions().get::<crate::SuperAdmin>().is_some());
+        assert!(sup.extensions().get::<crate::TenantAdmin>().is_none());
+
+        let tenant = work().tenant_admin();
+        assert!(tenant.extensions().get::<crate::TenantAdmin>().is_some());
+        assert!(tenant.extensions().get::<crate::SuperAdmin>().is_none());
     }
 }

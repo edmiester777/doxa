@@ -574,11 +574,12 @@ mod tests {
         svc.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
     }
 
-    /// Admin is the app's layer's call, whatever the token's roles say.
+    /// Either admin tier is the app's layer's call, whatever the token's roles say.
     #[tokio::test]
     async fn the_layer_never_marks_a_caller_admin() {
         let svc = build_service(make_state("good"), |req| {
-            assert!(req.extensions().get::<crate::Admin>().is_none());
+            assert!(req.extensions().get::<crate::SuperAdmin>().is_none());
+            assert!(req.extensions().get::<crate::TenantAdmin>().is_none());
             Response::builder().body(Body::empty()).unwrap()
         });
         let req = Request::builder()
