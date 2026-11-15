@@ -169,8 +169,8 @@ impl CapabilityChecker for Unrestricted {
     }
 }
 
-/// Allows every check, but not every row: what a tenant admin is checked against. Handed to
-/// a caller without the marker, it waives Cedar only; tenant and owner confinement still apply.
+/// Allows every check; what a tenant admin is checked against. Without the `TenantAdmin` marker
+/// it answers checks only: listings still narrow, and an ownerless row is not refused.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TenantUnrestricted;
 
