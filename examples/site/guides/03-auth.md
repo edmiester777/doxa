@@ -5,7 +5,7 @@ Bring your identity provider and your claims. doxa verifies tokens, hands your h
 ## Your claims, your struct
 
 ```rust
-use doxa::auth::{Auth, Claims};
+use doxa::auth::{Auth, Claims, Tenant};
 
 #[derive(Debug, Clone, Deserialize)]
 struct MyClaims {
@@ -25,6 +25,37 @@ async fn whoami(Auth(ctx): Auth<MySession, MyClaims>) -> String {
     format!("hello {} from tenant {}", ctx.claims.email, ctx.claims.tenant_id)
 }
 ```
+
+## The tenant
+
+`scope()` is the caller's tenant. Most handlers need only that, so they ask for it by itself:
+
+```rust
+#[get("/widgets")]
+async fn list(tenant: Tenant) -> Json<Vec<Widget>> {
+    Json(load_for(&tenant).await)
+}
+
+// Parsed into your own type; a scope that doesn't parse is a 401.
+async fn typed(Tenant(id): Tenant<TenantId>) { /* ... */ }
+```
+
+A route that already has a guard reads it from there: `grant.tenant()`. A caller with no scope is refused by every guard with a `403`, so a handler never sees an empty tenant. The browser never sees `Tenant` at all, because it's read on the server.
+
+## Admins are yours
+
+doxa never decides who is an admin. Your own layer, inside `AuthLayer`, marks the request, and every guard then allows and every listing is unscoped:
+
+```rust
+async fn platform_admins(mut req: Request, next: Next) -> Response {
+    if is_platform_admin(&req) {
+        req.extensions_mut().insert(doxa::auth::Admin);
+    }
+    next.run(req).await
+}
+```
+
+Work outside a request does the same with `OffRequest::new(…).admin()`.
 
 Under the hood: JWKS fetching and caching, JWT signature checks, and RFC 7662 introspection as a fallback. It works with Keycloak, Auth0, Cognito, Okta, Azure AD or any standards-compliant issuer. Turn off the `axum` feature and the pipeline runs on its own, outside a web server.
 

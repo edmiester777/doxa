@@ -52,18 +52,13 @@ pub struct OrderFilter {
 }
 
 /// What can go wrong with an order.
+#[doxa::faults(common)]
 #[dto]
 #[derive(thiserror::Error, ApiError)]
 pub enum OrderError {
-    #[error("no order {0}")]
-    #[api(status = 404, code = "not_found")]
-    NotFound(u32),
     #[error("out of {0}")]
     #[api(status = 409, code = "out_of_stock")]
     OutOfStock(String),
-    #[error("{0}")]
-    #[api(status = 500, internal)]
-    Internal(String),
 }
 
 #[server]

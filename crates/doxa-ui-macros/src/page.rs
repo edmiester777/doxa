@@ -1,4 +1,5 @@
-//! `#[page("/path/{param}", lazy)]`: a component reachable at a path.
+//! `#[page("/path/{param}", lazy)]`: a component reachable at a path. `lazy = "reports"` puts it
+//! in one split module with every page naming that chunk.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -11,26 +12,49 @@ use crate::component::{self, Options, Parsed};
 pub(crate) struct Args {
     path: LitStr,
     lazy: bool,
+    chunk: Option<LitStr>,
 }
 
 impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let path: LitStr = input.parse()?;
-        let mut lazy = false;
+        let (mut lazy, mut chunk) = (false, None);
         while input.parse::<Option<Token![,]>>()?.is_some() && !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             match key.to_string().as_str() {
-                "lazy" => lazy = true,
+                "lazy" => {
+                    lazy = true;
+                    if input.parse::<Option<Token![=]>>()?.is_some() {
+                        chunk = Some(chunk_name(input.parse()?)?);
+                    }
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown option `{other}`; expected `lazy`"),
+                        format!("unknown option `{other}`; expected `lazy` or `lazy = \"chunk\"`"),
                     ))
                 }
             }
         }
-        Ok(Args { path, lazy })
+        Ok(Args { path, lazy, chunk })
     }
+}
+
+/// A chunk name becomes part of a wasm symbol, so it's lowercase letters, digits and `_`.
+fn chunk_name(name: LitStr) -> syn::Result<LitStr> {
+    let value = name.value();
+    let valid = value.starts_with(|c: char| c.is_ascii_lowercase())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !value.contains("__");
+    if !valid {
+        return Err(syn::Error::new(
+            name.span(),
+            "a chunk is named like `reports` or `admin_tools`: lowercase, digits and single `_`",
+        ));
+    }
+    Ok(name)
 }
 
 fn template_names(path: &str) -> Vec<String> {
@@ -104,6 +128,7 @@ pub(crate) fn expand(args: Args, parsed: &Parsed) -> syn::Result<TokenStream> {
     }
     let opts = Options {
         lazy: args.lazy,
+        chunk: args.chunk,
         ..Options::default()
     };
     let component = component::expand(opts, parsed);

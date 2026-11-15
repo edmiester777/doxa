@@ -18,7 +18,7 @@ pub struct RunFilter {
 }
 
 /// A widget's runs, filtered and paged by `?status=…&page=…`.
-#[page("/widgets/{name}/runs")]
+#[page("/widgets/{name}/runs", lazy = "widget")]
 pub fn RunsPage(name: String, #[query] filter: RunFilter) -> View {
     let next = RunsPage::route(&name).query(&RunFilter {
         page: filter.page + 1,

@@ -77,42 +77,49 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             }
         }
     };
-    let optional_json = quote! {
-        impl<__S, __T> #ax::extract::FromRequest<__S> for #name<::core::option::Option<#ax::Json<__T>>>
-        where
-            __S: ::core::marker::Send + ::core::marker::Sync,
-            #ax::Json<__T>: #ax::extract::OptionalFromRequest<__S>,
-            <#ax::Json<__T> as #ax::extract::OptionalFromRequest<__S>>::Rejection: ::doxa::InnerRejection,
-            Self: ::doxa::wire::Validates<Value = ::core::option::Option<__T>>,
-        {
-            type Rejection = ::doxa::ValidRejection<
-                <#ax::Json<__T> as #ax::extract::OptionalFromRequest<__S>>::Rejection,
-            >;
+    let optional_json = |json: TokenStream| {
+        quote! {
+            impl<__S, __T> #ax::extract::FromRequest<__S> for #name<::core::option::Option<#json<__T>>>
+            where
+                __S: ::core::marker::Send + ::core::marker::Sync,
+                #json<__T>: #ax::extract::OptionalFromRequest<__S>,
+                <#json<__T> as #ax::extract::OptionalFromRequest<__S>>::Rejection: ::doxa::InnerRejection,
+                Self: ::doxa::wire::Validates<Value = ::core::option::Option<__T>>,
+            {
+                type Rejection = ::doxa::ValidRejection<
+                    <#json<__T> as #ax::extract::OptionalFromRequest<__S>>::Rejection,
+                >;
 
-            async fn from_request(
-                req: #ax::extract::Request,
-                state: &__S,
-            ) -> ::core::result::Result<Self, Self::Rejection> {
-                let inner = <#ax::Json<__T> as #ax::extract::OptionalFromRequest<__S>>::from_request(req, state)
-                    .await
-                    .map_err(::doxa::ValidRejection::Inner)?;
-                let value = inner.map(|j| j.0);
-                <Self as ::doxa::wire::Validates>::check(&value)
-                    .map_err(::doxa::ValidRejection::Invalid)?;
-                ::core::result::Result::Ok(#name(value.map(#ax::Json)))
+                async fn from_request(
+                    req: #ax::extract::Request,
+                    state: &__S,
+                ) -> ::core::result::Result<Self, Self::Rejection> {
+                    let inner = <#json<__T> as #ax::extract::OptionalFromRequest<__S>>::from_request(req, state)
+                        .await
+                        .map_err(::doxa::ValidRejection::Inner)?;
+                    let value = inner.map(|j| j.0);
+                    <Self as ::doxa::wire::Validates>::check(&value)
+                        .map_err(::doxa::ValidRejection::Invalid)?;
+                    ::core::result::Result::Ok(#name(value.map(#json)))
+                }
             }
         }
     };
-    let json = body(quote!(#ax::Json));
-    let form = body(quote!(#ax::extract::Form));
-    let query = parts(quote!(#ax::extract::Query));
+    let ours = quote!(::doxa::extract);
+    let extractors = [
+        body(quote!(#ax::Json)),
+        optional_json(quote!(#ax::Json)),
+        body(quote!(#ax::extract::Form)),
+        parts(quote!(#ax::extract::Query)),
+        body(quote!(#ours::Json)),
+        optional_json(quote!(#ours::Json)),
+        body(quote!(#ours::Form)),
+        parts(quote!(#ours::Query)),
+    ];
     let op = quote!(::doxa::__private::utoipa::openapi::path::Operation);
 
     let server = quote! {
-        #json
-        #optional_json
-        #form
-        #query
+        #(#extractors)*
 
         impl<__E: ::doxa::DocQueryParams> ::doxa::DocQueryParams for #name<__E> {
             fn describe(op: &mut #op) {

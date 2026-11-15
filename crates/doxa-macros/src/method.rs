@@ -38,7 +38,7 @@ pub fn expand_operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
 
 /// A route, as this crate's role builds it.
 fn route(method: &str, path: &LitStr, extra: Vec<Meta>, item: TokenStream) -> Result<TokenStream> {
-    let (mount, extra) = take_mount_arg(extra)?;
+    let ((mount, trace), extra) = take_mount_arg(extra)?;
     let (client, extra) = take_client_arg(extra)?;
     let (flags, extra) = take_route_flags(extra)?;
     let (touches, extra) = take_touches(extra)?;
@@ -49,6 +49,7 @@ fn route(method: &str, path: &LitStr, extra: Vec<Meta>, item: TokenStream) -> Re
         path,
         extra: &extra,
         mount,
+        trace,
         client,
         flags,
         touches: &touches,
@@ -76,6 +77,8 @@ struct Parts<'a> {
     path: &'a LitStr,
     extra: &'a [Meta],
     mount: bool,
+    /// `false` when the route says `trace = false`: no span of doxa's.
+    trace: bool,
     client: bool,
     flags: Flags,
     touches: &'a [syn::Path],
@@ -114,7 +117,18 @@ fn serve(r: &Parts<'_>, mut item_fn: ItemFn) -> Result<TokenStream> {
         r.extra,
         &answering(&item_fn, r.answers),
     )?;
-    let mount = r.mount.then(|| app::mount(&item_fn));
+    let handler = r
+        .extra
+        .iter()
+        .find_map(operation_id)
+        .map_or_else(|| item_fn.sig.ident.to_string(), LitStr::value);
+    let span = app::RouteSpan {
+        on: r.trace,
+        handler: &handler,
+        route: &format!("{} {}", r.method.to_uppercase(), r.path.value()),
+        path: &r.path.value(),
+    };
+    let mount = r.mount.then(|| app::mount(&item_fn, &span));
     grant::stop_dry_runs(&mut item_fn);
 
     Ok(quote! {
@@ -488,9 +502,10 @@ fn take_route_flags(extra: Vec<Meta>) -> Result<(Flags, Vec<Meta>)> {
 }
 
 /// Pull `mount = false` out of the arguments, which leaves the handler to be routed by hand.
-fn take_mount_arg(extra: Vec<Meta>) -> Result<(bool, Vec<Meta>)> {
-    let (flags, rest) = take_flags(extra, &["mount"])?;
-    Ok((flags[0], rest))
+/// `mount = false` and `trace = false`.
+fn take_mount_arg(extra: Vec<Meta>) -> Result<((bool, bool), Vec<Meta>)> {
+    let (flags, rest) = take_flags(extra, &["mount", "trace"])?;
+    Ok(((flags[0], flags[1]), rest))
 }
 
 /// Each named boolean flag, `true` unless given as `false`, and the remaining arguments.

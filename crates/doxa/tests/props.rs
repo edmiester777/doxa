@@ -382,6 +382,7 @@ fn Loaded(id: u32, fetched: Rc<Cell<u32>>, fails: Rc<Cell<Option<Thrown>>>) -> V
         Load::Loading => "loading".to_owned(),
         Load::Ready(r) => r,
         Load::Forbidden => "forbidden".to_owned(),
+        Load::NotFound => "not found".to_owned(),
         Load::Failed(why) => format!("failed {why}"),
     };
     view! { <button id="fire" on:click={move || row.refetch()}>{shown}</button> }
@@ -422,6 +423,15 @@ fn a_403_replaces_data_a_refresh_would_otherwise_keep() {
     use doxa::ui::Load;
     let forbidden = Fetch::<NoError>::Forbidden(None);
     assert_eq!(Load::Ready(1).after_error(&forbidden), Load::Forbidden);
+}
+
+#[test]
+fn a_404_replaces_data_too() {
+    use doxa::client::{Fetch, NoError};
+    use doxa::ui::Load;
+    let gone = Fetch::<NoError>::NotFound(None);
+    assert_eq!(Load::Ready(1).after_error(&gone), Load::NotFound);
+    assert_eq!(Load::<u8>::Loading.after_error(&gone), Load::NotFound);
 }
 
 #[component]

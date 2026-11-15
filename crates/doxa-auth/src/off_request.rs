@@ -67,6 +67,13 @@ impl<C: FromAuthExtensions> OffRequest<C> {
         self
     }
 
+    /// Run this work as an [`Admin`](crate::Admin), as a request marked by the app's layer would.
+    #[must_use]
+    pub fn admin(mut self) -> Self {
+        self.extensions.insert(crate::Admin);
+        self
+    }
+
     /// Authorize a subject through the chain a route's extractor runs, recording the verdict.
     pub async fn authorize<T: Chain<Ctx = C>>(
         &self,

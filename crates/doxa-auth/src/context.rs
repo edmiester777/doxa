@@ -1,6 +1,5 @@
-//! [`AuthContext`]: the caller's claims `C`, the session `S` their
-//! [`Policy<S>`](doxa_policy::Policy) resolved, and whether they are an admin, put in request
-//! extensions by the auth middleware.
+//! [`AuthContext`]: the caller's claims `C` and the session `S` their
+//! [`Policy<S>`](doxa_policy::Policy) resolved, put in request extensions by the auth middleware.
 
 use crate::claims::Claims;
 
@@ -20,8 +19,6 @@ pub struct AuthContext<S, C: Claims> {
     /// whatever per-request authorization state the consumer's extension
     /// produces.
     pub session: S,
-    /// Whether a token role passes [`Policy::is_admin_role`](doxa_policy::Policy::is_admin_role).
-    pub is_admin: bool,
 }
 
 /// Type-erased capability-check context inserted into request extensions
@@ -37,6 +34,25 @@ pub struct CapabilityContext {
     pub tenant_id: Option<String>,
     /// Roles asserted for the caller.
     pub roles: Vec<String>,
+}
+
+/// Marks the caller unrestricted: every guard allows and every listing is unscoped. doxa never
+/// sets it; the app's own layer, inside [`AuthLayer`](crate::AuthLayer), inserts it.
+///
+/// ```ignore
+/// async fn platform_admins(mut req: Request, next: Next) -> Response {
+///     if is_platform_admin(&req) {
+///         req.extensions_mut().insert(doxa::auth::Admin);
+///     }
+///     next.run(req).await
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admin;
+
+/// `Claims::scope`'s contract: no scope refuses every check, except for an admin.
+pub(crate) fn unscoped(tenant: Option<&str>, extensions: &http::Extensions) -> bool {
+    tenant.is_none() && extensions.get::<Admin>().is_none()
 }
 
 impl<S, C: Claims> AuthContext<S, C> {
@@ -63,7 +79,7 @@ mod tests {
     use super::*;
     use crate::claims::OidcClaims;
 
-    fn ctx(roles: Vec<&str>, is_admin: bool, scope: Option<&str>) -> AuthContext<(), OidcClaims> {
+    fn ctx(roles: Vec<&str>, scope: Option<&str>) -> AuthContext<(), OidcClaims> {
         AuthContext {
             claims: OidcClaims {
                 sub: "alice".to_string(),
@@ -71,28 +87,29 @@ mod tests {
                 roles: roles.into_iter().map(String::from).collect(),
             },
             session: (),
-            is_admin,
         }
     }
 
     #[test]
     fn accessors_forward_to_claims() {
-        let c = ctx(vec!["viewer", "editor"], false, Some("acme"));
+        let c = ctx(vec!["viewer", "editor"], Some("acme"));
         assert_eq!(c.actor_subject(), Some("alice"));
         assert_eq!(c.tenant_id(), Some("acme"));
         assert_eq!(c.roles(), &["viewer".to_string(), "editor".to_string()]);
-        assert!(!c.is_admin);
-    }
-
-    #[test]
-    fn is_admin_flag_is_independent_of_claims() {
-        let c = ctx(vec!["root"], true, Some("acme"));
-        assert!(c.is_admin);
     }
 
     #[test]
     fn a_caller_without_a_scope_has_no_tenant() {
-        let c = ctx(vec!["viewer"], false, None);
+        let c = ctx(vec!["viewer"], None);
         assert!(c.tenant_id().is_none());
+    }
+
+    #[test]
+    fn only_an_admin_marker_waives_the_scope() {
+        let mut extensions = http::Extensions::new();
+        assert!(unscoped(None, &extensions));
+        assert!(!unscoped(Some("acme"), &extensions));
+        extensions.insert(Admin);
+        assert!(!unscoped(None, &extensions));
     }
 }

@@ -434,3 +434,72 @@ fn a_split_module_holds_its_own_functions_and_stubs_the_ones_main_keeps() {
     };
     assert!(matches!(offset, ConstExpr::Value(ir::Value::I32(17))));
 }
+
+#[test]
+fn split_points_sharing_a_name_are_one_module_with_no_chunk() {
+    const OTHER_IMPORT: &str = "__wasm_split_00___page___00_import_cd_other";
+    const OTHER_EXPORT: &str = "__wasm_split_00___page___00_export_cd_other";
+    let mut module = Module::default();
+    let ty = module.types.add(&[], &[]);
+    module.add_import_func("./__wasm_split.js", IMPORT, ty);
+    module.add_import_func("./__wasm_split.js", OTHER_IMPORT, ty);
+    let named = |module: &mut Module, name: &str, callees: &[FunctionId]| {
+        let mut builder = FunctionBuilder::new(&mut module.types, &[], &[]);
+        builder.name(name.into());
+        let mut body = builder.func_body();
+        for callee in callees {
+            body.call(*callee);
+        }
+        builder.finish(Vec::new(), &mut module.funcs)
+    };
+    let common = named(&mut module, "common", &[]);
+    let a = named(&mut module, "a", &[common]);
+    let b = named(&mut module, "b", &[common]);
+    let kept = named(&mut module, "kept", &[]);
+    module.exports.add(EXPORT, a);
+    module.exports.add(OTHER_EXPORT, b);
+    module.exports.add("kept", kept);
+    module.tables.add_local(false, 1, Some(1), RefType::Funcref);
+    module.memories.add_local(false, false, 1, None, None);
+    let bytes: &'static [u8] = module.emit_wasm().leak();
+
+    let (module, ids, fns_to_ids) = parse_module_with_ids(bytes).unwrap();
+    let f = |name| Node::Function(module.funcs.by_name(name).unwrap());
+    let graph = [
+        (f("a"), [f("common")].into()),
+        (f("b"), [f("common")].into()),
+    ]
+    .into();
+    let mut splitter = splitter(module, graph);
+    splitter.bindgened = bytes;
+    splitter.fns_to_ids = fns_to_ids;
+    splitter.ids_to_fns = ids;
+    splitter.build_split_chunks();
+
+    let out = splitter.emit().unwrap();
+    Module::from_buffer(&out.main.bytes).unwrap();
+    assert!(
+        out.chunks.is_empty(),
+        "what one module shares with itself isn't a chunk"
+    );
+    assert_eq!(out.modules.len(), 1);
+    let part = &out.modules[0];
+    assert!(part.relies_on_chunks.is_empty());
+    let mut points = part.split_points.clone();
+    points.sort();
+    assert_eq!(
+        points,
+        [
+            ("ab".into(), "render".into()),
+            ("cd".into(), "other".into())
+        ]
+    );
+    let part = Module::from_buffer(&part.bytes).unwrap();
+    assert!(part.exports.get_func(EXPORT).is_ok());
+    assert!(part.exports.get_func(OTHER_EXPORT).is_ok());
+    let common = part.funcs.by_name("common").unwrap();
+    assert!(matches!(
+        part.funcs.get(common).kind,
+        FunctionKind::Local(_)
+    ));
+}

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 pub use serde_json::Value as __Value;
 
 pub mod contract;
+mod page;
 mod valid;
+pub use page::{Page, PageInput};
 pub use valid::Validates;
 
 /// `#[serde(with)]` for `Option<Option<T>>`: absent is `None`, `null` is `Some(None)`.

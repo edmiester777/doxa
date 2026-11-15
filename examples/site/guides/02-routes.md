@@ -14,6 +14,14 @@ async fn get_widget(Path(id): Path<u32>) -> Result<Json<Widget>, WidgetError> {
 
 `#[get]`, `#[post]`, `#[put]`, `#[patch]` and `#[delete]` read the signature: the path parameters, the query and body extractors, the success body and the error type. Each becomes part of the OpenAPI operation. The doc comment becomes its summary and description.
 
+Each route also runs under a `route` span carrying its handler, method and template, the caller's tenant and each path parameter:
+
+```text
+route{handler="get_widget" route="GET /widgets/{id}" tenant="acme" id="42"}
+```
+
+A handler's own `#[tracing::instrument]` nests inside it, so add only what the handler computes. `trace = false` on the attribute leaves a route without one, and turning off the `trace` feature drops them all.
+
 ## Routes both halves build
 
 In an API crate (one whose `build.rs` calls `doxa_role::api()`), every route is compiled twice. Off wasm it's the handler. On wasm the body is dropped and the same name becomes a typed call the browser makes. So the server's code has to stay out of the browser build without a `#[cfg]` on every line.
@@ -72,11 +80,11 @@ pub async fn widget_events(widget: Grant<Widget>)
 }
 ```
 
-Server-only names can also be re-exported from `src/server/mod.rs` (`pub use axum::extract::Multipart;`), and they come in with the rest of it.
+Server-only names can also be re-exported from `src/server/mod.rs` (`pub use sqlx::PgPool;`), and they come in with the rest of it, or kept at the top of the file in one `doxa::server_only! { use sqlx::PgPool; }`. Neither needs a `#[cfg]`.
 
 ### What a signature may name
 
-The browser reads the signature, so it names what both halves have: your `#[dto]` types, `Json`, `Query`, `Path`, `Form`, `Bytes`, `Multipart`, `SseStream`, `Attachment` and `StatusCode`, which `doxa::prelude!()` gives each half its own version of. The browser drops `State<…>`, `Extension<…>` and the other extractors only the server reads. For one doxa doesn't know, mark the argument `#[server]`:
+The browser reads the signature, so it names what both halves have: your `#[dto]` types, `Json`, `Query`, `Path`, `Form`, `Bytes`, `Multipart`, `SseStream`, `Attachment` and `StatusCode`, which `doxa::prelude!()` gives each half its own version of. The browser drops `State<…>`, `Extension<…>`, `Tenant` and the other extractors only the server reads. For one doxa doesn't know, mark the argument `#[server]`:
 
 ```rust
 pub async fn suggest_name(#[server] Caller(who): Caller, Json(s): Json<Rename>) -> StatusCode
@@ -125,6 +133,56 @@ enum CheckoutError {
 ```
 
 That one derive gives you the `IntoResponse` impl, the `400`/`403`/`404` entries in the spec, and an audit outcome per variant (the [audit layer](05-audit.md) reads it, so you don't). `#[api(status = 500, internal)]` marks the variant an internal failure turns into, and the client only ever sees its message.
+
+### Failure classes
+
+Most error enums repeat the same few variants. `#[doxa::faults(common)]` adds `Validation` (400 `validation_error`), `NotFound` (404 `not_found`), `Forbidden` (403 `forbidden`) and `Internal` (500 `internal`, its cause logged and never sent) to an enum that lacks them. Put it first, above `#[dto]` and the derives, which read the variants it adds:
+
+```rust
+#[doxa::faults(common, crate::StoreFaults)]
+#[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
+enum CheckoutError {
+    #[error("payment declined")]
+    #[api(status = 403, code = "payment_declined", outcome = "denied")]
+    PaymentDeclined,
+}
+```
+
+An app registers its own classes with `fault_set!` at its crate root, naming the error they're sorted from by a path from the root:
+
+```rust
+doxa::fault_set! {
+    pub StoreFaults from ::sqlx::Error {
+        conflict: Conflict = 409 "conflict",
+        not_found: NotFound = 404 "not_found",
+        internal: Internal = 500 "internal" (redact),
+    }
+}
+
+impl From<sqlx::Error> for StoreFaults { /* sort each error into a class */ }
+```
+
+Every enum naming the set then converts from `sqlx::Error`, so `?` works in each handler. The conversion is server-only; add `wire` to write only `From<StoreFaults>`. A class lands on a variant of its name when that variant answers the same code, and `not_found = Missing` points it at another one. A variant of the class's name with a different code, or a different variant already answering the code, is a compile error.
+
+The prelude's `Json`, `Query`, `Path` and `Form` refuse in the same envelope: axum's status, with the code `malformed` and why in the message. A client reads every failure one way.
+
+## Paged listings
+
+A listing takes `Query<PageInput>` and answers `Json<Page<T>>`:
+
+```rust
+#[get("/api/orders")]
+pub async fn list_orders(
+    State(db): State<DatabaseConnection>,
+    Query(page): Query<PageInput>,
+) -> Result<Json<Page<Order>>, OrderError> {
+    Ok(Json(order::Entity::find().page(&db, &page).await?))
+}
+```
+
+`?page=2&page_size=50` asks for the second fifty. `page` counts from 1 and defaults to it, `page_size` defaults to 20, and the server answers at most 100 whatever the request says. The answer carries `items`, `page`, `page_size`, `total` and `total_pages`. With the `sea-orm` feature, `.page(&db, &page)` counts the query and fetches the one page; `Page::of(all, &page)` cuts a list already in memory. A second `Query<…>` beside it takes the listing's filters.
+
+In the browser, `list_orders(PageInput::new(2, 50))` fetches one page and `doxa::client::every_page(|p| list_orders(p))` fetches them all.
 
 ## Server-Sent Events
 

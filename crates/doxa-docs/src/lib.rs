@@ -199,6 +199,7 @@ mod doc_traits;
 mod dry_run;
 mod error_responses;
 mod etag;
+pub mod extract;
 mod extractor;
 mod handler_ops;
 mod headers;
@@ -208,6 +209,8 @@ mod private_dispatch;
 mod problem;
 #[cfg(feature = "proxy")]
 mod proxy;
+#[cfg(feature = "trace")]
+mod route_span;
 mod router_ext;
 mod routes_macro;
 mod schemas;
@@ -284,6 +287,10 @@ pub type ApiResult<T, E> = Result<T, E>;
 #[doc(hidden)]
 pub mod __private {
     pub use tracing;
+
+    /// The caller's tenant, left in extensions by the auth layer for the route span to record.
+    #[derive(Debug, Clone)]
+    pub struct SpanTenant(pub String);
 
     /// What `#[dto]` registers its schema name with.
     pub mod schemas {

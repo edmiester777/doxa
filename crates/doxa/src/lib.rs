@@ -53,6 +53,12 @@ pub use doxa_docs::dist;
 
 /// Types the server and its browser client agree on.
 pub use doxa_wire as wire;
+pub use doxa_wire::{Page, PageInput};
+
+#[cfg(all(feature = "sea-orm", not(target_arch = "wasm32")))]
+mod paged;
+#[cfg(all(feature = "sea-orm", not(target_arch = "wasm32")))]
+pub use paged::Paged;
 
 /// Zeroize-on-drop secret string type with `[REDACTED]` Debug/Display.
 #[cfg(feature = "protected")]
@@ -72,8 +78,8 @@ pub use doxa_policy as policy;
 
 #[cfg(any(feature = "macros", feature = "client"))]
 pub use doxa_macros::{
-    client, client_only, client_pub, dto, entity, mirror, prelude, server, server_only, service,
-    Identity,
+    __faults_chain, client, client_only, client_pub, dto, entity, fault_set, faults, mirror,
+    prelude, server, server_only, service, Identity,
 };
 
 /// A mirrored type and its wire copy must agree on every variant:
@@ -266,20 +272,21 @@ pub struct Internal(pub String);
 pub mod server {
     /// Names a shared route file needs when compiled as the server.
     pub mod prelude {
+        pub use crate::extract::{Form, Json, Path, Query};
         pub use crate::{
             asset, capability, client, client_only, client_pub, delete, dto, entity, get,
             operation, patch, post, put, server, server_only, Actions, ApiError, Attachment,
             Identity, IntoParams, PolicyResource, SseEvent, SseStream, ToSchema,
         };
-        pub use axum::extract::{Extension, Form, Path, Query, State};
+        pub use crate::{Page, PageInput};
+        pub use axum::extract::{Extension, State};
         pub use axum::http::StatusCode;
-        pub use axum::Json;
         pub use serde::{Deserialize, Serialize};
 
         #[cfg(feature = "garde")]
         pub use crate::Valid;
         #[cfg(feature = "auth")]
-        pub use doxa_auth::{route_key, Cap, Granted, Many, One, Require};
+        pub use doxa_auth::{route_key, Cap, Granted, Many, One, Require, Tenant};
     }
 }
 
@@ -326,6 +333,20 @@ pub use doxa_ui::start;
 /// use doxa::ui::prelude::*;
 /// #[component]
 /// fn Row(key: u32) -> View { view! { <li>{key}</li> } }
+/// ```
+///
+/// A lazy page's chunk is a lowercase name:
+///
+/// ```
+/// use doxa::ui::prelude::*;
+/// #[page("/reports", lazy = "reports")]
+/// fn ReportsPage() -> View { view! { <p/> } }
+/// ```
+///
+/// ```compile_fail
+/// use doxa::ui::prelude::*;
+/// #[page("/reports", lazy = "Reports")]
+/// fn ReportsPage() -> View { view! { <p/> } }
 /// ```
 ///
 /// Spawning from an event handler compiles:
@@ -1065,6 +1086,7 @@ pub mod client {
     pub mod prelude {
         #[cfg(feature = "garde")]
         pub use crate::Valid;
+        pub use crate::{Page, PageInput};
         pub use doxa_client::route_key;
         pub use doxa_client::{Form, Granted, Json, Path, Query, SseStream, StatusCode};
         pub use doxa_macros::{
@@ -1090,6 +1112,7 @@ pub mod api {
             server_only, Actions, ApiError, Identity, SseEvent,
         };
         pub use doxa_wire::contract::{Cap, Grant, Many};
+        pub use doxa_wire::{Page, PageInput};
         pub use serde::{Deserialize, Serialize};
 
         #[cfg(target_arch = "wasm32")]
@@ -1100,17 +1123,17 @@ pub mod api {
         pub use doxa_macros::{ClientIntoParams as IntoParams, ClientToSchema as ToSchema};
 
         #[cfg(not(target_arch = "wasm32"))]
+        pub use crate::extract::{Form, Json, Path, Query};
+        #[cfg(not(target_arch = "wasm32"))]
         pub use crate::{asset, Attachment, IntoParams, PolicyResource, SseStream, ToSchema};
         #[cfg(not(target_arch = "wasm32"))]
         pub use axum::body::Bytes;
         #[cfg(not(target_arch = "wasm32"))]
-        pub use axum::extract::{Extension, Form, Path, Query, State};
+        pub use axum::extract::{Extension, State};
         #[cfg(not(target_arch = "wasm32"))]
         pub use axum::http::StatusCode;
-        #[cfg(not(target_arch = "wasm32"))]
-        pub use axum::Json;
         #[cfg(all(feature = "auth", not(target_arch = "wasm32")))]
-        pub use doxa_auth::{Granted, One, Require};
+        pub use doxa_auth::{Granted, One, Require, Tenant};
     }
 }
 

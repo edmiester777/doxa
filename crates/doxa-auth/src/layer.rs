@@ -452,17 +452,19 @@ where
         tenant_id: claims.scope().map(str::to_owned),
         roles: claims.roles().to_vec(),
     };
+    if let Some(scope) = &cap_ctx.tenant_id {
+        request
+            .extensions_mut()
+            .insert(doxa::__private::SpanTenant(scope.clone()));
+    }
     request.extensions_mut().insert(cap_ctx);
     if let Some(checker) = checker {
         request.extensions_mut().insert(checker);
     }
     let epoch = epoch(&claims);
-    let is_admin = claims.roles().iter().any(|r| auth.policy.is_admin_role(r));
-    request.extensions_mut().insert(Arc::new(AuthContext {
-        claims,
-        session,
-        is_admin,
-    }));
+    request
+        .extensions_mut()
+        .insert(Arc::new(AuthContext { claims, session }));
 
     Ok((request, epoch))
 }
@@ -572,41 +574,19 @@ mod tests {
         svc.oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
     }
 
+    /// Admin is the app's layer's call, whatever the token's roles say.
     #[tokio::test]
-    async fn a_role_the_policy_names_admin_makes_the_caller_admin() {
-        struct AdminReaders;
-        #[async_trait]
-        impl Policy<()> for AdminReaders {
-            async fn resolve(&self, _: Option<&str>, _: &[String]) -> Result<(), AuthError> {
-                Ok(())
-            }
-            fn is_admin_role(&self, role: &str) -> bool {
-                role == "reader"
-            }
-        }
-        for (policy, admin) in [
-            (Box::new(AdminReaders) as Box<dyn Policy<()>>, true),
-            (Box::new(StubPolicy), false),
-        ] {
-            let state = Arc::new(AuthState {
-                validator: Arc::new(StubValidator { accept: "good" }),
-                resolver: Arc::new(StubResolver),
-                policy,
-                #[cfg(feature = "audit")]
-                audit: None,
-            });
-            let svc = build_service(state, move |req| {
-                let ctx = req.extensions().get::<Arc<AuthContext<(), OidcClaims>>>();
-                assert_eq!(ctx.unwrap().is_admin, admin);
-                Response::builder().body(Body::empty()).unwrap()
-            });
-            let req = Request::builder()
-                .uri("/x")
-                .header("authorization", "Bearer good")
-                .body(Body::empty())
-                .unwrap();
-            assert_eq!(svc.oneshot(req).await.unwrap().status(), StatusCode::OK);
-        }
+    async fn the_layer_never_marks_a_caller_admin() {
+        let svc = build_service(make_state("good"), |req| {
+            assert!(req.extensions().get::<crate::Admin>().is_none());
+            Response::builder().body(Body::empty()).unwrap()
+        });
+        let req = Request::builder()
+            .uri("/x")
+            .header("authorization", "Bearer good")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(svc.oneshot(req).await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]

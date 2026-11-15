@@ -278,10 +278,10 @@ async fn one_key_resolves_per_tenant() {
 }
 
 #[tokio::test]
-async fn no_tenant_is_no_row() {
+async fn no_tenant_is_refused_before_the_load() {
     let (status, _) = call("/widgets/alpha", None).await;
 
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 // ---- and the listing --------------------------------------------------------

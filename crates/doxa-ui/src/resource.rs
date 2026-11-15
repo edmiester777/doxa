@@ -6,7 +6,7 @@ use doxa_client::Fetch;
 
 use crate::hooks::{effect, reference, state, Deps, State};
 
-/// What fetched data can be showing, with a 403 as its own state.
+/// What fetched data can be showing, with a 403 and a 404 as states of their own.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Load<T> {
     /// Nothing yet.
@@ -16,15 +16,19 @@ pub enum Load<T> {
     Ready(T),
     /// The policy refused.
     Forbidden,
+    /// Nothing by that key, or it has gone.
+    NotFound,
     /// The fetch failed, saying why.
     Failed(String),
 }
 
 impl<T> Load<T> {
-    /// The state after a failed fetch. A refresh failing leaves what's on screen; a 403 never does.
+    /// The state after a failed fetch. A refresh failing leaves what's on screen; a 403 or a
+    /// 404 never does.
     pub fn after_error(self, error: &impl LoadError) -> Load<T> {
         match self {
             _ if error.is_forbidden() => Load::Forbidden,
+            _ if error.is_not_found() => Load::NotFound,
             Load::Ready(data) => Load::Ready(data),
             _ => Load::Failed(error.message()),
         }
@@ -50,6 +54,10 @@ pub trait LoadError {
     fn is_forbidden(&self) -> bool {
         false
     }
+    /// Whether there was nothing to fetch, which a refresh mustn't hide either.
+    fn is_not_found(&self) -> bool {
+        false
+    }
     /// What to tell the user.
     fn message(&self) -> String;
 }
@@ -60,6 +68,10 @@ where
 {
     fn is_forbidden(&self) -> bool {
         matches!(self, Fetch::Forbidden(_))
+    }
+
+    fn is_not_found(&self) -> bool {
+        Fetch::is_not_found(self)
     }
 
     fn message(&self) -> String {

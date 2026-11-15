@@ -186,9 +186,6 @@ pub trait PolicyExtension: Send + Sync {
     /// Build a deny-all session output (empty allowlists, no grants).
     fn deny_all(&self) -> Self::SessionOutput;
 
-    /// Build an unrestricted admin session output.
-    fn admin_session(&self) -> Result<Self::SessionOutput, AuthError>;
-
     /// Cedar entity type used for the synthetic per-request principal.
     ///
     /// The Cedar evaluator constructs a synthetic principal entity on each
@@ -223,25 +220,9 @@ pub trait PolicyExtension: Send + Sync {
         "_session"
     }
 
-    /// Whether the given role name should short-circuit Cedar evaluation
-    /// and produce an admin session via [`admin_session`](Self::admin_session).
-    ///
-    /// The Cedar policy implementation calls this for each role on the
-    /// principal; if any match, evaluation is skipped and
-    /// `admin_session()` is returned directly.
-    ///
-    /// Default: exact match on `"admin"`. Override to recognize role
-    /// conventions like `"system:admin"`, `"ROLE_ADMIN"`, or SCIM group
-    /// names, or to disable the fast path entirely by always returning
-    /// `false`.
-    fn is_admin_role(&self, role: &str) -> bool {
-        role == "admin"
-    }
-
     // ---- What the assembled session already knows (read by `SessionChecker`) ----
 
-    /// Whether an assembled session bypasses policy, as [`admin_session`](Self::admin_session)'s
-    /// would. Default: `false`.
+    /// Whether an assembled session bypasses policy. Default: `false`.
     fn session_is_admin(&self, _session: &Self::SessionOutput) -> bool {
         false
     }

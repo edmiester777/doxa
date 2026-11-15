@@ -183,10 +183,11 @@ fn parts(
     parts_as(roles, grants, false)
 }
 
+/// `admin` stands in for the app's layer inserting [`doxa::auth::Admin`].
 fn parts_as(
     roles: &[&str],
     grants: Grants,
-    is_admin: bool,
+    admin: bool,
 ) -> (
     axum::http::request::Parts,
     tokio::sync::mpsc::Receiver<AuditEvent>,
@@ -199,9 +200,11 @@ fn parts_as(
             roles: roles.iter().map(|role| (*role).to_owned()).collect(),
         },
         session: grants,
-        is_admin,
     });
     request.extensions_mut().insert(ctx);
+    if admin {
+        request.extensions_mut().insert(doxa::auth::Admin);
+    }
 
     let checker: Arc<dyn CapabilityChecker> = Arc::new(Roles);
     request.extensions_mut().insert(checker);

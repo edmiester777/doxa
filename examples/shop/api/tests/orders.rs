@@ -6,6 +6,7 @@ use std::time::Duration;
 use doxa::client::layer::{transport, Scoped};
 use doxa::client::transport::RouterTransport;
 use doxa::client::{Fetch, Permission};
+use doxa::PageInput;
 use shop_api::orders::*;
 
 thread_local! {
@@ -63,12 +64,15 @@ async fn a_query_and_a_validated_body_reach_the_handler() {
     .await
     .unwrap();
     assert_eq!(placed.id, 3);
-    let cogs = list_orders(OrderFilter {
-        item: Some("cog".into()),
-    })
+    let cogs = list_orders(
+        OrderFilter {
+            item: Some("cog".into()),
+        },
+        PageInput::default(),
+    )
     .await
     .unwrap();
-    assert_eq!(cogs.len(), 1);
+    assert_eq!((cogs.items.len(), cogs.total), (1, 1));
     let refused = place_order(NewOrder {
         item: String::new(),
         quantity: 0,
@@ -123,8 +127,9 @@ fn the_document_names_each_route_by_its_function() {
 async fn placing_an_order_refreshes_the_cached_list() {
     install("clerk");
     let s = shop_api::service();
-    let list = || list_orders(OrderFilter::default()).cache(Duration::from_secs(60));
-    assert_eq!(list().await.unwrap().len(), 2);
+    let list =
+        || list_orders(OrderFilter::default(), PageInput::default()).cache(Duration::from_secs(60));
+    assert_eq!(list().await.unwrap().total, 2);
     place_order(NewOrder {
         item: "cog".into(),
         quantity: 1,
@@ -132,7 +137,7 @@ async fn placing_an_order_refreshes_the_cached_list() {
     .await
     .unwrap();
     let before = s.requests_sent();
-    assert_eq!(list().await.unwrap().len(), 3);
+    assert_eq!(list().await.unwrap().total, 3);
     assert_eq!(s.requests_sent(), before + 1);
 }
 

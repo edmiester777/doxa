@@ -342,20 +342,11 @@ async fn an_unconfined_loader_reaches_another_tenants_row_and_nothing_stops_it()
     );
 }
 
-/// The same asset with no tenant at all. The generated loader answers
-/// `None` here; this one has no reason to, and does not.
+/// A caller with no tenant never reaches a loader, confined or not.
 #[tokio::test]
-async fn an_unconfined_loader_serves_a_caller_with_no_tenant() {
-    let call = call("/loose/alpha", None, Verdict::Allow).await;
-
-    assert_eq!(call.status, StatusCode::OK);
-    assert_eq!(call.body, "alpha@acme");
-}
-
-/// Where the confined one refuses, as the generated loader would.
-#[tokio::test]
-async fn a_confined_loader_answers_none_for_a_caller_with_no_tenant() {
-    let call = call("/strict/alpha", None, Verdict::Allow).await;
-
-    assert_eq!(call.status, StatusCode::NOT_FOUND);
+async fn a_caller_with_no_tenant_is_refused_before_any_loader() {
+    for path in ["/loose/alpha", "/strict/alpha"] {
+        let call = call(path, None, Verdict::Allow).await;
+        assert_eq!(call.status, StatusCode::FORBIDDEN, "{path}");
+    }
 }

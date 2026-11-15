@@ -68,9 +68,6 @@ impl PolicyExtension for StubExtension {
         Ok(())
     }
     fn deny_all(&self) -> Self::SessionOutput {}
-    fn admin_session(&self) -> Result<Self::SessionOutput, AuthError> {
-        Ok(())
-    }
 }
 
 /// Variant of [`StubExtension`] whose `build_resource_uid` always fails.
@@ -121,9 +118,6 @@ impl PolicyExtension for FailingUidExtension {
         Ok(())
     }
     fn deny_all(&self) -> Self::SessionOutput {}
-    fn admin_session(&self) -> Result<Self::SessionOutput, AuthError> {
-        Ok(())
-    }
 }
 
 /// In-memory `PolicyStore` returning a fixed Cedar policy text. An empty
@@ -229,13 +223,6 @@ impl PolicyExtension for SessionExtension {
     fn deny_all(&self) -> Self::SessionOutput {
         SessionFlags::default()
     }
-    fn admin_session(&self) -> Result<Self::SessionOutput, AuthError> {
-        Ok(SessionFlags {
-            is_admin: true,
-            ..SessionFlags::default()
-        })
-    }
-
     fn session_is_admin(&self, session: &Self::SessionOutput) -> bool {
         session.is_admin
     }

@@ -1,4 +1,5 @@
 //! What only the server compiles: `server_only` in Cargo.toml keeps it out of the browser.
+//! Its `pub` items, re-exports too (`pub use sqlx::PgPool;`), are in scope in every route file.
 
 use crate::Greeting;
 

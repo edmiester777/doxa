@@ -81,11 +81,11 @@ pub use doxa_wire as __wire;
 
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};
-pub use context::{AuthContext, CapabilityContext};
+pub use context::{Admin, AuthContext, CapabilityContext};
 pub use provider::{ClaimResolver, MinimalClaims, OidcClaimConfig, TokenValidator};
 
 #[cfg(feature = "axum")]
-pub use extractors::{Auth, BearerScheme, Require, SchemeName};
+pub use extractors::{Auth, BearerScheme, Require, SchemeName, Tenant};
 #[cfg(all(feature = "axum", feature = "catalog"))]
 pub use granted::actions;
 #[cfg(feature = "axum")]

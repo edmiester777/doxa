@@ -14,14 +14,15 @@ pub async fn get_order(order: Grant<Order>) -> Result<Json<Order>, OrderError> {
     Ok(Json(order.into_inner().into()))
 }
 
-/// Every order, narrowed by `filter`.
+/// Every order, narrowed by `filter`, a page at a time.
 #[get("/api/orders")]
 pub async fn list_orders(
     _: Grant<Many<Order>>,
     State(store): State<Store>,
     Query(filter): Query<OrderFilter>,
-) -> Json<Vec<Order>> {
-    Json(store.list(filter.item.as_deref()))
+    Query(page): Query<PageInput>,
+) -> Json<Page<Order>> {
+    Json(Page::of(store.list(filter.item.as_deref()), &page))
 }
 
 /// Orders as they're placed and cancelled.

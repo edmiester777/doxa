@@ -28,6 +28,8 @@ pub(crate) struct Options {
     pub memo: bool,
     /// Render from its own wasm module, split off by `doxa build`.
     pub lazy: bool,
+    /// The split module it shares with other lazy pages; its own when `None`.
+    pub chunk: Option<syn::LitStr>,
     /// Mountable by a foreign React host, through `doxa build --lib`.
     pub export: bool,
 }
@@ -349,7 +351,10 @@ pub(crate) fn expand(opts: Options, parsed: &Parsed) -> TokenStream {
     };
     let (split, render) = if opts.lazy {
         let module = lazy_mod(name);
-        let abi = syn::LitStr::new(&snake(&name_str), name.span());
+        let abi = opts
+            .chunk
+            .clone()
+            .unwrap_or_else(|| syn::LitStr::new(&snake(&name_str), name.span()));
         // A hot-patched build stays one module, so `doxa dev` loads lazy pages eagerly.
         // The lint allowance only reaches a cfg from an enclosing item.
         let split = quote! {

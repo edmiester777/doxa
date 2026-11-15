@@ -49,6 +49,62 @@ where
     }
 }
 
+/// The caller's tenant from [`Claims::scope`], parsed as `T`: 401 without auth, 403 without a
+/// scope, 401 when it doesn't parse.
+///
+/// ```ignore
+/// async fn list(tenant: Tenant) -> String { format!("{tenant}") }
+/// async fn typed(Tenant(id): Tenant<TenantId>) {}
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Tenant<T = String>(pub T);
+
+impl<T> std::ops::Deref for Tenant<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: std::fmt::Display> std::fmt::Display for Tenant<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T, St> axum::extract::FromRequestParts<St> for Tenant<T>
+where
+    T: std::str::FromStr + Send,
+    T::Err: std::fmt::Display,
+    St: Send + Sync,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &St) -> Result<Self, Self::Rejection> {
+        let ctx = parts
+            .extensions
+            .get::<CapabilityContext>()
+            .ok_or(AuthError::MissingCredentials)?;
+        let scope = ctx.tenant_id.as_deref().ok_or(AuthError::Forbidden)?;
+        scope
+            .parse()
+            .map(Tenant)
+            .map_err(|e| AuthError::InvalidToken(format!("scope `{scope}` is not a tenant: {e}")))
+    }
+}
+
+impl<T> doxa::DocOperationContribution for Tenant<T> {
+    fn contribution() -> doxa::OperationContribution {
+        doxa::OperationContribution::new()
+            .with_response(doxa::ResponseContribution::unauthorized())
+            .with_response(doxa::ResponseContribution::new(
+                "403",
+                "Caller has no tenant",
+            ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Capability gating: `Require<M, S>`
 // ---------------------------------------------------------------------------
@@ -135,6 +191,13 @@ where
             .get::<CapabilityContext>()
             .ok_or(AuthError::MissingCredentials)?
             .clone();
+        if parts.extensions.get::<crate::Admin>().is_some() {
+            return Ok(Require(PhantomData));
+        }
+        if crate::context::unscoped(ctx.tenant_id.as_deref(), &parts.extensions) {
+            return Err(AuthError::Forbidden);
+        }
+        let tenant = ctx.tenant_id.clone().unwrap_or_default();
         let checker = parts
             .extensions
             .get::<Arc<dyn CapabilityChecker>>()
@@ -142,14 +205,13 @@ where
             .ok_or_else(|| {
                 AuthError::PolicyFailed("capability checker not configured on AuthLayer".into())
             })?;
-        let tenant = ctx.tenant_id.as_deref().unwrap_or("");
-        let allowed = checker.check(tenant, &ctx.roles, M::CAPABILITY).await?;
+        let allowed = checker.check(&tenant, &ctx.roles, M::CAPABILITY).await?;
         if allowed {
             return Ok(Require(PhantomData));
         }
 
         let (resource_type, resource_id) =
-            crate::granted::capability_resource(M::CAPABILITY, tenant);
+            crate::granted::capability_resource(M::CAPABILITY, &tenant);
 
         record::record(
             &parts.extensions,

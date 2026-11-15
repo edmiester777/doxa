@@ -19,7 +19,10 @@ categories = ["web-programming::http-server", "development-tools"]
 # `src/ui/scalar.rs` for the default configuration (three-pane `modern`
 # layout, dark mode on, Scalar Agent / MCP integrations disabled). All
 # knobs are overridable via `ScalarConfig` on `MountOpts::scalar`.
-default = ["docs-scalar", "macros"]
+default = ["docs-scalar", "macros", "trace"]
+
+# Every mounted route runs under a `route` span: handler, route, tenant, path parameters.
+trace = []
 
 # Mount the Scalar UI at the configured docs path. Scalar is a small
 # HTML template that pulls `@scalar/api-reference` from cdn.jsdelivr.net

@@ -41,6 +41,31 @@ fn OrdersPage() -> View {
     view! { <p>"orders"</p> }
 }
 
+#[page("/reports/daily", lazy = "reports")]
+fn DailyReportPage() -> View {
+    view! { <p>"daily"</p> }
+}
+
+#[page("/reports/weekly", lazy = "reports")]
+fn WeeklyReportPage() -> View {
+    view! { <p>"weekly"</p> }
+}
+
+#[test]
+fn pages_sharing_a_chunk_render_like_any_page() {
+    let dom = mount(
+        Router::new()
+            .page::<DailyReportPage>()
+            .page::<WeeklyReportPage>(),
+    );
+    navigate(DailyReportPage::route());
+    settle();
+    assert_eq!(dom.text(dom.body()), "daily");
+    navigate(WeeklyReportPage::route());
+    settle();
+    assert_eq!(dom.text(dom.body()), "weekly");
+}
+
 #[test]
 fn a_redirect_replaces_the_url_it_matches() {
     let dom = mount(

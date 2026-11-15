@@ -39,7 +39,8 @@ struct Segment<'a> {
 /// One part to emit, in bindgened function indices.
 pub(crate) struct Plan<'p> {
     pub label: &'p str,
-    pub export: Option<(&'p str, u32, u32)>,
+    /// Each split point it serves: export name, function, and the table slot main's stub calls.
+    pub exports: Vec<(&'p str, u32, u32)>,
     pub table_funcs: HashSet<u32>,
     /// Functions this part puts in main's table for other parts' stubs, with their slots.
     pub placed: Vec<(u32, u32)>,
@@ -219,8 +220,8 @@ impl<'a> Source<'a> {
         name: impl Fn(u32) -> Option<String>,
     ) -> Result<Vec<u8>> {
         let mut r = Renumber::default();
-        if let Some((_, func, _)) = plan.export {
-            r.index(func);
+        for (_, func, _) in &plan.exports {
+            r.index(*func);
         }
         let mut slots = BTreeMap::new();
         for (offset, items) in &self.elements {
@@ -274,10 +275,10 @@ impl<'a> Source<'a> {
         let mut exports = ExportSection::new();
         let table = (self.funcref_table != 0).then_some(self.funcref_table);
         let mut elements = ElementSection::new();
-        if let Some((export, func, slot)) = plan.export {
-            exports.export(export, ExportKind::Func, r.map[&func]);
-            let at = ConstExpr::i32_const(slot as i32);
-            elements.active(table, &at, Elements::Functions(vec![r.map[&func]].into()));
+        for (export, func, slot) in &plan.exports {
+            exports.export(export, ExportKind::Func, r.map[func]);
+            let at = ConstExpr::i32_const(*slot as i32);
+            elements.active(table, &at, Elements::Functions(vec![r.map[func]].into()));
         }
         for (slot, func) in &slots {
             let at = ConstExpr::i32_const(*slot);

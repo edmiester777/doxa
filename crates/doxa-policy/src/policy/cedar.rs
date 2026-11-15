@@ -107,10 +107,6 @@ impl<E: PolicyExtension + 'static> Policy<E::SessionOutput> for CedarPolicy<E>
 where
     E::SessionOutput: Clone,
 {
-    fn is_admin_role(&self, role: &str) -> bool {
-        self.extension.is_admin_role(role)
-    }
-
     async fn flush_cache(&self) {
         self.cache.flush().await;
     }
@@ -130,12 +126,7 @@ where
     ) -> Result<E::SessionOutput, AuthError> {
         let tenant_id = match tenant_id {
             Some(id) if !id.is_empty() => id,
-            _ => {
-                if roles.iter().any(|r| self.extension.is_admin_role(r)) {
-                    return self.extension.admin_session();
-                }
-                return Ok(self.extension.deny_all());
-            }
+            _ => return Ok(self.extension.deny_all()),
         };
 
         let store = self.cache.get_or_load(&self.store, tenant_id).await?;
@@ -177,10 +168,10 @@ mod tests {
         assert_eq!(policy.cache_ttl(), Duration::from_secs(42));
     }
 
-    // Extension that treats any role matching a custom predicate as admin.
-    struct CustomAdminExtension;
+    // Extension that renames the synthetic principal.
+    struct RenamedPrincipalExtension;
 
-    impl crate::extension::PolicyExtension for CustomAdminExtension {
+    impl crate::extension::PolicyExtension for RenamedPrincipalExtension {
         type ResourceAttrs = ();
         type SessionOutput = &'static str;
 
@@ -228,13 +219,6 @@ mod tests {
         fn deny_all(&self) -> Self::SessionOutput {
             "denied"
         }
-        fn admin_session(&self) -> Result<Self::SessionOutput, AuthError> {
-            Ok("admin")
-        }
-
-        fn is_admin_role(&self, role: &str) -> bool {
-            role == "system:admin"
-        }
 
         fn principal_entity_type(&self) -> &'static str {
             "Principal"
@@ -245,35 +229,28 @@ mod tests {
         }
     }
 
+    /// No role buys a tenantless session anything; admin is the app's layer's call.
     #[tokio::test]
-    async fn resolve_uses_custom_is_admin_role() {
+    async fn a_tenantless_resolve_is_deny_all_whatever_the_roles() {
         use crate::policy::Policy;
         let store: SharedPolicyStore = Arc::new(StubStore {
             policy_text: "",
             entities: Vec::new(),
         });
-        let policy = CedarPolicy::new(store, CustomAdminExtension);
+        let policy = CedarPolicy::new(store, RenamedPrincipalExtension);
 
-        // Custom admin role triggers admin_session().
-        let out = policy
-            .resolve(None, &["system:admin".to_string()])
-            .await
-            .unwrap();
-        assert_eq!(out, "admin");
-
-        // The old literal "admin" no longer short-circuits.
         let out = policy.resolve(None, &["admin".to_string()]).await.unwrap();
         assert_eq!(out, "denied");
     }
 
     #[test]
     fn extension_principal_overrides_propagate_to_uid() {
-        let ext = CustomAdminExtension;
+        let ext = RenamedPrincipalExtension;
         let uid = crate::uid::build_uid(
-            <CustomAdminExtension as crate::extension::PolicyExtension>::principal_entity_type(
+            <RenamedPrincipalExtension as crate::extension::PolicyExtension>::principal_entity_type(
                 &ext,
             ),
-            <CustomAdminExtension as crate::extension::PolicyExtension>::synthetic_principal_id(
+            <RenamedPrincipalExtension as crate::extension::PolicyExtension>::synthetic_principal_id(
                 &ext,
             ),
         )

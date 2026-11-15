@@ -116,12 +116,27 @@ fn apply_stack<L: Layers>(routes: Routes, state: &dyn Any) -> Option<Routes> {
 }
 
 /// `routes` under `state`, where `S` is inferred from the crate's one [`Resolve`] impl.
-pub fn mount<S, const K: u64>(routes: UtoipaMethodRouter<S>, state: &dyn Any) -> Option<Routes>
+pub fn mount<S, const K: u64>(
+    routes: UtoipaMethodRouter<S>,
+    state: &dyn Any,
+    span: Option<fn() -> tracing::Span>,
+) -> Option<Routes>
 where
     S: Clone + Send + Sync + 'static,
     Key<K>: Resolve<S>,
 {
     let state = state.downcast_ref::<S>()?;
+    #[cfg(feature = "trace")]
+    let routes = match span {
+        Some(make) => (
+            routes.0,
+            routes.1,
+            routes.2.layer(crate::route_span::RouteSpanLayer(make)),
+        ),
+        None => routes,
+    };
+    #[cfg(not(feature = "trace"))]
+    let _ = span;
     Some(
         OpenApiRouter::<S>::default()
             .routes(routes)

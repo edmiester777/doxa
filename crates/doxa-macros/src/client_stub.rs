@@ -16,6 +16,7 @@ const SERVER_ONLY: &[&str] = &[
     "State",
     "Extension",
     "Auth",
+    "Tenant",
     "AuthContext",
     "CapabilityContext",
     "Require",

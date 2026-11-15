@@ -49,7 +49,7 @@ pub struct Gone(u32);
 
 impl From<Gone> for OrderError {
     fn from(Gone(id): Gone) -> Self {
-        OrderError::NotFound(id)
+        OrderError::NotFound(format!("no order {id}"))
     }
 }
 

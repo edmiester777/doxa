@@ -17,6 +17,7 @@ pub mod layer;
 mod multipart;
 #[cfg(feature = "oidc")]
 pub mod oidc;
+mod page;
 mod response;
 mod service;
 mod sse;
@@ -31,6 +32,7 @@ pub use can::{has, Permission, Probe};
 pub use fetch::{Fetch, NoError};
 pub use layer::{layer_fn, layers, Layer, Next};
 pub use multipart::Multipart;
+pub use page::every_page;
 pub use response::{
     AliasedResult, Attachment, Download, FromResponse, SseOnce, SseStream, StatusCode, Unsupported,
 };

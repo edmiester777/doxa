@@ -26,17 +26,62 @@ pub fn derive_state(input: DeriveInput) -> Result<TokenStream> {
     })
 }
 
+/// The span a route runs under: its handler, method and template, the caller's tenant, and a
+/// field per path parameter.
+pub struct RouteSpan<'a> {
+    /// `false` for `trace = false`.
+    pub on: bool,
+    pub handler: &'a str,
+    pub route: &'a str,
+    pub path: &'a str,
+}
+
+impl RouteSpan<'_> {
+    fn maker(&self) -> TokenStream {
+        if !self.on {
+            return quote!(::core::option::Option::None);
+        }
+        let (handler, route) = (self.handler, self.route);
+        let fixed = ["handler", "route", "tenant"];
+        let params = path_params(self.path)
+            .into_iter()
+            .filter(|p| !fixed.contains(&p.as_str()))
+            .map(|p| syn::LitStr::new(&p, proc_macro2::Span::call_site()));
+        let t = quote!(::doxa::__private::tracing);
+        quote! {
+            ::core::option::Option::Some((|| #t::info_span!(
+                "route",
+                handler = #handler,
+                route = #route,
+                tenant = #t::field::Empty,
+                #(#params = #t::field::Empty,)*
+            )) as fn() -> #t::Span)
+        }
+    }
+}
+
+/// Every `{name}` and `{*name}` in a template.
+fn path_params(path: &str) -> Vec<String> {
+    path.split('{')
+        .skip(1)
+        .filter_map(|s| s.split_once('}'))
+        .map(|(name, _)| name.trim_start_matches('*').to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
 /// The `Mount` a handler submits, unless it said `mount = false`.
-pub fn mount(item_fn: &ItemFn) -> TokenStream {
+pub fn mount(item_fn: &ItemFn, span: &RouteSpan<'_>) -> TokenStream {
     let name = &item_fn.sig.ident;
     let handler = name.to_string();
     let key = crate_key();
+    let span = span.maker();
     quote! {
         ::doxa::__private::inventory::submit! {
             ::doxa::__private::Mount {
                 module: ::core::module_path!(),
                 handler: #handler,
-                build: |state| ::doxa::__private::mount::<_, #key>(::doxa::routes!(#name), state),
+                build: |state| ::doxa::__private::mount::<_, #key>(::doxa::routes!(#name), state, #span),
                 doc: || ::doxa::__private::describe::<_, #key>(::doxa::routes!(#name)),
             }
         }

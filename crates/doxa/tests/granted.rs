@@ -520,7 +520,6 @@ fn typed_parts() -> axum::http::request::Parts {
             session: Session {
                 grants: vec!["tenant = acme"],
             },
-            is_admin: false,
         }));
     let checker: Arc<dyn CapabilityChecker> = Arc::new(RegionChecker);
     request.extensions_mut().insert(checker);
@@ -546,4 +545,64 @@ async fn a_guard_and_an_auth_extractor_share_one_context() {
         Arc::ptr_eq(guard.caller(), &auth),
         "one allocation, however many readers",
     );
+}
+
+// ---- tenant -----------------------------------------------------------------
+
+/// `Claims::scope`'s contract: a caller without one is refused, before any check.
+#[tokio::test]
+async fn a_caller_without_a_scope_is_refused() {
+    let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+    caller(&mut request, &["viewer"]);
+    request
+        .extensions_mut()
+        .get_mut::<CapabilityContext>()
+        .unwrap()
+        .tenant_id = None;
+    let (mut parts, _) = request.into_parts();
+
+    let rejection = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
+        .await
+        .err()
+        .expect("no scope, no grant");
+    assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
+}
+
+/// The app's layer marks an admin: no scope needed, and no policy asked.
+#[tokio::test]
+async fn an_admin_marked_by_the_app_is_unrestricted() {
+    let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+    caller(&mut request, &["stranger"]);
+    request
+        .extensions_mut()
+        .get_mut::<CapabilityContext>()
+        .unwrap()
+        .tenant_id = None;
+    request.extensions_mut().insert(doxa::auth::Admin);
+    let mut parts = request.into_parts().0;
+
+    let grant = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
+        .await
+        .expect("an admin holds every capability, with or without a scope");
+    assert_eq!(grant.tenant(), "");
+}
+
+/// Without the marker the same caller is refused, so it is the marker that admits.
+#[tokio::test]
+async fn a_stranger_without_the_marker_is_refused() {
+    let (mut parts, _rx) = parts(&["stranger"]);
+    let rejection = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
+        .await
+        .err()
+        .expect("no capability");
+    assert_eq!(rejection.into_response().status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_grant_carries_the_caller_s_tenant() {
+    let (mut parts, _rx) = parts(&["viewer"]);
+    let grant = Granted::<Cap<WidgetsRead>>::from_request_parts(&mut parts, &())
+        .await
+        .expect("viewer holds the capability");
+    assert_eq!(grant.tenant(), "acme");
 }

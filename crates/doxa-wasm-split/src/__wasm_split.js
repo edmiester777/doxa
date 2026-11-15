@@ -1,14 +1,16 @@
 export function makeLoad(url, deps, fusedImports, initIt) {
-  let alreadyLoaded = false;
+  let loaded = null;
   // Shared by concurrent callers: a second instance would re-run the part's data initializers.
   let loading = null;
+  // Every caller is called back, loaded or not: a module several split points share answers each.
   return async (callbackIndex, callbackData) => {
     await Promise.all(deps.map((dep) => dep()));
-    if (alreadyLoaded) return;
-    loading ??= instantiate().finally(() => {
-      loading = null;
+    loading ??= instantiate().then((exports) => {
+      loaded = exports;
+      if (!exports) loading = null;
+      return exports;
     });
-    const mainExports = await loading;
+    const mainExports = loaded ?? (await loading);
     if (mainExports && callbackIndex !== undefined) {
       mainExports.__indirect_function_table.get(callbackIndex)(
         callbackData,
@@ -47,8 +49,6 @@ export function makeLoad(url, deps, fusedImports, initIt) {
         response,
         imports
       );
-
-      alreadyLoaded = true;
 
       for (let name in new_exports.instance.exports) {
         fusedImports[name] = new_exports.instance.exports[name];

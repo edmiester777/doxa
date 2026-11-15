@@ -917,10 +917,6 @@ mod residual_effect_tests {
         fn deny_all(&self) -> Self::SessionOutput {
             Vec::new()
         }
-
-        fn admin_session(&self) -> Result<Self::SessionOutput, AuthError> {
-            Ok(Vec::new())
-        }
     }
 
     async fn verdicts(policy_text: &'static str) -> Vec<(String, bool)> {

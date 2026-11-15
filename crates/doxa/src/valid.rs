@@ -10,6 +10,9 @@ macro_rules! validates {
             #[cfg(all(feature = "docs", not(target_arch = "wasm32")))] axum::Json,
             #[cfg(all(feature = "docs", not(target_arch = "wasm32")))] axum::extract::Query,
             #[cfg(all(feature = "docs", not(target_arch = "wasm32")))] axum::extract::Form,
+            #[cfg(all(feature = "docs", not(target_arch = "wasm32")))] doxa_docs::extract::Json,
+            #[cfg(all(feature = "docs", not(target_arch = "wasm32")))] doxa_docs::extract::Query,
+            #[cfg(all(feature = "docs", not(target_arch = "wasm32")))] doxa_docs::extract::Form,
             #[cfg(feature = "client")] doxa_client::Json,
             #[cfg(feature = "client")] doxa_client::Query,
             #[cfg(feature = "client")] doxa_client::Form

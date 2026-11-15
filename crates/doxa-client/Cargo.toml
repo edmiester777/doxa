@@ -43,4 +43,5 @@ http-body-util = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 serde = { workspace = true }

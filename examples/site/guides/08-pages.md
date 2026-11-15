@@ -31,7 +31,7 @@ fn start() {
 }
 ```
 
-- `lazy` splits the page into its own wasm chunk, fetched when a link to it is hovered or on first visit.
+- `lazy` splits the page into its own wasm chunk, fetched when a link to it is hovered or on first visit. `lazy = "reports"` puts every page naming that chunk into one module, fetched once for all of them.
 - `<Can>` sends a [dry run](07-api-crates.md#call): the button appears only for callers the route would let through.
 - A layout (`Shell`) stays mounted while pages change inside its `<Outlet/>`, and `<Link>` navigates without a reload.
 

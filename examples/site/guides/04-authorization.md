@@ -30,7 +30,7 @@ async fn list_widgets(scope: Granted<Many<Widget>>) -> Json<Vec<Widget>> {
 async fn flush(_: Granted<Cap<WidgetsRead>>) -> StatusCode { StatusCode::OK }
 ```
 
-Need the caller too? `Granted(caller, widget): Granted<Widget>` gives you both, with no second extractor.
+Need the caller too? `Granted(caller, widget): Granted<Widget>` gives you both, with no second extractor, and `widget.tenant()` is the caller's tenant.
 
 The spec gets the `security` requirement, the badge, and the `401`/`403` the guard can return, plus `400` and `404` on the instance form.
 

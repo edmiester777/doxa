@@ -113,8 +113,8 @@ pub fn dedupe_loader_imports(glue: &str) -> String {
 pub struct Part {
     /// The unhashed file name.
     pub file: String,
-    /// What `__wasm_split.js` exports to load it.
-    pub loader: String,
+    /// What `__wasm_split.js` exports to load it, one per split point it serves.
+    pub loaders: Vec<String>,
     /// The shared chunks it needs first, as indexes into the chunk parts.
     pub needs: Vec<usize>,
     /// Its bytes.
@@ -127,7 +127,7 @@ pub struct Split {
     pub main: Vec<u8>,
     /// Code shared by several split modules.
     pub chunks: Vec<Part>,
-    /// One per split point.
+    /// One per module name, serving each split point that names it.
     pub modules: Vec<Part>,
 }
 
@@ -150,24 +150,28 @@ pub fn split(original: &[u8], bindgened: &[u8]) -> Result<Split> {
         .enumerate()
         .map(|(i, c)| Part {
             file: format!("chunk_{i}_{}.wasm", c.module_name),
-            loader: format!("__wasm_split_load_chunk_{i}"),
+            loaders: vec![format!("__wasm_split_load_chunk_{i}")],
             needs: Vec::new(),
             bytes: c.bytes,
         })
         .collect();
     let mut modules = Vec::new();
     for (i, m) in out.modules.into_iter().enumerate() {
-        let (Some(hash), Some(name)) = (&m.hash_id, &m.component_name) else {
+        if m.split_points.is_empty() {
             return Err(tool(anyhow::anyhow!(
-                "split module `{}` has no hash or name",
+                "split module `{}` serves no split point",
                 m.module_name
             )));
-        };
+        }
         let mut needs: Vec<usize> = m.relies_on_chunks.iter().copied().collect();
         needs.sort_unstable();
         modules.push(Part {
             file: format!("module_{i}_{}.wasm", m.module_name),
-            loader: format!("__wasm_split_load_{}_{hash}_{name}", m.module_name),
+            loaders: m
+                .split_points
+                .iter()
+                .map(|(hash, name)| format!("__wasm_split_load_{}_{hash}_{name}", m.module_name))
+                .collect(),
             needs,
             bytes: m.bytes,
         });
@@ -189,13 +193,17 @@ pub fn loader_js(split: &Split, hashed: impl Fn(&Part) -> String) -> String {
             .iter()
             .map(|i| format!("__wasm_split_load_chunk_{i}"))
             .collect();
+        let (first, rest) = part.loaders.split_first().expect("a part has a loader");
         writeln!(
             js,
-            "export const {} = makeLoad(new URL({url}, import.meta.url).href, [{}], fusedImports);",
-            part.loader,
+            "export const {first} = makeLoad(new URL({url}, import.meta.url).href, [{}], fusedImports);",
             needs.join(", ")
         )
         .expect("string");
+        // One instance, so the module loads once whichever split point asks first.
+        for other in rest {
+            writeln!(js, "export const {other} = {first};").expect("string");
+        }
     }
     js
 }
@@ -246,18 +254,25 @@ mod tests {
 
     #[test]
     fn the_loader_fetches_each_part_after_the_chunks_it_needs() {
-        let part = |file: &str, loader: &str, needs: Vec<usize>| Part {
+        let part = |file: &str, loaders: &[&str], needs: Vec<usize>| Part {
             file: file.into(),
-            loader: loader.into(),
+            loaders: loaders.iter().map(|l| l.to_string()).collect(),
             needs,
             bytes: Vec::new(),
         };
         let split = Split {
             main: Vec::new(),
-            chunks: vec![part("chunk_0_a.wasm", "__wasm_split_load_chunk_0", vec![])],
+            chunks: vec![part(
+                "chunk_0_a.wasm",
+                &["__wasm_split_load_chunk_0"],
+                vec![],
+            )],
             modules: vec![part(
                 "module_0_page.wasm",
-                "__wasm_split_load_page_ab_render",
+                &[
+                    "__wasm_split_load_page_ab_render",
+                    "__wasm_split_load_page_cd_render",
+                ],
                 vec![0],
             )],
         };
@@ -266,5 +281,11 @@ mod tests {
         assert!(js.contains(
             "export const __wasm_split_load_page_ab_render = makeLoad(new URL(\"./module_0_page-0123.wasm\", import.meta.url).href, [__wasm_split_load_chunk_0], fusedImports);"
         ), "{js}");
+        assert!(
+            js.contains(
+                "export const __wasm_split_load_page_cd_render = __wasm_split_load_page_ab_render;"
+            ),
+            "{js}"
+        );
     }
 }

@@ -223,6 +223,7 @@ mod capability;
 mod client_stub;
 mod dto;
 mod entity;
+mod faults;
 mod grant;
 mod method;
 mod mirror;
@@ -832,6 +833,58 @@ pub fn spec(args: TokenStream, item: TokenStream) -> TokenStream {
         })
     };
     expand()
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Give an `ApiError` enum the failure classes it names: `common` (`Validation`, `NotFound`,
+/// `Forbidden`, `Internal`) and any `fault_set!`, injecting each variant it lacks. It goes
+/// above `#[dto]` and the derives.
+///
+/// ```ignore
+/// #[doxa::faults(common, crate::StoreFaults, not_found = Missing)]
+/// #[derive(Debug, thiserror::Error, Serialize, ToSchema, ApiError)]
+/// pub enum WidgetError { /* … */ }
+/// ```
+///
+/// A variant of a class's name must already answer its code:
+///
+/// ```
+/// #[doxa::faults(common)]
+/// #[derive(Debug, thiserror::Error, serde::Serialize, utoipa::ToSchema, doxa::ApiError)]
+/// enum E { #[error("gone")] #[api(status = 404, code = "not_found")] NotFound(String) }
+/// ```
+///
+/// ```compile_fail
+/// #[doxa::faults(common)]
+/// #[derive(Debug, thiserror::Error, serde::Serialize, utoipa::ToSchema, doxa::ApiError)]
+/// enum E { #[error("gone")] #[api(status = 404, code = "missing")] NotFound(String) }
+/// ```
+#[proc_macro_attribute]
+pub fn faults(args: TokenStream, item: TokenStream) -> TokenStream {
+    faults::attribute(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Register failure classes any `#[doxa::faults]` enum can name, and the source error they
+/// convert from: `fault_set! { pub StoreFaults from ::sqlx::Error { conflict: Conflict = 409 "conflict" } }`,
+/// at the crate root.
+///
+/// The set is an enum you convert the source into; `#[faults(StoreFaults)]` then writes
+/// `From<StoreFaults>` and `From<sqlx::Error>` (server only, and not with `wire`).
+#[proc_macro]
+pub fn fault_set(input: TokenStream) -> TokenStream {
+    faults::fault_set(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// One step of `#[faults]` reading its sets.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __faults_chain(input: TokenStream) -> TokenStream {
+    faults::chain_step(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

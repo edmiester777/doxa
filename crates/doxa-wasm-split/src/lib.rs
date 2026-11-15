@@ -67,8 +67,8 @@ pub struct OutputModules {
 /// All IDs here correspond to *this* module - not the parent main module
 pub struct SplitModule {
     pub module_name: String,
-    pub hash_id: Option<String>,
-    pub component_name: Option<String>,
+    /// `(hash, function)` of each split point it serves; none for main and the chunks.
+    pub split_points: Vec<(String, String)>,
     pub bytes: Vec<u8>,
     pub relies_on_chunks: HashSet<usize>,
 }
@@ -106,7 +106,7 @@ impl<'a> Splitter<'a> {
         Ok(module)
     }
 
-    /// Split the module at its split points into main, a module per split point, and shared chunks.
+    /// Split the module at its split points into main, a module per module name, and shared chunks.
     /// Zeroed data segments are only removed by wasm-opt's memory packing.
     pub fn emit(self) -> Result<OutputModules> {
         tracing::info!("Emitting split modules.");
@@ -130,9 +130,10 @@ impl<'a> Splitter<'a> {
             .into_par_iter()
             .map(|idx| self.emit_split_chunk(&src, &slots, idx))
             .collect::<Result<Vec<SplitModule>>>()?;
-        let modules = (0..self.split_points.len())
+        let modules = self
+            .groups()
             .into_par_iter()
-            .map(|idx| self.emit_split_module(&src, &slots, idx))
+            .map(|group| self.emit_split_module(&src, &slots, &group))
             .collect::<Result<Vec<SplitModule>>>()?;
 
         let main = self.emit_main_module()?;
@@ -175,42 +176,57 @@ impl<'a> Splitter<'a> {
 
         Ok(SplitModule {
             module_name: "main".to_string(),
-            component_name: None,
             bytes: out.emit_wasm(),
             relies_on_chunks: Default::default(),
-            hash_id: None,
+            split_points: Vec::new(),
         })
     }
 
-    /// Write the contents of the split modules to the output
+    /// Split points sharing a module name, which load as one module, in order of first appearance.
+    fn groups(&self) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (idx, split) in self.split_points.iter().enumerate() {
+            match groups
+                .iter_mut()
+                .find(|g| self.split_points[g[0]].module_name == split.module_name)
+            {
+                Some(group) => group.push(idx),
+                None => groups.push(vec![idx]),
+            }
+        }
+        groups
+    }
+
+    /// Everything a group's split points reach.
+    fn group_reach(&self, group: &[usize]) -> HashSet<Node> {
+        group
+            .iter()
+            .flat_map(|&i| self.split_points[i].reachable_graph.iter().copied())
+            .collect()
+    }
+
+    /// One module serving every split point in `group`.
     fn emit_split_module(
         &self,
         src: &emit::Source,
         slots: &HashMap<FunctionId, u32>,
-        split_idx: usize,
+        group: &[usize],
     ) -> Result<SplitModule> {
-        let split = &self.split_points[split_idx];
+        let split = &self.split_points[group[0]];
+        let reach = self.group_reach(group);
 
         // These are the symbols that will only exist in this module and not in the main module.
-        let mut unique_symbols = split
-            .reachable_graph
+        let mut unique_symbols = reach
             .difference(&self.main_graph)
             .cloned()
             .collect::<HashSet<_>>();
 
         // The functions we'll need to import
-        let mut symbols_to_import: HashSet<_> = split
-            .reachable_graph
-            .intersection(&self.main_graph)
-            .cloned()
-            .collect();
+        let mut symbols_to_import: HashSet<_> =
+            reach.intersection(&self.main_graph).cloned().collect();
 
         // Identify the functions we'll delete
-        let symbols_to_delete: HashSet<_> = self
-            .main_graph
-            .difference(&split.reachable_graph)
-            .cloned()
-            .collect();
+        let symbols_to_delete: HashSet<_> = self.main_graph.difference(&reach).cloned().collect();
 
         // Convert split chunk functions to imports
         let mut relies_on_chunks = HashSet::new();
@@ -229,17 +245,23 @@ impl<'a> Splitter<'a> {
         }
 
         tracing::info!(
-            "Emitting module {}/{} {}: {:?}",
-            split_idx,
-            self.split_points.len(),
+            "Emitting module {} ({} split points): {:?}",
             split.module_name,
+            group.len(),
             relies_on_chunks
         );
 
-        let slot = src.slots_start + split.index as u32;
+        let points: Vec<&SplitPoint> = group.iter().map(|&i| &self.split_points[i]).collect();
+        let exports = points
+            .iter()
+            .map(|p| {
+                let slot = src.slots_start + p.index as u32;
+                (p.export_name.as_str(), p.export_func, slot)
+            })
+            .collect();
         let plan = self.plan(
             &split.module_name,
-            Some((&split.export_name, split.export_func, slot)),
+            exports,
             [&unique_symbols, &symbols_to_import, &symbols_to_delete],
             slots,
         );
@@ -247,9 +269,11 @@ impl<'a> Splitter<'a> {
         Ok(SplitModule {
             bytes: src.emit(&plan, |i| self.func_name(i))?,
             module_name: split.module_name.clone(),
-            component_name: Some(split.component_name.clone()),
             relies_on_chunks,
-            hash_id: Some(split.hash_name.clone()),
+            split_points: points
+                .iter()
+                .map(|p| (p.hash_name.clone(), p.component_name.clone()))
+                .collect(),
         })
     }
 
@@ -278,7 +302,7 @@ impl<'a> Splitter<'a> {
 
         let mut plan = self.plan(
             "split chunk",
-            None,
+            Vec::new(),
             [unique_symbols, &symbols_to_import, &symbols_to_delete],
             slots,
         );
@@ -293,9 +317,8 @@ impl<'a> Splitter<'a> {
         Ok(SplitModule {
             bytes: src.emit(&plan, |i| self.func_name(i))?,
             module_name: "split".to_string(),
-            component_name: None,
             relies_on_chunks: Default::default(),
-            hash_id: None,
+            split_points: Vec::new(),
         })
     }
 
@@ -323,7 +346,7 @@ impl<'a> Splitter<'a> {
     fn plan<'p>(
         &self,
         label: &'p str,
-        export: Option<(&'p str, FunctionId, u32)>,
+        exports: Vec<(&'p str, FunctionId, u32)>,
         [unique, import, delete]: [&HashSet<Node>; 3],
         slots: &HashMap<FunctionId, u32>,
     ) -> emit::Plan<'p> {
@@ -355,7 +378,10 @@ impl<'a> Splitter<'a> {
         data.sort_unstable();
         emit::Plan {
             label,
-            export: export.map(|(name, func, slot)| (name, idx(&func), slot)),
+            exports: exports
+                .into_iter()
+                .map(|(name, func, slot)| (name, idx(&func), slot))
+                .collect(),
             table_funcs: funcs(unique),
             placed: Vec::new(),
             stubs,
@@ -605,11 +631,11 @@ impl<'a> Splitter<'a> {
         }
     }
 
-    /// One chunk of what several splits reach outside main, so each static is initialized once.
+    /// One chunk of what several modules reach outside main, so each static is initialized once.
     fn build_split_chunks(&mut self) {
         let mut users: HashMap<Node, usize> = HashMap::new();
-        for split in &self.split_points {
-            for item in split.reachable_graph.difference(&self.main_graph) {
+        for group in self.groups() {
+            for item in self.group_reach(&group).difference(&self.main_graph) {
                 *users.entry(*item).or_default() += 1;
             }
         }

@@ -11,7 +11,7 @@ keywords = ["axum", "openapi", "auth", "cedar", "doxa"]
 categories = ["web-programming::http-server", "authentication"]
 
 [features]
-default = ["docs", "macros", "docs-scalar", "policy-catalog", "auth-catalog"]
+default = ["docs", "macros", "docs-scalar", "trace", "policy-catalog", "auth-catalog"]
 
 # OpenAPI documentation, Scalar UI hosting, and the core doxa-docs
 # surface (ApiDocBuilder, MountDocsExt, ProblemDetails, etc.).
@@ -19,6 +19,9 @@ docs = ["dep:doxa-docs", "dep:axum"]
 
 # Forward Scalar UI feature to doxa-docs.
 docs-scalar = ["docs", "doxa-docs/docs-scalar"]
+
+# Every mounted route runs under a `route` span: handler, route, tenant, path parameters.
+trace = ["docs", "doxa-docs/trace"]
 
 # `doxa::Cors`, for a server a doxa client reaches cross-origin.
 cors = ["docs", "doxa-docs/cors"]
@@ -76,6 +79,9 @@ auth-catalog = ["doxa-auth?/catalog"]
 # into the policy layer, so it stays opt-in even under `full`'s siblings.
 policy-sea-orm = ["policy", "macros", "doxa-policy/sea-orm", "doxa-docs/macros-sea-orm"]
 
+# `doxa::Paged`: `query.page(&db, &input)` answers a SeaORM query as a `doxa::Page`.
+sea-orm = ["dep:sea-orm"]
+
 # Compile the built SPA into the binary via `dist!()`; needs `DOXA_DIST`,
 # which `doxa build` sets. Not part of `full`.
 embed = ["docs", "doxa-docs/embed"]
@@ -100,7 +106,7 @@ gallery = ["ui", "doxa-ui/gallery"]
 tailwind = ["ui", "dep:doxa-tailwind"]
 
 # Everything.
-full = ["docs", "docs-scalar", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm", "client", "ui", "react"]
+full = ["docs", "docs-scalar", "trace", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm", "sea-orm", "client", "ui", "react"]
 
 [dependencies]
 doxa-wire = { workspace = true }
@@ -120,6 +126,7 @@ doxa-audit = { workspace = true, optional = true }
 doxa-auth = { workspace = true, optional = true, default-features = false }
 doxa-policy = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
+sea-orm = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }
@@ -143,6 +150,8 @@ serde_valid = { workspace = true }
 sha2 = { workspace = true }
 serde_urlencoded = "0.7"
 http-body-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 
 [[example]]
 name = "full_test"
@@ -205,6 +214,10 @@ name = "granted"
 required-features = ["full"]
 
 [[test]]
+name = "tenant"
+required-features = ["full"]
+
+[[test]]
 name = "granted_routes"
 required-features = ["full"]
 
@@ -247,3 +260,7 @@ required-features = ["client-router", "garde"]
 [[test]]
 name = "touches"
 required-features = ["client"]
+
+[[test]]
+name = "page"
+required-features = ["sea-orm"]

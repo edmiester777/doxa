@@ -21,6 +21,12 @@ use crate::granted::{caller_and_checker, Denial, FromAuthExtensions};
     responses((status = 200, description = "The names of the capabilities the caller holds", body = Vec<String>))
 )]
 async fn capabilities(parts: Parts) -> Result<Json<Vec<&'static str>>, Denial> {
+    // Every check would be refused; the shell still renders.
+    if CapabilityContext::from_extensions(&parts.extensions)
+        .is_some_and(|c| crate::context::unscoped(c.tenant(), &parts.extensions))
+    {
+        return Ok(Json(Vec::new()));
+    }
     let (ctx, checker) = caller_and_checker::<CapabilityContext>(&parts.extensions)?;
     let tenant = ctx.tenant().unwrap_or("");
     let caps = doxa_policy::capabilities();

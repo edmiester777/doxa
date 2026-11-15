@@ -39,11 +39,6 @@ pub trait FromAuthExtensions: Clone + Send + Sync + 'static {
 
     /// Roles asserted for the caller.
     fn roles(&self) -> &[String];
-
-    /// Whether the caller is unrestricted; [`Scoping::scope`] reads it, never asking the checker.
-    fn is_admin(&self) -> bool {
-        false
-    }
 }
 
 impl FromAuthExtensions for CapabilityContext {
@@ -75,11 +70,6 @@ where
 
     fn roles(&self) -> &[String] {
         self.claims.roles()
-    }
-
-    /// The flag `AuthLayer` set from the token's roles.
-    fn is_admin(&self) -> bool {
-        self.is_admin
     }
 }
 
@@ -986,7 +976,7 @@ impl<R: Scoping, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Chain for 
 
         gate::<A>(ctx, checker).await?;
 
-        let scope = subset::<R>(action, ctx)?;
+        let scope = subset::<R>(action, ctx, checker)?;
 
         // The id a refused listing names too.
         Ok(Authorized {
@@ -1115,6 +1105,11 @@ impl<T: Subject> Granted<T> {
     pub fn caller(&self) -> &T::Ctx {
         &self.0
     }
+
+    /// The caller's tenant, as [`Claims::scope`] gave it; `""` only for a tenantless admin.
+    pub fn tenant(&self) -> &str {
+        self.0.tenant().unwrap_or_default()
+    }
 }
 
 /// Reads through to the authorized subject, so `widget.name` and span fields borrow it.
@@ -1194,11 +1189,18 @@ async fn authorize_as<T: Chain>(
     }
 }
 
-/// The caller and checker [`AuthLayer`](crate::AuthLayer) put in extensions.
+/// The caller and checker [`AuthLayer`](crate::AuthLayer) put in extensions; an
+/// [`Admin`](crate::Admin) is checked against [`Unrestricted`](doxa_policy::Unrestricted).
 pub(crate) fn caller_and_checker<C: FromAuthExtensions>(
     extensions: &Extensions,
 ) -> Result<(C, Arc<dyn CapabilityChecker>), Denial> {
     let ctx = C::from_extensions(extensions).ok_or(Denial::Auth(AuthError::MissingCredentials))?;
+    if extensions.get::<crate::Admin>().is_some() {
+        return Ok((ctx, Arc::new(doxa_policy::Unrestricted)));
+    }
+    if crate::context::unscoped(ctx.tenant(), extensions) {
+        return Err(Denial::Auth(AuthError::Forbidden));
+    }
 
     let checker = extensions
         .get::<Arc<dyn CapabilityChecker>>()
@@ -1520,9 +1522,9 @@ fn dependency_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
 ) -> Result<(R::Ctx, R::Filter), Denial> {
     let () = Gated::<R, A>::PROOF;
     // Recovered only so a route with no `AuthLayer` fails as every other door does.
-    let (ctx, _) = caller_and_checker::<R::Ctx>(extensions)?;
+    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
 
-    let reached = subset::<R>(A::ACTION, &ctx).map(|filter| (A::ROW, filter));
+    let reached = subset::<R>(A::ACTION, &ctx, checker.as_ref()).map(|filter| (A::ROW, filter));
 
     let filter = record_scope::<R>(reached, A::ACTION, &ctx, extensions)?;
     Ok((ctx, filter))
@@ -1535,7 +1537,9 @@ async fn gated_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
     let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
 
     let reached = match gate::<A>(&ctx, checker.as_ref()).await {
-        Ok(declared) => subset::<R>(A::ACTION, &ctx).map(|filter| (declared, filter)),
+        Ok(declared) => {
+            subset::<R>(A::ACTION, &ctx, checker.as_ref()).map(|filter| (declared, filter))
+        }
         Err(denial) => Err(denial),
     };
 
@@ -1544,9 +1548,13 @@ async fn gated_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
 }
 
 /// The caller's scope, or the asset's answer for nothing granted. Records nothing.
-fn subset<R: Scoping>(action: &'static str, ctx: &R::Ctx) -> Result<R::Filter, Denial> {
+fn subset<R: Scoping>(
+    action: &'static str,
+    ctx: &R::Ctx,
+    checker: &dyn CapabilityChecker,
+) -> Result<R::Filter, Denial> {
     // The checker decides reach, never rows, so the admin seat is applied here.
-    if ctx.is_admin() {
+    if checker.unrestricted() {
         if let Some(everything) = R::unscoped() {
             return Ok(everything);
         }
