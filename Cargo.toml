@@ -42,7 +42,7 @@ license = "Apache-2.0"
 authors = ["edmiester777"]
 repository = "https://github.com/edmiester777/doxa"
 homepage = "https://github.com/edmiester777/doxa"
-rust-version = "1.88"
+rust-version = "1.94"
 
 [workspace.dependencies]
 # Internal crates
