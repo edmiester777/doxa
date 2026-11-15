@@ -320,6 +320,72 @@ async fn a_renamed_key_still_queries_its_own_column() {
     assert!(sql.contains("acme"), "{sql}");
 }
 
+mod shared {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, PolicyResource)]
+    #[sea_orm(table_name = "rules")]
+    #[resource(entity_type = "Rule")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        #[resource(id, key)]
+        pub name: String,
+
+        #[resource(scope, shared = listed)]
+        pub tenant_id: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[test]
+fn a_listed_shared_owner_reaches_the_tenant_s_rows_and_everyone_s() {
+    let sql = shared::Model::scoped("acme")
+        .build(DatabaseBackend::Postgres)
+        .to_string();
+
+    assert!(
+        sql.contains(r#""rules"."tenant_id" = 'acme' OR "rules"."tenant_id" IS NULL"#),
+        "{sql}"
+    );
+}
+
+#[tokio::test]
+async fn a_listed_shared_owner_loads_by_key_and_by_id_the_same_way() {
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_results([Vec::<shared::Model>::new(), Vec::new()])
+        .into_connection();
+
+    shared::Model::load_scoped("limits".to_owned(), &db, "acme")
+        .await
+        .expect("query runs");
+    shared::Model::load_by_id("limits".to_owned(), &db, "acme")
+        .await
+        .expect("query runs");
+
+    for statement in db.into_transaction_log() {
+        let sql = format!("{statement:?}");
+        assert!(sql.contains("IS NULL"), "{sql}");
+    }
+}
+
+#[test]
+fn a_shared_row_belongs_to_every_tenant_and_an_owned_one_to_its_owner() {
+    let rule = shared::Model {
+        name: "limits".to_owned(),
+        tenant_id: None,
+    };
+    assert_eq!(rule.owned_by("acme"), Some(true));
+    let owned = shared::Model {
+        tenant_id: Some("globex".to_owned()),
+        ..rule
+    };
+    assert_eq!(owned.owned_by("acme"), Some(false));
+}
+
 /// Reached by uuid but named by its name, so `Connection::"primary"` covers both routes.
 #[test]
 fn the_key_need_not_be_the_id() {

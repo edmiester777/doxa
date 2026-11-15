@@ -96,12 +96,6 @@ pub trait Capable: Send + Sync + 'static {
 /// being generic over the extension.
 #[async_trait::async_trait]
 pub trait CapabilityChecker: Send + Sync {
-    /// Whether this checker allows every check. Informational: a caller's reach comes from the
-    /// app's admin markers, never from the checker.
-    fn unrestricted(&self) -> bool {
-        false
-    }
-
     /// Evaluate `cap` against the given tenant + roles and return
     /// `Ok(true)` if every underlying [`CapabilityCheck`] is allowed.
     async fn check(
@@ -160,10 +154,6 @@ pub struct Unrestricted;
 
 #[async_trait::async_trait]
 impl CapabilityChecker for Unrestricted {
-    fn unrestricted(&self) -> bool {
-        true
-    }
-
     async fn check(&self, _: &str, _: &[String], _: &Capability) -> Result<bool, crate::AuthError> {
         Ok(true)
     }
@@ -212,7 +202,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn a_tenant_checker_allows_every_check_without_claiming_everything() {
+    async fn a_tenant_checker_allows_every_check() {
         let checker = TenantUnrestricted;
         let entity = crate::ResourceEntity::new("Widget", "w");
 
@@ -221,8 +211,6 @@ mod tests {
             .check_instance("acme", &[], "delete", &entity)
             .await
             .unwrap());
-        assert!(!checker.unrestricted());
-        assert!(Unrestricted.unrestricted());
     }
 }
 

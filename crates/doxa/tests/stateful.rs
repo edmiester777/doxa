@@ -117,6 +117,10 @@ impl Scoping for Document {
         Ok("tenant = acme")
     }
 
+    fn confine(rows: &'static str, _tenant: &str, _ctx: &CapabilityContext) -> &'static str {
+        rows
+    }
+
     fn narrow(
         _action: &str,
         rows: &'static str,

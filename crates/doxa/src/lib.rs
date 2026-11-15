@@ -172,6 +172,7 @@ pub mod mirror_diagnostics {}
 /// #     type Filter = ();
 /// #     const FROM_POLICY: bool = false;
 /// #     fn owned(_: &str, _: &CapabilityContext) -> Result<(), AuthError> { Ok(()) }
+/// #     fn confine(_: (), _: &str, _: &CapabilityContext) {}
 /// #     fn narrow(_: &str, r: (), _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(r)) }
 /// # }
 /// #[get("/notes", mount = false)]
@@ -203,6 +204,7 @@ pub mod mirror_diagnostics {}
 /// #     type Filter = ();
 /// #     const FROM_POLICY: bool = false;
 /// #     fn owned(_: &str, _: &CapabilityContext) -> Result<(), AuthError> { Ok(()) }
+/// #     fn confine(_: (), _: &str, _: &CapabilityContext) {}
 /// #     fn narrow(_: &str, r: (), _: &CapabilityContext) -> Result<Option<()>, AuthError> { Ok(Some(r)) }
 /// # }
 /// #[get("/notes", mount = false)]

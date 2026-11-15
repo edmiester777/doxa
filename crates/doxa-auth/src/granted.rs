@@ -746,9 +746,8 @@ pub trait Scoping: Granting {
     fn owned(tenant: &str, ctx: &Self::Ctx) -> Result<Self::Filter, AuthError>;
 
     /// The asset's own confinement on top of [`owned`](Self::owned); skipped for a super admin.
-    fn confine(rows: Self::Filter, _tenant: &str, _ctx: &Self::Ctx) -> Self::Filter {
-        rows
-    }
+    /// Required, so a listing can't miss the rule [`admits`](Granting::admits) applies to rows.
+    fn confine(rows: Self::Filter, tenant: &str, ctx: &Self::Ctx) -> Self::Filter;
 
     /// The policy's subset of `rows` for `action`; `Ok(None)` if nothing was granted. Never asked
     /// for an admin. Ignoring `action` grants listing and bulk-deleting alike.
@@ -1868,10 +1867,16 @@ async fn decide_all<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     }
 
     let tenant = ctx.tenant().unwrap_or("");
-    let entities: Vec<ResourceEntity> = resources
+    let mut entities: Vec<ResourceEntity> = resources
         .iter()
         .map(|resource| ResourceEntity::of(resource, tenant))
         .collect();
+
+    // The policy is asked only about the rows before the first one outside confinement.
+    let outside = resources
+        .iter()
+        .position(|resource| !confined::<R>(resource, &ctx, reach));
+    let foreign = outside.map(|at| entities.split_off(at).swap_remove(0));
 
     let allowed = match checker
         .check_instance_many(tenant, ctx.roles(), action, &entities)
@@ -1890,15 +1895,12 @@ async fn decide_all<R: Granting, A: DeclaredAction<Table = R::Actions>>(
         ))));
     }
 
-    for ((resource, entity), allowed) in resources.iter().zip(entities).zip(allowed) {
-        // Confinement first, so a row both foreign and denied says so the same way on every door.
-        let refused = if !confined::<R>(resource, &ctx, reach) {
-            Some(OUTSIDE)
-        } else if !allowed {
-            Some("instance denied")
-        } else {
-            None
-        };
+    let refusals = entities
+        .into_iter()
+        .zip(allowed)
+        .map(|(entity, allowed)| (entity, (!allowed).then_some("instance denied")))
+        .chain(foreign.map(|entity| (entity, Some(OUTSIDE))));
+    for (entity, refused) in refusals {
         if let Some(reason) = refused {
             let denial = Denial::Denied {
                 action: Cow::Borrowed(action),

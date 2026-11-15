@@ -83,6 +83,8 @@ impl Scoping for Widget {
         Ok(())
     }
 
+    fn confine(_rows: (), _tenant: &str, _ctx: &CapabilityContext) {}
+
     fn narrow(_action: &str, rows: (), _ctx: &CapabilityContext) -> Result<Option<()>, AuthError> {
         Ok(Some(rows))
     }

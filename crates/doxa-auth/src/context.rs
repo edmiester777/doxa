@@ -36,8 +36,8 @@ pub struct CapabilityContext {
     pub roles: Vec<String>,
 }
 
-/// Marks the caller unrestricted: every guard allows, any tenant or none, and listings use
-/// `Scoping::unscoped`. doxa never sets it; the app's own layer, inside `AuthLayer`, inserts it.
+/// Every guard allows it, any tenant or none; loaders stay tenant-confined and listings widen
+/// only through `Scoping::unscoped`. Set by the app's layer inside `AuthLayer`.
 ///
 /// ```ignore
 /// async fn admins(mut req: Request, next: Next) -> Response {

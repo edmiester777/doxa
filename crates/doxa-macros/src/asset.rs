@@ -291,13 +291,18 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             }
         }
     });
-    let confine = args.confine.as_ref().map(|rule| {
-        quote! {
+    let confine = match &args.confine {
+        Some(rule) => quote! {
             fn confine(rows: Self::Filter, tenant: &str, ctx: &Self::Ctx) -> Self::Filter {
                 <#rule as ::doxa::auth::ListRule<Self::Filter, Self::Ctx>>::confine(rows, tenant, ctx)
             }
-        }
-    });
+        },
+        None => quote! {
+            fn confine(rows: Self::Filter, _tenant: &str, _ctx: &Self::Ctx) -> Self::Filter {
+                rows
+            }
+        },
+    };
 
     // Tenant-confined listing only; an asset needing the policy's residual writes `Scoping` itself.
     let scoping = match &args.list {
@@ -988,7 +993,11 @@ mod tests {
         );
         assert!(out.contains(":: subset (tenant)"), "{out}");
         assert!(out.contains("fn narrow"), "{out}");
-        assert!(!out.contains("fn confine"), "no rule, no override: {out}");
+        assert!(out.contains("fn confine"), "{out}");
+        assert!(
+            !out.contains("ListRule"),
+            "no rule, rows pass through: {out}"
+        );
     }
 
     #[test]

@@ -150,7 +150,7 @@ impl AuditEventBuilder {
         });
     }
 
-    /// The admin tier that let the caller skip the policy, sent as `actor_attrs.via`. Kept apart
+    /// The admin tier that let the caller skip the policy, sent as `actor_attrs.doxa_via`. Kept apart
     /// from [`set_actor`](Self::set_actor), so a later call there can't drop it.
     pub fn set_via(&self, via: &'static str) {
         self.with_inner(|inner| inner.via = Some(via));
@@ -491,15 +491,18 @@ fn fold_decision(inner: &mut BuilderInner) {
     }
 }
 
+/// The `actor_attrs` key the admin tier lands under; doxa's own, so it never meets an app's key.
+const VIA_KEY: &str = "doxa_via";
+
 /// `via` into the actor's attributes, whose shape is the app's: a non-object is kept under `attrs`.
 fn fold_via(attrs: &mut serde_json::Value, via: &'static str) {
-    match attrs {
-        serde_json::Value::Object(map) => {
-            map.insert("via".to_owned(), via.into());
-        }
-        serde_json::Value::Null => *attrs = serde_json::json!({ "via": via }),
-        other => *other = serde_json::json!({ "attrs": other.take(), "via": via }),
-    }
+    let mut map = match attrs.take() {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => serde_json::Map::from_iter([("attrs".to_owned(), other)]),
+    };
+    map.insert(VIA_KEY.to_owned(), via.into());
+    *attrs = serde_json::Value::Object(map);
 }
 
 #[cfg(test)]
@@ -512,15 +515,15 @@ mod tests {
         for (attrs, expected) in [
             (
                 serde_json::Value::Null,
-                serde_json::json!({ "via": "tenant_admin" }),
+                serde_json::json!({ "doxa_via": "tenant_admin" }),
             ),
             (
-                serde_json::json!({ "dept": "ops" }),
-                serde_json::json!({ "dept": "ops", "via": "tenant_admin" }),
+                serde_json::json!({ "dept": "ops", "via": "sso" }),
+                serde_json::json!({ "dept": "ops", "via": "sso", "doxa_via": "tenant_admin" }),
             ),
             (
                 serde_json::json!("opaque"),
-                serde_json::json!({ "attrs": "opaque", "via": "tenant_admin" }),
+                serde_json::json!({ "attrs": "opaque", "doxa_via": "tenant_admin" }),
             ),
         ] {
             let (builder, mut rx) = builder();

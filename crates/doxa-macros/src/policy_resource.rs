@@ -18,8 +18,10 @@ enum Role {
     /// A column of the named lookup `#[resource(key(Name))]`; several fields compose one key.
     NamedKey(Ident),
     Scope,
-    /// A `NULL` owner means every tenant owns the row, not none.
-    Shared,
+    /// A `NULL` owner means every tenant owns the row; `listed` also loads and lists it for each.
+    Shared {
+        listed: bool,
+    },
 }
 
 /// The columns one named lookup matches, in declaration order.
@@ -65,7 +67,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let mut key: Option<(Ident, Type, String)> = None;
     let mut named: Vec<NamedLookup> = Vec::new();
     let mut scope: Option<(Ident, Type)> = None;
-    let mut shared: Option<Ident> = None;
+    let mut shared: Option<(Ident, bool)> = None;
     // The identifier columns for `key = pk`, from SeaORM's own `primary_key` marker.
     let mut primary_key: Vec<(Ident, Type)> = Vec::new();
 
@@ -126,12 +128,13 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                     }
                     scope = Some((name.clone(), field.ty.clone()));
                 }
-                Role::Shared => shared = Some(name.clone()),
+                Role::Shared { listed } => shared = Some((name.clone(), listed)),
             }
         }
     }
 
-    let owned_by = owned_by_impl(scope.as_ref(), shared.as_ref())?;
+    let owned_by = owned_by_impl(scope.as_ref(), shared.as_ref().map(|(name, _)| name))?;
+    let shared_listed = shared.is_some_and(|(_, listed)| listed);
     let scope = scope.map(|(name, _)| name);
 
     let id_body = match (&container.id_with, &id_field) {
@@ -191,7 +194,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         key.as_ref(),
         &primary_key,
         &named,
-        scope.as_ref(),
+        scope.as_ref().map(|scope| (scope, shared_listed)),
         &container.filters,
         &attrs,
     )?;
@@ -263,7 +266,7 @@ fn owned_by_impl(scope: Option<&(Ident, Type)>, shared: Option<&Ident>) -> Resul
         let missing = if shared.is_some() {
             quote!(::std::option::Option::Some(true))
         } else {
-            quote!(::std::option::Option::Some(false))
+            quote!(::std::option::Option::None)
         };
         quote! {
             match &self.#field {
@@ -306,11 +309,12 @@ fn scoped_impl(
     key: Option<&(Ident, Type, String)>,
     primary_key: &[(Ident, Type)],
     named: &[NamedLookup],
-    scope: Option<&Ident>,
+    // The scope column, and whether its `NULL` rows load and list for every tenant.
+    scope: Option<(&Ident, bool)>,
     filters: &[Expr],
     attrs: &[(String, Ident)],
 ) -> Result<TokenStream> {
-    let scope = match scope {
+    let (scope, shared_listed) = match scope {
         Some(scope) => scope,
         None => {
             // Each needs the owning column; each gets its own message.
@@ -448,6 +452,19 @@ fn scoped_impl(
         }
     });
 
+    let scope_condition = shared_listed.then(|| {
+        quote! {
+            fn scope_condition(
+                __scope: impl ::std::convert::Into<::doxa::policy::__private::sea_orm::Value>,
+            ) -> ::doxa::policy::__private::sea_orm::Condition {
+                use ::doxa::policy::__private::sea_orm::ColumnTrait as _;
+                ::doxa::policy::__private::sea_orm::Condition::any()
+                    .add(Column::#scope_column.eq(__scope))
+                    .add(Column::#scope_column.is_null())
+            }
+        }
+    });
+
     Ok(quote! {
         #[automatically_derived]
         impl ::doxa::policy::ScopedTable for #ident {
@@ -469,6 +486,8 @@ fn scoped_impl(
             }
 
             #table_condition
+
+            #scope_condition
         }
 
         #row
@@ -621,7 +640,8 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
     })
 }
 
-/// One field's `#[resource(id | attr [= "key"] | parent = "…" | key … | scope | shared)]` roles.
+/// One field's `#[resource(id | attr [= "key"] | parent = "…" | key … | scope | shared [= listed])]`
+/// roles.
 fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
     let mut roles = Vec::new();
     let default_key = field
@@ -685,12 +705,25 @@ fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
                 roles.push(Role::Scope);
                 Ok(())
             } else if meta.path.is_ident("shared") {
-                roles.push(Role::Shared);
+                let listed = match meta.value() {
+                    Ok(value) => {
+                        let mode = value.parse::<Ident>()?;
+                        if mode != "listed" {
+                            return Err(syn::Error::new(
+                                mode.span(),
+                                "expected `shared` or `shared = listed`",
+                            ));
+                        }
+                        true
+                    }
+                    Err(_) => false,
+                };
+                roles.push(Role::Shared { listed });
                 Ok(())
             } else {
                 Err(meta.error(
                     "expected `id`, `attr`, `parent = \"EntityType\"`, `key`, `key = \"segment\"`, \
-                     `key(Lookup, …)`, `scope` or `shared`",
+                     `key(Lookup, …)`, `scope`, `shared` or `shared = listed`",
                 ))
             }
         })?;
@@ -1313,10 +1346,11 @@ mod tests {
         );
     }
 
-    /// Fail closed: a row with no owner is no tenant's, unless `shared` says it is every tenant's.
+    /// A row with no owner records none, which leaves it to the policy, unless `shared` says it
+    /// is every tenant's.
     #[cfg(feature = "sea-orm")]
     #[test]
-    fn a_null_owner_is_no_one_s_unless_shared() {
+    fn a_null_owner_records_none_unless_shared() {
         let owned = expand_ok(quote! {
             #[resource(entity_type = "Rule")]
             struct Model {
@@ -1328,10 +1362,11 @@ mod tests {
         });
         assert!(
             owned.contains(
-                ":: std :: option :: Option :: None => :: std :: option :: Option :: Some (false)"
+                ":: std :: option :: Option :: None => :: std :: option :: Option :: None"
             ),
             "{owned}",
         );
+        assert!(!owned.contains("fn scope_condition"), "{owned}");
 
         let shared = expand_ok(quote! {
             #[resource(entity_type = "Rule")]
@@ -1348,6 +1383,47 @@ mod tests {
             ),
             "{shared}",
         );
+        assert!(
+            !shared.contains("fn scope_condition"),
+            "only `listed` widens the loaders: {shared}"
+        );
+    }
+
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn shared_listed_loads_and_lists_a_null_owner_for_every_tenant() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Rule")]
+            struct Model {
+                #[resource(id)]
+                name: String,
+                #[resource(scope, shared = listed)]
+                tenant_id: Option<String>,
+            }
+        });
+        assert!(out.contains("fn scope_condition"), "{out}");
+        assert!(out.contains("Condition :: any ()"), "{out}");
+        assert!(out.contains("Column :: TenantId . is_null ()"), "{out}");
+        assert!(
+            out.contains(
+                ":: std :: option :: Option :: None => :: std :: option :: Option :: Some (true)"
+            ),
+            "{out}",
+        );
+    }
+
+    #[test]
+    fn shared_takes_only_listed() {
+        let message = expand_err(quote! {
+            #[resource(entity_type = "Rule")]
+            struct Model {
+                #[resource(id)]
+                name: String,
+                #[resource(scope, shared = everywhere)]
+                tenant_id: Option<String>,
+            }
+        });
+        assert!(message.contains("`shared = listed`"), "{message}");
     }
 
     #[test]

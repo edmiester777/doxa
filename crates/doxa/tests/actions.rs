@@ -91,6 +91,10 @@ impl Scoping for Source {
         Ok("tenant = acme")
     }
 
+    fn confine(rows: &'static str, _tenant: &str, _ctx: &CapabilityContext) -> &'static str {
+        rows
+    }
+
     fn narrow(
         action: &str,
         rows: &'static str,

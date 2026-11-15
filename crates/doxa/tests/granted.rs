@@ -103,6 +103,10 @@ impl Scoping for Widget {
         Ok(Filter("tenant = acme"))
     }
 
+    fn confine(rows: Filter, _tenant: &str, _ctx: &CapabilityContext) -> Filter {
+        rows
+    }
+
     /// Keys off a role, so a test can clear the coarse gate with no scope.
     fn narrow(
         action: &str,
@@ -158,6 +162,10 @@ impl Scoping for Gadget {
 
     fn owned(_tenant: &str, _ctx: &CapabilityContext) -> Result<Filter, AuthError> {
         Ok(Filter("tenant = acme"))
+    }
+
+    fn confine(rows: Filter, _tenant: &str, _ctx: &CapabilityContext) -> Filter {
+        rows
     }
 
     /// Grants nothing, ever — which `empty_scope` below then turns into
@@ -523,6 +531,10 @@ impl Scoping for Ledger {
         Ok("tenant")
     }
 
+    fn confine(rows: &'static str, _tenant: &str, _ctx: &Self::Ctx) -> &'static str {
+        rows
+    }
+
     fn narrow(
         _action: &str,
         _rows: &'static str,
@@ -649,7 +661,7 @@ async fn a_tenant_admin_holds_every_capability_in_its_tenant() {
     assert_eq!(grant.tenant(), "acme");
     assert_eq!(
         emitted(&parts, &mut rx).actor_attrs,
-        json!({ "via": "tenant_admin" }),
+        json!({ "doxa_via": "tenant_admin" }),
         "the trail says who skipped the policy",
     );
 }
@@ -692,7 +704,7 @@ async fn a_tenant_admin_is_refused_a_row_that_records_no_owner() {
     assert_eq!(refused.into_response().status(), StatusCode::NOT_FOUND);
     let event = rx.try_recv().expect("the refusal is recorded");
     assert_eq!(event.error_message.as_deref(), Some("outside confinement"));
-    assert_eq!(event.actor_attrs, json!({ "via": "tenant_admin" }));
+    assert_eq!(event.actor_attrs, json!({ "doxa_via": "tenant_admin" }));
 }
 
 /// The loaded-row door refuses the same row, as a 403 since the handler already holds it.
@@ -732,7 +744,7 @@ async fn a_super_admin_reaches_a_row_the_policy_would_refuse() {
     assert_eq!(widget.region, "eu");
     assert_eq!(
         emitted(&parts, &mut rx).actor_attrs,
-        json!({ "via": "super_admin" })
+        json!({ "doxa_via": "super_admin" })
     );
 }
 

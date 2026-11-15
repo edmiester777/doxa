@@ -128,6 +128,10 @@ impl Scoping for WidgetByName {
         Ok(Model::scoped(tenant))
     }
 
+    fn confine(rows: Self::Filter, _tenant: &str, _ctx: &Self::Ctx) -> Self::Filter {
+        rows
+    }
+
     fn narrow(
         _action: &str,
         rows: Self::Filter,
