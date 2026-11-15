@@ -32,6 +32,10 @@ struct Container {
     attrs_with: Option<Ident>,
     /// Entity type this resource is `in` by virtue of the request.
     tenant_parent: Option<LitStr>,
+    /// Method answering `owned_by`, in place of the scope column.
+    owned_with: Option<Ident>,
+    /// Function answering `ScopedTable::scope_condition`.
+    scope_with: Option<syn::Path>,
     /// Conditions every query carries on top of the scope, spliced verbatim and `AND`ed.
     filters: Vec<Expr>,
 }
@@ -127,7 +131,14 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         }
     }
 
-    let owned_by = owned_by_impl(scope.as_ref());
+    let owned_by = match &container.owned_with {
+        Some(method) => quote! {
+            fn owned_by(&self, __tenant: &str) -> ::std::option::Option<bool> {
+                self.#method(__tenant)
+            }
+        },
+        None => owned_by_impl(scope.as_ref()),
+    };
     let scope = scope.map(|(name, _)| name);
 
     let id_body = match (&container.id_with, &id_field) {
@@ -188,7 +199,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         &primary_key,
         &named,
         scope.as_ref(),
-        &container.filters,
+        &container,
         &attrs,
     )?;
 
@@ -280,9 +291,11 @@ fn scoped_impl(
     primary_key: &[(Ident, Type)],
     named: &[NamedLookup],
     scope: Option<&Ident>,
-    filters: &[Expr],
+    container: &Container,
     attrs: &[(String, Ident)],
 ) -> Result<TokenStream> {
+    let filters = &container.filters;
+    let scope_with = container.scope_with.as_ref();
     let scope = match scope {
         Some(scope) => scope,
         None => {
@@ -308,6 +321,13 @@ fn scoped_impl(
                     filter,
                     "`filter` is a condition on the generated `ScopedTable`, which is what a \
                      scope column produces: mark the owning column `#[resource(scope)]`",
+                ));
+            }
+            if let Some(path) = scope_with {
+                return Err(syn::Error::new_spanned(
+                    path,
+                    "`scope_with` replaces the generated `ScopedTable`'s owner filter, which is \
+                     what a scope column produces: mark the owning column `#[resource(scope)]`",
                 ));
             }
             return Ok(quote!());
@@ -421,6 +441,16 @@ fn scoped_impl(
         }
     });
 
+    let scope_condition = scope_with.map(|path| {
+        quote! {
+            fn scope_condition(
+                __scope: impl ::std::convert::Into<::doxa::policy::__private::sea_orm::Value>,
+            ) -> ::doxa::policy::__private::sea_orm::Condition {
+                #path(__scope)
+            }
+        }
+    });
+
     Ok(quote! {
         #[automatically_derived]
         impl ::doxa::policy::ScopedTable for #ident {
@@ -442,6 +472,8 @@ fn scoped_impl(
             }
 
             #table_condition
+
+            #scope_condition
         }
 
         #row
@@ -543,6 +575,8 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
     let mut id_with = None;
     let mut attrs_with = None;
     let mut tenant_parent = None;
+    let mut owned_with = None;
+    let mut scope_with = None;
     let mut filters = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -566,13 +600,20 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
             } else if meta.path.is_ident("tenant_parent") {
                 tenant_parent = Some(meta.value()?.parse::<LitStr>()?);
                 Ok(())
+            } else if meta.path.is_ident("owned_with") {
+                owned_with = Some(meta.value()?.parse::<Ident>()?);
+                Ok(())
+            } else if meta.path.is_ident("scope_with") {
+                scope_with = Some(meta.value()?.parse::<syn::Path>()?);
+                Ok(())
             } else if meta.path.is_ident("filter") {
                 // Repeatable, and `AND`ed.
                 filters.push(meta.value()?.parse::<Expr>()?);
                 Ok(())
             } else {
                 Err(meta.error(
-                    "expected `entity_type`, `id_with`, `attrs_with`, `tenant_parent` or `filter`",
+                    "expected `entity_type`, `id_with`, `attrs_with`, `tenant_parent`, \
+                     `owned_with`, `scope_with` or `filter`",
                 ))
             }
         })?;
@@ -590,6 +631,8 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
         id_with,
         attrs_with,
         tenant_parent,
+        owned_with,
+        scope_with,
         filters,
     })
 }
@@ -1302,7 +1345,10 @@ mod tests {
             ),
             "{owned}",
         );
-        assert!(!owned.contains("fn scope_condition"), "{owned}");
+        assert!(
+            !owned.contains("fn scope_condition"),
+            "only `scope_with` widens: {owned}"
+        );
     }
 
     #[test]
@@ -1315,6 +1361,63 @@ mod tests {
             }
         });
         assert!(!out.contains("owned_by"), "{out}");
+    }
+
+    #[test]
+    fn owned_with_answers_for_a_row_with_no_scope() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Widget", owned_with = owner_of)]
+            struct Widget {
+                #[resource(id)]
+                name: String,
+            }
+        });
+        assert!(out.contains("self . owner_of (__tenant)"), "{out}");
+    }
+
+    /// A scope column that isn't the tenant: the method wins over the column.
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn owned_with_replaces_the_scope_columns_owner() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Task", owned_with = owner_of)]
+            struct Model {
+                #[resource(id)]
+                name: String,
+                #[resource(scope)]
+                project_id: String,
+            }
+        });
+        assert!(out.contains("self . owner_of (__tenant)"), "{out}");
+        assert!(!out.contains("to_string (& self . project_id)"), "{out}");
+    }
+
+    #[cfg(feature = "sea-orm")]
+    #[test]
+    fn scope_with_replaces_the_owner_filter() {
+        let out = expand_ok(quote! {
+            #[resource(entity_type = "Rule", scope_with = Self::own_or_shared)]
+            struct Model {
+                #[resource(id)]
+                name: String,
+                #[resource(scope)]
+                tenant_id: Option<String>,
+            }
+        });
+        assert!(out.contains("fn scope_condition"), "{out}");
+        assert!(out.contains("Self :: own_or_shared (__scope)"), "{out}");
+    }
+
+    #[test]
+    fn scope_with_needs_a_scope_column() {
+        let message = expand_err(quote! {
+            #[resource(entity_type = "Widget", scope_with = widened)]
+            struct Widget {
+                #[resource(id)]
+                name: String,
+            }
+        });
+        assert!(message.contains("`scope_with`"), "{message}");
     }
 
     #[cfg(not(feature = "sea-orm"))]

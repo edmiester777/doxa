@@ -173,6 +173,8 @@ pub struct Model {
 | `attrs_with` | Method producing attributes no field backs |
 | `tenant_parent` | Entity type this resource is `in` by virtue of the request rather than of any column |
 | `filter` | A condition every query carries on top of the scope — repeatable, `AND`ed (needs `sea-orm`) |
+| `owned_with` | Method answering `owned_by(&self, tenant) -> Option<bool>`, in place of the `scope` column |
+| `scope_with` | Function answering `ScopedTable::scope_condition`, to widen the owner filter (needs `scope`) |
 
 | Field role | Description |
 |------------|-------------|

@@ -423,6 +423,67 @@ async fn an_overridden_scope_condition_reaches_every_loader_and_listing() {
     }
 }
 
+/// Shared rows through the derive: `scope_with` widens the filter, `owned_with` says who owns one.
+mod derived_widened {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, PolicyResource)]
+    #[sea_orm(table_name = "rules")]
+    #[resource(entity_type = "Rule", scope_with = Self::own_or_shared, owned_with = owner)]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        #[resource(id, key)]
+        pub name: String,
+
+        #[resource(scope)]
+        pub tenant_id: Option<String>,
+    }
+
+    impl Model {
+        fn own_or_shared(scope: impl Into<Value>) -> Condition {
+            Condition::any()
+                .add(Column::TenantId.eq(scope))
+                .add(Column::TenantId.is_null())
+        }
+
+        /// A shared row belongs to every tenant.
+        fn owner(&self, tenant: &str) -> Option<bool> {
+            Some(
+                self.tenant_id
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant),
+            )
+        }
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[test]
+fn the_derive_takes_the_owner_filter_and_the_owner_from_the_row() {
+    let listing = derived_widened::Model::scoped("acme")
+        .build(DatabaseBackend::Postgres)
+        .to_string();
+    assert!(
+        listing.contains(r#""rules"."tenant_id" = 'acme' OR "rules"."tenant_id" IS NULL"#),
+        "{listing}"
+    );
+
+    let shared = derived_widened::Model {
+        name: "limits".to_owned(),
+        tenant_id: None,
+    };
+    assert_eq!(shared.owned_by("acme"), Some(true));
+    let foreign = derived_widened::Model {
+        tenant_id: Some("globex".to_owned()),
+        ..shared
+    };
+    assert_eq!(foreign.owned_by("acme"), Some(false));
+}
+
 /// Reached by uuid but named by its name, so `Connection::"primary"` covers both routes.
 #[test]
 fn the_key_need_not_be_the_id() {

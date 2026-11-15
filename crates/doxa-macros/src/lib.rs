@@ -449,7 +449,8 @@ pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Fields take `#[resource(id)]`, `#[resource(attr)]` (`attr = "key"` renames) and
 /// `#[resource(parent = "Folder")]`. `id_with = method` computes the id; `attrs_with = method`
-/// merges extra attributes, panicking on a key a field already supplies.
+/// merges extra attributes, panicking on a key a field already supplies. `owned_with = method`
+/// answers `owned_by`; `scope_with = path` answers `ScopedTable::scope_condition`.
 ///
 /// ```ignore
 /// #[derive(PolicyResource)]
