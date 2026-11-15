@@ -28,6 +28,9 @@ struct BuilderInner {
     /// A guard's verdict, folded into the blanks at send time.
     decision: Option<Decision>,
 
+    /// The admin tier that waived the policy, folded into `actor_attrs` at send time.
+    via: Option<&'static str>,
+
     // Auth layer
     tenant_id: Option<String>,
     actor_sub: Option<String>,
@@ -94,6 +97,7 @@ impl AuditEventBuilder {
                 start: Instant::now(),
                 layered,
                 decision: None,
+                via: None,
                 tenant_id: None,
                 actor_sub: None,
                 actor_roles: None,
@@ -144,6 +148,12 @@ impl AuditEventBuilder {
             inner.actor_roles = Some(roles.to_vec());
             inner.actor_attrs = attrs;
         });
+    }
+
+    /// The admin tier that let the caller skip the policy, sent as `actor_attrs.doxa_via`. Kept apart
+    /// from [`set_actor`](Self::set_actor), so a later call there can't drop it.
+    pub fn set_via(&self, via: &'static str) {
+        self.with_inner(|inner| inner.via = Some(via));
     }
 
     /// The indexed `tenant_id` column. `AuthLayer` sets it from `Claims::scope()`.
@@ -414,6 +424,9 @@ impl AuditEventBuilder {
         let Some(mut inner) = taken else { return };
 
         fold_decision(&mut inner);
+        if let Some(via) = inner.via {
+            fold_via(&mut inner.actor_attrs, via);
+        }
 
         if inner.duration_ms.is_none() {
             inner.duration_ms = Some(inner.start.elapsed().as_millis() as i64);
@@ -478,10 +491,49 @@ fn fold_decision(inner: &mut BuilderInner) {
     }
 }
 
+/// The `actor_attrs` key the admin tier lands under; doxa's own, so it never meets an app's key.
+const VIA_KEY: &str = "doxa_via";
+
+/// `via` into the actor's attributes, whose shape is the app's: a non-object is kept under `attrs`.
+fn fold_via(attrs: &mut serde_json::Value, via: &'static str) {
+    let mut map = match attrs.take() {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => serde_json::Map::from_iter([("attrs".to_owned(), other)]),
+    };
+    map.insert(VIA_KEY.to_owned(), via.into());
+    *attrs = serde_json::Value::Object(map);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::EventType;
+
+    #[tokio::test]
+    async fn via_lands_in_the_actor_attrs_whatever_their_shape() {
+        for (attrs, expected) in [
+            (
+                serde_json::Value::Null,
+                serde_json::json!({ "doxa_via": "tenant_admin" }),
+            ),
+            (
+                serde_json::json!({ "dept": "ops", "via": "sso" }),
+                serde_json::json!({ "dept": "ops", "via": "sso", "doxa_via": "tenant_admin" }),
+            ),
+            (
+                serde_json::json!("opaque"),
+                serde_json::json!({ "attrs": "opaque", "doxa_via": "tenant_admin" }),
+            ),
+        ] {
+            let (builder, mut rx) = builder();
+            builder.set_via("tenant_admin");
+            // After, as a handler might: it must not drop the tier.
+            builder.set_actor(Some("u"), &[], attrs);
+            builder.emit_allowed();
+            assert_eq!(rx.recv().await.unwrap().actor_attrs, expected);
+        }
+    }
 
     fn builder() -> (AuditEventBuilder, tokio::sync::mpsc::Receiver<AuditEvent>) {
         let (tx, rx) = tokio::sync::mpsc::channel(4);

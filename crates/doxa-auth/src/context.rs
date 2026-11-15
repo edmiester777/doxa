@@ -36,23 +36,30 @@ pub struct CapabilityContext {
     pub roles: Vec<String>,
 }
 
-/// Marks the caller unrestricted: every guard allows and every listing is unscoped. doxa never
-/// sets it; the app's own layer, inside [`AuthLayer`](crate::AuthLayer), inserts it.
+/// Every guard allows it, any tenant or none; loaders stay tenant-confined and listings widen
+/// only through `Scoping::unscoped`. Set by the app's layer inside `AuthLayer`.
 ///
 /// ```ignore
-/// async fn platform_admins(mut req: Request, next: Next) -> Response {
-///     if is_platform_admin(&req) {
-///         req.extensions_mut().insert(doxa::auth::Admin);
+/// async fn admins(mut req: Request, next: Next) -> Response {
+///     match role_of(&req) {
+///         Some("sysadmin") => { req.extensions_mut().insert(doxa::auth::SuperAdmin); }
+///         Some("tadmin") => { req.extensions_mut().insert(doxa::auth::TenantAdmin); }
+///         _ => {}
 ///     }
 ///     next.run(req).await
 /// }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Admin;
+pub struct SuperAdmin;
 
-/// `Claims::scope`'s contract: no scope refuses every check, except for an admin.
+/// Marks the caller unrestricted within their own tenant: Cedar is never asked, but tenant and
+/// owner confinement still apply, and a caller with no tenant is refused. Set as [`SuperAdmin`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantAdmin;
+
+/// `Claims::scope`'s contract: no scope refuses every check, except for a super admin.
 pub(crate) fn unscoped(tenant: Option<&str>, extensions: &http::Extensions) -> bool {
-    tenant.is_none() && extensions.get::<Admin>().is_none()
+    tenant.is_none() && extensions.get::<SuperAdmin>().is_none()
 }
 
 impl<S, C: Claims> AuthContext<S, C> {
@@ -105,11 +112,13 @@ mod tests {
     }
 
     #[test]
-    fn only_an_admin_marker_waives_the_scope() {
+    fn only_a_super_admin_waives_the_scope() {
         let mut extensions = http::Extensions::new();
         assert!(unscoped(None, &extensions));
         assert!(!unscoped(Some("acme"), &extensions));
-        extensions.insert(Admin);
+        extensions.insert(TenantAdmin);
+        assert!(unscoped(None, &extensions), "a tenant admin needs a tenant");
+        extensions.insert(SuperAdmin);
         assert!(!unscoped(None, &extensions));
     }
 }

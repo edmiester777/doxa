@@ -381,6 +381,17 @@ mod sealed {
     /// Blocks outside implementations of [`Subject`].
     pub trait Sealed {}
 
+    /// Which guards the caller's admin marker waives; read from the markers, never the checker.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Reach {
+        /// [`SuperAdmin`](crate::SuperAdmin): no policy, no confinement.
+        Super,
+        /// [`TenantAdmin`](crate::TenantAdmin): no policy, confined to the tenant.
+        Tenant,
+        /// Everyone else.
+        Policy,
+    }
+
     /// The value the handler receives, and what the policy decided about, for the audit event.
     pub struct Authorized<T> {
         /// What the handler receives.
@@ -407,6 +418,7 @@ mod sealed {
             state: &Self::State,
             ctx: &Self::Ctx,
             checker: &dyn CapabilityChecker,
+            reach: Reach,
         ) -> impl Future<Output = Result<Authorized<Self::Loaded>, Refusal<Self::Error>>> + Send;
     }
 }
@@ -414,7 +426,7 @@ mod sealed {
 use sealed::Authorized;
 
 // For `off_request`'s bound.
-pub(crate) use sealed::Chain;
+pub(crate) use sealed::{Chain, Reach};
 
 /// What a route authorizes: [`One<R>`], [`Many<R>`] or [`Cap<M>`]. Sealed; implement [`Granting`].
 pub trait Subject: sealed::Sealed + Send + Sync + 'static {
@@ -712,32 +724,62 @@ pub trait Granting: Sized + Send + Sync + 'static {
         state: &Self::State,
         ctx: &Self::Ctx,
     ) -> impl Future<Output = Result<Option<Self::Row>, Self::Error>> + Send;
+
+    /// Whether a loaded row stays visible, checked after the row's owner on every single-row door;
+    /// skipped for a [`SuperAdmin`](crate::SuperAdmin). `#[asset(confine = …)]` writes it.
+    fn admits(_row: &Self::Row, _tenant: &str, _ctx: &Self::Ctx) -> bool {
+        true
+    }
 }
 
 /// An asset a caller can be granted a subset of; [`Many<R>`] requires it, so an unlistable
-/// asset's collection route doesn't compile.
+/// asset's collection route doesn't compile. doxa composes `narrow(confine(owned))`.
 pub trait Scoping: Granting {
     /// The caller's authorized subset, as this asset's queries take it.
     type Filter: Send;
 
-    /// Whether [`scope`](Self::scope) asks the policy. When it doesn't, only an action's
+    /// Whether [`narrow`](Self::narrow) asks the policy. When it doesn't, only an action's
     /// capability guards a listing, so an action without one fails the build.
     const FROM_POLICY: bool = true;
 
-    /// The caller's scope for `action`, from the session the policy assembled; `Ok(None)` if
-    /// nothing was granted. Ignoring `action` grants listing and bulk-deleting alike.
-    fn scope(action: &str, ctx: &Self::Ctx) -> Result<Option<Self::Filter>, AuthError>;
+    /// Every row `tenant` owns. It must carry the tenant: it is all of a tenant admin's listing.
+    fn owned(tenant: &str, ctx: &Self::Ctx) -> Result<Self::Filter, AuthError>;
+
+    /// The asset's own confinement on top of [`owned`](Self::owned); skipped for a super admin.
+    /// Required, so a listing can't miss the rule [`admits`](Granting::admits) applies to rows.
+    fn confine(rows: Self::Filter, tenant: &str, ctx: &Self::Ctx) -> Self::Filter;
+
+    /// The policy's subset of `rows` for `action`; `Ok(None)` if nothing was granted. Never asked
+    /// for an admin. Ignoring `action` grants listing and bulk-deleting alike.
+    fn narrow(
+        action: &str,
+        rows: Self::Filter,
+        ctx: &Self::Ctx,
+    ) -> Result<Option<Self::Filter>, AuthError>;
 
     /// The scope when nothing was granted. `None` refuses; a match-nothing filter answers an empty page.
     fn empty_scope() -> Option<Self::Filter> {
         None
     }
 
-    /// The scope for an admin caller, used before [`scope`](Self::scope); `None` gives an admin
-    /// [`scope`](Self::scope) too. The coarse capability is still checked first.
+    /// A super admin's listing; `None` gives them [`owned`](Self::owned). The coarse capability
+    /// is still checked first.
     fn unscoped() -> Option<Self::Filter> {
         None
     }
+}
+
+/// A reusable [`Granting::admits`]: hides loaded rows from everyone but a super admin. Generic over
+/// the row, so one rule serves every asset whose row qualifies.
+pub trait RowRule<Row, Ctx>: 'static {
+    /// Whether `row` stays visible to this caller in `tenant`.
+    fn admits(row: &Row, tenant: &str, ctx: &Ctx) -> bool;
+}
+
+/// A reusable [`Scoping::confine`]: narrows a listing for everyone but a super admin.
+pub trait ListRule<Filter, Ctx>: 'static {
+    /// `rows`, narrowed for this caller in `tenant`.
+    fn confine(rows: Filter, tenant: &str, ctx: &Ctx) -> Filter;
 }
 
 /// Authorize one object: load it, then decide with its attributes. `A` is the asset's action
@@ -889,6 +931,7 @@ impl<R: Granting, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Chain for
         state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
+        reach: Reach,
     ) -> Result<Authorized<R::Row>, Refusal<R::Error>> {
         let action = A::ACTION;
 
@@ -904,6 +947,15 @@ impl<R: Granting, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Chain for
 
         let tenant = ctx.tenant().unwrap_or("");
         let entity = ResourceEntity::of(&resource, tenant);
+        if !confined::<R>(&resource, ctx, reach) {
+            return Err(Refusal::Denied {
+                action: Cow::Borrowed(action),
+                resource_type: Cow::Borrowed(entity_type::<R>()),
+                resource_id: Cow::Owned(entity.entity_id),
+                reason: OUTSIDE,
+                hidden: true,
+            });
+        }
         let allowed = checker
             .check_instance(tenant, ctx.roles(), action, &entity)
             .await?;
@@ -971,12 +1023,13 @@ impl<R: Scoping, A: DeclaredAction<Table = R::Actions>, S: GrantSite> Chain for 
         _state: &Self::State,
         ctx: &Self::Ctx,
         checker: &dyn CapabilityChecker,
+        reach: Reach,
     ) -> Result<Authorized<R::Filter>, Refusal<R::Error>> {
         let action = A::ACTION;
 
         gate::<A>(ctx, checker).await?;
 
-        let scope = subset::<R>(action, ctx, checker)?;
+        let scope = subset::<R>(action, ctx, reach)?;
 
         // The id a refused listing names too.
         Ok(Authorized {
@@ -1018,6 +1071,7 @@ impl<M: Capable, S: GrantSite> Chain for Cap<M, S> {
         _state: &NoState,
         ctx: &CapabilityContext,
         checker: &dyn CapabilityChecker,
+        _reach: Reach,
     ) -> Result<Authorized<()>, Refusal<Self::Error>> {
         let tenant = ctx.tenant().unwrap_or("");
         let allowed = checker.check(tenant, ctx.roles(), M::CAPABILITY).await?;
@@ -1106,7 +1160,7 @@ impl<T: Subject> Granted<T> {
         &self.0
     }
 
-    /// The caller's tenant, as [`Claims::scope`] gave it; `""` only for a tenantless admin.
+    /// The caller's tenant, as [`Claims::scope`] gave it; `""` only for a tenantless super admin.
     pub fn tenant(&self) -> &str {
         self.0.tenant().unwrap_or_default()
     }
@@ -1136,7 +1190,7 @@ where
         // Instantiates the build-time checks.
         let () = T::SITE_DECLARED;
 
-        let (ctx, checker) = caller_and_checker::<T::Ctx>(&parts.extensions)?;
+        let (ctx, checker, reach) = caller_and_checker::<T::Ctx>(&parts.extensions)?;
 
         let key = fetch_key::<T, St>(parts, state).await?;
 
@@ -1144,8 +1198,15 @@ where
             .await
             .map_err(|rejection| Refusal::Source(Box::new(rejection.into_response())))?;
 
-        let loaded =
-            authorize_as::<T>(key, source.state(), &ctx, &*checker, &parts.extensions).await?;
+        let loaded = authorize_as::<T>(
+            key,
+            source.state(),
+            &ctx,
+            &*checker,
+            reach,
+            &parts.extensions,
+        )
+        .await?;
         Ok(Granted(ctx, loaded))
     }
 }
@@ -1157,8 +1218,8 @@ pub async fn authorize<T: Chain>(
     state: &T::State,
     extensions: &Extensions,
 ) -> Result<T::Loaded, Refusal<T::Error>> {
-    let (ctx, checker) = caller_and_checker::<T::Ctx>(extensions)?;
-    authorize_as::<T>(key, state, &ctx, checker.as_ref(), extensions).await
+    let (ctx, checker, reach) = caller_and_checker::<T::Ctx>(extensions)?;
+    authorize_as::<T>(key, state, &ctx, checker.as_ref(), reach, extensions).await
 }
 
 /// [`authorize`] for a caller and checker already recovered from `extensions`.
@@ -1167,9 +1228,10 @@ async fn authorize_as<T: Chain>(
     state: &T::State,
     ctx: &T::Ctx,
     checker: &dyn CapabilityChecker,
+    reach: Reach,
     extensions: &Extensions,
 ) -> Result<T::Loaded, Refusal<T::Error>> {
-    match T::authorize(key, state, ctx, checker).await {
+    match T::authorize(key, state, ctx, checker, reach).await {
         Ok(authorized) => {
             crate::record::grant(
                 extensions,
@@ -1189,17 +1251,26 @@ async fn authorize_as<T: Chain>(
     }
 }
 
-/// The caller and checker [`AuthLayer`](crate::AuthLayer) put in extensions; an
-/// [`Admin`](crate::Admin) is checked against [`Unrestricted`](doxa_policy::Unrestricted).
+/// The caller [`AuthLayer`](crate::AuthLayer) put in extensions, the checker that answers for
+/// them, and what their admin marker waives. A tenant admin without a tenant is refused here.
 pub(crate) fn caller_and_checker<C: FromAuthExtensions>(
     extensions: &Extensions,
-) -> Result<(C, Arc<dyn CapabilityChecker>), Denial> {
+) -> Result<(C, Arc<dyn CapabilityChecker>, Reach), Denial> {
     let ctx = C::from_extensions(extensions).ok_or(Denial::Auth(AuthError::MissingCredentials))?;
-    if extensions.get::<crate::Admin>().is_some() {
-        return Ok((ctx, Arc::new(doxa_policy::Unrestricted)));
+    if extensions.get::<crate::SuperAdmin>().is_some() {
+        crate::record::via(extensions, Reach::Super);
+        return Ok((ctx, Arc::new(doxa_policy::Unrestricted), Reach::Super));
     }
     if crate::context::unscoped(ctx.tenant(), extensions) {
         return Err(Denial::Auth(AuthError::Forbidden));
+    }
+    if extensions.get::<crate::TenantAdmin>().is_some() {
+        crate::record::via(extensions, Reach::Tenant);
+        return Ok((
+            ctx,
+            Arc::new(doxa_policy::TenantUnrestricted),
+            Reach::Tenant,
+        ));
     }
 
     let checker = extensions
@@ -1211,7 +1282,22 @@ pub(crate) fn caller_and_checker<C: FromAuthExtensions>(
             ))
         })?;
 
-    Ok((ctx, checker))
+    Ok((ctx, checker, Reach::Policy))
+}
+
+const OUTSIDE: &str = "outside confinement";
+
+/// The row's owner, then the asset's own rule; a super admin skips both, and a tenant admin, whom
+/// no policy backs, is refused a row that records no owner.
+fn confined<R: Granting>(row: &R::Row, ctx: &R::Ctx, reach: Reach) -> bool {
+    let tenant = ctx.tenant().unwrap_or("");
+    let owned = match (reach, row.owned_by(tenant)) {
+        (Reach::Super, _) => return true,
+        (_, Some(owned)) => owned,
+        (Reach::Tenant, None) => false,
+        (Reach::Policy, None) => true,
+    };
+    owned && R::admits(row, tenant, ctx)
 }
 
 /// Authorize an object already in hand, such as one in an uncommitted transaction, without
@@ -1521,10 +1607,10 @@ fn dependency_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
     extensions: &Extensions,
 ) -> Result<(R::Ctx, R::Filter), Denial> {
     let () = Gated::<R, A>::PROOF;
-    // Recovered only so a route with no `AuthLayer` fails as every other door does.
-    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
+    // The checker is recovered only so a route with no `AuthLayer` fails as every other door does.
+    let (ctx, _, reach) = caller_and_checker::<R::Ctx>(extensions)?;
 
-    let reached = subset::<R>(A::ACTION, &ctx, checker.as_ref()).map(|filter| (A::ROW, filter));
+    let reached = subset::<R>(A::ACTION, &ctx, reach).map(|filter| (A::ROW, filter));
 
     let filter = record_scope::<R>(reached, A::ACTION, &ctx, extensions)?;
     Ok((ctx, filter))
@@ -1534,12 +1620,10 @@ fn dependency_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
 async fn gated_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
     extensions: &Extensions,
 ) -> Result<(R::Ctx, R::Filter), Denial> {
-    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
+    let (ctx, checker, reach) = caller_and_checker::<R::Ctx>(extensions)?;
 
     let reached = match gate::<A>(&ctx, checker.as_ref()).await {
-        Ok(declared) => {
-            subset::<R>(A::ACTION, &ctx, checker.as_ref()).map(|filter| (declared, filter))
-        }
+        Ok(declared) => subset::<R>(A::ACTION, &ctx, reach).map(|filter| (declared, filter)),
         Err(denial) => Err(denial),
     };
 
@@ -1551,23 +1635,38 @@ async fn gated_scope<R: Scoping, A: DeclaredAction<Table = R::Actions>>(
 fn subset<R: Scoping>(
     action: &'static str,
     ctx: &R::Ctx,
-    checker: &dyn CapabilityChecker,
+    reach: Reach,
 ) -> Result<R::Filter, Denial> {
-    // The checker decides reach, never rows, so the admin seat is applied here.
-    if checker.unrestricted() {
-        if let Some(everything) = R::unscoped() {
-            return Ok(everything);
-        }
-    }
-
-    match R::scope(action, ctx)? {
-        Some(filter) => Ok(filter),
-        None => R::empty_scope().ok_or(Denial::Denied {
+    let nothing = || {
+        R::empty_scope().ok_or(Denial::Denied {
             action: Cow::Borrowed(action),
             resource_type: Cow::Borrowed(entity_type::<R>()),
             resource_id: Cow::Borrowed("collection"),
             reason: "no authorized scope",
-        }),
+        })
+    };
+
+    if reach == Reach::Super {
+        if let Some(everything) = R::unscoped() {
+            return Ok(everything);
+        }
+    }
+    // Only a super admin reaches here without a tenant.
+    let Some(tenant) = ctx.tenant() else {
+        return nothing();
+    };
+
+    let owned = R::owned(tenant, ctx)?;
+    if reach == Reach::Super {
+        return Ok(owned);
+    }
+    let confined = R::confine(owned, tenant, ctx);
+    if reach == Reach::Tenant {
+        return Ok(confined);
+    }
+    match R::narrow(action, confined, ctx)? {
+        Some(filter) => Ok(filter),
+        None => nothing(),
     }
 }
 
@@ -1719,9 +1818,9 @@ async fn decide<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     coarse: Coarse,
 ) -> Result<R::Row, Denial> {
     let action = A::ACTION;
-    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
+    let (ctx, checker, reach) = caller_and_checker::<R::Ctx>(extensions)?;
 
-    match verdict::<R, A>(&resource, &ctx, checker.as_ref(), coarse).await {
+    match verdict::<R, A>(&resource, &ctx, checker.as_ref(), reach, coarse).await {
         Ok((declared, entity_id)) => {
             crate::record::grant(
                 extensions,
@@ -1749,7 +1848,7 @@ async fn decide_all<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     coarse: Coarse,
 ) -> Result<Vec<R::Row>, Denial> {
     let action = A::ACTION;
-    let (ctx, checker) = caller_and_checker::<R::Ctx>(extensions)?;
+    let (ctx, checker, reach) = caller_and_checker::<R::Ctx>(extensions)?;
 
     let declared = match coarse {
         Coarse::Check => match gate::<A>(&ctx, checker.as_ref()).await {
@@ -1768,10 +1867,16 @@ async fn decide_all<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     }
 
     let tenant = ctx.tenant().unwrap_or("");
-    let entities: Vec<ResourceEntity> = resources
+    let mut entities: Vec<ResourceEntity> = resources
         .iter()
         .map(|resource| ResourceEntity::of(resource, tenant))
         .collect();
+
+    // The policy is asked only about the rows before the first one outside confinement.
+    let outside = resources
+        .iter()
+        .position(|resource| !confined::<R>(resource, &ctx, reach));
+    let foreign = outside.map(|at| entities.split_off(at).swap_remove(0));
 
     let allowed = match checker
         .check_instance_many(tenant, ctx.roles(), action, &entities)
@@ -1790,13 +1895,18 @@ async fn decide_all<R: Granting, A: DeclaredAction<Table = R::Actions>>(
         ))));
     }
 
-    for (entity, allowed) in entities.into_iter().zip(allowed) {
-        if !allowed {
+    let refusals = entities
+        .into_iter()
+        .zip(allowed)
+        .map(|(entity, allowed)| (entity, (!allowed).then_some("instance denied")))
+        .chain(foreign.map(|entity| (entity, Some(OUTSIDE))));
+    for (entity, refused) in refusals {
+        if let Some(reason) = refused {
             let denial = Denial::Denied {
                 action: Cow::Borrowed(action),
                 resource_type: Cow::Borrowed(entity_type::<R>()),
                 resource_id: Cow::Owned(entity.entity_id),
-                reason: "instance denied",
+                reason,
             };
             record_denial(&denial, extensions, ctx.tenant());
             return Err(denial);
@@ -1820,6 +1930,7 @@ async fn verdict<R: Granting, A: DeclaredAction<Table = R::Actions>>(
     resource: &R::Row,
     ctx: &R::Ctx,
     checker: &dyn CapabilityChecker,
+    reach: Reach,
     coarse: Coarse,
 ) -> Result<(&'static Action, String), Denial> {
     let action = A::ACTION;
@@ -1830,6 +1941,14 @@ async fn verdict<R: Granting, A: DeclaredAction<Table = R::Actions>>(
 
     let tenant = ctx.tenant().unwrap_or("");
     let entity = ResourceEntity::of(resource, tenant);
+    if !confined::<R>(resource, ctx, reach) {
+        return Err(Denial::Denied {
+            action: Cow::Borrowed(action),
+            resource_type: Cow::Borrowed(entity_type::<R>()),
+            resource_id: Cow::Owned(entity.entity_id),
+            reason: OUTSIDE,
+        });
+    }
     let allowed = checker
         .check_instance(tenant, ctx.roles(), action, &entity)
         .await?;

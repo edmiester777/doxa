@@ -166,7 +166,9 @@ This is a claim about that door only. An `AuthLayer` with no `AuditLayer` above 
 | `GrantProfile` | The application's caller / state / source / error, stated once for every asset |
 | `LoaderSource` | Where a loader's state comes from — any extractor, not just router state |
 | `FromState<T>` | The ordinary source: `T` reached out of the router state through `FromRef` |
-| `Scoping` | Adds the collection form — which subset the caller may query for |
+| `Scoping` | Adds the collection form: `owned` rows of the tenant, `confine`d by the app, `narrow`ed by the policy |
+| `SuperAdmin` / `TenantAdmin` | Markers and gate extractors: bypass everything, or bypass the policy inside the tenant |
+| `RowRule` / `ListRule` | Reusable app confinement for rows and listings, wired by `#[asset(confine = …)]` |
 | `Action` | One row of `Granting::ACTIONS`: capability, audit category, existence |
 | `AuthorizeLoaded` / `AuthorizeLoadedAll` | Authorize objects the handler already holds |
 | `AuthorizeScope` | The query filter, for a handler building its own query |

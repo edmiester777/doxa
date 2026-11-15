@@ -1,5 +1,6 @@
 //! [`SessionChecker`]: the guard's checker, answering from the caller's assembled session where
-//! the extension's [`session_is_admin`] or [`decide_from_session`] can, else the router.
+//! the extension's [`session_is_admin`] or [`decide_from_session`] can, else the router. These
+//! answer checks only; they never widen a listing or lift tenant confinement.
 //!
 //! ```ignore
 //! let checker = SessionChecker::new(Arc::clone(&router), session.clone());

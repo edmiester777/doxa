@@ -113,8 +113,20 @@ impl Granting for Document {
 impl Scoping for Document {
     type Filter = &'static str;
 
-    fn scope(_action: &str, _ctx: &CapabilityContext) -> Result<Option<&'static str>, AuthError> {
-        Ok(Some("tenant = acme"))
+    fn owned(_tenant: &str, _ctx: &CapabilityContext) -> Result<&'static str, AuthError> {
+        Ok("tenant = acme")
+    }
+
+    fn confine(rows: &'static str, _tenant: &str, _ctx: &CapabilityContext) -> &'static str {
+        rows
+    }
+
+    fn narrow(
+        _action: &str,
+        rows: &'static str,
+        _ctx: &CapabilityContext,
+    ) -> Result<Option<&'static str>, AuthError> {
+        Ok(Some(rows))
     }
 }
 

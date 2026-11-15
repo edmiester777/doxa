@@ -121,7 +121,7 @@ pub trait FetchSubset: Sized + Send + 'static {
     /// Every row `scope` owns.
     fn subset(scope: &str) -> Self::Filter;
 
-    /// The subset for an unrestricted caller; `None` (the default) gives them [`subset`](Self::subset).
+    /// The subset for a super admin; `None` (the default) gives them [`subset`](Self::subset).
     fn everything() -> Option<Self::Filter> {
         None
     }

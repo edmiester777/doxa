@@ -36,6 +36,8 @@ struct Args {
     load_with: Option<Path>,
     /// `list = tenant`: emit a `Scoping` confined to the caller's tenant.
     list: Option<Ident>,
+    /// A `RowRule` (and, with `list`, `ListRule`) every caller but a super admin is confined by.
+    confine: Option<Path>,
     /// The `#[doxa::entity]` this asset guards.
     entity: Option<Path>,
     /// `default = false`: a route reaches it only as `Grant<E, by = …>`.
@@ -96,12 +98,14 @@ impl Parse for Args {
                 out.entity = Some(input.parse()?);
             } else if key == "default" {
                 out.not_default = !input.parse::<syn::LitBool>()?.value;
+            } else if key == "confine" {
+                out.confine = Some(input.parse()?);
             } else {
                 return Err(syn::Error::new(
                     key.span(),
                     "unknown `asset` option; expected `profile`, `actions`, `row`, `key`, \
-                     `with`, `list`, `ctx`, `source`, `error`, `load_with`, `entity` or \
-                     `default`",
+                     `with`, `list`, `confine`, `ctx`, `source`, `error`, `load_with`, `entity` \
+                     or `default`",
                 ));
             }
 
@@ -280,6 +284,26 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     };
 
+    let admits = args.confine.as_ref().map(|rule| {
+        quote! {
+            fn admits(row: &Self::Row, tenant: &str, ctx: &Self::Ctx) -> bool {
+                <#rule as ::doxa::auth::RowRule<Self::Row, Self::Ctx>>::admits(row, tenant, ctx)
+            }
+        }
+    });
+    let confine = match &args.confine {
+        Some(rule) => quote! {
+            fn confine(rows: Self::Filter, tenant: &str, ctx: &Self::Ctx) -> Self::Filter {
+                <#rule as ::doxa::auth::ListRule<Self::Filter, Self::Ctx>>::confine(rows, tenant, ctx)
+            }
+        },
+        None => quote! {
+            fn confine(rows: Self::Filter, _tenant: &str, _ctx: &Self::Ctx) -> Self::Filter {
+                rows
+            }
+        },
+    };
+
     // Tenant-confined listing only; an asset needing the policy's residual writes `Scoping` itself.
     let scoping = match &args.list {
         None => quote!(),
@@ -289,23 +313,25 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                 type Filter = <#row as ::doxa::policy::FetchSubset>::Filter;
                 const FROM_POLICY: bool = false;
 
-                fn scope(
+                fn owned(
+                    tenant: &str,
+                    _ctx: &Self::Ctx,
+                ) -> ::std::result::Result<Self::Filter, ::doxa::policy::AuthError> {
+                    ::std::result::Result::Ok(<#row as ::doxa::policy::FetchSubset>::subset(tenant))
+                }
+
+                #confine
+
+                // The action's capability, required since `FROM_POLICY` is false, decided whether to list.
+                fn narrow(
                     _action: &str,
-                    ctx: &Self::Ctx,
+                    rows: Self::Filter,
+                    _ctx: &Self::Ctx,
                 ) -> ::std::result::Result<
                     ::std::option::Option<Self::Filter>,
                     ::doxa::policy::AuthError,
                 > {
-                    // The action's capability (required, since `FROM_POLICY` is false) decided
-                    // whether to list; the tenant decides which rows. No tenant is a refusal.
-                    let ::std::option::Option::Some(scope) =
-                        ::doxa::auth::FromAuthExtensions::tenant(ctx)
-                    else {
-                        return ::std::result::Result::Ok(::std::option::Option::None);
-                    };
-                    ::std::result::Result::Ok(::std::option::Option::Some(
-                        <#row as ::doxa::policy::FetchSubset>::subset(scope),
-                    ))
+                    ::std::result::Result::Ok(::std::option::Option::Some(rows))
                 }
 
                 // Forwarded, so a backend that can answer "everything" is asked.
@@ -345,6 +371,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             );
 
             #load
+
+            #admits
         }
 
         // What the spec tells a generated client about routes this asset guards.
@@ -963,10 +991,67 @@ mod tests {
             out.contains("type Filter = < Widget as :: doxa :: policy :: FetchSubset > :: Filter"),
             "{out}",
         );
-        assert!(out.contains(":: subset (scope)"), "{out}");
+        assert!(out.contains(":: subset (tenant)"), "{out}");
+        assert!(out.contains("fn narrow"), "{out}");
+        assert!(out.contains("fn confine"), "{out}");
+        assert!(
+            !out.contains("ListRule"),
+            "no rule, rows pass through: {out}"
+        );
     }
 
-    /// Leaving `unscoped` at the default compiles and silently narrows an admin's listing.
+    #[test]
+    fn confine_delegates_to_the_rule_for_rows_and_listings() {
+        let out = expand_ok(
+            quote!(
+                row = Widget,
+                profile = AppGrants,
+                actions = WidgetAction,
+                list = tenant,
+                confine = HideFlagged
+            ),
+            quote!(
+                pub struct WidgetByName;
+            ),
+        );
+
+        assert!(
+            out.contains(
+                "< HideFlagged as :: doxa :: auth :: RowRule < Self :: Row , Self :: Ctx >> :: \
+                 admits (row , tenant , ctx)"
+            ),
+            "{out}",
+        );
+        assert!(
+            out.contains(
+                "< HideFlagged as :: doxa :: auth :: ListRule < Self :: Filter , Self :: Ctx >> \
+                 :: confine (rows , tenant , ctx)"
+            ),
+            "{out}",
+        );
+    }
+
+    /// An unlisted asset has no `Scoping` to confine, so only the row rule is wired.
+    #[test]
+    fn confine_without_list_confines_rows_only() {
+        let out = expand_ok(
+            quote!(
+                row = Widget,
+                key = pk,
+                profile = AppGrants,
+                actions = WidgetAction,
+                confine = HideFlagged
+            ),
+            quote!(
+                pub struct WidgetById;
+            ),
+        );
+
+        assert!(out.contains("RowRule"), "{out}");
+        assert!(!out.contains("ListRule"), "{out}");
+    }
+
+    /// Leaving `unscoped` at the default compiles and silently narrows a super admin's listing.
     #[test]
     fn list_tenant_forwards_the_backends_unrestricted_subset() {
         let out = expand_ok(

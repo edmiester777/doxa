@@ -13,7 +13,7 @@ use axum::http::Request;
 use doxa::audit::{AuditEvent, AuditEventBuilder, AuditLogger};
 use doxa::auth::{
     AuthContext, AuthorizeScope, Claims, Denial, FromAuthExtensions, FromState, GrantProfile,
-    Granted, Many, Scoped, Scoping,
+    Granted, Many, Scoped, Scoping, SuperAdmin, TenantAdmin,
 };
 use doxa::policy::{
     condition_from_residual, AuthError, Capability, CapabilityChecker, DbLoadError, ResourceEntity,
@@ -120,21 +120,30 @@ impl GrantProfile for AppGrants {
 #[asset(row = Model, profile = AppGrants, actions = WidgetAction)]
 pub struct WidgetByName;
 
-/// The tenant column and the policy's residual; dropping either widens the listing.
+/// The tenant column, then the policy's residual on top.
 impl Scoping for WidgetByName {
     type Filter = Select<Entity>;
 
-    fn scope(_action: &str, ctx: &Self::Ctx) -> Result<Option<Self::Filter>, AuthError> {
-        let tenant = FromAuthExtensions::tenant(ctx).unwrap_or_default();
+    fn owned(tenant: &str, _ctx: &Self::Ctx) -> Result<Self::Filter, AuthError> {
+        Ok(Model::scoped(tenant))
+    }
 
+    fn confine(rows: Self::Filter, _tenant: &str, _ctx: &Self::Ctx) -> Self::Filter {
+        rows
+    }
+
+    fn narrow(
+        _action: &str,
+        rows: Self::Filter,
+        ctx: &Self::Ctx,
+    ) -> Result<Option<Self::Filter>, AuthError> {
         Ok(ctx
             .session
             .widgets
             .clone()
-            .map(|condition| Model::scoped(tenant).filter(condition)))
+            .map(|condition| rows.filter(condition)))
     }
 
-    /// An unrestricted caller's subset: this door never asks the checker, so it can't see admin.
     fn unscoped() -> Option<Self::Filter> {
         Some(Entity::find())
     }
@@ -180,14 +189,21 @@ fn parts(
     axum::http::request::Parts,
     tokio::sync::mpsc::Receiver<AuditEvent>,
 ) {
-    parts_as(roles, grants, false)
+    parts_as(roles, grants, Tier::Ordinary)
 }
 
-/// `admin` stands in for the app's layer inserting [`doxa::auth::Admin`].
+/// The marker the app's layer would insert.
+#[derive(Clone, Copy)]
+enum Tier {
+    Super,
+    Tenant,
+    Ordinary,
+}
+
 fn parts_as(
     roles: &[&str],
     grants: Grants,
-    admin: bool,
+    tier: Tier,
 ) -> (
     axum::http::request::Parts,
     tokio::sync::mpsc::Receiver<AuditEvent>,
@@ -202,8 +218,14 @@ fn parts_as(
         session: grants,
     });
     request.extensions_mut().insert(ctx);
-    if admin {
-        request.extensions_mut().insert(doxa::auth::Admin);
+    match tier {
+        Tier::Super => {
+            request.extensions_mut().insert(SuperAdmin);
+        }
+        Tier::Tenant => {
+            request.extensions_mut().insert(TenantAdmin);
+        }
+        Tier::Ordinary => {}
     }
 
     let checker: Arc<dyn CapabilityChecker> = Arc::new(Roles);
@@ -253,8 +275,8 @@ fn the_scope_composes_the_tenant_and_the_policys_own_condition() {
 }
 
 #[test]
-fn an_admin_is_scoped_to_everything_rather_than_to_the_policys_condition() {
-    let (parts, _rx) = parts_as(&[], granted(), true);
+fn a_super_admin_is_scoped_to_everything_rather_than_to_the_policys_condition() {
+    let (parts, _rx) = parts_as(&[], granted(), Tier::Super);
 
     let scope = WidgetByName::authorize_scope_dependency(widget_action::Read, &parts.extensions)
         .expect("the action is declared");
@@ -270,8 +292,51 @@ fn an_admin_is_scoped_to_everything_rather_than_to_the_policys_condition() {
     );
 }
 
-/// The mirror, and the reason the seat is not simply "admins skip the
-/// scope": a caller the policy did *not* mark is scoped exactly as before.
+/// The tenant column stays; only the policy's condition goes.
+#[test]
+fn a_tenant_admin_is_scoped_to_its_tenant_without_the_policys_condition() {
+    let (parts, _rx) = parts_as(&[], granted(), Tier::Tenant);
+
+    let sql = sql(
+        WidgetByName::authorize_scope_dependency(widget_action::Read, &parts.extensions)
+            .expect("the action is declared"),
+    );
+    assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
+    assert!(!sql.contains(r#""region" = 'us'"#), "{sql}");
+}
+
+#[test]
+fn a_tenant_admin_is_not_refused_by_an_empty_grant() {
+    let (parts, _rx) = parts_as(&[], Grants::none(), Tier::Tenant);
+
+    let sql = sql(
+        WidgetByName::authorize_scope_dependency(widget_action::Read, &parts.extensions)
+            .expect("narrow is never asked"),
+    );
+    assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
+}
+
+/// An allow-everything checker without a marker answers checks only; the listing still narrows.
+#[tokio::test]
+async fn an_unrestricted_checker_without_a_marker_still_narrows() {
+    for checker in [
+        Arc::new(doxa::policy::Unrestricted) as Arc<dyn CapabilityChecker>,
+        Arc::new(doxa::policy::TenantUnrestricted),
+    ] {
+        let (mut parts, _rx) = parts(&[], granted());
+        parts.extensions.insert(checker);
+
+        let sql = sql(
+            WidgetByName::authorize_scope(widget_action::Read, &parts.extensions)
+                .await
+                .expect("the checker allows the capability"),
+        );
+        assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""region" = 'us'"#), "{sql}");
+    }
+}
+
+/// A caller neither marker covers is scoped exactly as before.
 #[test]
 fn an_ordinary_caller_is_unaffected_by_the_admin_seat() {
     let (parts, _rx) = parts(&[], granted());
@@ -286,8 +351,8 @@ fn an_ordinary_caller_is_unaffected_by_the_admin_seat() {
 }
 
 #[test]
-fn an_admin_is_not_refused_by_an_empty_grant() {
-    let (parts, _rx) = parts_as(&[], Grants::none(), true);
+fn a_super_admin_is_not_refused_by_an_empty_grant() {
+    let (parts, _rx) = parts_as(&[], Grants::none(), Tier::Super);
 
     assert!(
         WidgetByName::authorize_scope_dependency(widget_action::Read, &parts.extensions).is_ok(),
@@ -360,10 +425,10 @@ async fn the_gated_form_passes_with_the_capability() {
     );
 }
 
-/// The listing route must answer an admin as the `Scoped` door does.
+/// The listing route must answer a super admin as the `Scoped` door does.
 #[tokio::test]
-async fn the_listing_route_seats_an_admin_the_way_the_dependency_does() {
-    let (mut parts, _rx) = parts_as(&["widgets.read"], granted(), true);
+async fn the_listing_route_seats_a_super_admin_the_way_the_dependency_does() {
+    let (mut parts, _rx) = parts_as(&["widgets.read"], granted(), Tier::Super);
     let db = MockDatabase::new(DbBackend::Postgres).into_connection();
 
     let granted =
@@ -376,6 +441,21 @@ async fn the_listing_route_seats_an_admin_the_way_the_dependency_does() {
         !sql.contains(r#""region" = 'us'"#),
         "the listing carried the policy's row condition an admin is exempt from: {sql}",
     );
+}
+
+#[tokio::test]
+async fn the_listing_route_keeps_a_tenant_admin_in_its_tenant() {
+    let (mut parts, _rx) = parts_as(&["stranger"], Grants::none(), Tier::Tenant);
+    let db = MockDatabase::new(DbBackend::Postgres).into_connection();
+
+    let granted =
+        Granted::<Many<WidgetByName, widget_action::Read>>::from_request_parts(&mut parts, &db)
+            .await
+            .expect("every capability, no policy");
+
+    let sql = sql(granted.into_inner());
+    assert!(sql.contains(r#""tenant_id" = 'acme'"#), "{sql}");
+    assert!(!sql.contains(r#""region" = 'us'"#), "{sql}");
 }
 
 #[tokio::test]

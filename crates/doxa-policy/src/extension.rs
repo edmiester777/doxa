@@ -222,7 +222,8 @@ pub trait PolicyExtension: Send + Sync {
 
     // ---- What the assembled session already knows (read by `SessionChecker`) ----
 
-    /// Whether an assembled session bypasses policy. Default: `false`.
+    /// Whether an assembled session bypasses policy checks. Default: `false`. It never widens a
+    /// listing or lifts tenant confinement; only the app's `SuperAdmin` marker does.
     fn session_is_admin(&self, _session: &Self::SessionOutput) -> bool {
         false
     }

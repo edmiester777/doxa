@@ -52,6 +52,12 @@ pub trait PolicyResource: Send + Sync + Sized + 'static {
     fn cedar_parents(&self) -> Vec<(&'static str, String)> {
         Vec::new()
     }
+
+    /// Whether `tenant` owns this row (`Some(true)` for a row every tenant shares); `None` when
+    /// the row records no owner, which a tenant admin is refused.
+    fn owned_by(&self, _tenant: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// One instance injected into the request's Cedar entity set, so `resource.<attr>` resolves.

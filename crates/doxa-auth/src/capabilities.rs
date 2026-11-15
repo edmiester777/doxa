@@ -27,7 +27,7 @@ async fn capabilities(parts: Parts) -> Result<Json<Vec<&'static str>>, Denial> {
     {
         return Ok(Json(Vec::new()));
     }
-    let (ctx, checker) = caller_and_checker::<CapabilityContext>(&parts.extensions)?;
+    let (ctx, checker, _) = caller_and_checker::<CapabilityContext>(&parts.extensions)?;
     let tenant = ctx.tenant().unwrap_or("");
     let caps = doxa_policy::capabilities();
     let allowed = checker
@@ -68,5 +68,34 @@ inventory::submit! {
             doc,
         },
         needed: declared,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::TenantAdmin;
+
+    fn tenant_admin(tenant: Option<&str>) -> Parts {
+        let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+        parts.extensions.insert(CapabilityContext {
+            tenant_id: tenant.map(str::to_owned),
+            roles: vec![],
+        });
+        parts.extensions.insert(TenantAdmin);
+        parts
+    }
+
+    #[tokio::test]
+    async fn a_tenant_admin_holds_every_capability_but_only_with_a_tenant() {
+        let Ok(Json(held)) = capabilities(tenant_admin(Some("acme"))).await else {
+            panic!("a tenant admin with a tenant is answered");
+        };
+        assert_eq!(held.len(), doxa_policy::capabilities().len());
+
+        let Ok(Json(held)) = capabilities(tenant_admin(None)).await else {
+            panic!("a tenantless caller still gets a list");
+        };
+        assert!(held.is_empty());
     }
 }

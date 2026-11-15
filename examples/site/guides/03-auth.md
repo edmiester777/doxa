@@ -44,18 +44,65 @@ A route that already has a guard reads it from there: `grant.tenant()`. A caller
 
 ## Admins are yours
 
-doxa never decides who is an admin. Your own layer, inside `AuthLayer`, marks the request, and every guard then allows and every listing is unscoped:
+doxa never decides who is an admin. Your own layer, inside `AuthLayer`, marks the request with one of two tiers:
 
 ```rust
-async fn platform_admins(mut req: Request, next: Next) -> Response {
-    if is_platform_admin(&req) {
-        req.extensions_mut().insert(doxa::auth::Admin);
+async fn admins(mut req: Request, next: Next) -> Response {
+    match role_of(&req) {
+        Some("sysadmin") => { req.extensions_mut().insert(doxa::auth::SuperAdmin); }
+        Some("tadmin") => { req.extensions_mut().insert(doxa::auth::TenantAdmin); }
+        _ => {}
     }
     next.run(req).await
 }
 ```
 
-Work outside a request does the same with `OffRequest::new(…).admin()`.
+| | Policy | Own tenant's rows | Other tenants' rows | No tenant |
+|---|---|---|---|---|
+| `SuperAdmin` | skipped | yes | through `unscoped` or rows you load yourself | allowed |
+| `TenantAdmin` | skipped | yes, minus your `confine` rule | never | `403` |
+| everyone else | asked | yes, minus your `confine` rule, as the policy narrows | never | `403` |
+
+A tenant admin holds every capability, so a platform-wide route asks for the stronger tier itself:
+
+```rust
+#[post("/tenants")]
+async fn create_tenant(_: SuperAdmin, body: Json<NewTenant>) -> StatusCode { /* ... */ }
+```
+
+`_: TenantAdmin` also admits a super admin. Both answer `401` without a token and `403` otherwise, and both appear in the spec. Work outside a request picks a tier with `OffRequest::new(…).super_admin()` or `.tenant_admin()`; a granted or refused event records which in its `actor_attrs.doxa_via`.
+
+### What confines a tenant admin
+
+The row's `#[resource(scope)]` column is its owner: another tenant's row is a `404` from `Granted<T>` and a `403` from `authorize`, before the policy is asked. A row that records no owner, a `NULL` in a nullable scope column, is refused to a tenant admin and left to the policy for everyone else. `#[resource(scope_with = …)]` widens what loaders and listings return, and `#[resource(owned_with = …)]` says who owns a row when ownership runs through a parent or a column other than the tenant. A row with neither a scope column nor `owned_with` records no owner. A widened condition can match two rows to one key, and a key load then returns either.
+
+On top of that sits your own rule. `#[resource(filter = …)]` applies to everyone, a super admin included; `#[asset(confine = Rule)]` applies to everyone but a super admin. One rule serves rows and listings across tables:
+
+```rust
+/// Flagged posts are visible only to their author.
+pub struct HideFlagged;
+
+impl<M: FlaggedRow> RowRule<M, Caller> for HideFlagged {
+    fn admits(row: &M, _: &str, ctx: &Caller) -> bool {
+        !row.flagged() || row.author() == ctx.claims.sub
+    }
+}
+
+impl<E: FlaggedTable> ListRule<Select<E>, Caller> for HideFlagged {
+    fn confine(rows: Select<E>, _: &str, ctx: &Caller) -> Select<E> {
+        rows.filter(Condition::any()
+            .add(E::flag_column().eq(false))
+            .add(E::author_column().eq(ctx.claims.sub.clone())))
+    }
+}
+
+#[doxa::asset(row = post::Model, profile = AppGrants, actions = PostAction, list = tenant, confine = HideFlagged)]
+pub struct PostByName;
+```
+
+Keep a rule and the row and table traits it reads in one crate. A hand-written `Scoping` splits a listing the same way: `owned` is the tenant's rows and the whole of a tenant admin's listing, `confine` is your rule, and `narrow` is the policy's part, never asked for an admin. `confine` has no default, so forward it to your `ListRule` there, or return `rows` when the asset has none.
+
+Loaders and `narrow` never see the tier. A super admin's `Granted<T>` still loads through the tenant-confined loader, and a tenantless one finds nothing there. A listing widens only when the asset's `unscoped` answers; otherwise a super admin lists their own tenant, and a tenantless one is refused.
 
 Under the hood: JWKS fetching and caching, JWT signature checks, and RFC 7662 introspection as a fallback. It works with Keycloak, Auth0, Cognito, Okta, Azure AD or any standards-compliant issuer. Turn off the `axum` feature and the pipeline runs on its own, outside a web server.
 

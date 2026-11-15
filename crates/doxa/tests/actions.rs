@@ -87,11 +87,20 @@ impl Granting for Source {
 impl Scoping for Source {
     type Filter = &'static str;
 
-    fn scope(action: &str, _ctx: &CapabilityContext) -> Result<Option<&'static str>, AuthError> {
-        Ok(match action {
-            "read" => Some("tenant = acme"),
-            _ => None,
-        })
+    fn owned(_tenant: &str, _ctx: &CapabilityContext) -> Result<&'static str, AuthError> {
+        Ok("tenant = acme")
+    }
+
+    fn confine(rows: &'static str, _tenant: &str, _ctx: &CapabilityContext) -> &'static str {
+        rows
+    }
+
+    fn narrow(
+        action: &str,
+        rows: &'static str,
+        _ctx: &CapabilityContext,
+    ) -> Result<Option<&'static str>, AuthError> {
+        Ok((action == "read").then_some(rows))
     }
 }
 

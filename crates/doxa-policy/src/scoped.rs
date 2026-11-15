@@ -43,9 +43,15 @@ pub trait ScopedTable: Sized + Send + FromQueryResult {
         None
     }
 
+    /// The rows `scope` owns, as every loader and listing filters them. Widening it can match two
+    /// rows to one key, and a key load then returns either.
+    fn scope_condition(scope: impl Into<Value>) -> Condition {
+        Condition::all().add(Self::SCOPE_COLUMN.eq(scope))
+    }
+
     /// Every row `scope` owns, as a `Select` the caller pages.
     fn scoped(scope: impl Into<Value>) -> Select<Self::Entity> {
-        let query = Self::Entity::find().filter(Self::SCOPE_COLUMN.eq(scope));
+        let query = Self::Entity::find().filter(Self::scope_condition(scope));
         match Self::table_condition() {
             Some(condition) => query.filter(condition),
             None => query,
@@ -60,7 +66,7 @@ pub trait ScopedTable: Sized + Send + FromQueryResult {
         scope: impl Into<Value> + Send,
     ) -> impl Future<Output = Result<Option<Self>, DbErr>> + Send {
         // `find_by_id` isn't built on `scoped`, so fold the table condition in by hand.
-        let query = Self::Entity::find_by_id(id).filter(Self::SCOPE_COLUMN.eq(scope));
+        let query = Self::Entity::find_by_id(id).filter(Self::scope_condition(scope));
         let query = match Self::table_condition() {
             Some(condition) => query.filter(condition),
             None => query,

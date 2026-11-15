@@ -173,6 +173,8 @@ pub struct Model {
 | `attrs_with` | Method producing attributes no field backs |
 | `tenant_parent` | Entity type this resource is `in` by virtue of the request rather than of any column |
 | `filter` | A condition every query carries on top of the scope — repeatable, `AND`ed (needs `sea-orm`) |
+| `owned_with` | Method answering `owned_by(&self, tenant) -> Option<bool>`, in place of the `scope` column |
+| `scope_with` | Function answering `ScopedTable::scope_condition`, to widen the owner filter (needs `scope`) |
 
 | Field role | Description |
 |------------|-------------|
@@ -181,7 +183,7 @@ pub struct Model {
 | `parent = "Type"` | This field holds the id of a parent entity |
 | `key` | The value a route's key segment matches (needs `sea-orm`) |
 | `key(Name, …)` | This column takes part in the named lookups (needs `sea-orm`) |
-| `scope` | The column every query is confined to (needs `sea-orm`) |
+| `scope` | The owning tenant: every query is confined to it (needs `sea-orm`), and `owned_by` compares it |
 
 With the `sea-orm` feature, `scope` emits a `ScopedTable` impl — the confinement column, plus the column behind each Cedar attribute so a policy residual can be translated — and `key` adds `ScopedRow` on top of it. Marking only `scope` is a table nothing addresses by a column: it can still be listed, still have a residual read against it, and still take `key = pk`, because a primary key belongs to the table rather than to a route. The key and the Cedar id are deliberately independent, so a row addressed by `{id}` and the same row addressed by `{name}` stay one Cedar entity reached two ways.
 
