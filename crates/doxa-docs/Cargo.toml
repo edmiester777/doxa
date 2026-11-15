@@ -83,3 +83,4 @@ futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tempfile = "3"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }

@@ -38,7 +38,9 @@ macro_rules! from_axum {
     ($($rejection:ty),*) => {$(
         impl From<$rejection> for Rejection {
             fn from(r: $rejection) -> Self {
-                Rejection { status: r.status(), message: r.body_text() }
+                let (status, message) = (r.status(), r.body_text());
+                tracing::warn!(status = status.as_u16(), error = %message, "request refused by an extractor");
+                Rejection { status, message }
             }
         }
     )*};
@@ -298,6 +300,59 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], MALFORMED);
         assert_eq!(body["status"], 400);
+    }
+
+    /// Every `WARN` event's fields, as `name=value`.
+    #[derive(Clone, Default)]
+    struct Warnings(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct Fields<'a>(&'a mut Vec<String>);
+
+    impl tracing::field::Visit for Fields<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push(format!("{}={value:?}", field.name()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                event.record(&mut Fields(&mut self.0.lock().unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_logged_with_its_status_and_cause() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let warnings = Warnings::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        let uri: axum::http::Uri = "/?n=abc".parse().unwrap();
+        #[derive(Debug, serde::Deserialize)]
+        struct Q {
+            #[allow(dead_code)]
+            n: u32,
+        }
+        let refused = tracing::subscriber::with_default(subscriber, || {
+            let rejection =
+                <axum::extract::Query<Q>>::try_from_uri(&uri).expect_err("not a number");
+            Rejection::from(rejection)
+        });
+
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let fields = warnings.0.lock().unwrap();
+        assert!(fields.contains(&"status=400".to_owned()), "{fields:?}");
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.starts_with("error=") && f.contains("invalid digit")),
+            "{fields:?}"
+        );
     }
 
     #[tokio::test]
