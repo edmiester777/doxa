@@ -43,8 +43,8 @@ pub trait ScopedTable: Sized + Send + FromQueryResult {
         None
     }
 
-    /// The rows `scope` owns, as every loader and listing filters them. Override to widen it, e.g.
-    /// `OR` a `NULL` owner; `#[resource(scope, shared = listed)]` writes that one.
+    /// The rows `scope` owns, as every loader and listing filters them. Widening it can match two
+    /// rows to one key, and a key load then returns either.
     fn scope_condition(scope: impl Into<Value>) -> Condition {
         Condition::all().add(Self::SCOPE_COLUMN.eq(scope))
     }

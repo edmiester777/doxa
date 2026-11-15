@@ -182,8 +182,6 @@ pub struct Model {
 | `key` | The value a route's key segment matches (needs `sea-orm`) |
 | `key(Name, …)` | This column takes part in the named lookups (needs `sea-orm`) |
 | `scope` | The owning tenant: every query is confined to it (needs `sea-orm`), and `owned_by` compares it |
-| `scope, shared` | As `scope`, on an `Option` column whose `NULL` means every tenant's row, for rows a handler loads |
-| `scope, shared = listed` | As `scope, shared`, and the derived loaders and listings return `NULL` rows to every tenant |
 
 With the `sea-orm` feature, `scope` emits a `ScopedTable` impl — the confinement column, plus the column behind each Cedar attribute so a policy residual can be translated — and `key` adds `ScopedRow` on top of it. Marking only `scope` is a table nothing addresses by a column: it can still be listed, still have a residual read against it, and still take `key = pk`, because a primary key belongs to the table rather than to a route. The key and the Cedar id are deliberately independent, so a row addressed by `{id}` and the same row addressed by `{name}` stay one Cedar entity reached two ways.
 

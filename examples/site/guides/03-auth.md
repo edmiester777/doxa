@@ -74,7 +74,7 @@ async fn create_tenant(_: SuperAdmin, body: Json<NewTenant>) -> StatusCode { /* 
 
 ### What confines a tenant admin
 
-The row's `#[resource(scope)]` column is its owner: another tenant's row is a `404` from `Granted<T>` and a `403` from `authorize`, before the policy is asked. A row that records no owner, a `NULL` in a nullable scope column, is refused to a tenant admin and left to the policy for everyone else. When `NULL` means every tenant's, mark the column `#[resource(scope, shared)]` so a row you load yourself counts as owned, or `#[resource(scope, shared = listed)]` so the derived loaders and listings return it to every tenant too. Override `ScopedTable::scope_condition` for any other rule, or write `owned_by` by hand when ownership runs through a parent.
+The row's `#[resource(scope)]` column is its owner: another tenant's row is a `404` from `Granted<T>` and a `403` from `authorize`, before the policy is asked. A row that records no owner, a `NULL` in a nullable scope column, is refused to a tenant admin and left to the policy for everyone else. Override `ScopedTable::scope_condition` to widen what loaders and listings return, or write `owned_by` by hand when ownership runs through a parent. A widened condition can match two rows to one key, and a key load then returns either.
 
 On top of that sits your own rule. `#[resource(filter = …)]` applies to everyone, a super admin included; `#[asset(confine = Rule)]` applies to everyone but a super admin. One rule serves rows and listings across tables:
 

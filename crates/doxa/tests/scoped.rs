@@ -9,7 +9,8 @@ use doxa::policy::{DbLoadError, PolicyResource, ScopedRow, ScopedTable};
 use doxa::PolicyResource;
 use sea_orm::entity::prelude::*;
 use sea_orm::{
-    DatabaseBackend, DatabaseConnection, IdenStatic, MockDatabase, QueryTrait, Transaction,
+    Condition, DatabaseBackend, DatabaseConnection, IdenStatic, MockDatabase, QueryTrait,
+    Transaction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -320,7 +321,7 @@ async fn a_renamed_key_still_queries_its_own_column() {
     assert!(sql.contains("acme"), "{sql}");
 }
 
-mod shared {
+mod nullable {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, PolicyResource)]
@@ -331,7 +332,7 @@ mod shared {
         #[resource(id, key)]
         pub name: String,
 
-        #[resource(scope, shared = listed)]
+        #[resource(scope)]
         pub tenant_id: Option<String>,
     }
 
@@ -342,48 +343,84 @@ mod shared {
 }
 
 #[test]
-fn a_listed_shared_owner_reaches_the_tenant_s_rows_and_everyone_s() {
-    let sql = shared::Model::scoped("acme")
-        .build(DatabaseBackend::Postgres)
-        .to_string();
-
-    assert!(
-        sql.contains(r#""rules"."tenant_id" = 'acme' OR "rules"."tenant_id" IS NULL"#),
-        "{sql}"
-    );
-}
-
-#[tokio::test]
-async fn a_listed_shared_owner_loads_by_key_and_by_id_the_same_way() {
-    let db = MockDatabase::new(DatabaseBackend::Postgres)
-        .append_query_results([Vec::<shared::Model>::new(), Vec::new()])
-        .into_connection();
-
-    shared::Model::load_scoped("limits".to_owned(), &db, "acme")
-        .await
-        .expect("query runs");
-    shared::Model::load_by_id("limits".to_owned(), &db, "acme")
-        .await
-        .expect("query runs");
-
-    for statement in db.into_transaction_log() {
-        let sql = format!("{statement:?}");
-        assert!(sql.contains("IS NULL"), "{sql}");
-    }
-}
-
-#[test]
-fn a_shared_row_belongs_to_every_tenant_and_an_owned_one_to_its_owner() {
-    let rule = shared::Model {
+fn a_null_owner_records_none_and_an_owned_row_its_owner() {
+    let rule = nullable::Model {
         name: "limits".to_owned(),
         tenant_id: None,
     };
-    assert_eq!(rule.owned_by("acme"), Some(true));
-    let owned = shared::Model {
+    assert_eq!(rule.owned_by("acme"), None);
+    let owned = nullable::Model {
         tenant_id: Some("globex".to_owned()),
         ..rule
     };
     assert_eq!(owned.owned_by("acme"), Some(false));
+    assert_eq!(owned.owned_by("globex"), Some(true));
+}
+
+#[test]
+fn a_nullable_owner_lists_only_the_tenant_s_rows() {
+    let sql = nullable::Model::scoped("acme")
+        .build(DatabaseBackend::Postgres)
+        .to_string();
+    assert!(!sql.contains("IS NULL"), "{sql}");
+}
+
+mod widened {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "rules")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub name: String,
+        pub tenant_id: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    impl ScopedTable for Model {
+        type Entity = Entity;
+        const SCOPE_COLUMN: Column = Column::TenantId;
+
+        fn scope_condition(scope: impl Into<Value>) -> Condition {
+            Condition::any()
+                .add(Column::TenantId.eq(scope))
+                .add(Column::TenantId.is_null())
+        }
+    }
+
+    impl ScopedRow for Model {
+        type Key = String;
+        const KEY_COLUMN: Column = Column::Name;
+    }
+}
+
+#[tokio::test]
+async fn an_overridden_scope_condition_reaches_every_loader_and_listing() {
+    let listing = widened::Model::scoped("acme")
+        .build(DatabaseBackend::Postgres)
+        .to_string();
+    assert!(
+        listing.contains(r#""rules"."tenant_id" = 'acme' OR "rules"."tenant_id" IS NULL"#),
+        "{listing}"
+    );
+
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_query_results([Vec::<widened::Model>::new(), Vec::new()])
+        .into_connection();
+    widened::Model::load_scoped("limits".to_owned(), &db, "acme")
+        .await
+        .expect("query runs");
+    widened::Model::load_by_id("limits".to_owned(), &db, "acme")
+        .await
+        .expect("query runs");
+    for statement in db.into_transaction_log() {
+        let sql = format!("{statement:?}");
+        assert!(sql.contains("IS NULL"), "{sql}");
+    }
 }
 
 /// Reached by uuid but named by its name, so `Connection::"primary"` covers both routes.
