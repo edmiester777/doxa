@@ -180,7 +180,7 @@ pub async fn list_orders(
 }
 ```
 
-`?page=2&page_size=50` asks for the second fifty. `page` counts from 1 and defaults to it, and `page_size` defaults to 20. `PageInput` caps the size at 200, and `PageInput<50>` at 50. A bare `Query` cuts a larger request to the cap. `Valid<Query<PageInput<50>>>` refuses it with a `422` on `page_size`, and the document states the maximum either way. The answer carries `items`, `page`, `page_size`, `total` and `total_pages`. With the `sea-orm` feature, `.page(&db, &page)` counts the query and fetches the one page; `Page::of(all, &page)` cuts a list already in memory. A second `Query<…>` beside it takes the listing's filters.
+`?page=2&page_size=50` asks for the second fifty. `page` counts from 1 and defaults to it. `PageInput` caps the size at 200 and `PageInput<50>` at 50, and a request that names no size gets the cap. A bare `Query` cuts a larger request to the cap. `Valid<Query<PageInput<50>>>` refuses it with a `422` on `page_size`, and the document states the maximum either way. The answer carries `items`, `page`, `page_size`, `total` and `total_pages`. With the `sea-orm` feature, `.page(&db, &page)` counts the query and fetches the one page; `Page::of(all, &page)` cuts a list already in memory. A second `Query<…>` beside it takes the listing's filters.
 
 In the browser, `list_orders(PageInput::new(2, 50))` fetches one page and `doxa::client::every_page(|p| list_orders(p))` fetches them all.
 

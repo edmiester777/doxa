@@ -8,25 +8,22 @@ pub struct PageInput<const MAX: u32 = 200> {
     /// The page to answer, from 1. Default: 1.
     #[serde(default = "first")]
     pub page: u32,
-    /// Items per page, at most `MAX`. Default: [`DEFAULT_PAGE_SIZE`].
-    #[serde(default = "default_size")]
+    /// Items per page, at most `MAX`. Default: `MAX`.
+    #[serde(default = "most::<MAX>")]
     pub page_size: u32,
 }
-
-/// The size a request that names none gets.
-pub const DEFAULT_PAGE_SIZE: u32 = 20;
 
 fn first() -> u32 {
     1
 }
 
-fn default_size() -> u32 {
-    DEFAULT_PAGE_SIZE
+fn most<const MAX: u32>() -> u32 {
+    MAX
 }
 
 impl<const MAX: u32> Default for PageInput<MAX> {
     fn default() -> Self {
-        Self::new(1, DEFAULT_PAGE_SIZE)
+        Self::new(1, MAX)
     }
 }
 
@@ -88,7 +85,7 @@ mod docs {
     use utoipa::openapi::schema::{ObjectBuilder, Schema, Type};
     use utoipa::openapi::{KnownFormat, RefOr, Required, SchemaFormat};
 
-    use super::{PageInput, DEFAULT_PAGE_SIZE};
+    use super::PageInput;
 
     fn field(minimum: u32, maximum: Option<u32>, default: u32, about: &str) -> ObjectBuilder {
         ObjectBuilder::new()
@@ -103,10 +100,7 @@ mod docs {
     fn fields<const MAX: u32>() -> [(&'static str, ObjectBuilder); 2] {
         [
             ("page", field(1, None, 1, "The page to answer, from 1.")),
-            (
-                "page_size",
-                field(1, Some(MAX), DEFAULT_PAGE_SIZE, "Items per page."),
-            ),
+            ("page_size", field(1, Some(MAX), MAX, "Items per page.")),
         ]
     }
 
@@ -195,9 +189,37 @@ impl<T> Page<T> {
     }
 
     /// The same page with each item converted.
-    pub fn map<U>(self, f: impl FnMut(T) -> U) -> Page<U> {
+    pub fn map<U>(mut self, f: impl FnMut(T) -> U) -> Page<U> {
+        let items = std::mem::take(&mut self.items);
+        self.with(items.into_iter().map(f).collect())
+    }
+
+    /// The same page with each item converted by [`Into`].
+    pub fn map_into<U>(self) -> Page<U>
+    where
+        T: Into<U>,
+    {
+        self.map(Into::into)
+    }
+
+    /// The same page keeping the items `f` answers; `total` still counts the dropped ones.
+    pub fn filter_map<U>(mut self, f: impl FnMut(T) -> Option<U>) -> Page<U> {
+        let items = std::mem::take(&mut self.items);
+        self.with(items.into_iter().filter_map(f).collect())
+    }
+
+    /// The same page with every item converted at once, as a batch loader does.
+    pub async fn try_map_all<U, E, F>(mut self, f: impl FnOnce(Vec<T>) -> F) -> Result<Page<U>, E>
+    where
+        F: std::future::Future<Output = Result<Vec<U>, E>>,
+    {
+        let items = std::mem::take(&mut self.items);
+        Ok(self.with(f(items).await?))
+    }
+
+    fn with<U>(&self, items: Vec<U>) -> Page<U> {
         Page {
-            items: self.items.into_iter().map(f).collect(),
+            items,
             page: self.page,
             page_size: self.page_size,
             total: self.total,
@@ -213,9 +235,9 @@ mod tests {
     #[test]
     fn a_missing_page_or_size_takes_the_default() {
         let input: PageInput = serde_json::from_str("{}").unwrap();
-        assert_eq!(input, PageInput::new(1, DEFAULT_PAGE_SIZE));
-        let input: PageInput = serde_json::from_str(r#"{"page":3}"#).unwrap();
-        assert_eq!(input.offset(), 40);
+        assert_eq!(input, PageInput::new(1, 200));
+        let input: PageInput<50> = serde_json::from_str(r#"{"page":3}"#).unwrap();
+        assert_eq!(input.offset(), 100);
     }
 
     #[test]
@@ -243,6 +265,29 @@ mod tests {
         let page = Page::of(Vec::<u8>::new(), &PageInput::<200>::default());
         assert_eq!((page.total, page.total_pages), (0, 0));
         assert!(page.next::<200>().is_none());
+    }
+
+    #[test]
+    fn conversions_keep_where_the_page_sits() {
+        let page = Page::of(1..=25u32, &PageInput::<200>::new(2, 10));
+        let kept = page.clone().filter_map(|n| (n % 2 == 0).then_some(n));
+        assert_eq!((kept.items.len(), kept.total, kept.page), (5, 25, 2));
+        let wide: Page<u64> = page.clone().map_into();
+        assert_eq!(wide.total_pages, 3);
+        let loaded = ready(page.try_map_all(|rows| async move {
+            Ok::<_, ()>(rows.into_iter().map(|n| n * 2).collect::<Vec<_>>())
+        }));
+        assert_eq!(loaded.unwrap().items[0], 22);
+    }
+
+    /// The batch loaders under test resolve without waiting.
+    fn ready<F: std::future::Future>(f: F) -> F::Output {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        match std::pin::pin!(f).poll(&mut cx) {
+            std::task::Poll::Ready(out) => out,
+            std::task::Poll::Pending => panic!("pending"),
+        }
     }
 
     #[cfg(feature = "garde")]
