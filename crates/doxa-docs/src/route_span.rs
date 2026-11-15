@@ -14,7 +14,7 @@ use crate::__private::SpanTenant;
 
 /// Wraps one route in the span its macro declared.
 #[derive(Clone, Copy)]
-pub struct RouteSpanLayer(pub fn() -> Span);
+pub struct RouteSpanLayer(pub fn(Option<&str>) -> Span);
 
 impl<S> Layer<S> for RouteSpanLayer {
     type Service = RouteSpanService<S>;
@@ -31,7 +31,7 @@ impl<S> Layer<S> for RouteSpanLayer {
 #[derive(Clone)]
 pub struct RouteSpanService<S> {
     inner: S,
-    make: fn() -> Span,
+    make: fn(Option<&str>) -> Span,
 }
 
 impl<S: Service<Request>> Service<Request> for RouteSpanService<S> {
@@ -44,11 +44,9 @@ impl<S: Service<Request>> Service<Request> for RouteSpanService<S> {
     }
 
     fn call(&mut self, request: Request) -> Self::Future {
-        let span = (self.make)();
         let (mut parts, body) = request.into_parts();
-        if let Some(SpanTenant(tenant)) = parts.extensions.get::<SpanTenant>() {
-            span.record("tenant", tenant.as_str());
-        }
+        let tenant = parts.extensions.get::<SpanTenant>();
+        let span = (self.make)(tenant.map(|SpanTenant(t)| t.as_str()));
         // Reading the router's params never waits.
         if let Some(Ok(params)) = now(RawPathParams::from_request_parts(&mut parts, &())) {
             for (name, value) in &params {

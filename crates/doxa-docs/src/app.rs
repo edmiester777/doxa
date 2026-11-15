@@ -119,7 +119,7 @@ fn apply_stack<L: Layers>(routes: Routes, state: &dyn Any) -> Option<Routes> {
 pub fn mount<S, const K: u64>(
     routes: UtoipaMethodRouter<S>,
     state: &dyn Any,
-    span: Option<fn() -> tracing::Span>,
+    span: Option<fn(Option<&str>) -> tracing::Span>,
 ) -> Option<Routes>
 where
     S: Clone + Send + Sync + 'static,

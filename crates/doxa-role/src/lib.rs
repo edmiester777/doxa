@@ -20,6 +20,8 @@ pub const SERVER_ONLY_ENV: &str = "DOXA_SERVER_ONLY";
 pub const CLIENT_ONLY_ENV: &str = "DOXA_CLIENT_ONLY";
 /// `[package.metadata.doxa] service`: the package whose service the crate's entities belong to.
 pub const SERVICE_ENV: &str = "DOXA_SERVICE";
+/// `[package.metadata.doxa] tenant_field`: the `route` span's field for the caller's tenant.
+pub const TENANT_FIELD_ENV: &str = "DOXA_TENANT_FIELD";
 
 /// Build this crate as the client half: routes become typed HTTP calls.
 pub fn client() {
@@ -32,10 +34,7 @@ pub fn client() {
 /// Panics on a bad `server_only` / `client_only` in `[package.metadata.doxa]`.
 pub fn api() {
     emit("api");
-    println!("cargo::rerun-if-changed=Cargo.toml");
-    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("run from build.rs"));
-    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).expect("read Cargo.toml");
-    let split = Split::read(&dir, &manifest).unwrap_or_else(|e| panic!("{e}"));
+    let split = manifest();
     println!("cargo::rustc-env={LIB_ENV}={}", split.lib.display());
     println!(
         "cargo::rustc-env={SERVER_ONLY_ENV}={}",
@@ -50,9 +49,23 @@ pub fn api() {
     }
 }
 
-/// Build this crate as the server half. The default; only needed to say so.
+/// Build this crate as the server half. The default; only needed to say so, or to read
+/// `[package.metadata.doxa] tenant_field`.
 pub fn server() {
     emit("server");
+    manifest();
+}
+
+/// Reads `[package.metadata.doxa]` and emits the keys every half shares.
+fn manifest() -> Split {
+    println!("cargo::rerun-if-changed=Cargo.toml");
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("run from build.rs"));
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).expect("read Cargo.toml");
+    let split = Split::read(&dir, &manifest).unwrap_or_else(|e| panic!("{e}"));
+    if let Some(field) = &split.tenant_field {
+        println!("cargo::rustc-env={TENANT_FIELD_ENV}={field}");
+    }
+    split
 }
 
 fn emit(role: &str) {
@@ -68,6 +81,7 @@ struct Split {
     server: Vec<String>,
     client: Vec<String>,
     service: Option<String>,
+    tenant_field: Option<String>,
 }
 
 impl Split {
@@ -120,11 +134,21 @@ impl Split {
                     .to_owned(),
             ),
         };
+        let tenant_field = match doxa.and_then(|d| d.get("tenant_field")) {
+            None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .filter(|f| is_ident(f))
+                    .ok_or("`[package.metadata.doxa] tenant_field` is a Rust identifier")?
+                    .to_owned(),
+            ),
+        };
         Ok(Split {
             lib,
             server,
             client,
             service,
+            tenant_field,
         })
     }
 }
@@ -193,8 +217,23 @@ mod tests {
                 server: vec!["server".into()],
                 client: vec!["browser".into()],
                 service: None,
+                tenant_field: None,
             }
         );
+    }
+
+    #[test]
+    fn names_the_route_span_s_tenant_field() {
+        let root = crate_with(&[]);
+        let read = |toml: &str| Split::read(&root, toml);
+        let split = read("[package.metadata.doxa]\ntenant_field = \"company_id\"").unwrap();
+        assert_eq!(split.tenant_field.as_deref(), Some("company_id"));
+        assert!(
+            read("[package.metadata.doxa]\ntenant_field = \"company id\"")
+                .unwrap_err()
+                .contains("identifier")
+        );
+        assert!(read("[package.metadata.doxa]\ntenant_field = 1").is_err());
     }
 
     #[test]

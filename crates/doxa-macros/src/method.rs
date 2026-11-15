@@ -127,6 +127,7 @@ fn serve(r: &Parts<'_>, mut item_fn: ItemFn) -> Result<TokenStream> {
         handler: &handler,
         route: &format!("{} {}", r.method.to_uppercase(), r.path.value()),
         path: &r.path.value(),
+        tenant_field: &app::tenant_field(),
     };
     let mount = r.mount.then(|| app::mount(&item_fn, &span));
     grant::stop_dry_runs(&mut item_fn);

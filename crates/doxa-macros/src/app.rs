@@ -34,6 +34,8 @@ pub struct RouteSpan<'a> {
     pub handler: &'a str,
     pub route: &'a str,
     pub path: &'a str,
+    /// `[package.metadata.doxa] tenant_field`, else `tenant`.
+    pub tenant_field: &'a str,
 }
 
 impl RouteSpan<'_> {
@@ -42,22 +44,28 @@ impl RouteSpan<'_> {
             return quote!(::core::option::Option::None);
         }
         let (handler, route) = (self.handler, self.route);
-        let fixed = ["handler", "route", "tenant"];
+        let tenant = syn::LitStr::new(self.tenant_field, proc_macro2::Span::call_site());
+        let fixed = ["handler", "route", self.tenant_field];
         let params = path_params(self.path)
             .into_iter()
             .filter(|p| !fixed.contains(&p.as_str()))
             .map(|p| syn::LitStr::new(&p, proc_macro2::Span::call_site()));
         let t = quote!(::doxa::__private::tracing);
         quote! {
-            ::core::option::Option::Some((|| #t::info_span!(
+            ::core::option::Option::Some((|tenant: ::core::option::Option<&str>| #t::info_span!(
                 "route",
                 handler = #handler,
                 route = #route,
-                tenant = #t::field::Empty,
+                #tenant = tenant,
                 #(#params = #t::field::Empty,)*
-            )) as fn() -> #t::Span)
+            )) as fn(::core::option::Option<&str>) -> #t::Span)
         }
     }
+}
+
+/// The crate's `tenant_field`, which `doxa_role` passes down from `build.rs`.
+pub fn tenant_field() -> String {
+    std::env::var("DOXA_TENANT_FIELD").unwrap_or_else(|_| "tenant".to_owned())
 }
 
 /// Every `{name}` and `{*name}` in a template.
@@ -196,4 +204,35 @@ fn shape(sig: &syn::Signature) -> syn::Error {
         sig,
         "a layer stack is `fn(routes: doxa::Routes, state: &State) -> doxa::Routes`",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span_for(path: &str, tenant_field: &str) -> String {
+        RouteSpan {
+            on: true,
+            handler: "get_widget",
+            route: "GET /widgets",
+            path,
+            tenant_field,
+        }
+        .maker()
+        .to_string()
+        .replace(' ', "")
+    }
+
+    #[test]
+    fn the_tenant_lands_on_the_configured_field() {
+        let out = span_for("/widgets/{id}", "company_id");
+        assert!(out.contains("\"company_id\"=tenant"), "{out}");
+        assert!(!out.contains("\"tenant\"="), "{out}");
+    }
+
+    #[test]
+    fn a_path_parameter_named_like_the_tenant_field_is_not_declared_twice() {
+        let out = span_for("/orgs/{company_id}", "company_id");
+        assert_eq!(out.matches("\"company_id\"").count(), 1, "{out}");
+    }
 }

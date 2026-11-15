@@ -20,6 +20,8 @@ Each route also runs under a `route` span carrying its handler, method and templ
 route{handler="get_widget" route="GET /widgets/{id}" tenant="acme" id="42"}
 ```
 
+`[package.metadata.doxa] tenant_field = "company_id"` names the tenant field to match your log schema; `build.rs` must call `doxa_role::server()` or `doxa_role::api()` for it to apply.
+
 A handler's own `#[tracing::instrument]` nests inside it, so add only what the handler computes. `trace = false` on the attribute leaves a route without one, and turning off the `trace` feature drops them all.
 
 ## Routes both halves build
