@@ -7,10 +7,10 @@ use sea_orm::{ConnectionTrait, DbErr, PaginatorTrait, SelectorTrait};
 pub trait Paged<'db, C: ConnectionTrait>: PaginatorTrait<'db, C> + Sized {
     /// The page `input` asks for, and the count across the whole query.
     #[allow(async_fn_in_trait)]
-    async fn page(
+    async fn page<const MAX: u32>(
         self,
         db: &'db C,
-        input: &PageInput,
+        input: &PageInput<MAX>,
     ) -> Result<Page<<Self::Selector as SelectorTrait>::Item>, DbErr> {
         let pages = self.paginate(db, u64::from(input.size()));
         let total = pages.num_items().await?;

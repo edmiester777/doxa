@@ -263,4 +263,4 @@ required-features = ["client"]
 
 [[test]]
 name = "page"
-required-features = ["sea-orm"]
+required-features = ["sea-orm", "garde"]

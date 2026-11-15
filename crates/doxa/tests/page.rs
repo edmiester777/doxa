@@ -1,4 +1,4 @@
-//! A paged listing: `Query<PageInput>` in, `Json<Page<T>>` out, cut by the database.
+//! A paged listing: `Valid<Query<PageInput<50>>>` in, `Json<Page<T>>` out, cut by the database.
 
 use std::collections::BTreeMap;
 
@@ -35,7 +35,7 @@ pub struct Widgets;
 /// Widgets, a page at a time.
 #[doxa::get("/widgets")]
 async fn list_widgets(
-    doxa::extract::Query(page): doxa::extract::Query<PageInput>,
+    doxa::Valid(doxa::extract::Query(page)): doxa::Valid<doxa::extract::Query<PageInput<50>>>,
 ) -> doxa::extract::Json<Page<widget::Model>> {
     doxa::extract::Json(Page::of(Vec::new(), &page))
 }
@@ -52,7 +52,7 @@ async fn a_query_is_counted_and_cut_to_the_page() {
         .into_connection();
 
     let page = widget::Entity::find()
-        .page(&db, &PageInput::new(3, 10))
+        .page(&db, &PageInput::<200>::new(3, 10))
         .await
         .unwrap();
 
@@ -73,6 +73,21 @@ async fn a_query_is_counted_and_cut_to_the_page() {
     );
 }
 
+#[tokio::test]
+async fn a_size_past_the_cap_is_refused_per_field() {
+    use tower::ServiceExt;
+    let ask = |query: &str| {
+        let (router, _) = doxa::app(&AppState).split_for_parts();
+        let req = axum::http::Request::get(format!("/widgets?{query}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        async move { router.oneshot(req).await.unwrap().status().as_u16() }
+    };
+    assert_eq!(ask("page_size=50").await, 200);
+    assert_eq!(ask("page_size=51").await, 422);
+    assert_eq!(ask("page=0").await, 422);
+}
+
 #[test]
 fn the_document_names_the_page_and_its_size() {
     let (_, api) = doxa::app(&AppState).split_for_parts();
@@ -85,6 +100,7 @@ fn the_document_names_the_page_and_its_size() {
         .map(|p| p["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["page", "page_size"]);
+    assert_eq!(op["parameters"][1]["schema"]["maximum"], 50);
     let body = op["responses"]["200"]["content"]["application/json"]["schema"].to_string();
     for field in ["total_pages", "items"] {
         assert!(doc.to_string().contains(field), "{field} missing: {body}");
