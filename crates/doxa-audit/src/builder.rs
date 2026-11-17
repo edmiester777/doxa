@@ -163,6 +163,11 @@ impl AuditEventBuilder {
         });
     }
 
+    /// The correlation id. Call after [`set_request_metadata`](Self::set_request_metadata), which overwrites it.
+    pub fn set_request_id(&self, id: &str) {
+        self.with_inner(|inner| inner.request_id = Some(id.to_owned()));
+    }
+
     /// Extract source_ip, user_agent, and request_id from HTTP headers.
     pub fn set_request_metadata(&self, headers: &HeaderMap) {
         self.with_inner(|inner| {

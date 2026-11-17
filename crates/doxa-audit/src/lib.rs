@@ -253,6 +253,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_request_id_lands_on_the_event() {
+        let (logger, mut rx) = make_logger(16);
+        let builder = AuditEventBuilder::new(logger);
+        builder.set_request_id("op-7");
+        builder.set_event(EventType::DataAccess, "test");
+        builder.emit_allowed();
+
+        let event = rx.recv().await.expect("should receive event");
+        assert_eq!(event.request_id.as_deref(), Some("op-7"));
+    }
+
+    #[tokio::test]
     async fn source_ip_fallback_only_fills_when_header_absent() {
         let (logger, mut rx) = make_logger(16);
 
