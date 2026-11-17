@@ -26,11 +26,10 @@
 //!
 //! - [`OidcJwksValidator`] — RFC 7519 JWT validation against a JWKS keyset
 //!   fetched from a configurable URL.
-//! - [`OidcIntrospector`] — RFC 7662 token introspection resolver that produces
-//!   [`OidcClaims`](crate::claims::OidcClaims) from the introspection response.
-//! - [`LocalJwtClaimResolver`] — reads claims directly from the validated JWT
-//!   body forwarded by the validator, producing
-//!   [`OidcClaims`](crate::claims::OidcClaims).
+//! - [`OidcIntrospector`] — RFC 7662 token introspection.
+//! - [`LocalJwtClaimResolver`] — reads the JWT body the validator forwards.
+//!
+//! Both resolve any `C: TryFrom<`[`OidcClaims`](crate::claims::OidcClaims)`>`.
 
 use std::collections::HashMap;
 
@@ -45,8 +44,11 @@ pub mod local_jwt;
 pub mod oidc_introspection;
 pub mod oidc_jwks;
 
-pub use local_jwt::{LocalJwtClaimResolver, OidcClaimConfig};
-pub use oidc_introspection::{OidcIntrospectionOptions, OidcIntrospector};
+pub use local_jwt::LocalJwtClaimResolver;
+pub use oidc_introspection::{
+    OidcIntrospectionOptions, OidcIntrospector, DEFAULT_INTROSPECTION_CACHE_CAPACITY,
+    DEFAULT_INTROSPECTION_CACHE_TTL,
+};
 pub use oidc_jwks::{parse_algorithms, OidcJwksOptions, OidcJwksValidator};
 
 /// Output of [`TokenValidator::validate`].

@@ -82,7 +82,8 @@ pub use doxa_wire as __wire;
 pub use claims::{Claims, OidcClaims};
 pub use config::{AuthProviderConfig, ClaimMapping, ResolverConfig, ValidatorConfig};
 pub use context::{AuthContext, CapabilityContext, SuperAdmin, TenantAdmin};
-pub use provider::{ClaimResolver, MinimalClaims, OidcClaimConfig, TokenValidator};
+pub use doxa_policy::AuthError;
+pub use provider::{ClaimResolver, MinimalClaims, TokenValidator};
 
 #[cfg(feature = "axum")]
 pub use extractors::{Auth, BearerScheme, Require, SchemeName, Tenant};

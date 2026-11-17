@@ -62,3 +62,10 @@ pub enum AuthError {
     )]
     UnsupportedFilter(String),
 }
+
+/// Lets an infallible `TryFrom` (such as `OidcClaims` into itself) stand where an `AuthError` is expected.
+impl From<std::convert::Infallible> for AuthError {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
+    }
+}
