@@ -8,7 +8,7 @@ use quote::quote;
 use syn::{Data, DeriveInput, Expr, Fields, Ident, LitStr, Result, Type};
 
 /// Role a field plays in the generated impls.
-enum Role {
+pub(crate) enum Role {
     Id,
     Attr(String),
     Parent(LitStr),
@@ -638,7 +638,7 @@ fn container_args(input: &DeriveInput) -> Result<Container> {
 }
 
 /// One field's `#[resource(id | attr [= "key"] | parent = "…" | key … | scope)]` roles.
-fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
+pub(crate) fn field_roles(field: &syn::Field) -> Result<Vec<Role>> {
     let mut roles = Vec::new();
     let default_key = field
         .ident

@@ -212,7 +212,6 @@ pub struct Model {
     #[resource(id)]
     pub id: Uuid,
     #[resource(scope)]
-    #[patch(skip)]
     pub tenant_id: String,
     pub quantity: i32,
     pub note: Option<String>,
@@ -232,7 +231,7 @@ pub async fn update_order(
 }
 ```
 
-`apply` writes each field that was sent, and leaves a column holding the same value unchanged. `doxa::changed_columns(&active)` lists what it will write, for an upsert's `update_columns`. A field naming no column, the primary key, a type that doesn't convert with `Into`, or a `Nullable` on a NOT NULL column is a compile error. A `#[resource(…)]` column warns until it's `#[patch(skip)]`. A tenant column scoped some other way has no such marker, so skip it by hand. `#[patch(column = "…")]` renames a field, and `#[patch(skip)]` leaves it for the handler.
+`apply` writes each field that was sent, and leaves a column holding the same value unchanged. `doxa::changed_columns(&active)` lists what it will write, for an upsert's `update_columns`. A field naming no column, the primary key, the `#[resource(id)]` or `#[resource(scope)]` column, a type that doesn't convert with `Into`, or a `Nullable` on a NOT NULL column is a compile error. `#[patch(skip)]` on a model column keeps it out of every DTO; a tenant column scoped some other way has no marker, so skip it by hand. A `#[resource(parent = "…")]` column warns, since a patch could move the row, until it's `#[patch(skip)]` or `#[patch(allow_unsafe)]`. On a DTO, `#[patch(column = "…")]` renames a field, and `#[patch(skip)]` leaves it for the handler.
 
 ## Server-Sent Events
 

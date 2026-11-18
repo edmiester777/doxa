@@ -5,7 +5,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::{Data, DeriveInput, Fields, Ident, LitStr, Type};
 
-use crate::policy_resource::is_primary_key;
+use crate::policy_resource::{field_roles, is_primary_key, Role};
 use crate::ty::{inner_of, last_ident};
 
 /// `(Ch<'n'>, Ch<'a'>, …,)`: always a tuple, even for one letter.
@@ -41,27 +41,31 @@ fn named_fields<'a>(input: &'a DeriveInput, derive: &str) -> syn::Result<&'a syn
     }
 }
 
-/// A field's `#[patch(skip)]` and `#[patch(column = "…")]`.
+/// A field's `#[patch(skip)]`, and `column = "…"` on a DTO or `allow_unsafe` on a model.
 struct FieldArgs {
     skip: bool,
     column: Option<LitStr>,
+    allow_unsafe: bool,
 }
 
-fn field_args(field: &syn::Field, column_allowed: bool) -> syn::Result<FieldArgs> {
+fn field_args(field: &syn::Field, dto: bool) -> syn::Result<FieldArgs> {
     let mut out = FieldArgs {
         skip: false,
         column: None,
+        allow_unsafe: false,
     };
     for attr in field.attrs.iter().filter(|a| a.path().is_ident("patch")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("skip") {
                 out.skip = true;
-            } else if column_allowed && meta.path.is_ident("column") {
+            } else if dto && meta.path.is_ident("column") {
                 out.column = Some(meta.value()?.parse()?);
-            } else if column_allowed {
+            } else if !dto && meta.path.is_ident("allow_unsafe") {
+                out.allow_unsafe = true;
+            } else if dto {
                 return Err(meta.error("expected `skip` or `column = \"…\"`"));
             } else {
-                return Err(meta.error("expected `skip`"));
+                return Err(meta.error("expected `skip` or `allow_unsafe`"));
             }
             Ok(())
         })?;
@@ -70,6 +74,12 @@ fn field_args(field: &syn::Field, column_allowed: bool) -> syn::Result<FieldArgs
         return Err(syn::Error::new_spanned(
             &field.ident,
             "a skipped field names no column: drop `column`",
+        ));
+    }
+    if out.skip && out.allow_unsafe {
+        return Err(syn::Error::new_spanned(
+            &field.ident,
+            "a skipped column isn't patched: drop `allow_unsafe`",
         ));
     }
     Ok(out)
@@ -197,10 +207,29 @@ pub fn expand_target(input: TokenStream) -> syn::Result<TokenStream> {
 
     for field in &fields.named {
         let args = field_args(field, false)?;
-        if args.skip || is_primary_key(field) || not_a_column(field) {
+        // A malformed `#[resource]` is `PolicyResource`'s error to report.
+        let roles = field_roles(field).unwrap_or_default();
+        // The Cedar identity (`id`) and owner (`scope`) never change through a patch.
+        let fixed = roles.iter().any(|r| matches!(r, Role::Id | Role::Scope))
+            || is_primary_key(field)
+            || not_a_column(field);
+        let parent = roles.iter().any(|r| matches!(r, Role::Parent(_)));
+        let name = field.ident.as_ref().expect("named");
+        if args.allow_unsafe && fixed {
+            return Err(syn::Error::new_spanned(
+                name,
+                "this column is never patched: drop `allow_unsafe`",
+            ));
+        }
+        if args.allow_unsafe && !parent {
+            return Err(syn::Error::new_spanned(
+                name,
+                "`allow_unsafe` silences a `#[resource(parent)]` column's warning, and this isn't one",
+            ));
+        }
+        if args.skip || fixed {
             continue;
         }
-        let name = field.ident.as_ref().expect("named");
         let ty: &Type = &field.ty;
         let k = key(&unraw(name), name.span());
         out.extend(quote! {
@@ -211,10 +240,11 @@ pub fn expand_target(input: TokenStream) -> syn::Result<TokenStream> {
                 }
             }
         });
-        if field.attrs.iter().any(|a| a.path().is_ident("resource")) {
+        if parent && !args.allow_unsafe {
             let note = LitStr::new(
                 &format!(
-                    "`{}` is a policy resource column and patchable: mark it `#[patch(skip)]`",
+                    "`{}` is a policy parent column, so a patch can move the row to another \
+                     parent: mark it `#[patch(skip)]`, or `#[patch(allow_unsafe)]` to allow it",
                     unraw(name)
                 ),
                 Span::call_site(),
@@ -323,26 +353,95 @@ mod tests {
         }
     }
 
+    fn target(item: TokenStream) -> syn::Result<String> {
+        expand_target(item).map(|t| t.to_string())
+    }
+
     #[test]
-    fn a_resource_column_warns_until_skipped() {
-        let out = expand_target(quote! {
+    fn an_attr_column_is_patchable_without_a_warning() {
+        let out = target(quote! {
             pub struct Model {
+                #[resource(attr)]
+                pub enabled: bool,
+            }
+        })
+        .unwrap();
+        assert!(out.contains("self . enabled . set_ne"), "{out}");
+        assert!(!out.contains("deprecated"), "{out}");
+    }
+
+    #[test]
+    fn the_id_and_scope_columns_are_left_out() {
+        let out = target(quote! {
+            pub struct Model {
+                #[sea_orm(primary_key)]
+                pub pk: i32,
+                #[resource(id)]
+                pub public_id: String,
                 #[resource(scope)]
                 pub tenant_id: String,
             }
         })
-        .unwrap()
-        .to_string();
-        assert!(out.contains("deprecated"), "{out}");
-        let skipped = expand_target(quote! {
+        .unwrap();
+        assert!(out.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn allow_unsafe_on_a_column_never_patched_is_refused() {
+        let err = target(quote! {
             pub struct Model {
-                #[resource(scope)]
-                #[patch(skip)]
+                #[resource(scope, parent = "Org")]
+                #[patch(allow_unsafe)]
                 pub tenant_id: String,
             }
         })
-        .unwrap()
-        .to_string();
-        assert!(skipped.is_empty(), "{skipped}");
+        .unwrap_err();
+        assert!(err.to_string().contains("never patched"), "{err}");
+    }
+
+    #[test]
+    fn a_parent_column_warns_until_skipped_or_allowed() {
+        let column = |attr: TokenStream| {
+            target(quote! {
+                pub struct Model {
+                    #[resource(parent = "Project")]
+                    #attr
+                    pub project_id: String,
+                }
+            })
+            .unwrap()
+        };
+        let warned = column(quote!());
+        assert!(warned.contains("deprecated"), "{warned}");
+        assert!(warned.contains("allow_unsafe"), "{warned}");
+        assert!(column(quote!(#[patch(skip)])).is_empty());
+        let allowed = column(quote!(#[patch(allow_unsafe)]));
+        assert!(allowed.contains("self . project_id . set_ne"), "{allowed}");
+        assert!(!allowed.contains("deprecated"), "{allowed}");
+    }
+
+    #[test]
+    fn allow_unsafe_is_only_for_an_unskipped_parent() {
+        let on_attr = target(quote! {
+            pub struct Model {
+                #[resource(attr)]
+                #[patch(allow_unsafe)]
+                pub enabled: bool,
+            }
+        })
+        .unwrap_err();
+        assert!(on_attr.to_string().contains("parent"), "{on_attr}");
+        let skipped = target(quote! {
+            pub struct Model {
+                #[resource(parent = "Project")]
+                #[patch(skip, allow_unsafe)]
+                pub project_id: String,
+            }
+        })
+        .unwrap_err();
+        assert!(
+            skipped.to_string().contains("drop `allow_unsafe`"),
+            "{skipped}"
+        );
     }
 }

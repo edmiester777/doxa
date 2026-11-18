@@ -25,7 +25,6 @@ pub struct Model {
     #[resource(id)]
     pub id: Uuid,
     #[resource(scope)]
-    #[patch(skip)]
     pub tenant_id: String,
     pub quantity: i32,
     pub note: Option<String>,

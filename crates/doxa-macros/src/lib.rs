@@ -1027,7 +1027,8 @@ pub fn derive_patch(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// The columns a `#[derive(Patch)]` DTO may write, on a sea-orm `Model` beside `DeriveEntityModel`.
+/// The columns a `#[derive(Patch)]` DTO may write, on a sea-orm `Model` beside `DeriveEntityModel`:
+/// all but the primary key, `#[resource(id)]`, `#[resource(scope)]` and `#[patch(skip)]`.
 #[proc_macro_derive(PatchTarget, attributes(patch))]
 pub fn derive_patch_target(input: TokenStream) -> TokenStream {
     patch::expand_target(input.into())

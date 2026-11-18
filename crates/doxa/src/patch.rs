@@ -1,5 +1,6 @@
 //! Partial updates: a `#[derive(Patch)]` DTO writes the `#[derive(PatchTarget)]` columns its
-//! fields name, each checked at compile time against the column's type.
+//! fields name, each checked at compile time against the column's type. The primary key, the
+//! `#[resource(id)]` and `#[resource(scope)]` columns, and `#[patch(skip)]` ones, aren't patchable.
 
 /// A partial update a DTO applies to an `ActiveModel`.
 pub trait Patch<A> {
@@ -166,7 +167,48 @@ pub struct Ch<const C: char>;
 /// fn main() { check::<UpdateOrder>() }
 /// ```
 ///
-/// A policy resource column warns until it is skipped:
+/// A policy attribute column is patchable like any other:
+///
+/// ```
+/// #![deny(deprecated)]
+/// # use doxa::{Patch, PatchTarget, PolicyResource};
+/// # use sea_orm::entity::prelude::*;
+/// #[derive(Clone, Debug, PartialEq, DeriveEntityModel, PolicyResource, PatchTarget)]
+/// #[sea_orm(table_name = "orders")]
+/// #[resource(entity_type = "Order")]
+/// pub struct Model {
+///     #[sea_orm(primary_key)] #[resource(id)] pub id: i32,
+///     #[resource(attr)] pub enabled: bool,
+/// }
+/// # #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)] pub enum Relation {}
+/// # impl ActiveModelBehavior for ActiveModel {}
+/// # fn check<P: Patch<ActiveModel>>() {}
+/// #[derive(Patch)]
+/// pub struct UpdateOrder { pub enabled: Option<bool> }
+/// fn main() { check::<UpdateOrder>() }
+/// ```
+///
+/// The `#[resource(scope)]` column, which says who owns the row:
+///
+/// ```compile_fail
+/// # use doxa::{Patch, PatchTarget, PolicyResource};
+/// # use sea_orm::entity::prelude::*;
+/// #[derive(Clone, Debug, PartialEq, DeriveEntityModel, PolicyResource, PatchTarget)]
+/// #[sea_orm(table_name = "orders")]
+/// #[resource(entity_type = "Order")]
+/// pub struct Model {
+///     #[sea_orm(primary_key)] #[resource(id)] pub id: i32,
+///     #[resource(scope)] pub tenant_id: String,
+/// }
+/// # #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)] pub enum Relation {}
+/// # impl ActiveModelBehavior for ActiveModel {}
+/// # fn check<P: Patch<ActiveModel>>() {}
+/// #[derive(Patch)]
+/// pub struct UpdateOrder { pub tenant_id: Option<String> }
+/// fn main() { check::<UpdateOrder>() }
+/// ```
+///
+/// A `#[resource(parent)]` column warns until it is `#[patch(skip)]` or `#[patch(allow_unsafe)]`:
 ///
 /// ```compile_fail
 /// #![deny(deprecated)]
@@ -177,7 +219,7 @@ pub struct Ch<const C: char>;
 /// #[resource(entity_type = "Order")]
 /// pub struct Model {
 ///     #[sea_orm(primary_key)] #[resource(id)] pub id: i32,
-///     #[resource(attr)] pub quantity: i32,
+///     #[resource(parent = "Project")] pub project_id: String,
 /// }
 /// # #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)] pub enum Relation {}
 /// # impl ActiveModelBehavior for ActiveModel {}
@@ -186,18 +228,21 @@ pub struct Ch<const C: char>;
 ///
 /// ```
 /// #![deny(deprecated)]
-/// # use doxa::{PatchTarget, PolicyResource};
+/// # use doxa::{Patch, PatchTarget, PolicyResource};
 /// # use sea_orm::entity::prelude::*;
 /// #[derive(Clone, Debug, PartialEq, DeriveEntityModel, PolicyResource, PatchTarget)]
 /// #[sea_orm(table_name = "orders")]
 /// #[resource(entity_type = "Order")]
 /// pub struct Model {
 ///     #[sea_orm(primary_key)] #[resource(id)] pub id: i32,
-///     #[resource(attr)] #[patch(skip)] pub quantity: i32,
+///     #[resource(parent = "Project")] #[patch(allow_unsafe)] pub project_id: String,
 /// }
 /// # #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)] pub enum Relation {}
 /// # impl ActiveModelBehavior for ActiveModel {}
-/// fn main() {}
+/// # fn check<P: Patch<ActiveModel>>() {}
+/// #[derive(Patch)]
+/// pub struct UpdateOrder { pub project_id: Option<String> }
+/// fn main() { check::<UpdateOrder>() }
 /// ```
 #[cfg(all(feature = "full", not(target_arch = "wasm32")))]
 #[doc(hidden)]
