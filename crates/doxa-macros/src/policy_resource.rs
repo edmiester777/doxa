@@ -535,7 +535,7 @@ fn route_key_impl(key: &Ident, columns: &[(Ident, Type)]) -> TokenStream {
 }
 
 /// Whether `#[sea_orm(primary_key)]` marks this field; read as tokens, since the attribute isn't ours.
-fn is_primary_key(field: &syn::Field) -> bool {
+pub(crate) fn is_primary_key(field: &syn::Field) -> bool {
     field.attrs.iter().any(|attr| {
         if !attr.path().is_ident("sea_orm") {
             return false;

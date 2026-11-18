@@ -527,7 +527,9 @@ mod tests {
         );
         assert!(out.contains("Node (Node)"), "{out}");
         assert!(
-            out.contains("pub parent : :: core :: option :: Option < :: core :: option :: Option < :: std :: boxed :: Box < Node > > >"),
+            out.contains(
+                "pub parent : :: doxa :: wire :: Nullable < :: std :: boxed :: Box < Node > >"
+            ),
             "{out}"
         );
     }
@@ -759,7 +761,8 @@ mod tests {
         ))
         .unwrap();
         let opt = ":: core :: option :: Option";
-        let double = "with = \"::doxa::wire::double_option\"";
+        let nullable = ":: doxa :: wire :: Nullable";
+        let skip = "skip_serializing_if = \"::doxa::wire::Nullable::is_absent\"";
         assert!(out.contains("pub id : :: std :: string :: String"), "{out}");
         assert!(
             out.contains(&format!(
@@ -773,15 +776,15 @@ mod tests {
         );
         assert!(
             out.contains(&format!(
-                "{double})] pub note : {opt} < {opt} < :: std :: string :: String > >"
+                "{skip})] pub note : {nullable} < :: std :: string :: String >"
             )),
             "{out}"
         );
         assert!(
-            out.contains(&format!("{double})] pub line : {opt} < {opt} < Line > >")),
+            out.contains(&format!("{skip})] pub line : {nullable} < Line >")),
             "{out}"
         );
-        assert_eq!(out.matches(double).count(), 2, "{out}");
+        assert_eq!(out.matches(skip).count(), 2, "{out}");
     }
 
     #[test]
@@ -820,7 +823,7 @@ mod tests {
             ),
             "{out}"
         );
-        assert!(!out.contains("double_option"), "{out}");
+        assert!(!out.contains("Nullable"), "{out}");
     }
 
     #[test]

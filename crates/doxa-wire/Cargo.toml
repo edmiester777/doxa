@@ -16,6 +16,12 @@ default = []
 utoipa = ["dep:utoipa"]
 # `From<…> for FieldErrors`, for each validation library.
 garde = ["dep:garde"]
+# garde rules that garde itself gates, implemented for `Nullable<T>` when on.
+garde-email = ["garde", "garde/email"]
+garde-url = ["garde", "garde/url"]
+garde-unicode = ["garde", "garde/unicode"]
+garde-credit-card = ["garde", "garde/credit-card"]
+garde-phone-number = ["garde", "garde/phone-number"]
 validator = ["dep:validator"]
 serde_valid = ["dep:serde_valid"]
 

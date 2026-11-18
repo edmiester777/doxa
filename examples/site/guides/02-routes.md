@@ -186,6 +186,54 @@ pub async fn list_orders(
 
 In the browser, `list_orders(PageInput::new(2, 50))` fetches one page and `doxa::client::every_page(|p| list_orders(p))` fetches them all.
 
+## Partial updates
+
+An update body says which fields it changes. `Option<T>` is sent or not, and `Nullable<T>` is `Absent`, `Null` or `Value(…)`, so it can also clear a column:
+
+```rust
+#[dto]
+#[derive(Patch)]
+pub struct UpdateOrder {
+    pub quantity: Option<i32>,
+    pub note: Nullable<String>,
+    #[patch(skip)]
+    pub customer: Option<String>,
+}
+```
+
+`#[derive(PatchTarget)]` beside `DeriveEntityModel` gives the model's columns to any DTO that names them:
+
+```rust
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, PolicyResource, PatchTarget)]
+#[sea_orm(table_name = "orders")]
+#[resource(entity_type = "Order")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    #[resource(id)]
+    pub id: Uuid,
+    #[resource(scope)]
+    #[patch(skip)]
+    pub tenant_id: String,
+    pub quantity: i32,
+    pub note: Option<String>,
+}
+```
+
+```rust
+#[put("/api/orders/{id}")]
+pub async fn update_order(
+    order: Grant<Order>,
+    State(db): State<DatabaseConnection>,
+    Json(edit): Json<UpdateOrder>,
+) -> Result<Json<Order>, OrderError> {
+    let mut active: order::ActiveModel = order.into_inner().into();
+    edit.apply(&mut active);
+    Ok(Json(active.update(&db).await?.into()))
+}
+```
+
+`apply` writes each field that was sent, and leaves a column holding the same value unchanged. `doxa::changed_columns(&active)` lists what it will write, for an upsert's `update_columns`. A field naming no column, the primary key, a type that doesn't convert with `Into`, or a `Nullable` on a NOT NULL column is a compile error. A `#[resource(…)]` column warns until it's `#[patch(skip)]`. A tenant column scoped some other way has no such marker, so skip it by hand. `#[patch(column = "…")]` renames a field, and `#[patch(skip)]` leaves it for the handler.
+
 ## Server-Sent Events
 
 ```rust

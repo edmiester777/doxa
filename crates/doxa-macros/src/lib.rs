@@ -227,6 +227,7 @@ mod faults;
 mod grant;
 mod method;
 mod mirror;
+mod patch;
 mod policy_resource;
 mod role;
 mod sig;
@@ -742,51 +743,67 @@ pub fn derive_state(input: TokenStream) -> TokenStream {
 /// pub struct Rename { pub name: String }
 /// ```
 ///
-/// `#[nullable]` on an `Option<Option<T>>` tells absent (`None`) from `null` (`Some(None)`);
-/// `#[omit_none]` on an `Option<T>` leaves `None` out rather than sending `null`:
+/// A `Nullable<T>` field tells absent from `null`; `#[omit_none]` on an `Option<T>` leaves
+/// `None` out rather than sending `null`:
 ///
 /// ```
 /// doxa::prelude!();
 ///
 /// #[dto]
-/// pub struct Patch {
-///     #[nullable] pub note: Option<Option<String>>,
+/// pub struct Edit {
+///     pub note: Nullable<String>,
 ///     #[omit_none] pub name: Option<String>,
 /// }
 ///
-/// let p: Patch = serde_json::from_str(r#"{"note":null}"#).unwrap();
-/// assert_eq!(p, Patch { note: Some(None), name: None });
-/// assert_eq!(serde_json::to_string(&Patch { note: None, name: None }).unwrap(), "{}");
+/// let e: Edit = serde_json::from_str(r#"{"note":null}"#).unwrap();
+/// assert_eq!(e, Edit { note: Nullable::Null, name: None });
+/// assert_eq!(serde_json::to_string(&Edit { note: Nullable::Absent, name: None }).unwrap(), "{}");
 /// ```
 ///
-/// Each needs its shape:
+/// `Option<Option<T>>` is refused in favour of `Nullable<T>`:
 ///
 /// ```compile_fail
 /// doxa::prelude!();
 ///
 /// #[dto]
-/// pub struct Patch { #[nullable] pub note: Option<String> }
+/// pub struct Edit { pub note: Option<Option<String>> }
 /// ```
 ///
 /// ```
 /// doxa::prelude!();
 ///
 /// #[dto]
-/// pub struct Patch { #[nullable] pub note: Option<Option<String>> }
+/// pub struct Edit { pub note: Nullable<String> }
 /// ```
 ///
 /// ```compile_fail
 /// doxa::prelude!();
 ///
 /// #[dto]
-/// pub struct Patch { #[omit_none] pub name: String }
+/// pub struct Edit { #[omit_none] pub name: String }
 /// ```
 ///
 /// ```
 /// doxa::prelude!();
 ///
 /// #[dto]
-/// pub struct Patch { #[omit_none] pub name: Option<String> }
+/// pub struct Edit { #[omit_none] pub name: Option<String> }
+/// ```
+///
+/// A query string can't send `null`:
+///
+/// ```compile_fail
+/// doxa::prelude!();
+///
+/// #[dto(query)]
+/// pub struct Filter { pub note: Nullable<String> }
+/// ```
+///
+/// ```
+/// doxa::prelude!();
+///
+/// #[dto(query)]
+/// pub struct Filter { pub note: Option<String> }
 /// ```
 #[proc_macro_attribute]
 pub fn dto(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -997,6 +1014,23 @@ pub fn client_only(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Identity, attributes(identity))]
 pub fn derive_identity(input: TokenStream) -> TokenStream {
     role::derive_identity(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `doxa::Patch<A>` for a partial-update DTO: each `Option<T>` / `Nullable<T>` field writes the
+/// column of the same name on any `ActiveModel` with `#[derive(PatchTarget)]`.
+#[proc_macro_derive(Patch, attributes(patch))]
+pub fn derive_patch(input: TokenStream) -> TokenStream {
+    patch::expand_patch(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The columns a `#[derive(Patch)]` DTO may write, on a sea-orm `Model` beside `DeriveEntityModel`.
+#[proc_macro_derive(PatchTarget, attributes(patch))]
+pub fn derive_patch_target(input: TokenStream) -> TokenStream {
+    patch::expand_target(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

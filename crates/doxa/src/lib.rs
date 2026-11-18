@@ -53,12 +53,25 @@ pub use doxa_docs::dist;
 
 /// Types the server and its browser client agree on.
 pub use doxa_wire as wire;
-pub use doxa_wire::{Page, PageInput};
+pub use doxa_wire::{Nullable, Page, PageInput};
 
 #[cfg(all(feature = "sea-orm", not(target_arch = "wasm32")))]
 mod paged;
 #[cfg(all(feature = "sea-orm", not(target_arch = "wasm32")))]
 pub use paged::Paged;
+
+pub mod patch;
+#[cfg(any(feature = "macros", feature = "client"))]
+pub use doxa_macros::Patch;
+#[cfg(all(
+    feature = "sea-orm",
+    any(feature = "macros", feature = "client"),
+    not(target_arch = "wasm32")
+))]
+pub use doxa_macros::PatchTarget;
+#[cfg(all(feature = "sea-orm", not(target_arch = "wasm32")))]
+pub use patch::changed_columns;
+pub use patch::Patch;
 
 /// Zeroize-on-drop secret string type with `[REDACTED]` Debug/Display.
 #[cfg(feature = "protected")]
@@ -282,7 +295,7 @@ pub mod server {
             operation, patch, post, put, server, server_only, Actions, ApiError, Attachment,
             Identity, IntoParams, PolicyResource, SseEvent, SseStream, ToSchema,
         };
-        pub use crate::{Page, PageInput};
+        pub use crate::{Nullable, Page, PageInput, Patch};
         pub use axum::extract::{Extension, State};
         pub use axum::http::StatusCode;
         pub use serde::{Deserialize, Serialize};
@@ -1090,7 +1103,7 @@ pub mod client {
     pub mod prelude {
         #[cfg(feature = "garde")]
         pub use crate::Valid;
-        pub use crate::{Page, PageInput};
+        pub use crate::{Nullable, Page, PageInput, Patch};
         pub use doxa_client::route_key;
         pub use doxa_client::{Form, Granted, Json, Path, Query, SseStream, StatusCode};
         pub use doxa_macros::{
@@ -1109,6 +1122,7 @@ pub mod api {
     /// Names an API crate's files use: the server's extractors off wasm, the client's on it.
     pub mod prelude {
         pub use crate::__api_route_key as route_key;
+        pub use crate::Patch;
         #[cfg(feature = "garde")]
         pub use crate::Valid;
         pub use doxa_macros::{
@@ -1116,7 +1130,7 @@ pub mod api {
             server_only, Actions, ApiError, Identity, SseEvent,
         };
         pub use doxa_wire::contract::{Cap, Grant, Many};
-        pub use doxa_wire::{Page, PageInput};
+        pub use doxa_wire::{Nullable, Page, PageInput};
         pub use serde::{Deserialize, Serialize};
 
         #[cfg(target_arch = "wasm32")]

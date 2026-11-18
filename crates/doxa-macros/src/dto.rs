@@ -202,46 +202,79 @@ fn option_inner(ty: &Type) -> Option<&Type> {
     inner_of(ty, "Option")
 }
 
-/// Turn `#[nullable]` and `#[omit_none]` into the serde and schema attributes they stand for.
-fn expand_markers(fields: &mut Fields, schema: bool) -> syn::Result<()> {
+/// The keys of an attribute's `#[name(key, key = …, key(…))]` list, and the value of `with`.
+fn attr_keys(attrs: &[Attribute], name: &str) -> (Vec<String>, Option<String>) {
+    let mut keys = Vec::new();
+    let mut with = None;
+    for attr in attrs.iter().filter(|a| a.path().is_ident(name)) {
+        let _ = attr.parse_nested_meta(|meta| {
+            let key = meta.path.get_ident().map(|i| i.to_string());
+            if meta.input.peek(Token![=]) {
+                let value: syn::Expr = meta.value()?.parse()?;
+                if key.as_deref() == Some("with") {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = &value
+                    {
+                        with = Some(s.value());
+                    }
+                }
+            } else if meta.input.peek(syn::token::Paren) {
+                meta.parse_nested_meta(|_| Ok(()))?;
+            }
+            keys.extend(key);
+            Ok(())
+        });
+    }
+    (keys, with)
+}
+
+/// Turn `#[omit_none]` and `Nullable<T>` fields into the serde and schema attributes they stand
+/// for, refusing the `Option<Option<T>>` spellings `Nullable` replaces.
+fn expand_markers(fields: &mut Fields, schema: bool, serde: bool, query: bool) -> syn::Result<()> {
     for field in fields.iter_mut() {
         let mut marker = None;
         let mut kept = Vec::with_capacity(field.attrs.len());
         for attr in std::mem::take(&mut field.attrs) {
-            if attr.path().is_ident("nullable") || attr.path().is_ident("omit_none") {
+            if attr.path().is_ident("nullable") {
+                return Err(syn::Error::new_spanned(
+                    &attr,
+                    "absent-or-null is a `Nullable<T>` field, with no attribute: `Absent`, `Null` or `Value(…)`",
+                ));
+            }
+            if attr.path().is_ident("omit_none") {
                 attr.meta.require_path_only()?;
-                if marker.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        &attr,
-                        "a field takes one of `#[nullable]` and `#[omit_none]`",
-                    ));
-                }
                 marker = Some(attr);
             } else {
                 kept.push(attr);
             }
         }
         field.attrs = kept;
-        let Some(marker) = marker else { continue };
-        if field.ident.is_none() {
+        let (serde_keys, with) = attr_keys(&field.attrs, "serde");
+        if with.is_some_and(|w| w.ends_with("double_option")) {
             return Err(syn::Error::new_spanned(
-                &marker,
-                "`#[nullable]` and `#[omit_none]` are for named fields",
+                &field.ty,
+                "absent-or-null is a `Nullable<T>` field: drop the `double_option` and use `Nullable`",
             ));
         }
-        if marker.path().is_ident("nullable") {
-            if option_inner(&field.ty).and_then(option_inner).is_none() {
+        if let Some(inner) = option_inner(&field.ty).and_then(option_inner) {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                format!(
+                    "absent-or-null is `Nullable<{}>`: `Absent`, `Null` or `Value(…)`",
+                    inner.to_token_stream()
+                ),
+            ));
+        }
+        let nullable = inner_of(&field.ty, "Nullable").cloned();
+        if let Some(marker) = &marker {
+            if field.ident.is_none() {
                 return Err(syn::Error::new_spanned(
-                    &field.ty,
-                    "`#[nullable]` needs an `Option<Option<T>>`: `None` absent, `Some(None)` null",
+                    marker,
+                    "`#[omit_none]` is for named fields",
                 ));
             }
-            field.attrs.push(syn::parse_quote!(#[serde(
-                default,
-                skip_serializing_if = "::core::option::Option::is_none",
-                with = "::doxa::wire::double_option"
-            )]));
-        } else {
             if option_inner(&field.ty).is_none() {
                 return Err(syn::Error::new_spanned(
                     &field.ty,
@@ -257,6 +290,40 @@ fn expand_markers(fields: &mut Fields, schema: bool) -> syn::Result<()> {
                     .attrs
                     .push(syn::parse_quote!(#[schema(nullable = false)]));
             }
+            continue;
+        }
+        let Some(inner) = nullable else { continue };
+        if field.ident.is_none() {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "a `Nullable` field needs a name, since `Absent` is a field left out",
+            ));
+        }
+        if query {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "a query string can't send `null`: use `Option<T>` in a `#[dto(query)]`",
+            ));
+        }
+        if serde {
+            let mut parts = Vec::new();
+            if !serde_keys.iter().any(|k| k == "default") {
+                parts.push(quote!(default));
+            }
+            if !serde_keys.iter().any(|k| k == "skip_serializing_if") {
+                parts.push(quote!(
+                    skip_serializing_if = "::doxa::wire::Nullable::is_absent"
+                ));
+            }
+            if !parts.is_empty() {
+                field.attrs.push(syn::parse_quote!(#[serde(#(#parts),*)]));
+            }
+        }
+        let (schema_keys, _) = attr_keys(&field.attrs, "schema");
+        if schema && !schema_keys.iter().any(|k| k == "value_type") {
+            field
+                .attrs
+                .push(syn::parse_quote!(#[schema(value_type = ::core::option::Option<#inner>)]));
         }
     }
     Ok(())
@@ -314,13 +381,17 @@ pub fn expand(args: TokenStream, item: TokenStream, client: bool) -> syn::Result
     let serde_crate = (adds_serde && !has_serde_crate(&attrs))
         .then(|| quote!(#[serde(crate = "::doxa::__serde")]));
     let schema = !client && (lists_schema || added.contains(&Stock::ToSchema));
+    let serde = adds_serde
+        || listed
+            .iter()
+            .any(|l| l == Stock::Serialize.name() || l == Stock::Deserialize.name());
     let added: Vec<TokenStream> = added.into_iter().map(Stock::path).collect();
 
     match &mut input.data {
-        Data::Struct(s) => expand_markers(&mut s.fields, schema)?,
+        Data::Struct(s) => expand_markers(&mut s.fields, schema, serde, args.query)?,
         Data::Enum(e) => {
             for variant in &mut e.variants {
-                expand_markers(&mut variant.fields, schema)?;
+                expand_markers(&mut variant.fields, schema, serde, args.query)?;
             }
         }
         Data::Union(_) => {}

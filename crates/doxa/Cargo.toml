@@ -32,6 +32,12 @@ proxy = ["docs", "doxa-docs/proxy"]
 # `doxa::Valid<Json<T>>`: garde rules, checked by the server (`422` per failing field) and by
 # the client before it sends.
 garde = ["dep:garde", "doxa-wire/garde"]
+# garde rules garde itself gates, implemented for `Nullable<T>`.
+garde-email = ["garde", "doxa-wire/garde-email"]
+garde-url = ["garde", "doxa-wire/garde-url"]
+garde-unicode = ["garde", "doxa-wire/garde-unicode"]
+garde-credit-card = ["garde", "doxa-wire/garde-credit-card"]
+garde-phone-number = ["garde", "doxa-wire/garde-phone-number"]
 # `doxa::validator::Valid<Json<T>>`, the same for the `validator` crate.
 validator = ["dep:validator", "doxa-wire/validator"]
 # `doxa::serde_valid::Valid<Json<T>>`, the same for `serde_valid`.
@@ -235,6 +241,10 @@ required-features = ["full"]
 
 [[test]]
 name = "scoped"
+required-features = ["full"]
+
+[[test]]
+name = "patch"
 required-features = ["full"]
 
 [[test]]

@@ -661,7 +661,7 @@ impl<'a> Types<'a> {
         Ok(())
     }
 
-    /// Each property by `required` and `nullable`; absent and nullable is `Option<Option<T>>`.
+    /// Each property by `required` and `nullable`; absent and nullable is `Nullable<T>`.
     fn fields(&mut self, schema: &Schema, at: &At<'_>) -> Result<Vec<Field>, GenerateError> {
         let mut out = Vec::new();
         let mut taken = BTreeSet::new();
@@ -678,14 +678,16 @@ impl<'a> Types<'a> {
                     quote!(::core::option::Option<#ty>),
                     quote!(#[serde(default, skip_serializing_if = "Option::is_none")]),
                 ),
-                (false, true) => (
-                    quote!(::core::option::Option<#ty>),
-                    quote!(#[serde(
-                        default,
-                        skip_serializing_if = "Option::is_none",
-                        with = "::doxa::wire::double_option"
-                    )]),
-                ),
+                (false, true) => {
+                    let value = option_inner(&ty);
+                    (
+                        quote!(::doxa::wire::Nullable<#value>),
+                        quote!(#[serde(
+                            default,
+                            skip_serializing_if = "::doxa::wire::Nullable::is_absent"
+                        )]),
+                    )
+                }
             };
             let layers = usize::from(!required) + usize::from(nullable);
             let some = quote!(::core::option::Option::Some);
@@ -695,10 +697,12 @@ impl<'a> Types<'a> {
                 #rules
                 __Constraints::check_into(v, &at, out);
             };
-            let check = match layers {
-                0 => quote!({ let v = &self.#ident; #body }),
-                1 => quote!(if let #some(v) = &self.#ident { #body }),
-                _ => quote!(if let #some(#some(v)) = &self.#ident { #body }),
+            let check = match (required, layers) {
+                (_, 0) => quote!({ let v = &self.#ident; #body }),
+                (false, 2) => {
+                    quote!(if let ::doxa::wire::Nullable::Value(v) = &self.#ident { #body })
+                }
+                _ => quote!(if let #some(v) = &self.#ident { #body }),
             };
             let shape = match self.options.forms && layers == 0 {
                 true => self.form_shape(prop),
@@ -1376,6 +1380,15 @@ fn non_null(schema: Schema) -> Schema {
 }
 
 /// `X` in `oneOf: [{type: null}, X]`, as utoipa writes a nullable reference.
+/// `T` from the `::core::option::Option<T>` that `ty` writes for a nullable schema.
+fn option_inner(ty: &TokenStream) -> TokenStream {
+    let text = ty.to_string();
+    text.strip_prefix(":: core :: option :: Option <")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .and_then(|inner| TokenStream::from_str(inner).ok())
+        .unwrap_or_else(|| ty.clone())
+}
+
 fn or_null(schema: &Schema) -> Option<&Schema> {
     let is_null = |s: &Schema| {
         s.reference.is_none()
