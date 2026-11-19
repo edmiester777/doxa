@@ -56,14 +56,14 @@ pub enum NewError {
     },
 }
 
-/// Fill a template's placeholders.
+/// Fill a template's placeholders, which are valid identifiers so the Rust templates still parse.
 pub fn render(template: &str, name: &str) -> String {
     template
-        .replace("{{name}}", name)
-        .replace("{{crate}}", &name.replace('-', "_"))
-        .replace("{{doxa_version}}", env!("CARGO_PKG_VERSION"))
+        .replace("__name__", name)
+        .replace("__crate__", &name.replace('-', "_"))
+        .replace("__doxa_version__", env!("CARGO_PKG_VERSION"))
         .replace(
-            "{{wasm_bindgen_version}}",
+            "__wasm_bindgen_version__",
             doxa_build::bindgen::WASM_BINDGEN_VERSION,
         )
 }
@@ -98,6 +98,13 @@ pub fn scaffold(parent: &Path, name: &str) -> Result<(), NewError> {
 mod tests {
     use super::*;
 
+    const PLACEHOLDERS: &[&str] = &[
+        "__name__",
+        "__crate__",
+        "__doxa_version__",
+        "__wasm_bindgen_version__",
+    ];
+
     #[test]
     fn scaffolds_the_two_crates() {
         let dir = tempfile::tempdir().unwrap();
@@ -106,7 +113,10 @@ mod tests {
         let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
 
         for (rel, _) in FILES {
-            assert!(!read(rel).contains("{{"), "unfilled placeholder in {rel}");
+            let text = read(rel);
+            for p in PLACEHOLDERS {
+                assert!(!text.contains(p), "unfilled {p} in {rel}");
+            }
         }
         let web = read("web/Cargo.toml");
         assert!(web.contains("name = \"shop-app-web\""));

@@ -1,23 +1,23 @@
 [package]
-name = "{{name}}-api"
+name = "__name__-api"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 # The routes: served off wasm, and called from the browser.
 [dependencies]
-doxa = { version = "{{doxa_version}}", features = ["client"] }
+doxa = { version = "__doxa_version__", features = ["client"] }
 serde = { version = "1", features = ["derive"] }
 utoipa = "5"
 
 # What only the server builds. Code using it lives under `server_only` below.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-doxa = { version = "{{doxa_version}}", features = ["full"] }
+doxa = { version = "__doxa_version__", features = ["full"] }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
-doxa-role = "{{doxa_version}}"
+doxa-role = "__doxa_version__"
 
 [features]
 # Set by `doxa build`, which compiles the built web app into the binary.

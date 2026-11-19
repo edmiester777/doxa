@@ -1,5 +1,5 @@
 [package]
-name = "{{name}}-web"
+name = "__name__-web"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [package.metadata.doxa]
 role = "client"
-server = "{{name}}-api"
+server = "__name__-api"
 css = ["style/app.css"]
 css_sources = []
 public = "public"
@@ -20,7 +20,7 @@ public = "public"
 # react = "^19"
 
 [dependencies]
-{{name}}-api = { path = "../api" }
-doxa = { version = "{{doxa_version}}", features = ["ui"] }
+__name__-api = { path = "../api" }
+doxa = { version = "__doxa_version__", features = ["ui"] }
 # Pinned to the version `doxa build` generates bindings with.
-wasm-bindgen = "={{wasm_bindgen_version}}"
+wasm-bindgen = "=__wasm_bindgen_version__"
