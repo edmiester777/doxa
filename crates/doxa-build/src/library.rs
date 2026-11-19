@@ -308,6 +308,7 @@ impl Pipeline {
             node_modules: self.npm.dir(),
             release: self.opts.release,
             library: true,
+            hot: false,
         })?;
         let _ = std::fs::remove_file(out.with_extension("meta.json"));
 

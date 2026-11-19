@@ -26,6 +26,8 @@ pub struct BundleRequest<'a> {
     pub release: bool,
     /// For an npm package: leave npm imports to the host's bundler, and keep chunks beside the entry.
     pub library: bool,
+    /// The glue is from a hot-patchable base, which links every js-sys binding, `eval` included.
+    pub hot: bool,
 }
 
 /// What a bundler wrote, as paths relative to its `out_dir`.
@@ -90,6 +92,9 @@ impl Esbuild {
             args.push("--chunk-names=[name]-[hash]".into());
             args.push("--banner:js=\"use client\";".into());
             args.retain(|a| a != "--chunk-names=chunks/[name]-[hash]");
+        }
+        if req.hot {
+            args.push("--log-override:direct-eval=silent".into());
         }
         args
     }
@@ -821,6 +826,7 @@ mod tests {
             node_modules: None,
             release: true,
             library: false,
+            hot: false,
         };
         let args: Vec<String> = Esbuild::args(&req, Path::new("/s/meta.json"))
             .into_iter()
@@ -844,6 +850,13 @@ mod tests {
         assert!(!Esbuild::args(&debug, Path::new("m"))
             .iter()
             .any(|a| a == "--minify"));
+        let silenced = |req: &BundleRequest<'_>| {
+            Esbuild::args(req, Path::new("m"))
+                .iter()
+                .any(|a| a == "--log-override:direct-eval=silent")
+        };
+        assert!(!silenced(&debug));
+        assert!(silenced(&BundleRequest { hot: true, ..debug }));
     }
 
     #[test]

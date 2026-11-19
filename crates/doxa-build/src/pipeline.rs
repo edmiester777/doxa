@@ -385,6 +385,7 @@ impl Pipeline {
             node_modules: self.npm.dir(),
             release: self.opts.release,
             library: false,
+            hot: self.hot.is_some(),
         })?);
         Ok(())
     }
