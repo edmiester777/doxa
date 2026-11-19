@@ -41,7 +41,6 @@ edition = "2021"
 license = "Apache-2.0"
 authors = ["edmiester777"]
 repository = "https://github.com/edmiester777/doxa"
-homepage = "https://github.com/edmiester777/doxa"
 rust-version = "1.94"
 
 [workspace.dependencies]
@@ -62,7 +61,6 @@ doxa-tailwind = { path = "crates/doxa-tailwind", version = "0.1.6" }
 doxa-ui-macros = { path = "crates/doxa-ui-macros", version = "0.1.6" }
 doxa-fmt = { path = "crates/doxa-fmt", version = "0.1.6" }
 doxa-build = { path = "crates/doxa-build", version = "0.1.6", default-features = false }
-doxa-cli = { path = "crates/doxa-cli", version = "0.1.6" }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }

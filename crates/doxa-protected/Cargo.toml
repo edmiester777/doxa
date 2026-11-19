@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-homepage.workspace = true
 description = "Zeroize-on-drop string type with [REDACTED] Debug/Display/Serialize and OpenAPI schema. Framework-neutral, zero internal dependencies."
 keywords = ["secrets", "redact", "zeroize", "openapi", "utoipa"]
 categories = ["cryptography", "data-structures"]

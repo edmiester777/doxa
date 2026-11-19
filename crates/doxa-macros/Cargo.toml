@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-homepage.workspace = true
 description = "Procedural macros for doxa: #[derive(ApiError)], #[derive(SseEvent)], and HTTP method shortcuts that delegate to utoipa::path."
 keywords = ["axum", "openapi", "macros", "utoipa", "doxa"]
 categories = ["web-programming::http-server", "development-tools::procedural-macro-helpers"]

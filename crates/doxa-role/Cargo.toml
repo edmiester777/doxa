@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-homepage.workspace = true
 rust-version.workspace = true
 description = "Build-script helper that marks a crate as the client or server half of a doxa app."
 keywords = ["doxa", "build"]
