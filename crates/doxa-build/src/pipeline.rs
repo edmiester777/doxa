@@ -171,7 +171,7 @@ impl Pipeline {
             let records = hot::Records::new(&self.layout.stage())?;
             records.configure(&mut cmd, &self.web.lib_name)?;
             // Cargo only runs rustc for a stale crate, and the run is what gets recorded.
-            hot::forget_fingerprint(&self.profile_dir().join(".fingerprint"), &self.web.name);
+            hot::forget_fingerprint(&self.profile_dir(), &self.web.name);
             Some(records)
         } else {
             None

@@ -370,12 +370,10 @@ impl Base {
     }
 }
 
-/// Remove `package`'s fingerprints under `dir`, so cargo reruns its rustc.
-pub(crate) fn forget_fingerprint(dir: &Path, package: &str) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
+/// Remove `package`'s fingerprints under the `profile` dir, so cargo reruns its rustc. Cargo's
+/// layout is internal: `.fingerprint/<pkg>-<hash>` before 1.100, `build/<pkg>/<hash>/fingerprint` since.
+pub(crate) fn forget_fingerprint(profile: &Path, package: &str) {
+    for e in read_dir(&profile.join(".fingerprint")) {
         let name = e.file_name();
         let ours = name
             .to_str()
@@ -386,6 +384,13 @@ pub(crate) fn forget_fingerprint(dir: &Path, package: &str) {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
+    for e in read_dir(&profile.join("build").join(package)) {
+        let _ = std::fs::remove_dir_all(e.path().join("fingerprint"));
+    }
+}
+
+fn read_dir(dir: &Path) -> impl Iterator<Item = std::fs::DirEntry> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten()
 }
 
 pub(crate) fn patch_error(e: anyhow::Error) -> Error {
@@ -594,6 +599,32 @@ mod tests {
         assert_eq!(story_exports(&base), story_exports(&same));
         assert_ne!(story_exports(&base), story_exports(&added));
         assert!(story_exports(&link(&["__doxa_story_a.o"])).is_empty());
+    }
+
+    #[test]
+    fn forgets_fingerprints_in_either_cargo_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let dirs = [
+            ".fingerprint/web-1a2b",
+            ".fingerprint/web-kit-3c4d",
+            "build/web/5e6f/fingerprint",
+            "build/web/5e6f/out",
+            "build/web-kit/7a8b/fingerprint",
+        ];
+        for d in dirs {
+            std::fs::create_dir_all(p.join(d)).unwrap();
+        }
+        forget_fingerprint(p, "web");
+        let left: Vec<_> = dirs.into_iter().filter(|d| p.join(d).exists()).collect();
+        assert_eq!(
+            left,
+            [
+                ".fingerprint/web-kit-3c4d",
+                "build/web/5e6f/out",
+                "build/web-kit/7a8b/fingerprint"
+            ]
+        );
     }
 
     #[test]
