@@ -166,7 +166,7 @@ impl Service {
         }
         self.feeds
             .dirs
-            .extend(patches.patched.iter().map(|(_, dir)| canonical(dir)));
+            .extend(patches.patched.iter().map(|p| canonical(&p.dir)));
         self.run.cargo_config = patches.config;
     }
 
@@ -475,6 +475,7 @@ pub async fn supervise(
 mod tests {
     use super::*;
     use crate::dev::log::Console;
+    use doxa_build::local::Patch;
 
     #[test]
     fn a_service_rebuilds_for_its_sources_and_root_manifests_only() {
@@ -513,7 +514,11 @@ mod tests {
         assert!(!svc.feeds.feeds(Path::new("/lib/core/src/lib.rs")));
         svc.patch(Patches {
             config: vec!["patch.crates-io.core.path=\"/lib/core\"".into()],
-            patched: vec![("core".into(), "/lib/core".into())],
+            patched: vec![Patch {
+                table: "crates-io".into(),
+                name: "core".into(),
+                dir: "/lib/core".into(),
+            }],
             unpatchable: Vec::new(),
         });
         assert!(svc.feeds.feeds(Path::new("/lib/core/src/lib.rs")));

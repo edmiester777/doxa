@@ -20,7 +20,7 @@ use axum::Router;
 use doxa_build::config::{sibling_cargo, Workspace};
 use doxa_build::dist::Dist;
 use doxa_build::hot::Patched;
-use doxa_build::local::{self, LockGuard, Patches};
+use doxa_build::local::{self, Locals, LockGuard, Patches};
 use doxa_build::{BuildOptions, Pipeline};
 use futures::FutureExt;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
@@ -116,6 +116,8 @@ struct Loaded {
     foreign: watch::Foreign,
     /// The web workspace's patches, which its server builds against too.
     own: Patches,
+    /// Services whose path has no `Cargo.toml`.
+    skipped: Vec<String>,
     locks: Vec<LockGuard>,
     width: usize,
 }
@@ -139,25 +141,38 @@ fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, S
         .max()
         .unwrap_or(0);
     let mut siblings = Vec::with_capacity(services.len());
+    let mut skipped = Vec::new();
     let mut ups: BTreeMap<String, signal::Receiver<bool>> = BTreeMap::new();
-    // In build order, so each `after` entry is already in `ups`.
+    // In build order, so each `after` entry is already in `ups` unless it was skipped.
     for (i, (name, s)) in services.iter().enumerate() {
+        if !s.path.join("Cargo.toml").is_file() {
+            console.web().note(format!(
+                "[workspace.metadata.doxa.dev.services] {name}: {} has no Cargo.toml, so it isn't run or patched",
+                s.path.display()
+            ));
+            skipped.push(name.clone());
+            continue;
+        }
         let (mut svc, ws) = Service::sibling(name, &s.path, console.tag(name, i, width))?;
         svc.launch_after(
             s.after
                 .iter()
-                .map(|a| (a.clone(), ups[a].clone()))
+                .filter_map(|a| Some((a.clone(), ups.get(a)?.clone())))
                 .collect(),
         );
         ups.insert(name.clone(), svc.up());
         siblings.push((svc, ws));
     }
-    let mut all: Vec<Workspace> = siblings.iter().map(|(_, ws)| ws.clone()).collect();
+    let mut locals = Locals::default();
+    siblings.iter().for_each(|(_, ws)| locals.push(ws.clone()));
     if !opts.gallery {
-        all.extend(local::patch_table(&pipeline.workspace)?);
+        let table = Locals::patch_table(&pipeline.workspace)?;
+        for a in &table.absent {
+            console.web().note(a);
+        }
+        locals.extend(table);
     }
-    let locals = local::unique(all);
-    let locals: Vec<&Workspace> = locals.iter().collect();
+    let locals = locals.refs();
     let foreign = siblings::watched(&pipeline.graph, &locals);
     let mut locks = Vec::new();
     let root = pipeline.workspace.workspace_root.clone();
@@ -193,6 +208,7 @@ fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, S
         siblings,
         foreign,
         own,
+        skipped,
         locks,
         width,
     })
@@ -215,6 +231,7 @@ async fn serve(
         siblings,
         foreign,
         own,
+        skipped,
         locks: _locks,
         width,
     } = tokio::task::spawn_blocking(move || load(cwd, opts, &loading)).await??;
@@ -267,7 +284,7 @@ async fn serve(
     }
     let routes = match gallery {
         true => Vec::new(),
-        false => routes(&pipeline.web.config.proxy, &ports, |name| {
+        false => routes(&pipeline.web.config.proxy, &ports, &skipped, |name| {
             std::env::var(name).ok()
         })?,
     };

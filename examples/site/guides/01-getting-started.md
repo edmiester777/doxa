@@ -147,7 +147,9 @@ A library you're editing in another checkout goes under `patch`. Every workspace
 ledger = "../ledger"
 ```
 
-`doxa build-dev` does the same for one workspace and builds only that one, taking `doxa build`'s flags. In a workspace without a web crate, it builds the crate with `role = "server"` under `[package.metadata.doxa]`.
+An entry whose path has no `Cargo.toml` on your machine is skipped with a warning, its crates left as the lockfile has them; a missing service also isn't run.
+
+`doxa build-dev` does the same for one workspace and builds only that one, taking `doxa build`'s flags. In a workspace without a web crate, it builds the crate with `role = "server"` under `[package.metadata.doxa]`. For any other command, `doxa patch cargo test` (or `doxa patch make`, or anything else) adds the patches to `.cargo/config.toml` for the run, then puts that file and `Cargo.lock` back.
 
 In a terminal, `doxa dev` gives each service, the web app and its server a pane of their own, titled with its status: pending, compiling, running or failed. `?` lists the keys; the mouse focuses, scrolls and resizes panes, and `m` turns it off so you can select text. `--no-tui` prints plain tagged lines instead, as `doxa dev` does when its output isn't a terminal.
 

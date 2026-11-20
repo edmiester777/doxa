@@ -78,10 +78,12 @@ pub(super) struct Route {
     strip: bool,
 }
 
-/// The configured routes, longest prefix first; `ports` maps each dev service to its port.
+/// The configured routes, longest prefix first; `ports` maps each dev service to its port. A
+/// route to a `skipped` service falls back to `env` and `to`, or is left out.
 pub(super) fn routes(
     proxy: &BTreeMap<String, Upstream>,
     ports: &BTreeMap<String, u16>,
+    skipped: &[String],
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<Route>, String> {
     let mut routes = Vec::with_capacity(proxy.len());
@@ -97,7 +99,11 @@ pub(super) fn routes(
             .as_deref()
             .and_then(&env)
             .filter(|v| !v.is_empty());
-        let from_service = match &upstream.service {
+        let skip = upstream
+            .service
+            .as_ref()
+            .is_some_and(|s| skipped.contains(s));
+        let from_service = match upstream.service.as_ref().filter(|_| !skip) {
             Some(s) => Some(ports.get(s).map(|p| format!("http://127.0.0.1:{p}")).ok_or_else(|| {
                 format!(
                     "{table} names service `{s}`, which isn't in [workspace.metadata.doxa.dev.services]\n  fix: add it there, or use `to`"
@@ -106,6 +112,9 @@ pub(super) fn routes(
             None => None,
         };
         let Some(target) = from_env.or(from_service).or_else(|| upstream.to.clone()) else {
+            if skip {
+                continue;
+            }
             return Err(format!(
                 "{table} has no upstream\n  fix: set `to` or `service`, or the variable its `env` names"
             ));
@@ -751,7 +760,7 @@ mod tests {
             ),
             ("/c".to_owned(), upstream(None, Some("C"), false)),
         ]);
-        let found = routes(&proxy, &BTreeMap::new(), |name| match name {
+        let found = routes(&proxy, &BTreeMap::new(), &[], |name| match name {
             "A" => Some(String::new()),
             "B" | "C" => Some(format!("http://{name}.env")),
             _ => None,
@@ -784,7 +793,7 @@ mod tests {
         let ports = BTreeMap::from([("b-api".to_owned(), 8081)]);
         let target = |env: Option<&str>| {
             let env = env.map(str::to_owned);
-            routes(&proxy, &ports, move |_| env.clone()).unwrap()[0]
+            routes(&proxy, &ports, &[], move |_| env.clone()).unwrap()[0]
                 .target
                 .clone()
         };
@@ -793,11 +802,36 @@ mod tests {
     }
 
     #[test]
+    fn a_route_to_a_skipped_service_falls_back_or_is_left_out() {
+        let up = |to: Option<&str>| Upstream {
+            to: to.map(Into::into),
+            service: Some("b-api".into()),
+            ..Upstream::default()
+        };
+        let skipped = ["b-api".to_owned()];
+        let found = |up| {
+            routes(
+                &BTreeMap::from([("/api".to_owned(), up)]),
+                &BTreeMap::new(),
+                &skipped,
+                |_| None,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            found(up(Some("http://fallback")))[0].target,
+            "http://fallback"
+        );
+        assert!(found(up(None)).is_empty());
+    }
+
+    #[test]
     fn a_route_without_a_usable_upstream_or_prefix_is_refused() {
         let refused = |prefix: &str, up: Upstream| {
             routes(
                 &BTreeMap::from([(prefix.to_owned(), up)]),
                 &BTreeMap::new(),
+                &[],
                 |_| None,
             )
             .unwrap_err()
@@ -823,6 +857,7 @@ mod tests {
                 ("/v2".to_owned(), upstream(Some(&two), None, true)),
             ]),
             &BTreeMap::new(),
+            &[],
             |_| None,
         )
         .unwrap();

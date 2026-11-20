@@ -159,7 +159,7 @@ Open `http://127.0.0.1:3000/docs`. Your route is there with its parameter, its b
 | `embed` | `doxa-docs` | The built web app inside the server binary |
 | `full` | | Every server-side feature |
 
-The `doxa` CLI (`cargo install doxa-cli`) scaffolds (`doxa new`), develops with hot patching (`doxa dev`), builds (`doxa build`, `--lib`, `--out`; `doxa build-dev` against local checkouts), shows stories (`doxa gallery`) and formats `view!` markup (`doxa fmt`).
+The `doxa` CLI (`cargo install doxa-cli`) scaffolds (`doxa new`), develops with hot patching (`doxa dev`), builds (`doxa build`, `--lib`, `--out`; `doxa build-dev` against local checkouts), runs any command against them (`doxa patch cargo test`), shows stories (`doxa gallery`) and formats `view!` markup (`doxa fmt`).
 
 > utoipa must be a direct dependency: doxa's macros expand to `::utoipa::…` paths in your crate.
 

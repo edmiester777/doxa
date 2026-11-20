@@ -3,6 +3,7 @@
 mod check;
 mod dev;
 mod new;
+mod patch;
 mod view;
 
 use std::num::NonZeroUsize;
@@ -12,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::{Args, Parser, Subcommand};
 use doxa_build::config::Workspace;
-use doxa_build::local::{self, LockGuard};
+use doxa_build::local::{self, Locals, LockGuard};
 use doxa_build::{BuildOptions, Pipeline};
 
 /// The system allocator holds what bindgen frees, so the split's parses stack on top of it.
@@ -93,6 +94,13 @@ enum Command {
         /// The API crate.
         #[arg(short, long)]
         package: String,
+    },
+    /// Run a command, e.g. `cargo test`, against the local checkouts `[workspace.metadata.doxa.dev]`
+    /// lists, via `.cargo/config.toml`; it and `Cargo.lock` are put back after.
+    Patch {
+        /// The command and its arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
     },
     /// Format Rust sources, including view markup.
     Fmt {
@@ -187,6 +195,7 @@ fn main() -> ExitCode {
             .map_err(Into::into)
             .and_then(|rt| rt.block_on(dev::gallery(package, port, locked))),
         Command::Check { package, .. } => check::wire(&package),
+        Command::Patch { command } => return patch::run(command),
         Command::Fmt { args } => return doxa_fmt::run(args),
     };
     match result {
@@ -241,14 +250,15 @@ fn export(opts: BuildOptions, out: &Path) -> Result<(), Box<dyn std::error::Erro
 /// a web crate, the `role = "server"` crate alone.
 fn build_dev(args: &BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
     let ws = Workspace::load(&std::env::current_dir()?)?;
-    let mut all = local::services(&ws)?;
-    all.extend(local::patch_table(&ws)?);
-    let locals = local::unique(all);
-    let locals: Vec<&Workspace> = locals.iter().collect();
-    let patches = local::for_workspace(&ws.workspace_root, local::cargo(), &locals)?;
+    let locals = Locals::all(&ws)?;
+    let patches = local::for_workspace(&ws.workspace_root, local::cargo(), &locals.refs())?;
     let mut opts = args.options();
-    for (name, dir) in &patches.patched {
-        opts.output.note(format!("{name} from {}", dir.display()));
+    for a in &locals.absent {
+        opts.output.note(a);
+    }
+    for p in &patches.patched {
+        opts.output
+            .note(format!("{} from {}", p.name, p.dir.display()));
     }
     for (name, source) in &patches.unpatchable {
         opts.output.note(format!(
@@ -356,6 +366,15 @@ mod tests {
                 out: None,
             })
         ));
+    }
+
+    #[test]
+    fn patch_passes_the_whole_command_through() {
+        assert!(matches!(
+            parse(&["doxa", "patch", "cargo", "test", "--release", "-p", "api"]),
+            Command::Patch { command } if command == ["cargo", "test", "--release", "-p", "api"]
+        ));
+        assert!(Cli::try_parse_from(["doxa", "patch"]).is_err());
     }
 
     #[test]

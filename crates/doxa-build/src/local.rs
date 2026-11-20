@@ -9,49 +9,118 @@ use crate::error::{Error, Result};
 use crate::graph::{Graph, Member};
 use crate::BuildOptions;
 
-/// The `--config` patches for one workspace.
+/// The patches for one workspace.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Patches {
-    /// `patch.<source>.<crate>.path=<dir>` values.
+    /// `patch.<source>.<crate>.path=<dir>` values for `cargo --config`.
     pub config: Vec<String>,
-    /// Each patched crate and the local directory it builds from.
-    pub patched: Vec<(String, PathBuf)>,
+    /// Each patched crate, in `config`'s order.
+    pub patched: Vec<Patch>,
     /// Crates a local workspace owns that come from a source doxa can't patch, with that source.
     pub unpatchable: Vec<(String, String)>,
 }
 
-/// The workspaces under `[workspace.metadata.doxa.dev.services]`.
-pub fn services(ws: &Workspace) -> Result<Vec<Workspace>> {
-    ws.dev_services()?
-        .into_iter()
-        .map(|(name, s)| {
-            let hint = format!("check [workspace.metadata.doxa.dev.services] {name}.path");
-            Workspace::load_sibling(&s.path, &hint)
-        })
-        .collect()
+/// One `[patch.<table>] <name> = { path = <dir> }` entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Patch {
+    /// `crates-io`, or the git URL.
+    pub table: String,
+    /// The crate.
+    pub name: String,
+    /// The local directory it builds from.
+    pub dir: PathBuf,
 }
 
-/// The workspaces under `[workspace.metadata.doxa.dev.patch]`.
-pub fn patch_table(ws: &Workspace) -> Result<Vec<Workspace>> {
-    ws.dev_patches()?
-        .into_iter()
-        .map(|(name, path)| {
-            let hint = format!("check [workspace.metadata.doxa.dev.patch] {name}");
-            Workspace::load_sibling(&path, &hint)
-        })
-        .collect()
+/// The local workspaces a `[workspace.metadata.doxa.dev]` table lists, and the entries whose
+/// path has no `Cargo.toml` on this machine.
+#[derive(Debug, Clone, Default)]
+pub struct Locals {
+    /// Each root once.
+    pub workspaces: Vec<Workspace>,
+    /// Entries left unpatched.
+    pub absent: Vec<Absent>,
 }
 
-/// `all` with each workspace root once.
-pub fn unique(all: Vec<Workspace>) -> Vec<Workspace> {
-    let mut out: Vec<Workspace> = Vec::with_capacity(all.len());
-    for ws in all {
+/// An entry whose path has no `Cargo.toml`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Absent {
+    /// `services` or `patch`.
+    pub table: &'static str,
+    /// The entry's name.
+    pub name: String,
+    /// Its path, absolute.
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for Absent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[workspace.metadata.doxa.dev.{}] {}: {} has no Cargo.toml, so its crates stay unpatched",
+            self.table,
+            self.name,
+            self.path.display()
+        )
+    }
+}
+
+impl Locals {
+    /// `[workspace.metadata.doxa.dev.services]` and `.patch` together.
+    pub fn all(ws: &Workspace) -> Result<Locals> {
+        let mut locals = Locals::services(ws)?;
+        locals.extend(Locals::patch_table(ws)?);
+        Ok(locals)
+    }
+
+    /// `[workspace.metadata.doxa.dev.services]`.
+    pub fn services(ws: &Workspace) -> Result<Locals> {
+        let entries = ws.dev_services()?.into_iter().map(|(n, s)| (n, s.path));
+        Locals::load("services", entries)
+    }
+
+    /// `[workspace.metadata.doxa.dev.patch]`.
+    pub fn patch_table(ws: &Workspace) -> Result<Locals> {
+        Locals::load("patch", ws.dev_patches()?)
+    }
+
+    fn load(
+        table: &'static str,
+        entries: impl IntoIterator<Item = (String, PathBuf)>,
+    ) -> Result<Locals> {
+        let mut locals = Locals::default();
+        for (name, path) in entries {
+            if !path.join("Cargo.toml").is_file() {
+                locals.absent.push(Absent { table, name, path });
+                continue;
+            }
+            let hint = format!("check [workspace.metadata.doxa.dev.{table}] {name}");
+            locals.push(Workspace::load_sibling(&path, &hint)?);
+        }
+        Ok(locals)
+    }
+
+    /// Add `ws` unless its root is already here.
+    pub fn push(&mut self, ws: Workspace) {
         let root = canonical(&ws.workspace_root);
-        if !out.iter().any(|w| canonical(&w.workspace_root) == root) {
-            out.push(ws);
+        if !self
+            .workspaces
+            .iter()
+            .any(|w| canonical(&w.workspace_root) == root)
+        {
+            self.workspaces.push(ws);
         }
     }
-    out
+
+    /// Add `other`'s workspaces and absent entries.
+    pub fn extend(&mut self, other: Locals) {
+        other.workspaces.into_iter().for_each(|ws| self.push(ws));
+        self.absent.extend(other.absent);
+    }
+
+    /// The workspaces, borrowed.
+    pub fn refs(&self) -> Vec<&Workspace> {
+        self.workspaces.iter().collect()
+    }
 }
 
 /// [`patches`] over every crate the workspace at `root` resolves, run with `cargo`; a local
@@ -99,19 +168,24 @@ pub fn patches(members: &[Member], locals: &[&Workspace]) -> Result<Patches> {
         if canonical(&m.dir) == dir {
             continue;
         }
-        let Some(key) = patch_key(m.source.as_deref()) else {
+        let Some(table) = patch_table_of(m.source.as_deref()) else {
             let source = m.source.clone().unwrap_or_else(|| "a path".into());
             out.unpatchable.push((m.name.clone(), source));
             continue;
         };
         let config = format!(
-            "patch.{key}.{}.path={}",
+            "patch.{}.{}.path={}",
+            config_key(&table),
             toml_key(&m.name),
             toml_str(&dir.to_string_lossy())
         );
         if !out.config.contains(&config) {
             out.config.push(config);
-            out.patched.push((m.name.clone(), dir));
+            out.patched.push(Patch {
+                table,
+                name: m.name.clone(),
+                dir,
+            });
         }
     }
     Ok(out)
@@ -138,8 +212,8 @@ pub fn build_server(ws: &Workspace, server: &str, opts: &BuildOptions) -> Result
         .run("cargo", &mut cmd, "fix the compile error above")
 }
 
-/// The `[patch.<key>]` table for a cargo source: `crates-io`, or the quoted git URL.
-fn patch_key(source: Option<&str>) -> Option<String> {
+/// The `[patch.<table>]` for a cargo source: `crates-io`, or the git URL.
+fn patch_table_of(source: Option<&str>) -> Option<String> {
     let s = source?;
     if s == "registry+https://github.com/rust-lang/crates.io-index"
         || s.starts_with("sparse+https://index.crates.io")
@@ -148,8 +222,98 @@ fn patch_key(source: Option<&str>) -> Option<String> {
     }
     // git+ssh://host/repo.git?branch=main#sha → ssh://host/repo.git
     let url = s.strip_prefix("git+")?;
-    let url = url.split(['?', '#']).next()?;
-    Some(toml_str(url))
+    Some(url.split(['?', '#']).next()?.to_owned())
+}
+
+/// Puts a workspace's `.cargo/config.toml` back as it was when dropped, after
+/// [`ConfigGuard::write`] adds the patches to it.
+pub struct ConfigGuard {
+    path: PathBuf,
+    bytes: Option<Vec<u8>>,
+    /// `.cargo`, when doxa created it.
+    made_dir: Option<PathBuf>,
+}
+
+impl ConfigGuard {
+    /// Merge `patches` into `root`'s cargo config, theirs winning over an entry for the same crate.
+    pub fn write(root: &Path, patches: &[Patch]) -> Result<ConfigGuard> {
+        let dir = root.join(".cargo");
+        // Cargo reads the extensionless legacy name when it is the only one.
+        let legacy = dir.join("config");
+        let path = match legacy.is_file() && !dir.join("config.toml").exists() {
+            true => legacy,
+            false => dir.join("config.toml"),
+        };
+        let bytes = std::fs::read(&path).ok();
+        let mut table: toml::Table = match &bytes {
+            Some(b) => String::from_utf8_lossy(b).parse().map_err(|e| {
+                Error::config(
+                    format!("{}: {e}", path.display()),
+                    "fix the file so doxa can add its [patch] tables",
+                )
+            })?,
+            None => toml::Table::new(),
+        };
+        for p in patches {
+            let mut entry = toml::Table::new();
+            entry.insert("path".into(), p.dir.to_string_lossy().into_owned().into());
+            table
+                .entry("patch")
+                .or_insert_with(|| toml::Table::new().into())
+                .as_table_mut()
+                .ok_or_else(|| {
+                    Error::config(
+                        format!("{}: `patch` isn't a table", path.display()),
+                        "make it one",
+                    )
+                })?
+                .entry(p.table.clone())
+                .or_insert_with(|| toml::Table::new().into())
+                .as_table_mut()
+                .ok_or_else(|| {
+                    Error::config(
+                        format!("{}: `patch.{}` isn't a table", path.display(), p.table),
+                        "make it one",
+                    )
+                })?
+                .insert(p.name.clone(), entry.into());
+        }
+        let made_dir = (!dir.exists()).then(|| dir.clone());
+        let guard = ConfigGuard {
+            path: path.clone(),
+            bytes,
+            made_dir,
+        };
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, table.to_string()))
+            .map_err(|e| {
+                Error::config(
+                    format!("writing {}: {e}", path.display()),
+                    "check the directory is writable",
+                )
+            })?;
+        Ok(guard)
+    }
+}
+
+impl Drop for ConfigGuard {
+    fn drop(&mut self) {
+        let _ = match &self.bytes {
+            Some(b) => std::fs::write(&self.path, b),
+            None => std::fs::remove_file(&self.path),
+        };
+        if let Some(dir) = &self.made_dir {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// The `--config` key for a patch table: `crates-io` bare, a git URL quoted.
+fn config_key(table: &str) -> String {
+    match table == "crates-io" {
+        true => table.to_owned(),
+        false => toml_str(table),
+    }
 }
 
 fn toml_str(s: &str) -> String {
@@ -200,6 +364,7 @@ mod tests {
 
     #[test]
     fn a_git_or_crates_io_source_names_its_patch_table() {
+        let patch_key = |s: Option<&str>| patch_table_of(s).map(|t| config_key(&t));
         let git = |s: &str| patch_key(Some(s));
         assert_eq!(
             git("git+ssh://git@host/b.git?branch=main#0123abc").as_deref(),
@@ -268,7 +433,14 @@ mod tests {
                 root.join("api").display()
             )]
         );
-        assert_eq!(p.patched, [("b-api".to_owned(), root.join("api"))]);
+        assert_eq!(
+            p.patched,
+            [Patch {
+                table: "https://host/b.git".into(),
+                name: "b-api".into(),
+                dir: root.join("api"),
+            }]
+        );
     }
 
     #[test]
@@ -288,10 +460,48 @@ mod tests {
     }
 
     #[test]
-    fn unique_keeps_the_first_of_each_root() {
+    fn locals_keep_each_root_once_and_an_entry_without_a_manifest_is_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        let (a, b) = (local(tmp.path()), local(&tmp.path().join(".")));
-        assert_eq!(unique(vec![a, b]).len(), 1);
+        let mut locals = Locals::default();
+        locals.push(local(tmp.path()));
+        locals.push(local(&tmp.path().join(".")));
+        assert_eq!(locals.workspaces.len(), 1);
+        let gone = tmp.path().join("gone");
+        let loaded = Locals::load("patch", [("lib".to_owned(), gone.clone())]).unwrap();
+        assert!(loaded.workspaces.is_empty());
+        assert_eq!(
+            loaded.absent,
+            [Absent {
+                table: "patch",
+                name: "lib".into(),
+                path: gone
+            }]
+        );
+    }
+
+    #[test]
+    fn the_config_guard_merges_patches_and_puts_the_config_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let patch = |name: &str| Patch {
+            table: "ssh://git@host/b.git".into(),
+            name: name.into(),
+            dir: "/src/b/api".into(),
+        };
+        drop(ConfigGuard::write(tmp.path(), &[patch("b-api")]).unwrap());
+        assert!(!tmp.path().join(".cargo").exists());
+
+        let config = tmp.path().join(".cargo/config.toml");
+        let before = "[build]\njobs = 2\n\n[patch.\"ssh://git@host/b.git\"]\nb-api = { path = \"/old\" }\nb-db = { path = \"/db\" }\n";
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, before).unwrap();
+        let guard = ConfigGuard::write(tmp.path(), &[patch("b-api")]).unwrap();
+        let during: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        let table = &during["patch"]["ssh://git@host/b.git"];
+        assert_eq!(table["b-api"]["path"].as_str(), Some("/src/b/api"));
+        assert_eq!(table["b-db"]["path"].as_str(), Some("/db"));
+        assert_eq!(during["build"]["jobs"].as_integer(), Some(2));
+        drop(guard);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
     }
 
     #[test]
