@@ -1,8 +1,7 @@
 //! React's hooks: `state`, `memo`, `effect`, `action`, `provide` / `context`, and `Singleton`.
 //!
-//! Each hook, and each GET awaited in a render, claims the next slot of the component. The call site is
-//! recorded, and in debug builds a render reaching a slot from a different call
-//! site panics naming both, which catches conditional hooks.
+//! Each hook, and each GET awaited in a render, claims the next slot of the component. In debug
+//! builds a render reaching a slot with a hook of another type panics naming both call sites.
 
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
@@ -34,8 +33,9 @@ pub(crate) fn slot_at<T: 'static>(
     let i = inst.cursor.get();
     inst.cursor.set(i + 1);
     let mut hooks = inst.hooks.borrow_mut();
-    if let Some(h) = hooks.get(i) {
-        if cfg!(debug_assertions) && (h.at != at || h.type_id != TypeId::of::<T>()) {
+    if let Some(h) = hooks.get_mut(i) {
+        // Not the call site: a hot patch shifts every line below an edit.
+        if cfg!(debug_assertions) && h.type_id != TypeId::of::<T>() {
             panic!(
                 "hook order changed in <{}>: `{hook}` at {at} ran where the hook at {} ran last render. \
                  Hooks must run in the same order every render: don't call them conditionally, in loops, \
@@ -43,6 +43,7 @@ pub(crate) fn slot_at<T: 'static>(
                 inst.name, h.at
             );
         }
+        h.at = at;
         let value = h
             .value
             .clone()

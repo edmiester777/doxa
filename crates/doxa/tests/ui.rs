@@ -273,6 +273,36 @@ fn a_conditional_hook_panics_with_both_locations() {
     settle();
 }
 
+/// Its count hook moves call site after a click, as a hot patch moves every line below an edit.
+#[component]
+fn Moved() -> View {
+    let moved = state(false);
+    let count = if moved.get() {
+        state(9u32)
+    } else {
+        state(0u32)
+    };
+    view! {
+        <button
+            on:click={move |_| {
+                count.set(count.get() + 1);
+                moved.set(true)
+            }}
+        >
+            "bump"
+        </button>
+        <span>{count.get()}</span>
+    }
+}
+
+#[test]
+fn a_hook_keeps_its_state_when_its_call_site_moves() {
+    let dom = mount(|| view! { <Moved/> });
+    dom.click(dom.find_tag("button").unwrap());
+    settle();
+    assert_eq!(dom.text(dom.find_tag("span").unwrap()), "1");
+}
+
 #[page("/things/{id}")]
 fn Thing(id: u32, tab: Option<String>) -> View {
     view! {
