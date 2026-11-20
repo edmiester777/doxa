@@ -36,6 +36,54 @@ struct Rustc {
     cwd: PathBuf,
 }
 
+/// What `-Csave-temps` leaves in a crate's output dir; removed on drop, as nothing reads it after.
+struct Temps {
+    dir: PathBuf,
+    /// The crate's file stem, `<crate-name><extra-filename>`.
+    stem: String,
+}
+
+impl Temps {
+    fn of(rustc: &Rustc) -> Option<Self> {
+        let after = |flag: &str| {
+            let i = rustc.args.iter().position(|a| a == flag)?;
+            rustc.args.get(i + 1)
+        };
+        let extra = rustc.args.iter().find_map(|a| {
+            a.strip_prefix("-C")
+                .unwrap_or(a)
+                .strip_prefix("extra-filename=")
+        });
+        Some(Temps {
+            dir: rustc.cwd.join(after("--out-dir")?),
+            stem: format!("{}{}", after("--crate-name")?, extra.unwrap_or_default()),
+        })
+    }
+}
+
+impl Drop for Temps {
+    fn drop(&mut self) {
+        let unit = format!("{}.", self.stem);
+        for e in read_dir(&self.dir) {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with(&unit) && name.contains(".rcgu.") {
+                let _ = std::fs::remove_file(e.path());
+            } else if is_rustc_temp_dir(name) && e.path().is_dir() {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+}
+
+/// rustc's scratch dirs: `rustc` or `rmeta` and six random characters.
+fn is_rustc_temp_dir(name: &str) -> bool {
+    ["rustc", "rmeta"].iter().any(|p| {
+        name.strip_prefix(p)
+            .is_some_and(|r| r.len() == 6 && r.bytes().all(|b| b.is_ascii_alphanumeric()))
+    })
+}
+
 /// Act as cargo's rustc wrapper or rustc's linker when `doxa` was started as one; call
 /// this first in `main`.
 pub fn intercept() -> Option<ExitCode> {
@@ -191,6 +239,7 @@ impl Records {
     /// Link the recorded objects with every workspace rlib whole, into `out`.
     pub(crate) fn fat_link(&self, target_dir: &Path, workspace: &Path, out: &Path) -> Result<Base> {
         let rustc: Rustc = read_json(&self.rustc())?;
+        let _temps = Temps::of(&rustc);
         let link = read_lines(&self.link())?;
         let mut args = linker_args(&link);
         let target_dir = std::fs::canonicalize(target_dir).at(target_dir)?;
@@ -302,6 +351,7 @@ impl Base {
             )
             .env(LINK_FILE, &thin)
             .current_dir(&self.rustc.cwd);
+        let _temps = Temps::of(&self.rustc);
         if !compile(&mut cmd)? {
             return Ok(Patched::NotCompiled);
         }
@@ -360,7 +410,6 @@ impl Base {
         for o in &objects {
             let object = std::fs::read(o).at(Path::new(o))?;
             sites.read(&object).map_err(patch_error)?;
-            let _ = std::fs::remove_file(o);
         }
         let bytes = std::fs::read(&out).at(&out)?;
         let (bytes, mut table) = wasm::jump_table(&bytes, &sites, cache).map_err(patch_error)?;
@@ -624,6 +673,79 @@ mod tests {
                 "build/web/5e6f/out",
                 "build/web-kit/7a8b/fingerprint"
             ]
+        );
+    }
+
+    #[test]
+    fn temps_go_and_outputs_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let files = [
+            "web-1a.x.y.rcgu.o",
+            "web-1a.x.y.rcgu.bc",
+            "web-1a.x.y.rcgu.no-opt.bc",
+            "libweb-1a.rlib",
+            "web-1a.wasm",
+            "web-1a.d",
+            "web.x.y.rcgu.o",
+            "kit-2b.x.y.rcgu.o",
+            "rustc-notes",
+        ];
+        for f in files {
+            std::fs::write(p.join(f), b"").unwrap();
+        }
+        for d in ["rustcAb12Cd", "rmetaZz9Yy8", "rustc-long-name"] {
+            std::fs::create_dir(p.join(d)).unwrap();
+        }
+        let rustc = Rustc {
+            args: [
+                "rustc",
+                "--crate-name",
+                "web",
+                "-C",
+                "extra-filename=-1a",
+                "--out-dir",
+                "out",
+            ]
+            .map(String::from)
+            .into(),
+            envs: vec![],
+            cwd: p.parent().unwrap().to_owned(),
+        };
+        let mut temps = Temps::of(&rustc).unwrap();
+        temps.dir = p.to_owned();
+        drop(temps);
+        let mut left: Vec<_> = read_dir(p)
+            .map(|e| e.file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "kit-2b.x.y.rcgu.o",
+                "libweb-1a.rlib",
+                "rustc-long-name",
+                "rustc-notes",
+                "web-1a.d",
+                "web-1a.wasm",
+                "web.x.y.rcgu.o"
+            ]
+        );
+    }
+
+    #[test]
+    fn temps_resolve_the_out_dir_against_rustcs_cwd() {
+        let rustc = Rustc {
+            args: ["rustc", "--crate-name", "web", "--out-dir", "out"]
+                .map(String::from)
+                .into(),
+            envs: vec![],
+            cwd: PathBuf::from("/w"),
+        };
+        let temps = Temps::of(&rustc).unwrap();
+        assert_eq!(
+            (temps.dir.as_path(), temps.stem.as_str()),
+            (Path::new("/w/out"), "web")
         );
     }
 
