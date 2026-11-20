@@ -392,6 +392,8 @@ async fn serve(
             }
         },
     };
+    // False after a failed wasm rebuild: the sources no longer match the hot base.
+    let mut patchable = true;
 
     loop {
         let (mut paths, forced) = tokio::select! {
@@ -420,6 +422,7 @@ async fn serve(
             match full {
                 Ok(()) => {
                     built = true;
+                    patchable = true;
                     web.status(Status::Running(served_port));
                     *proxy.latest_patch.lock().expect("patch") = None;
                     let _ = reload.send(Reload::Page);
@@ -431,7 +434,7 @@ async fn serve(
             }
             continue;
         }
-        if hot && plan.patch && !plan.bundle && !plan.css && !plan.server {
+        if hot && patchable && plan.patch && !plan.bundle && !plan.css && !plan.server {
             web.status(Status::Patching);
             let p = pipeline.clone();
             match tokio::task::spawn_blocking(move || p.lock().expect("pipeline").patch()).await? {
@@ -460,6 +463,9 @@ async fn serve(
         let rebuilt =
             tokio::task::spawn_blocking(move || rebuild(&mut p.lock().expect("pipeline"), plan))
                 .await?;
+        if plan.wasm {
+            patchable = rebuilt.is_ok();
+        }
         let dist = match rebuilt {
             Ok(dist) => dist,
             Err(e) => {
