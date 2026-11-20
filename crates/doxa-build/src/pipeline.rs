@@ -105,6 +105,11 @@ impl Pipeline {
         })
     }
 
+    /// The `--config` values every cargo call gets.
+    pub fn cargo_config(&self) -> &[String] {
+        &self.opts.cargo_config
+    }
+
     /// The served directory.
     pub fn dist_dir(&self) -> PathBuf {
         if self.opts.gallery {
@@ -510,6 +515,9 @@ impl Pipeline {
             .note(format!("building {server} with the dist embedded"));
         let dist = std::fs::canonicalize(self.dist_dir()).at(&self.dist_dir())?;
         let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        for c in &self.opts.cargo_config {
+            cmd.args(["--config", c]);
+        }
         cmd.args(["build", "-p", server, "--features", "embed"])
             .env("DOXA_DIST", dist)
             .current_dir(&self.workspace.workspace_root);

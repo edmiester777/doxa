@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use doxa_build::config::{DevConfig, Workspace};
+use doxa_build::local::Patches;
 use futures::future::BoxFuture;
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
@@ -34,6 +35,8 @@ struct Run {
     dist: Option<PathBuf>,
     /// Sibling builds use their own toolchain.
     sibling: bool,
+    /// `--config` patches to local checkouts.
+    cargo_config: Vec<String>,
 }
 
 /// Which changed paths rebuild a service.
@@ -93,6 +96,7 @@ impl Service {
             args: start_args(dev.port),
             dist: None,
             sibling: true,
+            cargo_config: Vec::new(),
         };
         Ok((Service::new(&ws, name, run, tag), ws))
     }
@@ -121,6 +125,7 @@ impl Service {
             },
             dist: Some(dist),
             sibling: false,
+            cargo_config: Vec::new(),
         };
         Ok(Service::new(ws, name, run, tag))
     }
@@ -152,6 +157,19 @@ impl Service {
         self.up.subscribe()
     }
 
+    /// Build against `patches` and rebuild when a patched crate changes, noting what it can't patch.
+    pub fn patch(&mut self, patches: Patches) {
+        for (name, source) in &patches.unpatchable {
+            self.tag.note(format!(
+                "{name} comes from {source}, which doxa can't patch; it builds without local edits"
+            ));
+        }
+        self.feeds
+            .dirs
+            .extend(patches.patched.iter().map(|(_, dir)| canonical(dir)));
+        self.run.cargo_config = patches.config;
+    }
+
     /// Hold the first launch until each of `after` is up.
     pub fn launch_after(&mut self, after: Vec<(String, watch::Receiver<bool>)>) {
         self.after = after;
@@ -178,8 +196,11 @@ impl Service {
             true => "--message-format=json-diagnostic-rendered-ansi",
             false => "--message-format=json",
         };
-        let mut child = self
-            .cargo()
+        let mut cmd = self.cargo();
+        for c in &self.run.cargo_config {
+            cmd.args(["--config", c]);
+        }
+        let mut child = cmd
             .args(["build", "-p", &self.name, "--bin", &self.run.bin, format])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -471,6 +492,32 @@ mod tests {
         assert!(!feeds.feeds(Path::new("/b/crates/api/.git/HEAD")));
         assert!(!feeds.feeds(Path::new("/b/crates/api/node_modules/x.js")));
         assert!(!feeds.feeds(Path::new("/b/crates/engine/src/lib.rs")));
+    }
+
+    #[test]
+    fn a_patched_crate_feeds_the_service_and_its_build() {
+        let ws = Workspace::from_json(
+            r#"{"workspace_root": "/b", "target_directory": "/b/target", "packages": [
+              {"name": "api", "manifest_path": "/b/api/Cargo.toml", "targets": [], "dependencies": []}]}"#,
+        )
+        .unwrap();
+        let run = Run {
+            bin: "api".into(),
+            port: 1,
+            args: Vec::new(),
+            dist: None,
+            sibling: false,
+            cargo_config: Vec::new(),
+        };
+        let mut svc = Service::new(&ws, "api", run, Console::Stderr.web());
+        assert!(!svc.feeds.feeds(Path::new("/lib/core/src/lib.rs")));
+        svc.patch(Patches {
+            config: vec!["patch.crates-io.core.path=\"/lib/core\"".into()],
+            patched: vec![("core".into(), "/lib/core".into())],
+            unpatchable: Vec::new(),
+        });
+        assert!(svc.feeds.feeds(Path::new("/lib/core/src/lib.rs")));
+        assert_eq!(svc.run.cargo_config.len(), 1);
     }
 
     /// A std-only server: `start --port N` answers every request with `reply`.

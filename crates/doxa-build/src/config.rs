@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DoxaConfig {
-    /// `"client"` marks the crate that compiles to wasm.
+    /// `"client"` marks the crate that compiles to wasm; `"server"`, the server of a workspace without one.
     pub role: Option<String>,
     /// The server package `doxa dev` runs.
     pub server: Option<String>,
@@ -321,12 +321,7 @@ impl Workspace {
                 )
             })?,
             None => {
-                let mut candidates = Vec::new();
-                for p in &self.packages {
-                    if p.doxa()?.and_then(|c| c.role).as_deref() == Some("client") {
-                        candidates.push(p);
-                    }
-                }
+                let candidates = self.with_role("client")?;
                 match candidates.as_slice() {
                     [one] => *one,
                     [] => return Err(Error::config(
@@ -420,6 +415,57 @@ impl Workspace {
             s.path = self.workspace_root.join(&s.path);
         }
         build_order(services)
+    }
+
+    /// `[workspace.metadata.doxa.dev.patch]`: `name = "../repo"`, paths made absolute.
+    pub fn dev_patches(&self) -> Result<Vec<(String, PathBuf)>> {
+        let Some(v) = self.metadata.pointer("/doxa/dev/patch") else {
+            return Ok(Vec::new());
+        };
+        let table: BTreeMap<String, PathBuf> = serde_json::from_value(v.clone()).map_err(|e| {
+            Error::config(
+                format!("[workspace.metadata.doxa.dev.patch]: {e}"),
+                "write each entry as name = \"../repo\"",
+            )
+        })?;
+        Ok(table
+            .into_iter()
+            .map(|(name, path)| (name, self.workspace_root.join(path)))
+            .collect())
+    }
+
+    /// The members whose `[package.metadata.doxa]` has `role = role`.
+    fn with_role(&self, role: &str) -> Result<Vec<&Package>> {
+        let mut found = Vec::new();
+        for p in &self.packages {
+            if p.doxa()?.and_then(|c| c.role).as_deref() == Some(role) {
+                found.push(p);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Whether a member has `role = "client"`.
+    pub fn has_client(&self) -> Result<bool> {
+        Ok(!self.with_role("client")?.is_empty())
+    }
+
+    /// The one member with `role = "server"`.
+    pub fn server_crate(&self) -> Result<&Package> {
+        match self.with_role("server")?.as_slice() {
+            [one] => Ok(one),
+            [] => Err(Error::config(
+                "no crate in the workspace has [package.metadata.doxa] role = \"client\" or \"server\"",
+                "add role = \"server\" to the server crate's Cargo.toml",
+            )),
+            many => {
+                let names: Vec<_> = many.iter().map(|p| p.name.as_str()).collect();
+                Err(Error::config(
+                    format!("several server crates: {}", names.join(", ")),
+                    "keep role = \"server\" on one",
+                ))
+            }
+        }
     }
 
     /// `[workspace.metadata.doxa.dev] max_parallel_build`: how many startup builds run at once.
@@ -547,6 +593,23 @@ mod tests {
          "dependencies": [{"name": "app-api", "path": "/app/api"}], "metadata": null}
       ]
     }"#;
+
+    #[test]
+    fn the_patch_table_resolves_against_the_root_and_role_server_finds_one_crate() {
+        let mut ws = Workspace::from_json(METADATA).unwrap();
+        assert!(ws.dev_patches().unwrap().is_empty());
+        assert!(ws.has_client().unwrap());
+        assert!(ws.server_crate().is_err());
+        ws.metadata = serde_json::json!({"doxa": {"dev": {"patch": {"ledger": "../ledger"}}}});
+        assert_eq!(
+            ws.dev_patches().unwrap(),
+            [("ledger".to_owned(), PathBuf::from("/app/../ledger"))]
+        );
+        ws.packages[3].metadata = serde_json::json!({"doxa": {"role": "server"}});
+        assert_eq!(ws.server_crate().unwrap().name, "app-server");
+        ws.packages[0].metadata = serde_json::json!({"doxa": {"role": "server"}});
+        assert!(ws.server_crate().is_err());
+    }
 
     #[test]
     fn a_proxy_table_names_each_upstream() {

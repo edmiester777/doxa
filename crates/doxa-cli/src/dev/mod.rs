@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
-use doxa_build::config::Workspace;
+use doxa_build::config::{sibling_cargo, Workspace};
 use doxa_build::dist::Dist;
 use doxa_build::hot::Patched;
+use doxa_build::local::{self, LockGuard, Patches};
 use doxa_build::{BuildOptions, Pipeline};
 use futures::FutureExt;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
@@ -31,7 +32,6 @@ use proxy::{
     RELOAD_PATH,
 };
 use service::{SendError, Service};
-use siblings::LockGuard;
 use tui::{Status, Tui};
 use watch::{canonical, classify, Plan, Watch};
 
@@ -114,7 +114,9 @@ struct Loaded {
     pipeline: Pipeline,
     siblings: Vec<(Service, Workspace)>,
     foreign: watch::Foreign,
-    lock: Option<LockGuard>,
+    /// The web workspace's patches, which its server builds against too.
+    own: Patches,
+    locks: Vec<LockGuard>,
     width: usize,
 }
 
@@ -150,31 +152,48 @@ fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, S
         ups.insert(name.clone(), svc.up());
         siblings.push((svc, ws));
     }
-    let workspaces: Vec<&Workspace> = siblings.iter().map(|(_, ws)| ws).collect();
-    let (patches, foreign) = siblings::wire(&pipeline.graph, &workspaces, &console.web())?;
-    let lock = match patches.is_empty() {
-        true => None,
-        false => {
-            let lock = LockGuard::take(&pipeline.workspace.workspace_root);
-            console.web().note(format!(
-                "compiling {} against the dev services' local source; Cargo.lock is restored on exit (`git checkout Cargo.lock` if doxa is killed)",
-                pipeline.web.name
-            ));
-            pipeline = Pipeline::new(
-                &cwd,
-                BuildOptions {
-                    cargo_config: patches,
-                    ..opts
-                },
-            )?;
-            Some(lock)
+    let mut all: Vec<Workspace> = siblings.iter().map(|(_, ws)| ws.clone()).collect();
+    if !opts.gallery {
+        all.extend(local::patch_table(&pipeline.workspace)?);
+    }
+    let locals = local::unique(all);
+    let locals: Vec<&Workspace> = locals.iter().collect();
+    let foreign = siblings::watched(&pipeline.graph, &locals);
+    let mut locks = Vec::new();
+    let root = pipeline.workspace.workspace_root.clone();
+    let mut own = local::for_workspace(&root, local::cargo(), &locals)?;
+    for (name, source) in own.unpatchable.drain(..) {
+        console.web().note(format!(
+            "{name} comes from {source}, which doxa can't patch; it builds without local edits"
+        ));
+    }
+    if !own.config.is_empty() {
+        locks.push(LockGuard::take(&root));
+        console.web().note(format!(
+            "compiling {} against local source; Cargo.lock is restored on exit (`git checkout Cargo.lock` if doxa is killed)",
+            pipeline.web.name
+        ));
+        pipeline = Pipeline::new(
+            &cwd,
+            BuildOptions {
+                cargo_config: own.config.clone(),
+                ..opts
+            },
+        )?;
+    }
+    for (svc, ws) in &mut siblings {
+        let patches = local::for_workspace(&ws.workspace_root, sibling_cargo(), &locals)?;
+        if !patches.config.is_empty() {
+            locks.push(LockGuard::take(&ws.workspace_root));
         }
-    };
+        svc.patch(patches);
+    }
     Ok(Loaded {
         pipeline,
         siblings,
         foreign,
-        lock,
+        own,
+        locks,
         width,
     })
 }
@@ -195,7 +214,8 @@ async fn serve(
         pipeline,
         siblings,
         foreign,
-        lock: _lock,
+        own,
+        locks: _locks,
         width,
     } = tokio::task::spawn_blocking(move || load(cwd, opts, &loading)).await??;
     web.rename(&pipeline.web.name);
@@ -212,12 +232,16 @@ async fn serve(
     };
     let dist = canonical(&pipeline.dist_dir());
     let server = match &server_pkg {
-        Some(pkg) => Some(Service::in_workspace(
-            &pipeline.workspace,
-            pkg,
-            dist.clone(),
-            console.server_tag(pkg, siblings.len(), width),
-        )?),
+        Some(pkg) => {
+            let mut svc = Service::in_workspace(
+                &pipeline.workspace,
+                pkg,
+                dist.clone(),
+                console.server_tag(pkg, siblings.len(), width),
+            )?;
+            svc.patch(own);
+            Some(svc)
+        }
         None => None,
     };
 

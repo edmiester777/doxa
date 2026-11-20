@@ -12,7 +12,7 @@ type Failure = Box<dyn std::error::Error>;
 
 /// Check `package` for wasm, naming each dependency that doesn't build and how it is reached.
 pub fn wire(package: &str) -> Result<(), Failure> {
-    let meta = metadata(Some(TARGET))?;
+    let meta = metadata(Some(TARGET), &[])?;
     let graph = Graph::new(&meta);
     let root = graph
         .member(package)
@@ -81,8 +81,8 @@ const SINGLE: &[&str] = &["doxa-client", "doxa-wire"];
 
 /// Stop when `package`'s graph, for `platform` or every one, links two copies of a [`SINGLE`]
 /// crate, naming how each is reached.
-pub fn one_copy(package: &str, platform: Option<&str>) -> Result<(), Failure> {
-    let meta = metadata(platform)?;
+pub fn one_copy(package: &str, platform: Option<&str>, config: &[String]) -> Result<(), Failure> {
+    let meta = metadata(platform, config)?;
     let graph = Graph::new(&meta);
     let root = graph
         .member(package)
@@ -94,8 +94,11 @@ fn cargo() -> Command {
     Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
 }
 
-fn metadata(platform: Option<&str>) -> Result<Value, Failure> {
+fn metadata(platform: Option<&str>, config: &[String]) -> Result<Value, Failure> {
     let mut cmd = cargo();
+    for c in config {
+        cmd.args(["--config", c]);
+    }
     cmd.args(["metadata", "--format-version", "1"]);
     if let Some(p) = platform {
         cmd.args(["--filter-platform", p]);

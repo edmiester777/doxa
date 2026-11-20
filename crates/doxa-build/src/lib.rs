@@ -28,6 +28,8 @@ pub mod hot;
 #[cfg(feature = "pipeline")]
 pub mod library;
 #[cfg(feature = "pipeline")]
+pub mod local;
+#[cfg(feature = "pipeline")]
 pub mod npm;
 #[cfg(feature = "pipeline")]
 mod output;

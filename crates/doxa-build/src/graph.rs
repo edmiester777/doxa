@@ -38,33 +38,34 @@ impl Graph {
         for c in config {
             cmd.args(["--config", c]);
         }
-        cmd.args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--filter-platform",
-            "wasm32-unknown-unknown",
-        ])
-        .current_dir(cwd);
-        let out = cmd.output().map_err(|e| {
-            Error::tool(
-                "cargo",
-                &cmd,
-                format!("could not start: {e}"),
-                "install Rust from https://rustup.rs",
-            )
-        })?;
-        if !out.status.success() {
-            return Err(Error::tool(
-                "cargo",
-                &cmd,
-                String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-                "run doxa from inside a cargo workspace",
-            ));
-        }
-        let json: Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| Error::tool("cargo", &cmd, e.to_string(), "upgrade cargo"))?;
-        Self::from_metadata(&json, web)
+        let meta = metadata(cmd, cwd, &["--filter-platform", "wasm32-unknown-unknown"])?;
+        Self::from_metadata(&meta, web)
+    }
+
+    /// Every non-member crate the workspace at `root` resolves, for any platform, with `cargo`.
+    pub fn resolved(root: &Path, cargo: Command) -> Result<Self> {
+        let meta = metadata(cargo, root, &[])?;
+        let items = |v: &Value| v.as_array().cloned().unwrap_or_default();
+        let own: HashSet<String> = items(&meta["workspace_members"])
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+        let mut members: Vec<Member> = items(&meta["packages"])
+            .into_iter()
+            .filter(|p| p["id"].as_str().is_some_and(|id| !own.contains(id)))
+            .map(|p| Member {
+                name: p["name"].as_str().unwrap_or_default().to_owned(),
+                dir: Path::new(p["manifest_path"].as_str().unwrap_or_default())
+                    .parent()
+                    .map(Path::to_owned)
+                    .unwrap_or_default(),
+                source: p["source"].as_str().map(str::to_owned),
+                npm: BTreeMap::new(),
+                uses_ui: false,
+            })
+            .collect();
+        members.sort_by(|a, b| a.name.cmp(&b.name).then(a.dir.cmp(&b.dir)));
+        Ok(Self { members })
     }
 
     /// The graph under the package named `web` in `cargo metadata` output.
@@ -190,6 +191,30 @@ impl Graph {
             .map(|(k, v)| (k.clone(), (v.clone(), app_name.to_owned())))
             .collect())
     }
+}
+
+fn metadata(mut cmd: Command, cwd: &Path, args: &[&str]) -> Result<Value> {
+    cmd.args(["metadata", "--format-version", "1"])
+        .args(args)
+        .current_dir(cwd);
+    let out = cmd.output().map_err(|e| {
+        Error::tool(
+            "cargo",
+            &cmd,
+            format!("could not start: {e}"),
+            "install Rust from https://rustup.rs",
+        )
+    })?;
+    if !out.status.success() {
+        return Err(Error::tool(
+            "cargo",
+            &cmd,
+            String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            "run doxa from inside a cargo workspace",
+        ));
+    }
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| Error::tool("cargo", &cmd, e.to_string(), "upgrade cargo"))
 }
 
 /// Each package `needed` names that the app's own `package.json` doesn't list.

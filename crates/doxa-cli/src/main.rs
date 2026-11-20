@@ -8,8 +8,11 @@ mod view;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use doxa_build::config::Workspace;
+use doxa_build::local::{self, LockGuard};
 use doxa_build::{BuildOptions, Pipeline};
 
 /// The system allocator holds what bindgen frees, so the split's parses stack on top of it.
@@ -36,26 +39,10 @@ enum Command {
         name: String,
     },
     /// Build the web crate into target/doxa/dist, then the server with it embedded.
-    Build {
-        /// Optimize, minify, and run wasm-opt when it is on PATH.
-        #[arg(long)]
-        release: bool,
-        /// The web crate; defaults to the one with role = "client".
-        #[arg(short, long)]
-        package: Option<String>,
-        /// Install npm dependencies from the lockfile only.
-        #[arg(long)]
-        locked: bool,
-        /// Write the `#[component(export)]` components as an npm package in target/doxa/lib.
-        #[arg(long)]
-        lib: bool,
-        /// The path the app is served under, e.g. /docs/; overrides the web crate's `base`.
-        #[arg(long)]
-        base: Option<String>,
-        /// Write a static site to this directory instead of building the server.
-        #[arg(long, conflicts_with = "lib")]
-        out: Option<PathBuf>,
-    },
+    Build(BuildArgs),
+    /// `doxa build` against the local checkouts `[workspace.metadata.doxa.dev]` lists; without
+    /// a web crate, builds the `role = "server"` crate.
+    BuildDev(BuildArgs),
     /// Build, run the server, and rebuild and reload on change.
     Dev {
         /// The web crate; defaults to the one with role = "client".
@@ -114,6 +101,41 @@ enum Command {
     },
 }
 
+#[derive(Debug, Args)]
+struct BuildArgs {
+    /// Optimize, minify, and run wasm-opt when it is on PATH.
+    #[arg(long)]
+    release: bool,
+    /// The web crate; defaults to the one with role = "client".
+    #[arg(short, long)]
+    package: Option<String>,
+    /// Install npm dependencies from the lockfile only.
+    #[arg(long)]
+    locked: bool,
+    /// Write the `#[component(export)]` components as an npm package in target/doxa/lib.
+    #[arg(long)]
+    lib: bool,
+    /// The path the app is served under, e.g. /docs/; overrides the web crate's `base`.
+    #[arg(long)]
+    base: Option<String>,
+    /// Write a static site to this directory instead of building the server.
+    #[arg(long, conflicts_with = "lib")]
+    out: Option<PathBuf>,
+}
+
+impl BuildArgs {
+    fn options(&self) -> BuildOptions {
+        BuildOptions {
+            release: self.release,
+            package: self.package.clone(),
+            locked: self.locked,
+            compress: self.release && !self.lib && self.out.is_none(),
+            base: self.base.clone(),
+            ..BuildOptions::default()
+        }
+    }
+}
+
 fn main() -> ExitCode {
     if let Some(code) = doxa_build::hot::intercept() {
         return code;
@@ -123,25 +145,8 @@ fn main() -> ExitCode {
         Command::New { name } => std::env::current_dir()
             .map_err(Into::into)
             .and_then(|cwd| new::scaffold(&cwd, &name).map_err(Into::into)),
-        Command::Build {
-            release,
-            package,
-            locked,
-            lib,
-            base,
-            out,
-        } => build(
-            BuildOptions {
-                release,
-                package,
-                locked,
-                compress: release && !lib && out.is_none(),
-                base,
-                ..BuildOptions::default()
-            },
-            lib,
-            out.as_deref(),
-        ),
+        Command::Build(args) => build(args.options(), args.lib, args.out.as_deref()),
+        Command::BuildDev(args) => build_dev(&args),
         Command::Dev {
             package,
             port,
@@ -202,9 +207,10 @@ fn build(
         return export(opts, out);
     }
     let mut pipeline = Pipeline::new(&std::env::current_dir()?, opts)?;
-    check::one_copy(&pipeline.web.name, Some(check::TARGET))?;
+    let config = pipeline.cargo_config();
+    check::one_copy(&pipeline.web.name, Some(check::TARGET), config)?;
     if let Some(server) = &pipeline.web.config.server {
-        check::one_copy(server, None)?;
+        check::one_copy(server, None, config)?;
     }
     if lib {
         pipeline.build_library()?;
@@ -220,11 +226,100 @@ fn build(
 /// Build the app or gallery, and write it to `out` as a static site.
 fn export(opts: BuildOptions, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut pipeline = Pipeline::new(&std::env::current_dir()?, opts)?;
-    check::one_copy(&pipeline.web.name, Some(check::TARGET))?;
+    check::one_copy(
+        &pipeline.web.name,
+        Some(check::TARGET),
+        pipeline.cargo_config(),
+    )?;
     let _ = pipeline.build()?;
     doxa_build::dist::export(&pipeline.dist_dir(), out)?;
     eprintln!("wrote {}", out.display());
     Ok(())
+}
+
+/// `doxa build` with this workspace's dependencies patched to the local checkouts; or, without
+/// a web crate, the `role = "server"` crate alone.
+fn build_dev(args: &BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let ws = Workspace::load(&std::env::current_dir()?)?;
+    let mut all = local::services(&ws)?;
+    all.extend(local::patch_table(&ws)?);
+    let locals = local::unique(all);
+    let locals: Vec<&Workspace> = locals.iter().collect();
+    let patches = local::for_workspace(&ws.workspace_root, local::cargo(), &locals)?;
+    let mut opts = args.options();
+    for (name, dir) in &patches.patched {
+        opts.output.note(format!("{name} from {}", dir.display()));
+    }
+    for (name, source) in &patches.unpatchable {
+        opts.output.note(format!(
+            "{name} comes from {source}, which doxa can't patch; it builds without local edits"
+        ));
+    }
+    let _lock = match patches.config.is_empty() {
+        true => None,
+        false => Some(HeldLock::take(&ws.workspace_root)?),
+    };
+    opts.cargo_config = patches.config;
+    if args.package.is_some() || ws.has_client()? {
+        return build(opts, args.lib, args.out.as_deref());
+    }
+    if args.lib || args.out.is_some() || args.base.is_some() {
+        return Err("--lib, --out and --base need a web crate with role = \"client\"".into());
+    }
+    let server = ws.server_crate()?.name.clone();
+    check::one_copy(&server, None, &opts.cargo_config)?;
+    local::build_server(&ws, &server, &opts)?;
+    Ok(())
+}
+
+/// A [`LockGuard`] that also restores the lockfile, then exits, on Ctrl-C or SIGTERM.
+struct HeldLock(Arc<Mutex<Option<LockGuard>>>);
+
+impl HeldLock {
+    fn take(root: &Path) -> std::io::Result<HeldLock> {
+        let held = Arc::new(Mutex::new(Some(LockGuard::take(root))));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        // Registered here, before the build starts, so a signal can't kill doxa first.
+        let interrupted = {
+            let _in = rt.enter();
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let (mut int, mut term) = (
+                    signal(SignalKind::interrupt())?,
+                    signal(SignalKind::terminate())?,
+                );
+                async move {
+                    tokio::select! {
+                        _ = int.recv() => {}
+                        _ = term.recv() => {}
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let mut int = tokio::signal::windows::ctrl_c()?;
+                async move {
+                    int.recv().await;
+                }
+            }
+        };
+        let restore = held.clone();
+        std::thread::spawn(move || {
+            rt.block_on(interrupted);
+            drop(restore.lock().unwrap_or_else(|e| e.into_inner()).take());
+            std::process::exit(130);
+        });
+        Ok(HeldLock(held))
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        drop(self.0.lock().unwrap_or_else(|e| e.into_inner()).take());
+    }
 }
 
 #[cfg(test)]
@@ -239,28 +334,37 @@ mod tests {
     fn build_flags() {
         assert!(matches!(
             parse(&["doxa", "build", "--release", "-p", "web", "--locked"]),
-            Command::Build { release: true, package: Some(p), locked: true, lib: false, .. } if p == "web"
+            Command::Build(BuildArgs { release: true, package: Some(p), locked: true, lib: false, .. }) if p == "web"
         ));
         assert!(matches!(
             parse(&["doxa", "build", "--base", "/docs/", "--out", "site"]),
-            Command::Build { base: Some(b), out: Some(o), .. } if b == "/docs/" && o == Path::new("site")
+            Command::Build(BuildArgs { base: Some(b), out: Some(o), .. }) if b == "/docs/" && o == Path::new("site")
         ));
         assert!(Cli::try_parse_from(["doxa", "build", "--lib", "--out", "s"]).is_err());
         assert!(matches!(
             parse(&["doxa", "build", "--lib"]),
-            Command::Build { lib: true, .. }
+            Command::Build(BuildArgs { lib: true, .. })
         ));
         assert!(matches!(
             parse(&["doxa", "build"]),
-            Command::Build {
+            Command::Build(BuildArgs {
                 release: false,
                 package: None,
                 locked: false,
                 lib: false,
                 base: None,
                 out: None,
-            }
+            })
         ));
+    }
+
+    #[test]
+    fn build_dev_takes_builds_flags() {
+        assert!(matches!(
+            parse(&["doxa", "build-dev", "--release", "-p", "web"]),
+            Command::BuildDev(BuildArgs { release: true, package: Some(p), .. }) if p == "web"
+        ));
+        assert!(Cli::try_parse_from(["doxa", "build-dev", "--lib", "--out", "s"]).is_err());
     }
 
     #[test]

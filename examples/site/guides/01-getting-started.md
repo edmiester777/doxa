@@ -140,6 +140,15 @@ At startup `doxa dev` compiles up to four things at once, then starts each servi
 
 Every line a service prints is tagged with its name, and so is each rebuild. A compile error leaves the last good build running until the next save fixes it. Editing a service's shared routes rebuilds both the service and the page, against the local source: doxa patches the web app's git dependency for the session and restores `Cargo.lock` when it exits. A service inherits `doxa dev`'s environment, which a `.env` loaded with `init =` doesn't override.
 
+A library you're editing in another checkout goes under `patch`. Every workspace `doxa dev` builds, services included, then compiles against it:
+
+```toml
+[workspace.metadata.doxa.dev.patch]
+ledger = "../ledger"
+```
+
+`doxa build-dev` does the same for one workspace and builds only that one, taking `doxa build`'s flags. In a workspace without a web crate, it builds the crate with `role = "server"` under `[package.metadata.doxa]`.
+
 In a terminal, `doxa dev` gives each service, the web app and its server a pane of their own, titled with its status: pending, compiling, running or failed. `?` lists the keys; the mouse focuses, scrolls and resizes panes, and `m` turns it off so you can select text. `--no-tui` prints plain tagged lines instead, as `doxa dev` does when its output isn't a terminal.
 
 ## Pick features
