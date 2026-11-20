@@ -47,7 +47,8 @@ impl Serve {
         }
     }
 
-    /// Whether a second signal exits at once, skipping teardown. On by default.
+    /// Whether a second signal exits at once, skipping teardown (the default). Off ignores it, so
+    /// only SIGKILL stops a hung teardown; `doxa dev` still kills its services on a second Ctrl-C.
     pub fn exit_on_second_signal(mut self, exit: bool) -> Self {
         self.exit_on_second_signal = exit;
         self
