@@ -338,6 +338,9 @@ mod tests {
             #[allow(dead_code)]
             n: u32,
         }
+        // With a lone dispatcher, tracing caches a callsite's interest from whichever
+        // thread registers it first; a parallel test without a subscriber would cache "never".
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let refused = tracing::subscriber::with_default(subscriber, || {
             let rejection =
                 <axum::extract::Query<Q>>::try_from_uri(&uri).expect_err("not a number");
