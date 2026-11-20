@@ -74,6 +74,9 @@ pub struct DevConfig {
 pub struct DevService {
     /// The service's workspace root.
     pub path: PathBuf,
+    /// Services whose first build finishes before this one's starts.
+    #[serde(default)]
+    pub after: Vec<String>,
 }
 
 /// `"/reports" = { to = "http://localhost:3100", env = "REPORTS_URL", strip = true }`.
@@ -400,10 +403,10 @@ impl Workspace {
         (server, client)
     }
 
-    /// `[workspace.metadata.doxa.dev.services]`, paths made absolute.
-    pub fn dev_services(&self) -> Result<BTreeMap<String, DevService>> {
+    /// `[workspace.metadata.doxa.dev.services]` in build order, paths made absolute.
+    pub fn dev_services(&self) -> Result<Vec<(String, DevService)>> {
         let Some(v) = self.metadata.pointer("/doxa/dev/services") else {
-            return Ok(BTreeMap::new());
+            return Ok(Vec::new());
         };
         let mut services: BTreeMap<String, DevService> = serde_json::from_value(v.clone())
             .map_err(|e| {
@@ -415,7 +418,7 @@ impl Workspace {
         for s in services.values_mut() {
             s.path = self.workspace_root.join(&s.path);
         }
-        Ok(services)
+        build_order(services)
     }
 
     /// Where doxa keeps its outputs.
@@ -426,6 +429,36 @@ impl Workspace {
             root,
         }
     }
+}
+
+/// Each service after those its `after` names; ties in name order.
+fn build_order(mut services: BTreeMap<String, DevService>) -> Result<Vec<(String, DevService)>> {
+    const TABLE: &str = "[workspace.metadata.doxa.dev.services]";
+    for (name, s) in &services {
+        if let Some(missing) = s.after.iter().find(|a| !services.contains_key(*a)) {
+            return Err(Error::config(
+                format!("{TABLE} {name}: after names `{missing}`, which isn't listed"),
+                "name only entries of this table in `after`",
+            ));
+        }
+    }
+    let mut order = Vec::with_capacity(services.len());
+    while !services.is_empty() {
+        let ready = services
+            .iter()
+            .find(|(_, s)| s.after.iter().all(|a| !services.contains_key(a)))
+            .map(|(name, _)| name.clone());
+        let Some(name) = ready else {
+            let left: Vec<&str> = services.keys().map(String::as_str).collect();
+            return Err(Error::config(
+                format!("{TABLE}: `after` loops among {}", left.join(", ")),
+                "remove one `after` entry from the loop",
+            ));
+        };
+        let s = services.remove(&name).expect("found above");
+        order.push((name, s));
+    }
+    Ok(order)
 }
 
 /// `cargo` for another workspace: from `PATH`, so its own `rust-toolchain.toml` applies.
@@ -552,10 +585,40 @@ mod tests {
         ws.metadata =
             serde_json::json!({"doxa": {"dev": {"services": {"b-api": {"path": "../b"}}}}});
         let services = ws.dev_services().unwrap();
-        assert_eq!(services["b-api"].path, Path::new("/app/../b"));
+        assert_eq!(services[0].0, "b-api");
+        assert_eq!(services[0].1.path, Path::new("/app/../b"));
         ws.metadata =
             serde_json::json!({"doxa": {"dev": {"services": {"b-api": {"dir": "../b"}}}}});
         assert!(ws.dev_services().unwrap_err().to_string().contains("dir"));
+    }
+
+    #[test]
+    fn dev_services_build_after_what_they_name() {
+        let mut ws = Workspace::from_json(METADATA).unwrap();
+        let order = |ws: &mut Workspace, services: serde_json::Value| {
+            ws.metadata = serde_json::json!({"doxa": {"dev": {"services": services}}});
+            ws.dev_services()
+                .map(|s| s.into_iter().map(|(n, _)| n).collect::<Vec<_>>())
+                .map_err(|e| e.to_string())
+        };
+        let chain = serde_json::json!({
+            "a": {"path": "a", "after": ["c"]},
+            "b": {"path": "b"},
+            "c": {"path": "c", "after": ["d"]},
+            "d": {"path": "d"},
+        });
+        assert_eq!(order(&mut ws, chain).unwrap(), ["b", "d", "c", "a"]);
+
+        let missing = serde_json::json!({"a": {"path": "a", "after": ["z"]}});
+        assert!(order(&mut ws, missing).unwrap_err().contains("`z`"));
+
+        let looped = serde_json::json!({
+            "a": {"path": "a", "after": ["b"]},
+            "b": {"path": "b", "after": ["a"]},
+            "c": {"path": "c"},
+        });
+        let err = order(&mut ws, looped).unwrap_err();
+        assert!(err.contains("loops among a, b"), "{err}");
     }
 
     #[test]

@@ -136,6 +136,8 @@ async fn start() -> axum::Router {
 
 A service with its own CLI passes its `clap::Parser` as `#[doxa::main(Cli)]` on `async fn main(cli: Cli)`, and doxa adds `start`. It needs its own `clap` dependency with the `derive` and `env` features.
 
+At startup `doxa dev` compiles one thing at a time, which keeps memory down: the services in name order, then the web app and its server. A service that needs another built first names it, as in `billing-api = { path = "../billing", after = ["ledger-api"] }`.
+
 Every line a service prints is tagged with its name, and so is each rebuild. A compile error leaves the last good build running until the next save fixes it. Editing a service's shared routes rebuilds both the service and the page, against the local source: doxa patches the web app's git dependency for the session and restores `Cargo.lock` when it exits. A service inherits `doxa dev`'s environment, which a `.env` loaded with `init =` doesn't override.
 
 ## Pick features

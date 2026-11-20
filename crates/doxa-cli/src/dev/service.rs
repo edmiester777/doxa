@@ -9,7 +9,7 @@ use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::log::{self, Tag};
 use super::proxy::Reload;
@@ -60,6 +60,8 @@ pub struct Service {
     run: Run,
     feeds: Feeds,
     child: Option<Child>,
+    /// Dropped when the first build ends, so startup can build the next in line.
+    pub built: Option<oneshot::Sender<()>>,
 }
 
 impl Service {
@@ -126,6 +128,7 @@ impl Service {
             run,
             feeds,
             child: None,
+            built: None,
         }
     }
 
@@ -224,7 +227,9 @@ impl Service {
 
     /// Build, then swap the running process for the new one. `true` once it listens.
     pub async fn rebuild(&mut self) -> bool {
-        let exe = match self.build().await {
+        let built = self.build().await;
+        self.built = None;
+        let exe = match built {
             Ok(Some((_, true))) if self.running() => return false,
             Ok(Some((exe, _))) => exe,
             Ok(None) => return false,
@@ -331,11 +336,13 @@ pub fn watch_sources(svc: &Service) -> Result<(Watcher, mpsc::UnboundedReceiver<
     Ok((d, rx))
 }
 
-/// Build and run `svc`, then again on each kick, until `stop` fires. Holds `_watcher` alive.
+/// Once `turn` resolves, build and run `svc`, then again on each kick, until `stop` fires.
+/// Holds `_watcher` alive.
 pub async fn supervise(
     mut svc: Service,
     _watcher: Option<Watcher>,
     mut kicks: mpsc::UnboundedReceiver<()>,
+    turn: Option<oneshot::Receiver<()>>,
     mut stop: tokio::sync::watch::Receiver<()>,
     reload: broadcast::Sender<Reload>,
 ) {
@@ -345,6 +352,14 @@ pub async fn supervise(
             svc.port()
         ));
         return;
+    }
+    if let Some(turn) = turn {
+        tokio::select! {
+            _ = stop.changed() => return,
+            _ = turn => {}
+        }
+        // The first build sees every change made while it waited.
+        while kicks.try_recv().is_ok() {}
     }
     loop {
         // Dropping the build on stop drops its cargo child, which is kill_on_drop.
@@ -455,7 +470,7 @@ fn main() {{
         let (watcher, kicks) = watch_sources(&svc).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(());
         let (reload, _) = broadcast::channel(16);
-        let task = tokio::spawn(supervise(svc, Some(watcher), kicks, stopped, reload));
+        let task = tokio::spawn(supervise(svc, Some(watcher), kicks, None, stopped, reload));
         until(port, "v1").await;
 
         std::fs::write(&main, "fn main() { this is not rust }").unwrap();

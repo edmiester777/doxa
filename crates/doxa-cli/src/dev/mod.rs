@@ -21,7 +21,7 @@ use doxa_build::hot::Patched;
 use doxa_build::pipeline::note;
 use doxa_build::{BuildOptions, Pipeline};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use log::Tag;
 use proxy::{
@@ -101,7 +101,7 @@ struct Loaded {
 fn load(cwd: PathBuf, opts: BuildOptions) -> Result<Loaded, SendError> {
     let mut pipeline = Pipeline::new(&cwd, opts.clone())?;
     let services = match opts.gallery {
-        true => BTreeMap::new(),
+        true => Vec::new(),
         false => pipeline.workspace.dev_services()?,
     };
     let server = pipeline
@@ -111,8 +111,8 @@ fn load(cwd: PathBuf, opts: BuildOptions) -> Result<Loaded, SendError> {
         .as_deref()
         .filter(|_| !opts.gallery);
     let width = services
-        .keys()
-        .map(String::len)
+        .iter()
+        .map(|(name, _)| name.len())
         .chain(server.map(str::len))
         .max()
         .unwrap_or(0);
@@ -256,16 +256,23 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
     // Services stop on the signal itself, not when this loop next breaks.
     let mut stop = stop_signal()?;
     let mut tasks = Vec::new();
-    for (svc, _) in siblings {
+    // Startup builds one at a time, to bound memory: the services in order, the web crate, its server.
+    let mut turn = None;
+    for (mut svc, _) in siblings {
         let (watcher, kicks) = service::watch_sources(&svc)?;
+        let (built, next) = oneshot::channel();
+        svc.built = Some(built);
         tasks.push(tokio::spawn(service::supervise(
             svc,
             Some(watcher),
             kicks,
+            turn.replace(next),
             stop.clone(),
             reload.clone(),
         )));
     }
+    let web_turn = turn;
+    let (web_built, server_turn) = oneshot::channel();
     // The web crate's classify() decides when the in-workspace server rebuilds.
     let kick = server.map(|svc| {
         let (kick, kicks) = mpsc::unbounded_channel();
@@ -273,6 +280,7 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
             svc,
             None,
             kicks,
+            Some(server_turn),
             stop.clone(),
             reload.clone(),
         )));
@@ -294,7 +302,15 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
     }
 
     let p = pipeline.clone();
-    let first = tokio::task::spawn_blocking(move || p.lock().expect("pipeline").build().map(drop));
+    let first = async move {
+        if let Some(turn) = web_turn {
+            let _ = turn.await;
+        }
+        let r = tokio::task::spawn_blocking(move || p.lock().expect("pipeline").build().map(drop))
+            .await;
+        drop(web_built);
+        r
+    };
     let mut built = tokio::select! {
         _ = stop.changed() => return finish(tasks).await,
         r = first => match r? {
