@@ -23,6 +23,24 @@ const MAX_BODY: usize = 100 * 1024 * 1024;
 const NO_UPSTREAM: &str = "no server or [package.metadata.doxa.proxy] entry answers this path";
 
 const RELOAD_SCRIPT: &str = r#"<script type="module">
+// A panic traps the wasm mid-update and leaves the page half-rendered, so start it over,
+// unless this load came from such a reload and trapped within 10s of starting.
+let reloadedByTrap = false;
+try {
+  reloadedByTrap = sessionStorage.getItem("__doxa_trapped") !== null;
+  sessionStorage.removeItem("__doxa_trapped");
+} catch {}
+const trapped = (err) => {
+  if (!(err instanceof WebAssembly.RuntimeError)) return;
+  if (reloadedByTrap && performance.now() < 10000) {
+    console.error("[doxa] the wasm trapped again right after reloading for a trap; not reloading");
+    return;
+  }
+  try { sessionStorage.setItem("__doxa_trapped", ""); } catch {}
+  location.reload();
+};
+addEventListener("error", (e) => trapped(e.error));
+addEventListener("unhandledrejection", (e) => trapped(e.reason));
 const es = new EventSource("/__doxa/reload");
 es.addEventListener("reload", () => location.reload());
 es.addEventListener("patch", (e) => {
