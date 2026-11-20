@@ -5,7 +5,7 @@
 //! 1. A [`SseEventMeta`][meta] impl mapping each variant to its SSE
 //!    `event:` frame name (snake-case by default, overridable per variant
 //!    with `#[sse(name = "…")]`).
-//! 2. The enum's [`utoipa::ToSchema`] / [`utoipa::PartialSchema`] impls,
+//! 2. The enum's `utoipa::ToSchema` / `utoipa::PartialSchema` impls,
 //!    emitting a **discriminated** `oneOf`: each variant becomes its own
 //!    `#/components/schemas/<Enum>_<Variant>` component and the union
 //!    carries an OpenAPI `discriminator`. This is the verbose, tooling-

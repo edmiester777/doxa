@@ -3,7 +3,7 @@
 //! # Derive macros
 //!
 //! - [`macro@ApiError`] — wires an error enum into both
-//!   [`axum::response::IntoResponse`] and [`utoipa::IntoResponses`] from a
+//!   `axum::response::IntoResponse` and `utoipa::IntoResponses` from a
 //!   single per-variant `#[api(...)]` declaration. Multiple variants sharing
 //!   a status code are grouped into one OpenAPI response with distinct
 //!   examples. An optional `outcome` attribute integrates with the audit
@@ -16,7 +16,7 @@
 //! # HTTP method attribute macros
 //!
 //! [`macro@get`], [`macro@post`], [`macro@put`], [`macro@patch`],
-//! [`macro@delete`] delegate to [`utoipa::path`] with automatic inference
+//! [`macro@delete`] delegate to `utoipa::path` with automatic inference
 //! from the handler signature. Use [`macro@operation`] for custom or
 //! multi-method routes.
 //!
@@ -236,7 +236,7 @@ mod sse_event;
 mod ty;
 mod validator;
 
-/// Derive [`axum::response::IntoResponse`] and [`utoipa::IntoResponses`]
+/// Derive `axum::response::IntoResponse` and `utoipa::IntoResponses`
 /// for an error enum from a single per-variant declaration.
 ///
 /// Each variant is annotated with `#[api_error(status = N, code =
@@ -411,7 +411,7 @@ pub fn get(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[post("/path", ...)]` shortcut for [`utoipa::path`]. See
+/// `#[post("/path", ...)]` shortcut for `utoipa::path`. See
 /// [`macro@get`] for the inference rules.
 #[proc_macro_attribute]
 pub fn post(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -420,7 +420,7 @@ pub fn post(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[put("/path", ...)]` shortcut for [`utoipa::path`]. See
+/// `#[put("/path", ...)]` shortcut for `utoipa::path`. See
 /// [`macro@get`] for the inference rules.
 #[proc_macro_attribute]
 pub fn put(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -429,7 +429,7 @@ pub fn put(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[patch("/path", ...)]` shortcut for [`utoipa::path`]. See
+/// `#[patch("/path", ...)]` shortcut for `utoipa::path`. See
 /// [`macro@get`] for the inference rules.
 #[proc_macro_attribute]
 pub fn patch(args: TokenStream, item: TokenStream) -> TokenStream {
@@ -438,7 +438,7 @@ pub fn patch(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[delete("/path", ...)]` shortcut for [`utoipa::path`]. See
+/// `#[delete("/path", ...)]` shortcut for `utoipa::path`. See
 /// [`macro@get`] for the inference rules.
 #[proc_macro_attribute]
 pub fn delete(args: TokenStream, item: TokenStream) -> TokenStream {

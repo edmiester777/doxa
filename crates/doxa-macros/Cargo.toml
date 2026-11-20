@@ -26,13 +26,6 @@ proc-macro2 = { workspace = true }
 doxa-macro-support = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
-# Pulled in solely so rustdoc links in the macro doc comments
-# (`utoipa::path`, `axum::response::IntoResponse`, etc.) can resolve.
-# The macros emit tokens referencing fully-qualified paths but do not
-# call any items directly at expand time, so these are build-time-only
-# and add no runtime cost.
-axum = { workspace = true }
-utoipa = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
