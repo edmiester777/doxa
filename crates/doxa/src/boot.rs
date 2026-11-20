@@ -32,6 +32,7 @@ pub struct Serve {
     addr: String,
     drain: Duration,
     teardown: Option<Teardown>,
+    exit_on_second_signal: bool,
 }
 
 impl Serve {
@@ -42,7 +43,15 @@ impl Serve {
             addr: "127.0.0.1:3000".into(),
             drain: Duration::from_secs(5),
             teardown: None,
+            exit_on_second_signal: true,
         }
+    }
+
+    /// Whether a second signal exits at once, skipping teardown (the default). Off ignores it, so
+    /// only SIGKILL stops a hung teardown; `doxa dev` still kills its services on a second Ctrl-C.
+    pub fn exit_on_second_signal(mut self, exit: bool) -> Self {
+        self.exit_on_second_signal = exit;
+        self
     }
 
     /// `host:port` to bind when neither `--port` nor `$PORT` is given.
@@ -225,10 +234,11 @@ where
     let (tx, rx) = watch::channel(false);
     let serve = start(Stopping(rx.clone())).await.into_serve()?;
     let env_port = std::env::var("PORT").ok().and_then(|p| p.parse().ok());
-    let signal = async {
+    // Under `doxa dev`, its SIGKILL after 10 s is the backstop instead.
+    let exit_early = serve.exit_on_second_signal && std::env::var_os("DOXA_DEV_CHILD").is_none();
+    let signal = async move {
         shutdown_signal().await;
-        // Under `doxa dev`, its SIGKILL after 10 s is the backstop instead.
-        if std::env::var_os("DOXA_DEV_CHILD").is_none() {
+        if exit_early {
             tokio::spawn(exit_on_second_signal());
         }
     };
@@ -256,6 +266,7 @@ async fn run_serve(
         addr,
         drain,
         teardown,
+        ..
     } = serve;
     let result = async {
         let configured = tokio::net::lookup_host(addr.as_str())
