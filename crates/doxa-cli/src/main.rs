@@ -70,9 +70,9 @@ enum Command {
         /// Rebuild and reload on a web crate change instead of patching the running page.
         #[arg(long)]
         no_hot: bool,
-        /// Show each service's output in its own pane, under its status.
+        /// Print plain tagged lines instead of a pane per service; implied without a terminal.
         #[arg(long)]
-        tui: bool,
+        no_tui: bool,
         /// Run at most N startup builds at once [default: 4].
         #[arg(long, value_name = "N")]
         max_parallel_build: Option<NonZeroUsize>,
@@ -147,14 +147,14 @@ fn main() -> ExitCode {
             port,
             locked,
             no_hot,
-            tui,
+            no_tui,
             max_parallel_build,
             serial,
         } => {
             let max = serial.then_some(NonZeroUsize::MIN).or(max_parallel_build);
             tokio::runtime::Runtime::new()
                 .map_err(Into::into)
-                .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot, tui, max)))
+                .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot, !no_tui, max)))
         }
         Command::Gallery {
             package,
@@ -277,13 +277,13 @@ mod tests {
             parse(&["doxa", "dev", "--no-hot"]),
             Command::Dev {
                 no_hot: true,
-                tui: false,
+                no_tui: false,
                 ..
             }
         ));
         assert!(matches!(
-            parse(&["doxa", "dev", "--tui"]),
-            Command::Dev { tui: true, .. }
+            parse(&["doxa", "dev", "--no-tui"]),
+            Command::Dev { no_tui: true, .. }
         ));
         assert!(matches!(
             parse(&["doxa", "dev"]),

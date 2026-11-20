@@ -60,7 +60,7 @@ fn rebuild(p: &mut Pipeline, plan: Plan) -> doxa_build::Result<Option<Dist>> {
 const MAX_PARALLEL_BUILD: NonZeroUsize = NonZeroUsize::new(4).expect("nonzero");
 
 /// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page, and `tui`
-/// gives each service a pane.
+/// gives each service a pane when a terminal is attached.
 pub async fn run(
     package: Option<String>,
     port: u16,
@@ -69,15 +69,10 @@ pub async fn run(
     tui: bool,
     max_parallel: Option<NonZeroUsize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let console = match (tui, tui::available()) {
-        (true, true) => Console::Tui(tui::Shared::new()),
-        (true, false) => {
-            Console::Stderr
-                .web()
-                .note("--tui needs an interactive terminal; showing plain output");
-            Console::Stderr
-        }
-        (false, _) => Console::Stderr,
+    let console = if tui && tui::available() {
+        Console::Tui(tui::Shared::new())
+    } else {
+        Console::Stderr
     };
     // Dropped before main prints an error, so the error lands on the restored screen.
     let _screen = match &console {

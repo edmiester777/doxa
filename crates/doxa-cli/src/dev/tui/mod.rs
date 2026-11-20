@@ -1,4 +1,4 @@
-//! `doxa dev --tui`: each service's output in its own pane, under its status.
+//! `doxa dev` in a terminal: each service's output in its own pane, under its status.
 
 mod draw;
 mod state;
