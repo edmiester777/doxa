@@ -5,6 +5,7 @@ mod dev;
 mod new;
 mod view;
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -72,6 +73,12 @@ enum Command {
         /// Show each service's output in its own pane, under its status.
         #[arg(long)]
         tui: bool,
+        /// Run at most N startup builds at once [default: 4].
+        #[arg(long, value_name = "N")]
+        max_parallel_build: Option<NonZeroUsize>,
+        /// Run startup builds one at a time, in `after` order; `--max-parallel-build 1`.
+        #[arg(long, conflicts_with = "max_parallel_build")]
+        serial: bool,
     },
     /// Build the `#[story]` functions into a gallery, serve it, and patch in each change.
     Gallery {
@@ -141,9 +148,14 @@ fn main() -> ExitCode {
             locked,
             no_hot,
             tui,
-        } => tokio::runtime::Runtime::new()
-            .map_err(Into::into)
-            .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot, tui))),
+            max_parallel_build,
+            serial,
+        } => {
+            let max = serial.then_some(NonZeroUsize::MIN).or(max_parallel_build);
+            tokio::runtime::Runtime::new()
+                .map_err(Into::into)
+                .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot, tui, max)))
+        }
         Command::Gallery {
             package,
             locked,
@@ -273,6 +285,28 @@ mod tests {
             parse(&["doxa", "dev", "--tui"]),
             Command::Dev { tui: true, .. }
         ));
+        assert!(matches!(
+            parse(&["doxa", "dev"]),
+            Command::Dev {
+                max_parallel_build: None,
+                serial: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["doxa", "dev", "--max-parallel-build", "2"]),
+            Command::Dev { max_parallel_build: Some(n), .. } if n.get() == 2
+        ));
+        assert!(matches!(
+            parse(&["doxa", "dev", "--serial"]),
+            Command::Dev { serial: true, .. }
+        ));
+        for bad in [
+            &["doxa", "dev", "--max-parallel-build", "0"][..],
+            &["doxa", "dev", "--serial", "--max-parallel-build", "2"],
+        ] {
+            assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+        }
         assert!(matches!(
             parse(&["doxa", "gallery"]),
             Command::Gallery {

@@ -1,6 +1,7 @@
 //! The app's shape, read from `cargo metadata` and `[package.metadata.doxa]`.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -74,7 +75,7 @@ pub struct DevConfig {
 pub struct DevService {
     /// The service's workspace root.
     pub path: PathBuf,
-    /// Services whose first build finishes before this one's starts.
+    /// Services that listen before this one first launches, and build first when builds are serial.
     #[serde(default)]
     pub after: Vec<String>,
 }
@@ -421,6 +422,19 @@ impl Workspace {
         build_order(services)
     }
 
+    /// `[workspace.metadata.doxa.dev] max_parallel_build`: how many startup builds run at once.
+    pub fn max_parallel_build(&self) -> Result<Option<NonZeroUsize>> {
+        let Some(v) = self.metadata.pointer("/doxa/dev/max_parallel_build") else {
+            return Ok(None);
+        };
+        serde_json::from_value(v.clone()).map(Some).map_err(|e| {
+            Error::config(
+                format!("[workspace.metadata.doxa.dev] max_parallel_build: {e}"),
+                "set it to a whole number, 1 or more",
+            )
+        })
+    }
+
     /// Where doxa keeps its outputs.
     pub fn layout(&self) -> Layout {
         let root = self.target_directory.join("doxa");
@@ -619,6 +633,17 @@ mod tests {
         });
         let err = order(&mut ws, looped).unwrap_err();
         assert!(err.contains("loops among a, b"), "{err}");
+    }
+
+    #[test]
+    fn max_parallel_build_reads_from_the_workspace_dev_table() {
+        let mut ws = Workspace::from_json(METADATA).unwrap();
+        assert_eq!(ws.max_parallel_build().unwrap(), None);
+        ws.metadata = serde_json::json!({"doxa": {"dev": {"max_parallel_build": 2}}});
+        assert_eq!(ws.max_parallel_build().unwrap(), NonZeroUsize::new(2));
+        ws.metadata = serde_json::json!({"doxa": {"dev": {"max_parallel_build": 0}}});
+        let err = ws.max_parallel_build().unwrap_err().to_string();
+        assert!(err.contains("max_parallel_build"), "{err}");
     }
 
     #[test]

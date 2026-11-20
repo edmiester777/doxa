@@ -20,6 +20,8 @@ pub enum Status {
     Pending,
     Compiling,
     Patching,
+    /// Built, and held until its `after` services listen.
+    Waiting,
     /// Listening on the port; `None` for the web crate, whose dist is served.
     Running(Option<u16>),
     /// The build failed; `running` when the last good build still serves.
@@ -40,6 +42,7 @@ impl Status {
             Status::Pending => ("◌ pending".into(), Color::DarkGray),
             Status::Compiling => ("◐ compiling".into(), Color::Yellow),
             Status::Patching => ("◐ patching".into(), Color::Yellow),
+            Status::Waiting => ("◌ waiting".into(), Color::DarkGray),
             Status::Running(Some(p)) => (format!("● running :{p}"), Color::Green),
             Status::Running(None) => ("● ready".into(), Color::Green),
             Status::Failed { running: true } => {

@@ -10,6 +10,7 @@ mod watch;
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,8 +21,9 @@ use doxa_build::config::Workspace;
 use doxa_build::dist::Dist;
 use doxa_build::hot::Patched;
 use doxa_build::{BuildOptions, Pipeline};
+use futures::FutureExt;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
-use tokio::sync::{broadcast, mpsc, oneshot, watch as signal};
+use tokio::sync::{broadcast, mpsc, oneshot, watch as signal, OwnedSemaphorePermit, Semaphore};
 
 use log::{Console, Tag};
 use proxy::{
@@ -54,6 +56,9 @@ fn rebuild(p: &mut Pipeline, plan: Plan) -> doxa_build::Result<Option<Dist>> {
     }
 }
 
+/// Startup builds at once when neither the flag nor `[workspace.metadata.doxa.dev]` says.
+const MAX_PARALLEL_BUILD: NonZeroUsize = NonZeroUsize::new(4).expect("nonzero");
+
 /// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page, and `tui`
 /// gives each service a pane.
 pub async fn run(
@@ -62,6 +67,7 @@ pub async fn run(
     locked: bool,
     hot: bool,
     tui: bool,
+    max_parallel: Option<NonZeroUsize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let console = match (tui, tui::available()) {
         (true, true) => Console::Tui(tui::Shared::new()),
@@ -85,7 +91,7 @@ pub async fn run(
         output: console.output(),
         ..BuildOptions::default()
     };
-    serve(opts, port, console)
+    serve(opts, port, console, max_parallel)
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)
 }
@@ -103,7 +109,7 @@ pub async fn gallery(
         gallery: true,
         ..BuildOptions::default()
     };
-    serve(opts, port, Console::Stderr)
+    serve(opts, port, Console::Stderr, None)
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)
 }
@@ -135,11 +141,20 @@ fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, S
         .chain(server.map(str::len))
         .max()
         .unwrap_or(0);
-    let siblings = services
-        .iter()
-        .enumerate()
-        .map(|(i, (name, s))| Service::sibling(name, &s.path, console.tag(name, i, width)))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut siblings = Vec::with_capacity(services.len());
+    let mut ups: BTreeMap<String, signal::Receiver<bool>> = BTreeMap::new();
+    // In build order, so each `after` entry is already in `ups`.
+    for (i, (name, s)) in services.iter().enumerate() {
+        let (mut svc, ws) = Service::sibling(name, &s.path, console.tag(name, i, width))?;
+        svc.launch_after(
+            s.after
+                .iter()
+                .map(|a| (a.clone(), ups[a].clone()))
+                .collect(),
+        );
+        ups.insert(name.clone(), svc.up());
+        siblings.push((svc, ws));
+    }
     let workspaces: Vec<&Workspace> = siblings.iter().map(|(_, ws)| ws).collect();
     let (patches, foreign) = siblings::wire(&pipeline.graph, &workspaces, &console.web())?;
     let lock = match patches.is_empty() {
@@ -169,7 +184,12 @@ fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, S
     })
 }
 
-async fn serve(opts: BuildOptions, port: u16, console: Console) -> Result<(), SendError> {
+async fn serve(
+    opts: BuildOptions,
+    port: u16,
+    console: Console,
+    max_parallel: Option<NonZeroUsize>,
+) -> Result<(), SendError> {
     let cwd = std::env::current_dir()?;
     let (hot, gallery) = (opts.hot, opts.gallery);
     let web = console.web();
@@ -184,6 +204,13 @@ async fn serve(opts: BuildOptions, port: u16, console: Console) -> Result<(), Se
         width,
     } = tokio::task::spawn_blocking(move || load(cwd, opts, &loading)).await??;
     web.rename(&pipeline.web.name);
+    let max_parallel = match max_parallel {
+        Some(n) => n,
+        None => pipeline
+            .workspace
+            .max_parallel_build()?
+            .unwrap_or(MAX_PARALLEL_BUILD),
+    };
     let server_pkg = match gallery {
         true => None,
         false => pipeline.web.config.server.clone(),
@@ -282,37 +309,46 @@ async fn serve(opts: BuildOptions, port: u16, console: Console) -> Result<(), Se
     // Services stop on the signal itself, not when this loop next breaks.
     listen(stops)?;
     let mut tasks = Vec::new();
-    // Startup builds one at a time, to bound memory: the services in order, the web crate, its server.
-    let mut turn = None;
-    for (mut svc, _) in siblings {
+    // Startup build slots go out in order: the services, the web crate, its server.
+    let mut turns = Vec::new();
+    let mut turn = || {
+        let (tx, rx) = oneshot::channel();
+        turns.push(tx);
+        rx.map(Result::ok)
+    };
+    for (svc, _) in siblings {
         let (watcher, kicks) = service::watch_sources(&svc)?;
-        let (built, next) = oneshot::channel();
-        svc.built = Some(built);
         tasks.push(tokio::spawn(service::supervise(
             svc,
             Some(watcher),
             kicks,
-            turn.replace(next),
+            Some(turn().boxed()),
             stop.clone(),
             reload.clone(),
         )));
     }
-    let web_turn = turn;
-    let (web_built, server_turn) = oneshot::channel();
+    let web_turn = turn();
+    let (web_built, web_done) = oneshot::channel::<()>();
     // The web crate's classify() decides when the in-workspace server rebuilds.
     let kick = server.map(|svc| {
         let (kick, kicks) = mpsc::unbounded_channel();
         svc.tag.kicks(&kick);
+        let slot = turn();
+        let server_turn = async move {
+            let _ = web_done.await;
+            slot.await
+        };
         tasks.push(tokio::spawn(service::supervise(
             svc,
             None,
             kicks,
-            Some(server_turn),
+            Some(server_turn.boxed()),
             stop.clone(),
             reload.clone(),
         )));
         kick
     });
+    hand_out(turns, max_parallel);
 
     let (changed, mut changes) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     let watching = web.clone();
@@ -338,13 +374,11 @@ async fn serve(opts: BuildOptions, port: u16, console: Console) -> Result<(), Se
     let p = pipeline.clone();
     let starting = web.clone();
     let first = async move {
-        if let Some(turn) = web_turn {
-            let _ = turn.await;
-        }
+        let permit = web_turn.await;
         starting.status(Status::Compiling);
         let r = tokio::task::spawn_blocking(move || p.lock().expect("pipeline").build().map(drop))
             .await;
-        drop(web_built);
+        drop((permit, web_built));
         r
     };
     let mut built = tokio::select! {
@@ -454,6 +488,20 @@ async fn serve(opts: BuildOptions, port: u16, console: Console) -> Result<(), Se
     finish(tasks, stop, &web).await
 }
 
+/// Give each of `turns` a build slot in order, `max` in use at once.
+fn hand_out(turns: Vec<oneshot::Sender<OwnedSemaphorePermit>>, max: NonZeroUsize) {
+    let slots = Arc::new(Semaphore::new(max.get()));
+    tokio::spawn(async move {
+        for turn in turns {
+            let Ok(permit) = slots.clone().acquire_owned().await else {
+                return;
+            };
+            // A service that never builds, its port already served, hands the slot straight back.
+            let _ = turn.send(permit);
+        }
+    });
+}
+
 /// Wait for every service to stop; another stop a second or more later stops waiting, and
 /// dropping the runtime then kills each child.
 async fn finish(
@@ -493,4 +541,21 @@ fn listen(stops: signal::Sender<u32>) -> std::io::Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn build_slots_go_out_in_order_and_no_more_than_max_at_once() {
+        let (txs, mut rxs): (Vec<_>, Vec<_>) = (0..3).map(|_| oneshot::channel()).unzip();
+        hand_out(txs, NonZeroUsize::new(2).unwrap());
+        let first = (&mut rxs[0]).await.unwrap();
+        let _second = (&mut rxs[1]).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(rxs[2].try_recv().is_err());
+        drop(first);
+        assert!((&mut rxs[2]).await.is_ok());
+    }
 }

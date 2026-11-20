@@ -5,11 +5,12 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use doxa_build::config::{DevConfig, Workspace};
+use futures::future::BoxFuture;
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, watch, OwnedSemaphorePermit};
 
 use super::log::{self, Tag};
 use super::proxy::Reload;
@@ -20,6 +21,9 @@ use super::watch::{canonical, outermost};
 pub type SendError = Box<dyn std::error::Error + Send + Sync>;
 
 pub type Watcher = Debouncer<RecommendedWatcher>;
+
+/// Resolves to the startup build slot, once it's this service's turn.
+pub type Turn = BoxFuture<'static, Option<OwnedSemaphorePermit>>;
 
 /// How a service is run.
 struct Run {
@@ -61,8 +65,12 @@ pub struct Service {
     run: Run,
     feeds: Feeds,
     child: Option<Child>,
-    /// Dropped when the first build ends, so startup can build the next in line.
-    pub built: Option<oneshot::Sender<()>>,
+    /// Held through the first build, so startup bounds how many build at once.
+    permit: Option<OwnedSemaphorePermit>,
+    /// `true` once it has listened.
+    up: watch::Sender<bool>,
+    /// Services to wait on before the first launch.
+    after: Vec<(String, watch::Receiver<bool>)>,
 }
 
 impl Service {
@@ -129,12 +137,24 @@ impl Service {
             run,
             feeds,
             child: None,
-            built: None,
+            permit: None,
+            up: watch::Sender::new(false),
+            after: Vec::new(),
         }
     }
 
     pub fn port(&self) -> u16 {
         self.run.port
+    }
+
+    /// Turns `true` once it has listened, or found its port already served.
+    pub fn up(&self) -> watch::Receiver<bool> {
+        self.up.subscribe()
+    }
+
+    /// Hold the first launch until each of `after` is up.
+    pub fn launch_after(&mut self, after: Vec<(String, watch::Receiver<bool>)>) {
+        self.after = after;
     }
 
     fn cargo(&self) -> Command {
@@ -231,7 +251,7 @@ impl Service {
     pub async fn rebuild(&mut self, force: bool) -> bool {
         self.tag.status(Status::Compiling);
         let built = self.build().await;
-        self.built = None;
+        self.permit = None;
         let exe = match built {
             Ok(Some((_, true))) if !force && self.running() => {
                 self.tag.status(Status::Running(Some(self.run.port)));
@@ -244,6 +264,13 @@ impl Service {
                 return self.failed();
             }
         };
+        for (name, mut up) in std::mem::take(&mut self.after) {
+            if !*up.borrow() {
+                self.tag.line(format!("waiting for {name} to listen"));
+                self.tag.status(Status::Waiting);
+                let _ = up.wait_for(|up| *up).await;
+            }
+        }
         self.stop().await;
         if let Err(e) = self.spawn(&exe) {
             self.tag
@@ -266,6 +293,7 @@ impl Service {
             if port_taken(self.run.port).await {
                 self.tag.line(format!("ready on :{}", self.run.port));
                 self.tag.status(Status::Running(Some(self.run.port)));
+                self.up.send_replace(true);
                 return true;
             }
             if let Some(Ok(Some(status))) = self.child.as_mut().map(|c| c.try_wait()) {
@@ -371,8 +399,8 @@ pub async fn supervise(
     mut svc: Service,
     _watcher: Option<Watcher>,
     mut kicks: mpsc::UnboundedReceiver<bool>,
-    turn: Option<oneshot::Receiver<()>>,
-    mut stop: tokio::sync::watch::Receiver<u32>,
+    turn: Option<Turn>,
+    mut stop: watch::Receiver<u32>,
     reload: broadcast::Sender<Reload>,
 ) {
     if port_taken(svc.port()).await {
@@ -381,13 +409,14 @@ pub async fn supervise(
             svc.port()
         ));
         svc.tag.status(Status::External(svc.port()));
+        svc.up.send_replace(true);
         return;
     }
     let mut force = false;
     if let Some(turn) = turn {
         tokio::select! {
             _ = stop.changed() => return svc.tag.status(Status::Stopped),
-            _ = turn => {}
+            permit = turn => svc.permit = permit,
         }
         // The first build sees every change made while it waited.
         while kicks.try_recv().is_ok() {}
