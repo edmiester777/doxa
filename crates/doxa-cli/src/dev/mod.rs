@@ -299,7 +299,8 @@ async fn serve(
         .with_state(proxy.clone())
         .layer(axum::middleware::from_fn_with_state(allowed, guard_host));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    let served = urls(host, lan_ip(), port);
+    let served_port = listener.local_addr()?.port();
+    let served = urls(host, lan_ip(), served_port);
     for url in &served {
         web.note(format!("serving {url}"));
     }
@@ -385,7 +386,7 @@ async fn serve(
         _ = stop.changed() => return finish(tasks, stop, &web).await,
         r = first => match r? {
             Ok(()) => {
-                web.status(Status::Running(None));
+                web.status(Status::Running(served_port));
                 true
             }
             Err(e) => {
@@ -424,7 +425,7 @@ async fn serve(
             match full {
                 Ok(()) => {
                     built = true;
-                    web.status(Status::Running(None));
+                    web.status(Status::Running(served_port));
                     *proxy.latest_patch.lock().expect("patch") = None;
                     let _ = reload.send(Reload::Page);
                 }
@@ -442,7 +443,7 @@ async fn serve(
                 Ok(Patched::Table(table)) => {
                     *proxy.latest_patch.lock().expect("patch") = Some(table.clone());
                     let _ = reload.send(Reload::Patch(table));
-                    web.status(Status::Running(None));
+                    web.status(Status::Running(served_port));
                     continue;
                 }
                 Ok(Patched::NotCompiled) => {
@@ -472,7 +473,7 @@ async fn serve(
                 continue;
             }
         };
-        web.status(Status::Running(None));
+        web.status(Status::Running(served_port));
         if plan.wasm {
             *proxy.latest_patch.lock().expect("patch") = None;
         }

@@ -254,7 +254,7 @@ impl Service {
         self.permit = None;
         let exe = match built {
             Ok(Some((_, true))) if !force && self.running() => {
-                self.tag.status(Status::Running(Some(self.run.port)));
+                self.tag.status(Status::Running(self.run.port));
                 return false;
             }
             Ok(Some((exe, _))) => exe,
@@ -292,7 +292,7 @@ impl Service {
         for _ in 0..1200 {
             if port_taken(self.run.port).await {
                 self.tag.line(format!("ready on :{}", self.run.port));
-                self.tag.status(Status::Running(Some(self.run.port)));
+                self.tag.status(Status::Running(self.run.port));
                 self.up.send_replace(true);
                 return true;
             }
