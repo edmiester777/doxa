@@ -104,6 +104,40 @@ async fn Home(name: Option<String>) -> Result<View> {
 
 In the browser, `greeting` is the same route, called like an `async fn`. The URL, query string, JSON and error type all come from its signature, so the call and the handler can't disagree.
 
+## Several services
+
+A web app can call backends that live in other workspaces. List them at the web app's workspace root, and `doxa dev` builds, runs and watches each one beside the page:
+
+```toml
+# the web app's workspace Cargo.toml
+[workspace.metadata.doxa.dev.services]
+billing-api = { path = "../billing" }
+
+# the web crate's Cargo.toml
+[package.metadata.doxa.proxy]
+"/billing" = { service = "billing-api", strip = true }
+```
+
+Each service names its own port, in its API crate's `Cargo.toml`:
+
+```toml
+[package.metadata.doxa.dev]
+port = 8081
+```
+
+The service's binary hands its `start` function to doxa, which binds the port `doxa dev` passes:
+
+```rust
+#[doxa::main]
+async fn start() -> axum::Router {
+    billing_api::server::app()
+}
+```
+
+A service with its own CLI passes its `clap::Parser` as `#[doxa::main(Cli)]` on `async fn main(cli: Cli)`, and doxa adds `start`. It needs its own `clap` dependency with the `derive` and `env` features.
+
+Every line a service prints is tagged with its name, and so is each rebuild. A compile error leaves the last good build running until the next save fixes it. Editing a service's shared routes rebuilds both the service and the page, against the local source: doxa patches the web app's git dependency for the session and restores `Cargo.lock` when it exits. A service inherits `doxa dev`'s environment, which a `.env` loaded with `init =` doesn't override.
+
 ## Pick features
 
 `doxa` is one dependency with feature flags. Defaults give you the docs and the macros; add what you need:
@@ -116,6 +150,7 @@ In the browser, `greeting` is the same route, called like an `async fn`. The URL
 | `audit` | A non-blocking audit log, filled in by a layer |
 | `protected` | `ProtectedString`, redacted everywhere |
 | `client`, `ui` | Typed calls and pages for the browser |
+| `main` | `#[doxa::main]`, a server binary `doxa dev` can run |
 | `full` | All of the server-side ones |
 
 ## Where next

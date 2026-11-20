@@ -1,35 +1,21 @@
-//! `doxa dev` and `doxa gallery`: build once, serve behind a reloading proxy, and rebuild only
-//! what a change touches. `doxa dev` also runs the server and any configured upstreams.
+//! The dev server's proxy: dist files, the reload stream, and forwarding to each upstream.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::Router;
-use doxa_build::config::{Upstream, WebCrate, Workspace};
-use doxa_build::dist::Dist;
-use doxa_build::hot::Patched;
-use doxa_build::pipeline::note;
-use doxa_build::{BuildOptions, Pipeline};
+use doxa_build::config::Upstream;
+use tokio::sync::broadcast;
 
-use crate::view::ClientViews;
-use notify_debouncer_mini::notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
-use tokio::sync::{broadcast, mpsc};
-
-type DynError = Box<dyn std::error::Error>;
-
-const RELOAD_PATH: &str = "/__doxa/reload";
-/// Where hot patches are fetched from, matching [`Pipeline::patch`]'s jump tables.
+pub(super) const RELOAD_PATH: &str = "/__doxa/reload";
+/// Where hot patches are fetched from, matching `Pipeline::patch`'s jump tables.
 const PATCH_PREFIX: &str = "__doxa_patch/";
 const API_PREFIX: &str = "/api";
 /// The largest request body the proxy buffers for an upstream, in bytes.
@@ -66,452 +52,18 @@ es.addEventListener("css", (e) => {
 </script>
 "#;
 
-/// What a batch of changes needs redone.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Plan {
-    pub wasm: bool,
-    /// Every wasm change is a web crate source file, which a hot patch covers.
-    pub patch: bool,
-    pub server: bool,
-    pub bundle: bool,
-    pub css: bool,
-}
-
-impl Plan {
-    fn is_empty(self) -> bool {
-        self == Plan::default()
-    }
-}
-
-/// Which directories feed which build.
-#[derive(Debug, Clone)]
-pub struct Watch {
-    root: PathBuf,
-    ignore: Vec<PathBuf>,
-    web_dir: PathBuf,
-    wasm_dirs: Vec<PathBuf>,
-    server_dirs: Vec<PathBuf>,
-    /// An API crate's `server_only` directories, which the wasm build never reads.
-    server_only: Vec<PathBuf>,
-    /// An API crate's `client_only` directories, which the server build never reads.
-    client_only: Vec<PathBuf>,
-    extra_dirs: Vec<PathBuf>,
-    public: Option<PathBuf>,
-    /// Extensions a preprocessor turns into CSS.
-    styles: Vec<String>,
-    /// Absolute `watch` globs of the preprocessors.
-    style_globs: Vec<glob::Pattern>,
-}
-
-fn canonical(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned())
-}
-
-impl Watch {
-    fn new(ws: &Workspace, web: &WebCrate, server: Option<&str>) -> Watch {
-        let root = canonical(&ws.workspace_root);
-        let extra_dirs = [
-            root.join("style"),
-            root.join("ts"),
-            web.dir.join("style"),
-            web.dir.join("ts"),
-        ]
-        .iter()
-        .filter(|d| d.is_dir())
-        .map(|d| canonical(d))
-        .collect::<Vec<_>>();
-        let web_dir = canonical(&web.dir);
-        let globs: Vec<String> = web
-            .config
-            .preprocess
-            .values()
-            .flat_map(|p| &p.watch)
-            .map(|g| web_dir.join(g).to_string_lossy().into_owned())
-            .collect();
-        let mut extra_dirs = extra_dirs;
-        extra_dirs.extend(globs.iter().map(|g| glob_root(g)).filter(|d| d.is_dir()));
-        let (server_only, client_only) = ws.sided_dirs();
-        Watch {
-            server_only: server_only.iter().map(|d| canonical(d)).collect(),
-            client_only: client_only.iter().map(|d| canonical(d)).collect(),
-            styles: web.config.preprocess.keys().cloned().collect(),
-            style_globs: globs
-                .iter()
-                .filter_map(|g| glob::Pattern::new(g).ok())
-                .collect(),
-            ignore: vec![canonical(&ws.target_directory)],
-            web_dir: web_dir.clone(),
-            wasm_dirs: ws
-                .source_dirs(&web.name)
-                .iter()
-                .map(|d| canonical(d))
-                .collect(),
-            server_dirs: server
-                .map(|s| ws.source_dirs(s))
-                .unwrap_or_default()
-                .iter()
-                .map(|d| canonical(d))
-                .collect(),
-            extra_dirs,
-            public: web
-                .config
-                .public
-                .as_ref()
-                .map(|p| canonical(&web.dir.join(p))),
-            root,
-        }
-    }
-
-    /// The browser view of every shared file: those the wasm build reads beyond the web crate.
-    fn client_views(&self) -> ClientViews {
-        let shared: Vec<PathBuf> = self
-            .wasm_dirs
-            .iter()
-            .filter(|d| !d.starts_with(&self.web_dir))
-            .cloned()
-            .collect();
-        let mut skip = self.ignore.clone();
-        skip.extend(self.server_only.iter().chain(&self.client_only).cloned());
-        skip.push(self.web_dir.clone());
-        ClientViews::of(&shared, &skip)
-    }
-
-    /// Directories to watch recursively, outermost only, plus the root itself.
-    fn roots(&self) -> Vec<(PathBuf, RecursiveMode)> {
-        let mut dirs: Vec<PathBuf> = self
-            .wasm_dirs
-            .iter()
-            .chain(&self.server_dirs)
-            .chain(&self.extra_dirs)
-            .filter(|d| d.is_dir() && !self.ignore.iter().any(|i| d.starts_with(i)))
-            .cloned()
-            .collect();
-        dirs.sort();
-        dirs.dedup();
-        let outer: Vec<PathBuf> = dirs
-            .iter()
-            .filter(|d| !dirs.iter().any(|o| o != *d && d.starts_with(o)))
-            .cloned()
-            .collect();
-        let mut roots: Vec<_> = outer
-            .into_iter()
-            .map(|d| (d, RecursiveMode::Recursive))
-            .collect();
-        if !roots.iter().any(|(d, _)| *d == self.root) {
-            roots.push((self.root.clone(), RecursiveMode::NonRecursive));
-        }
-        roots
-    }
-}
-
-/// The directory a glob starts in: everything before its first wildcard.
-fn glob_root(glob: &str) -> PathBuf {
-    let fixed = glob.split(['*', '?', '[', '{']).next().unwrap_or(glob);
-    let p = Path::new(fixed);
-    if fixed.ends_with('/') {
-        p.to_owned()
-    } else {
-        p.parent().unwrap_or(p).to_owned()
-    }
-}
-
-/// Decide what to rebuild for a batch of changed paths. A shared file whose browser view is
-/// unchanged rebuilds only the server.
-pub fn classify<'a>(
-    paths: impl IntoIterator<Item = &'a Path>,
-    w: &Watch,
-    views: &mut ClientViews,
-) -> Plan {
-    let mut plan = Plan::default();
-    let mut unpatchable = false;
-    let under = |p: &Path, dirs: &[PathBuf]| dirs.iter().any(|d| p.starts_with(d));
-    for p in paths {
-        let skipped = w.ignore.iter().any(|i| p.starts_with(i))
-            || p.components()
-                .any(|c| c.as_os_str() == "node_modules" || c.as_os_str() == ".git");
-        if skipped {
-            continue;
-        }
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-        // A preprocessor's own output, written and removed by the build.
-        if w.styles
-            .iter()
-            .any(|s| name.ends_with(&format!(".{s}.css")))
-        {
-            continue;
-        }
-        if w.styles.iter().any(|s| s == ext) || w.style_globs.iter().any(|g| g.matches_path(p)) {
-            plan.css = true;
-            continue;
-        }
-        match ext {
-            "rs" if under(p, &w.server_only) => plan.server = true,
-            "rs" if under(p, &w.client_only) => {
-                plan.wasm = true;
-                unpatchable = true;
-            }
-            "rs" if under(p, &w.wasm_dirs) && !p.starts_with(&w.web_dir) && views.unchanged(p) => {
-                plan.server |= under(p, &w.server_dirs);
-            }
-            "rs" | "toml" if ext == "rs" || name == "Cargo.toml" => {
-                if p.parent() == Some(w.root.as_path()) && name == "Cargo.toml" {
-                    plan.wasm = true;
-                    plan.server = true;
-                    unpatchable = true;
-                }
-                if under(p, &w.wasm_dirs) {
-                    plan.wasm = true;
-                    unpatchable |= ext != "rs" || !p.starts_with(&w.web_dir);
-                }
-                plan.server |= under(p, &w.server_dirs);
-            }
-            "ts" | "tsx" | "js" | "jsx" | "mjs" => plan.bundle = true,
-            "css" => plan.css = true,
-            _ if name == "index.html" || w.public.as_deref().is_some_and(|d| p.starts_with(d)) => {
-                plan.bundle = true
-            }
-            _ => {}
-        }
-    }
-    plan.patch = plan.wasm && !unpatchable;
-    plan
-}
-
-fn rebuild(p: &mut Pipeline, plan: Plan) -> doxa_build::Result<Option<Dist>> {
-    if plan.wasm {
-        p.npm()?;
-        p.wasm()?;
-        p.js()?;
-        p.css()?;
-    } else {
-        if plan.bundle {
-            p.js()?;
-        }
-        if plan.css {
-            p.css()?;
-        }
-    }
-    if plan.wasm || plan.bundle || plan.css {
-        p.assemble().map(Some)
-    } else {
-        Ok(None)
-    }
-}
-
-/// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page.
-pub async fn run(
-    package: Option<String>,
-    port: u16,
-    locked: bool,
-    hot: bool,
-) -> Result<(), DynError> {
-    let opts = BuildOptions {
-        package,
-        locked,
-        hot,
-        ..BuildOptions::default()
-    };
-    serve(opts, port).await
-}
-
-/// Run `doxa gallery` until interrupted. Stories have no API to reach, so nothing is proxied.
-pub async fn gallery(package: Option<String>, port: u16, locked: bool) -> Result<(), DynError> {
-    let opts = BuildOptions {
-        package,
-        locked,
-        hot: true,
-        gallery: true,
-        ..BuildOptions::default()
-    };
-    serve(opts, port).await
-}
-
-async fn serve(opts: BuildOptions, port: u16) -> Result<(), DynError> {
-    let cwd = std::env::current_dir()?;
-    let (hot, gallery) = (opts.hot, opts.gallery);
-    let pipeline = tokio::task::spawn_blocking(move || -> doxa_build::Result<Pipeline> {
-        let mut p = Pipeline::new(&cwd, opts)?;
-        p.build()?;
-        Ok(p)
-    })
-    .await??;
-    let (routes, server_pkg) = if gallery {
-        (Vec::new(), None)
-    } else {
-        (
-            routes(&pipeline.web.config.proxy, |name| std::env::var(name).ok())?,
-            pipeline.web.config.server.clone(),
-        )
-    };
-    if !gallery && server_pkg.is_none() && routes.is_empty() {
-        return Err("nothing to serve the API\n  fix: set server = \"<server package>\" or add a [package.metadata.doxa.proxy] table to the web crate".into());
-    }
-    let dist = canonical(&pipeline.dist_dir());
-    let patches = pipeline.patch_dir();
-    let watch = Watch::new(&pipeline.workspace, &pipeline.web, server_pkg.as_deref());
-    let mut views = watch.client_views();
-    let mut server = match server_pkg {
-        Some(package) => Some(Server {
-            root: pipeline.workspace.workspace_root.clone(),
-            package,
-            dist: dist.clone(),
-            port: free_port()?,
-            child: None,
-        }),
-        None => None,
-    };
-    let pipeline = Arc::new(Mutex::new(pipeline));
-    if let Some(server) = &mut server {
-        server.start()?;
-    }
-    for route in &routes {
-        note(format!("proxying {} to {}", route.prefix, route.target));
-    }
-
-    let (reload, _) = broadcast::channel(16);
-    let proxy = Arc::new(Proxy {
-        dist,
-        patches,
-        upstream: server
-            .as_ref()
-            .map(|s| format!("http://127.0.0.1:{}", s.port)),
-        routes,
-        client: reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?,
-        reload: reload.clone(),
-        latest_patch: Mutex::new(None),
-    });
-    let host = match std::env::var("DOXA_HOST") {
-        Ok(h) => h
-            .parse::<IpAddr>()
-            .map_err(|_| format!("DOXA_HOST={h} is not an IP address"))?,
-        Err(_) => Ipv4Addr::LOCALHOST.into(),
-    };
-    let allowed = Arc::new(allowed_hosts(
-        host,
-        lan_ip(),
-        std::env::var("DOXA_ALLOWED_HOSTS").ok().as_deref(),
-    ));
-    let app = Router::new()
-        .route(RELOAD_PATH, get(reload_events))
-        .fallback(forward)
-        .with_state(proxy.clone())
-        .layer(axum::middleware::from_fn_with_state(allowed, guard_host));
-    let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    for url in urls(host, lan_ip(), port) {
-        note(format!("serving {url}"));
-    }
-    tokio::spawn(async move { axum::serve(listener, app).await });
-
-    let mut stop = stop_signal()?;
-    let (changed, mut changes) = mpsc::unbounded_channel::<Vec<PathBuf>>();
-    let mut debouncer = new_debouncer(
-        Duration::from_millis(200),
-        move |res: DebounceEventResult| match res {
-            Ok(events) => {
-                let _ = changed.send(events.into_iter().map(|e| e.path).collect());
-            }
-            Err(e) => eprintln!("error: watching for changes: {e}"),
-        },
-    )?;
-    for (dir, mode) in watch.roots() {
-        debouncer.watcher().watch(&dir, mode)?;
-    }
-
-    loop {
-        let mut paths = tokio::select! {
-            _ = stop.changed() => break,
-            Some(paths) = changes.recv() => paths,
-        };
-        while let Ok(more) = changes.try_recv() {
-            paths.extend(more);
-        }
-        let plan = classify(paths.iter().map(PathBuf::as_path), &watch, &mut views);
-        if plan.is_empty() {
-            continue;
-        }
-        if hot && plan.patch && !plan.bundle && !plan.css && !plan.server {
-            let p = pipeline.clone();
-            match tokio::task::spawn_blocking(move || p.lock().expect("pipeline").patch()).await? {
-                Ok(Patched::Table(table)) => {
-                    *proxy.latest_patch.lock().expect("patch") = Some(table.clone());
-                    let _ = reload.send(Reload::Patch(table));
-                    continue;
-                }
-                Ok(Patched::NotCompiled) => continue,
-                Ok(Patched::NeedsRebuild(why)) => note(format!("{why}; rebuilding")),
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    note("rebuilding instead");
-                }
-            }
-        }
-        let p = pipeline.clone();
-        let built =
-            tokio::task::spawn_blocking(move || rebuild(&mut p.lock().expect("pipeline"), plan))
-                .await?;
-        let dist = match built {
-            Ok(dist) => dist,
-            Err(e) => {
-                eprintln!("error: {e}");
-                continue;
-            }
-        };
-        if plan.wasm {
-            *proxy.latest_patch.lock().expect("patch") = None;
-        }
-        if let (true, Some(server)) = (plan.server, &mut server) {
-            server.restart().await?;
-            tokio::select! {
-                _ = stop.changed() => break,
-                () = server.wait_ready() => {}
-            }
-        }
-        let event = match dist {
-            Some(d) if !plan.wasm && !plan.bundle && !plan.server => {
-                Reload::Css(d.stylesheets.iter().map(|s| format!("/{s}")).collect())
-            }
-            _ => Reload::Page,
-        };
-        let _ = reload.send(event);
-    }
-    if let Some(server) = &mut server {
-        server.stop().await;
-    }
-    Ok(())
-}
-
-/// Changes once Ctrl-C or SIGTERM arrives, at any point after this call.
-fn stop_signal() -> std::io::Result<tokio::sync::watch::Receiver<()>> {
-    let (tx, rx) = tokio::sync::watch::channel(());
-    #[cfg(unix)]
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::spawn(async move {
-        #[cfg(unix)]
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-        #[cfg(not(unix))]
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = tx.send(());
-    });
-    Ok(rx)
-}
-
 /// A `[package.metadata.doxa.proxy]` entry with its upstream settled.
 #[derive(Debug, Clone, PartialEq)]
-struct Route {
-    prefix: String,
-    target: String,
+pub(super) struct Route {
+    pub(super) prefix: String,
+    pub(super) target: String,
     strip: bool,
 }
 
-/// The configured routes, longest prefix first.
-fn routes(
+/// The configured routes, longest prefix first; `ports` maps each dev service to its port.
+pub(super) fn routes(
     proxy: &BTreeMap<String, Upstream>,
+    ports: &BTreeMap<String, u16>,
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<Route>, String> {
     let mut routes = Vec::with_capacity(proxy.len());
@@ -527,9 +79,17 @@ fn routes(
             .as_deref()
             .and_then(&env)
             .filter(|v| !v.is_empty());
-        let Some(target) = from_env.or_else(|| upstream.to.clone()) else {
+        let from_service = match &upstream.service {
+            Some(s) => Some(ports.get(s).map(|p| format!("http://127.0.0.1:{p}")).ok_or_else(|| {
+                format!(
+                    "{table} names service `{s}`, which isn't in [workspace.metadata.doxa.dev.services]\n  fix: add it there, or use `to`"
+                )
+            })?),
+            None => None,
+        };
+        let Some(target) = from_env.or(from_service).or_else(|| upstream.to.clone()) else {
             return Err(format!(
-                "{table} has no upstream\n  fix: set `to`, or the variable its `env` names"
+                "{table} has no upstream\n  fix: set `to` or `service`, or the variable its `env` names"
             ));
         };
         if !target.starts_with("http://") && !target.starts_with("https://") {
@@ -555,7 +115,7 @@ fn after_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 
 /// Where a browser reaches a server bound to `host`: localhost and the LAN address for
 /// `0.0.0.0`, else `host` itself.
-fn urls(host: IpAddr, lan: Option<IpAddr>, port: u16) -> Vec<String> {
+pub(super) fn urls(host: IpAddr, lan: Option<IpAddr>, port: u16) -> Vec<String> {
     let hosts = if host.is_unspecified() {
         std::iter::once(IpAddr::from(Ipv4Addr::LOCALHOST))
             .chain(lan)
@@ -571,7 +131,7 @@ fn urls(host: IpAddr, lan: Option<IpAddr>, port: u16) -> Vec<String> {
 
 /// The hostnames a request may name in `Host` or `Origin`: loopback, the address bound (or the LAN
 /// address for `0.0.0.0`), and `$DOXA_ALLOWED_HOSTS` (comma-separated, e.g. a tunnel's).
-fn allowed_hosts(
+pub(super) fn allowed_hosts(
     host: IpAddr,
     lan: Option<IpAddr>,
     extra: Option<&str>,
@@ -606,7 +166,7 @@ fn hostname(authority: &str) -> String {
 }
 
 /// Refuses a request naming another host, so a page rebinding its DNS to this server can't read it.
-async fn guard_host(
+pub(super) async fn guard_host(
     State(allowed): State<Arc<std::collections::HashSet<String>>>,
     req: Request,
     next: axum::middleware::Next,
@@ -627,98 +187,33 @@ async fn guard_host(
 }
 
 /// The address this machine routes outward from; a UDP connect sends nothing.
-fn lan_ip() -> Option<IpAddr> {
+pub(super) fn lan_ip() -> Option<IpAddr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
     Some(socket.local_addr().ok()?.ip())
 }
 
-fn free_port() -> std::io::Result<u16> {
-    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
-        .local_addr()?
-        .port())
-}
-
-struct Server {
-    root: PathBuf,
-    package: String,
-    dist: PathBuf,
-    port: u16,
-    child: Option<tokio::process::Child>,
-}
-
-impl Server {
-    fn start(&mut self) -> std::io::Result<()> {
-        note(format!(
-            "starting {} on internal port {}",
-            self.package, self.port
-        ));
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let child = tokio::process::Command::new(cargo)
-            .args(["run", "-p", &self.package])
-            .env("DOXA_DIST", &self.dist)
-            .env("PORT", self.port.to_string())
-            .current_dir(&self.root)
-            .kill_on_drop(true)
-            .spawn()?;
-        self.child = Some(child);
-        Ok(())
-    }
-
-    async fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill().await;
-        }
-    }
-
-    async fn restart(&mut self) -> std::io::Result<()> {
-        self.stop().await;
-        self.start()
-    }
-
-    /// Until the server accepts connections, it exits, or two minutes pass.
-    async fn wait_ready(&mut self) {
-        for _ in 0..1200 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", self.port))
-                .await
-                .is_ok()
-            {
-                return;
-            }
-            if let Some(Ok(Some(status))) = self.child.as_mut().map(|c| c.try_wait()) {
-                eprintln!("error: {} exited with {status}", self.package);
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        eprintln!(
-            "warning: {} isn't listening on port {} after 2 minutes; reloading anyway",
-            self.package, self.port
-        );
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
-enum Reload {
+pub(super) enum Reload {
     Page,
     Css(Vec<String>),
     /// A jump table, as JSON.
     Patch(String),
 }
 
-struct Proxy {
-    dist: PathBuf,
-    patches: PathBuf,
+pub(super) struct Proxy {
+    pub(super) dist: PathBuf,
+    pub(super) patches: PathBuf,
     /// The server `doxa dev` runs, if any; it answers what no route claims.
-    upstream: Option<String>,
-    routes: Vec<Route>,
-    client: reqwest::Client,
-    reload: broadcast::Sender<Reload>,
+    pub(super) upstream: Option<String>,
+    pub(super) routes: Vec<Route>,
+    pub(super) client: reqwest::Client,
+    pub(super) reload: broadcast::Sender<Reload>,
     /// What a page loading the base wasm still has to apply.
-    latest_patch: Mutex<Option<String>>,
+    pub(super) latest_patch: Mutex<Option<String>>,
 }
 
-async fn reload_events(State(p): State<Arc<Proxy>>) -> impl IntoResponse {
+pub(super) async fn reload_events(State(p): State<Arc<Proxy>>) -> impl IntoResponse {
     let latest = p.latest_patch.lock().expect("patch").clone();
     let state = (p.reload.subscribe(), latest);
     let events = futures::stream::unfold(state, |(mut rx, mut pending)| async move {
@@ -1007,7 +502,7 @@ async fn tunnel(p: &Proxy, mut req: Request) -> Result<Response, String> {
     Ok(res)
 }
 
-async fn forward(State(p): State<Arc<Proxy>>, req: Request) -> Response {
+pub(super) async fn forward(State(p): State<Arc<Proxy>>, req: Request) -> Response {
     if is_upgrade(&req) {
         return tunnel(&p, req).await.unwrap_or_else(|e| bad_gateway(&e));
     }
@@ -1062,34 +557,9 @@ fn bad_gateway(e: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn watch() -> Watch {
-        Watch {
-            root: "/app".into(),
-            ignore: vec!["/app/target".into()],
-            web_dir: "/app/web".into(),
-            wasm_dirs: vec![
-                "/app/web".into(),
-                "/app/client".into(),
-                "/app/api/src".into(),
-            ],
-            server_dirs: vec!["/app/server".into(), "/app/api".into()],
-            server_only: vec!["/app/api/src/server".into()],
-            client_only: vec!["/app/api/src/browser".into()],
-            extra_dirs: vec!["/app/style".into()],
-            public: Some("/app/web/public".into()),
-            styles: vec!["scss".into()],
-            style_globs: vec![glob::Pattern::new("/app/web/theme/**/*.json").unwrap()],
-        }
-    }
-
-    fn plan(paths: &[&str]) -> Plan {
-        classify(
-            paths.iter().map(Path::new),
-            &watch(),
-            &mut ClientViews::default(),
-        )
-    }
+    use axum::routing::get;
+    use axum::Router;
+    use std::path::Path;
 
     #[tokio::test]
     async fn a_request_naming_another_host_is_refused() {
@@ -1122,53 +592,6 @@ mod tests {
             status("localhost:4710", Some("http://attacker.test")).await,
             StatusCode::FORBIDDEN
         );
-    }
-
-    #[test]
-    fn a_one_sided_directory_rebuilds_only_its_half() {
-        assert_eq!(
-            plan(&["/app/api/src/server/db.rs"]),
-            Plan {
-                server: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/api/src/browser/dom.rs"]),
-            Plan {
-                wasm: true,
-                ..Plan::default()
-            }
-        );
-    }
-
-    #[test]
-    fn a_shared_file_whose_browser_view_holds_rebuilds_only_the_server() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = canonical(dir.path());
-        let api = root.join("api/src");
-        std::fs::create_dir_all(&api).unwrap();
-        let routes = api.join("routes.rs");
-        let route = "#[get(\"/n\")]\npub async fn n() -> Json<u32> { Json(1) }\n";
-        std::fs::write(&routes, route).unwrap();
-        let mut w = watch();
-        w.root = root.clone();
-        w.web_dir = root.join("web");
-        w.wasm_dirs = vec![root.join("web"), api.clone()];
-        w.server_dirs = vec![root.join("api")];
-        let mut views = w.client_views();
-        std::fs::write(&routes, route.replace("Json(1)", "Json(2)")).unwrap();
-        let body = classify([routes.as_path()], &w, &mut views);
-        assert_eq!(
-            body,
-            Plan {
-                server: true,
-                ..Plan::default()
-            }
-        );
-        std::fs::write(&routes, route.replace("u32", "u64")).unwrap();
-        let sig = classify([routes.as_path()], &w, &mut views);
-        assert!(sig.wasm && sig.server && !sig.patch, "{sig:?}");
     }
 
     #[test]
@@ -1256,6 +679,7 @@ mod tests {
         Upstream {
             to: to.map(Into::into),
             env: env.map(Into::into),
+            service: None,
             strip,
         }
     }
@@ -1309,7 +733,7 @@ mod tests {
             ),
             ("/c".to_owned(), upstream(None, Some("C"), false)),
         ]);
-        let found = routes(&proxy, |name| match name {
+        let found = routes(&proxy, &BTreeMap::new(), |name| match name {
             "A" => Some(String::new()),
             "B" | "C" => Some(format!("http://{name}.env")),
             _ => None,
@@ -1331,11 +755,41 @@ mod tests {
     }
 
     #[test]
+    fn a_service_route_goes_to_its_dev_port_unless_its_env_is_set() {
+        let up = Upstream {
+            to: Some("http://fallback".into()),
+            env: Some("API".into()),
+            service: Some("b-api".into()),
+            strip: false,
+        };
+        let proxy = BTreeMap::from([("/api".to_owned(), up)]);
+        let ports = BTreeMap::from([("b-api".to_owned(), 8081)]);
+        let target = |env: Option<&str>| {
+            let env = env.map(str::to_owned);
+            routes(&proxy, &ports, move |_| env.clone()).unwrap()[0]
+                .target
+                .clone()
+        };
+        assert_eq!(target(None), "http://127.0.0.1:8081");
+        assert_eq!(target(Some("http://override")), "http://override");
+    }
+
+    #[test]
     fn a_route_without_a_usable_upstream_or_prefix_is_refused() {
         let refused = |prefix: &str, up: Upstream| {
-            routes(&BTreeMap::from([(prefix.to_owned(), up)]), |_| None).unwrap_err()
+            routes(
+                &BTreeMap::from([(prefix.to_owned(), up)]),
+                &BTreeMap::new(),
+                |_| None,
+            )
+            .unwrap_err()
         };
         assert!(refused("/a", upstream(None, Some("A"), false)).contains("no upstream"));
+        let unknown = Upstream {
+            service: Some("b-api".into()),
+            ..Upstream::default()
+        };
+        assert!(refused("/a", unknown).contains("isn't in [workspace.metadata.doxa.dev.services]"));
         assert!(refused("/a", upstream(Some("a.test"), None, false)).contains("http://"));
         assert!(refused("a", upstream(Some("http://a"), None, false)).contains("path prefix"));
         assert!(refused("/", upstream(Some("http://a"), None, false)).contains("path prefix"));
@@ -1350,6 +804,7 @@ mod tests {
                 ("/api".to_owned(), upstream(Some(&one), None, false)),
                 ("/v2".to_owned(), upstream(Some(&two), None, true)),
             ]),
+            &BTreeMap::new(),
             |_| None,
         )
         .unwrap();
@@ -1468,144 +923,6 @@ mod tests {
         let mut head = [0u8; 12];
         c.read_exact(&mut head).await.unwrap();
         assert_eq!(&head, b"HTTP/1.1 101");
-    }
-
-    #[test]
-    fn rust_changes_rebuild_wasm_and_restart_the_server_they_feed() {
-        assert_eq!(
-            plan(&["/app/api/src/widgets.rs"]),
-            Plan {
-                wasm: true,
-                server: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/web/src/lib.rs"]),
-            Plan {
-                wasm: true,
-                patch: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/server/src/main.rs"]),
-            Plan {
-                server: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/Cargo.toml"]),
-            Plan {
-                wasm: true,
-                server: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/web/Cargo.toml"]),
-            Plan {
-                wasm: true,
-                ..Plan::default()
-            }
-        );
-    }
-
-    #[test]
-    fn only_web_crate_sources_are_patched() {
-        assert!(plan(&["/app/web/src/a.rs", "/app/web/src/b.rs"]).patch);
-        assert!(!plan(&["/app/web/src/a.rs", "/app/client/src/lib.rs"]).patch);
-        assert!(!plan(&["/app/web/src/a.rs", "/app/web/Cargo.toml"]).patch);
-        assert!(!plan(&["/app/web/src/a.rs", "/app/Cargo.toml"]).patch);
-    }
-
-    #[test]
-    fn scripts_bundle_and_styles_rebuild_css() {
-        assert_eq!(
-            plan(&["/app/web/ts/editor.tsx"]),
-            Plan {
-                bundle: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/style/app.css"]),
-            Plan {
-                css: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/web/public/logo.svg"]),
-            Plan {
-                bundle: true,
-                ..Plan::default()
-            }
-        );
-        assert_eq!(
-            plan(&["/app/web/ts/a.ts", "/app/web/style/app.css"]),
-            Plan {
-                bundle: true,
-                css: true,
-                ..Plan::default()
-            }
-        );
-    }
-
-    #[test]
-    fn preprocessed_styles_and_their_globs_rebuild_css_but_not_their_output() {
-        let css = Plan {
-            css: true,
-            ..Plan::default()
-        };
-        assert_eq!(plan(&["/app/web/style/_vars.scss"]), css);
-        assert_eq!(plan(&["/app/web/theme/brand/colors.json"]), css);
-        assert!(plan(&["/app/web/style/app.scss.css"]).is_empty());
-        assert_eq!(glob_root("/w/style/**/*.scss"), Path::new("/w/style"));
-    }
-
-    #[test]
-    fn build_output_and_noise_are_ignored() {
-        assert!(plan(&["/app/target/doxa/stage/css/app.tailwind-in.css"]).is_empty());
-        assert!(plan(&["/app/web/node_modules/react/index.js"]).is_empty());
-        assert!(plan(&["/app/Cargo.lock", "/app/README.md", "/app/rustfmt.toml"]).is_empty());
-    }
-
-    #[test]
-    fn roots_are_outermost_dirs_plus_the_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = canonical(dir.path());
-        for d in ["api/src", "server", "web", "target/x"] {
-            std::fs::create_dir_all(root.join(d)).unwrap();
-        }
-        let w = Watch {
-            root: root.clone(),
-            ignore: vec![root.join("target")],
-            web_dir: root.join("web"),
-            wasm_dirs: vec![
-                root.join("web"),
-                root.join("api/src"),
-                root.join("target/x"),
-            ],
-            server_dirs: vec![root.join("server"), root.join("api")],
-            server_only: vec![],
-            client_only: vec![],
-            extra_dirs: vec![],
-            public: None,
-            styles: vec![],
-            style_globs: vec![],
-        };
-        let roots: Vec<_> = w.roots().into_iter().map(|(d, _)| d).collect();
-        assert_eq!(
-            roots,
-            [
-                root.join("api"),
-                root.join("server"),
-                root.join("web"),
-                root
-            ]
-        );
     }
 
     #[test]

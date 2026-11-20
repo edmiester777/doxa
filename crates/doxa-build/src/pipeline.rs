@@ -31,6 +31,8 @@ pub struct BuildOptions {
     pub hot: bool,
     /// The path served under; overrides the web crate's `base`.
     pub base: Option<String>,
+    /// `--config` values for every cargo call, e.g. a `doxa dev` patch to a sibling's source.
+    pub cargo_config: Vec<String>,
 }
 
 /// One app's build, holding what earlier steps produced.
@@ -41,6 +43,8 @@ pub struct Pipeline {
     pub web: WebCrate,
     /// Output directories.
     pub layout: Layout,
+    /// Every crate the web crate reaches.
+    pub graph: Graph,
     pub(crate) opts: BuildOptions,
     pub(crate) npm: npm::Source,
     /// `css_sources`, and the directory of each crate in the graph that uses doxa-ui.
@@ -75,7 +79,7 @@ impl Pipeline {
         } else {
             layout
         };
-        let graph = Graph::load(cwd, &web.name)?;
+        let graph = Graph::load(cwd, &web.name, &opts.cargo_config)?;
         let needed = graph.npm(&web.name, &web.config.npm)?;
         let npm = npm::Source::for_app(&web, &workspace.workspace_root, &layout, &needed)?;
         let mut tailwind_sources = web.config.css_sources.clone();
@@ -89,6 +93,7 @@ impl Pipeline {
             workspace,
             web,
             layout,
+            graph,
             opts,
             npm,
             tailwind_sources,
@@ -141,6 +146,9 @@ impl Pipeline {
         let checked = self.check_lock(&lock)?;
         note(format!("compiling {} to wasm", self.web.name));
         let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        for c in &self.opts.cargo_config {
+            cmd.args(["--config", c]);
+        }
         cmd.args([
             "rustc",
             "--lib",

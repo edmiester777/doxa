@@ -59,7 +59,7 @@ doxa new hello && cd hello
 doxa dev            # http://127.0.0.1:3000, rebuilt and hot-patched on save
 ```
 
-`doxa dev` runs the server and patches each change to the web crate into the running page. When you're done, `doxa build --release` compiles the web app into the server, so you deploy one binary. Or `doxa build --out dist` writes static files for any host.
+`doxa dev` runs the server and patches each change to the web crate into the running page. Backends in other workspaces, listed under `[workspace.metadata.doxa.dev.services]`, run beside it, each rebuilt on save with its log lines tagged by name. When you're done, `doxa build --release` compiles the web app into the server, so you deploy one binary. Or `doxa build --out dist` writes static files for any host.
 
 ### Just the API
 

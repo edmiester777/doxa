@@ -91,7 +91,10 @@ sea-orm = ["dep:sea-orm"]
 # which `doxa build` sets. Not part of `full`.
 embed = ["docs", "doxa-docs/embed"]
 
-client = ["dep:doxa-client", "dep:doxa-macros"]
+# `#[doxa::main]`: a server binary whose `start` command binds the port `doxa dev` gives it.
+main = ["docs", "dep:doxa-macros", "dep:clap", "dep:tokio", "dep:tracing"]
+
+client =["dep:doxa-client", "dep:doxa-macros"]
 # `doxa::client::oidc`: sign-in in the browser with authorization code and PKCE.
 oidc = ["client", "doxa-client/oidc", "doxa-ui?/oidc"]
 # Drive client calls through an in-process axum `Router`, for native tests.
@@ -111,7 +114,7 @@ gallery = ["ui", "doxa-ui/gallery"]
 tailwind = ["ui", "dep:doxa-tailwind"]
 
 # Everything.
-full = ["docs", "docs-scalar", "trace", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm", "sea-orm", "client", "ui", "react"]
+full = ["docs", "docs-scalar", "trace", "macros", "protected", "audit", "audit-sea-orm", "auth", "auth-catalog", "policy-axum", "policy-catalog", "policy-sea-orm", "sea-orm", "client", "ui", "react", "main"]
 
 [dependencies]
 doxa-wire = { workspace = true }
@@ -132,6 +135,9 @@ doxa-auth = { workspace = true, optional = true, default-features = false }
 doxa-policy = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }

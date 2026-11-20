@@ -15,6 +15,7 @@
 //! | `ui` | `doxa-ui` | Components, `view!`, hooks and a router, rendered in the browser |
 //! | `react` | `doxa-ui` | `#[react]`: React components used inside `view!` |
 //! | `embed` | `doxa-docs` | `dist!()` compiles the built SPA into the binary |
+//! | `main` | `doxa` | `#[doxa::main]`: a server binary that binds the port `doxa dev` gives it |
 //! | `full` | all of the above | Everything |
 //!
 //! A crate whose `build.rs` calls `doxa_role::client()` sees every route as a
@@ -50,6 +51,52 @@ pub use doxa_docs::*;
 
 #[cfg(all(feature = "docs", not(target_arch = "wasm32")))]
 pub use doxa_docs::dist;
+
+#[cfg(all(feature = "main", not(target_arch = "wasm32")))]
+pub mod boot;
+#[cfg(all(feature = "main", not(target_arch = "wasm32")))]
+pub use doxa_macros::main;
+
+/// `#[doxa::main]` goes on `async fn start`, or with a Cli on `async fn main`:
+///
+/// ```no_run
+/// #[doxa::main]
+/// async fn start() -> axum::Router { axum::Router::new() }
+/// ```
+///
+/// ```compile_fail
+/// #[doxa::main]
+/// fn start() -> axum::Router { axum::Router::new() }
+/// ```
+///
+/// ```compile_fail
+/// #[doxa::main]
+/// async fn serve() -> axum::Router { axum::Router::new() }
+/// ```
+///
+/// ```no_run
+/// # use doxa::boot::{Serve, Stopping};
+/// # #[derive(clap::Parser)]
+/// # struct Cli { #[command(subcommand)] command: Option<Command> }
+/// # #[derive(clap::Subcommand)]
+/// # enum Command { Schema }
+/// #[doxa::main(Cli)]
+/// async fn main(cli: Cli) { let _ = cli.command; }
+/// async fn start(_: Cli, _: Stopping) -> Serve { Serve::new(axum::Router::new()) }
+/// ```
+///
+/// ```compile_fail
+/// # use doxa::boot::{Serve, Stopping};
+/// # #[derive(clap::Parser)]
+/// # struct Cli { #[command(subcommand)] command: Option<Command> }
+/// # #[derive(clap::Subcommand)]
+/// # enum Command { Schema }
+/// #[doxa::main(Cli)]
+/// async fn start(cli: Cli) { let _ = cli.command; }
+/// ```
+#[cfg(all(feature = "main", not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub mod main_diagnostics {}
 
 /// Types the server and its browser client agree on.
 pub use doxa_wire as wire;

@@ -16,6 +16,8 @@ pub struct Member {
     pub name: String,
     /// Where cargo resolved it: a workspace, registry or git checkout directory.
     pub dir: PathBuf,
+    /// Cargo's `source`, e.g. `git+https://…#sha`; `None` for a path or workspace crate.
+    pub source: Option<String>,
     /// Its `[package.metadata.doxa.npm]`.
     pub npm: BTreeMap<String, String>,
     /// Whether it depends on doxa-ui, itself or through doxa.
@@ -30,9 +32,12 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// Run `cargo metadata` from `cwd` for the graph under `web`.
-    pub fn load(cwd: &Path, web: &str) -> Result<Self> {
+    /// Run `cargo metadata` from `cwd` for the graph under `web`, with `--config` for each of `config`.
+    pub fn load(cwd: &Path, web: &str, config: &[String]) -> Result<Self> {
         let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        for c in config {
+            cmd.args(["--config", c]);
+        }
         cmd.args([
             "metadata",
             "--format-version",
@@ -132,6 +137,7 @@ impl Graph {
                         .parent()
                         .map(Path::to_owned)
                         .unwrap_or_default(),
+                    source: p["source"].as_str().map(str::to_owned),
                     npm,
                     uses_ui: own.iter().any(|d| ui.contains(d.as_str())),
                 });

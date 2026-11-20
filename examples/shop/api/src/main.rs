@@ -1,8 +1,9 @@
+use axum::Router;
 use doxa::{dist, MountSpaExt, Spa};
 
-#[tokio::main]
-async fn main() {
-    let app = shop_api::server::app(shop_api::server::seeded())
+#[doxa::main]
+async fn start() -> Router {
+    shop_api::server::app(shop_api::server::seeded())
         // The example has no sign-in: a browser that sends no `x-role` acts as a viewer.
         .layer(axum::middleware::from_fn(
             |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
@@ -13,10 +14,5 @@ async fn main() {
                 next.run(req).await
             },
         ))
-        .mount_spa(Spa::auto(dist!()));
-    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .unwrap();
-    axum::serve(listener, app).await.unwrap();
+        .mount_spa(Spa::auto(dist!()))
 }

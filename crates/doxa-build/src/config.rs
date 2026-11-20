@@ -52,16 +52,40 @@ pub struct DoxaConfig {
     pub client_only: Vec<String>,
     /// The service a types crate's entities and actions belong to, when it isn't this package.
     pub service: Option<String>,
+    /// How `doxa dev` runs this package.
+    pub dev: Option<DevConfig>,
+    /// The tenant column; `doxa-role` passes it to the macros as `DOXA_TENANT_FIELD`.
+    pub tenant_field: Option<String>,
+}
+
+/// `[package.metadata.doxa.dev]`: `port = 8081`, and `bin` when the package has several.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevConfig {
+    /// The port `doxa dev` starts it on.
+    pub port: u16,
+    /// The binary to run; inferred when the package has exactly one.
+    pub bin: Option<String>,
+}
+
+/// A `[workspace.metadata.doxa.dev.services]` entry: `api = { path = "../api" }`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevService {
+    /// The service's workspace root.
+    pub path: PathBuf,
 }
 
 /// `"/reports" = { to = "http://localhost:3100", env = "REPORTS_URL", strip = true }`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Upstream {
-    /// The upstream's URL, unless `env` names a set variable.
+    /// The upstream's URL, unless `env` or `service` gives one.
     pub to: Option<String>,
-    /// An environment variable holding the upstream's URL, which wins over `to`.
+    /// An environment variable holding the upstream's URL, which wins over the rest.
     pub env: Option<String>,
+    /// A `[workspace.metadata.doxa.dev.services]` entry whose dev port this forwards to.
+    pub service: Option<String>,
     /// Leave the prefix off the forwarded path.
     #[serde(default)]
     pub strip: bool,
@@ -99,6 +123,9 @@ pub struct Workspace {
     pub target_directory: PathBuf,
     /// Every workspace member.
     pub packages: Vec<Package>,
+    /// `[workspace.metadata]`.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 /// One workspace member.
@@ -119,6 +146,9 @@ pub struct Package {
     /// `[package.metadata]`.
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// `default-run`.
+    #[serde(default)]
+    pub default_run: Option<String>,
 }
 
 /// A build target of a [`Package`].
@@ -172,17 +202,79 @@ impl Package {
                         "[package.metadata.doxa] in {}: {e}",
                         self.manifest_path.display()
                     ),
-                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, server_only, client_only, service, and npm, services, preprocess and proxy tables",
+                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, server_only, client_only, service, tenant_field, and npm, services, preprocess, proxy and dev tables",
                 )
             }),
         }
+    }
+
+    /// `[package.metadata.doxa.dev]` alone, so a sibling on another doxa revision still loads.
+    pub fn dev(&self) -> Result<Option<DevConfig>> {
+        let Some(v) = self.metadata.pointer("/doxa/dev") else {
+            return Ok(None);
+        };
+        serde_json::from_value(v.clone()).map(Some).map_err(|e| {
+            Error::config(
+                format!(
+                    "[package.metadata.doxa.dev] in {}: {e}",
+                    self.manifest_path.display()
+                ),
+                "keys are port and bin",
+            )
+        })
+    }
+
+    /// `bin`, else `default-run`, else the package's only `bin` target.
+    pub fn dev_bin(&self, bin: Option<&str>) -> Result<String> {
+        if let Some(bin) = bin.or(self.default_run.as_deref()) {
+            return Ok(bin.to_owned());
+        }
+        let bins: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|t| t.kind.iter().any(|k| k == "bin"))
+            .map(|t| t.name.as_str())
+            .collect();
+        match bins.as_slice() {
+            [one] => Ok((*one).to_owned()),
+            _ => Err(Error::config(
+                format!("`{}` has {} binaries", self.name, bins.len()),
+                "set [package.metadata.doxa.dev] bin = \"<name>\"",
+            )),
+        }
+    }
+
+    /// The directories `key` (`server_only` or `client_only`) names, absolute.
+    fn sided(&self, key: &str) -> Vec<PathBuf> {
+        let dirs = self.metadata.pointer(&format!("/doxa/{key}"));
+        dirs.and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d.as_str())
+            .map(|d| self.dir().join(d))
+            .collect()
     }
 }
 
 impl Workspace {
     /// Run `cargo metadata` from `cwd`.
     pub fn load(cwd: &Path) -> Result<Self> {
-        let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        let cargo = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        Self::load_with(cwd, "run doxa from inside a cargo workspace", cargo)
+    }
+
+    /// `cargo metadata` in another workspace, with its own toolchain rather than ours.
+    pub fn load_sibling(root: &Path, hint: &str) -> Result<Self> {
+        if !root.join("Cargo.toml").is_file() {
+            return Err(Error::config(
+                format!("{} has no Cargo.toml", root.display()),
+                hint,
+            ));
+        }
+        Self::load_with(root, hint, sibling_cargo())
+    }
+
+    fn load_with(cwd: &Path, hint: &str, mut cmd: Command) -> Result<Self> {
         cmd.args(["metadata", "--format-version", "1", "--no-deps"])
             .current_dir(cwd);
         let out = cmd.output().map_err(|e| {
@@ -198,7 +290,7 @@ impl Workspace {
                 "cargo",
                 &cmd,
                 String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-                "run doxa from inside a cargo workspace",
+                hint,
             ));
         }
         Self::from_json(&String::from_utf8_lossy(&out.stdout))
@@ -302,11 +394,28 @@ impl Workspace {
     pub fn sided_dirs(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let (mut server, mut client) = (Vec::new(), Vec::new());
         for p in &self.packages {
-            let Ok(Some(config)) = p.doxa() else { continue };
-            server.extend(config.server_only.iter().map(|d| p.dir().join(d)));
-            client.extend(config.client_only.iter().map(|d| p.dir().join(d)));
+            server.extend(p.sided("server_only"));
+            client.extend(p.sided("client_only"));
         }
         (server, client)
+    }
+
+    /// `[workspace.metadata.doxa.dev.services]`, paths made absolute.
+    pub fn dev_services(&self) -> Result<BTreeMap<String, DevService>> {
+        let Some(v) = self.metadata.pointer("/doxa/dev/services") else {
+            return Ok(BTreeMap::new());
+        };
+        let mut services: BTreeMap<String, DevService> = serde_json::from_value(v.clone())
+            .map_err(|e| {
+                Error::config(
+                    format!("[workspace.metadata.doxa.dev.services]: {e}"),
+                    "write each entry as name = { path = \"../repo\" }",
+                )
+            })?;
+        for s in services.values_mut() {
+            s.path = self.workspace_root.join(&s.path);
+        }
+        Ok(services)
     }
 
     /// Where doxa keeps its outputs.
@@ -317,6 +426,13 @@ impl Workspace {
             root,
         }
     }
+}
+
+/// `cargo` for another workspace: from `PATH`, so its own `rust-toolchain.toml` applies.
+pub fn sibling_cargo() -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.env_remove("CARGO").env_remove("RUSTUP_TOOLCHAIN");
+    cmd
 }
 
 /// Directories under `target/doxa`.
@@ -427,6 +543,57 @@ mod tests {
         let ws = Workspace::from_json(&json).unwrap();
         let err = ws.web_crate(None).unwrap_err().to_string();
         assert!(err.contains("publik"), "{err}");
+    }
+
+    #[test]
+    fn dev_services_resolve_against_the_workspace_root() {
+        let mut ws = Workspace::from_json(METADATA).unwrap();
+        assert!(ws.dev_services().unwrap().is_empty());
+        ws.metadata =
+            serde_json::json!({"doxa": {"dev": {"services": {"b-api": {"path": "../b"}}}}});
+        let services = ws.dev_services().unwrap();
+        assert_eq!(services["b-api"].path, Path::new("/app/../b"));
+        ws.metadata =
+            serde_json::json!({"doxa": {"dev": {"services": {"b-api": {"dir": "../b"}}}}});
+        assert!(ws.dev_services().unwrap_err().to_string().contains("dir"));
+    }
+
+    #[test]
+    fn a_dev_table_reads_alone_and_a_tenant_field_parses() {
+        let json = METADATA.replace(
+            "\"metadata\": null},\n        {\"name\": \"app-client\"",
+            "\"metadata\": {\"doxa\": {\"server_only\": [\"src/server\"], \"tenant_field\": \"tenant_id\", \"someday\": 1, \"dev\": {\"port\": 8081}}}},\n        {\"name\": \"app-client\"",
+        );
+        let ws = Workspace::from_json(&json).unwrap();
+        let api = ws.package("app-api").unwrap();
+        assert_eq!(
+            api.dev().unwrap(),
+            Some(DevConfig {
+                port: 8081,
+                bin: None
+            })
+        );
+        assert_eq!(ws.sided_dirs().0, [PathBuf::from("/app/api/src/server")]);
+        let config: DoxaConfig =
+            serde_json::from_value(serde_json::json!({"tenant_field": "tenant_id"})).unwrap();
+        assert_eq!(config.tenant_field.as_deref(), Some("tenant_id"));
+    }
+
+    #[test]
+    fn the_dev_binary_is_named_defaulted_or_the_only_one() {
+        let ws = Workspace::from_json(METADATA).unwrap();
+        let server = ws.package("app-server").unwrap();
+        assert_eq!(server.dev_bin(None).unwrap(), "app-server");
+        assert_eq!(server.dev_bin(Some("other")).unwrap(), "other");
+        let mut two = server.clone();
+        two.targets.push(two.targets[0].clone());
+        assert!(two
+            .dev_bin(None)
+            .unwrap_err()
+            .to_string()
+            .contains("2 binaries"));
+        two.default_run = Some("app-server".into());
+        assert_eq!(two.dev_bin(None).unwrap(), "app-server");
     }
 
     #[test]

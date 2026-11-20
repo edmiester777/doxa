@@ -219,6 +219,7 @@ mod actions;
 mod api_error;
 mod app;
 mod asset;
+mod boot;
 mod capability;
 mod client_stub;
 mod dto;
@@ -926,6 +927,19 @@ pub fn entity(args: TokenStream, item: TokenStream) -> TokenStream {
 pub fn mirror(args: TokenStream, item: TokenStream) -> TokenStream {
     mirror::expand(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The binary's `fn main`. On `async fn start()` alone, or `#[doxa::main(Cli, init = f)]` on
+/// `async fn main(cli: Cli)`, which runs every subcommand but the reserved `start(cli, stop)`.
+#[proc_macro_attribute]
+pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
+    boot::expand(args.into(), item.into())
+        .unwrap_or_else(|e| {
+            // The stub keeps "`main` function not found" from following the real error.
+            let e = e.into_compile_error();
+            quote::quote!(#e fn main() {})
+        })
         .into()
 }
 

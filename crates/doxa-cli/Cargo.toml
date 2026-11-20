@@ -38,6 +38,9 @@ quote = { workspace = true }
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.6"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }

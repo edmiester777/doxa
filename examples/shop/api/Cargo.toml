@@ -3,6 +3,7 @@ name = "shop-api"
 version = "0.0.0"
 edition.workspace = true
 publish = false
+default-run = "shop-api"
 
 # The shop's routes: served off wasm, and called from the browser.
 [dependencies]
