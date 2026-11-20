@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::bundle::{rewrite_islands, rewrite_npm, rewrite_react, BundleRequest};
 use crate::config::Library;
 use crate::error::{Error, IoContext, Result};
-use crate::pipeline::{note, Pipeline};
+use crate::pipeline::Pipeline;
 use crate::{css, npm, split};
 
 /// The custom section `#[component(export)]` writes each component's props into.
@@ -301,7 +301,7 @@ impl Pipeline {
         let split = !self.split_files.is_empty();
         let js = index_js(&found, &rewritten, runtime.as_deref(), split, class);
         std::fs::write(&entry, js).at(&entry)?;
-        note("bundling the library");
+        self.opts.output.note("bundling the library");
         self.bundler.bundle(&BundleRequest {
             entry: &entry,
             out_dir: &out,
@@ -309,6 +309,7 @@ impl Pipeline {
             release: self.opts.release,
             library: true,
             hot: false,
+            output: self.opts.output.clone(),
         })?;
         let _ = std::fs::remove_file(out.with_extension("meta.json"));
 
@@ -340,7 +341,7 @@ impl Pipeline {
         let pkg = out.join("package.json");
         let deps = npm_deps(&self.npm)?;
         std::fs::write(&pkg, package_json(&lib, &self.web.version, &deps, has_css)).at(&pkg)?;
-        note(format!(
+        self.opts.output.note(format!(
             "wrote {} ({} components)",
             out.display(),
             found.len()

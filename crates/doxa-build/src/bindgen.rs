@@ -5,7 +5,8 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use crate::error::{run, Error, IoContext, Result};
+use crate::error::{Error, IoContext, Result};
+use crate::Output;
 
 /// The `wasm-bindgen` version the app must lock; the schema is not stable across
 /// releases, so the macro and the CLI must match exactly.
@@ -90,7 +91,7 @@ pub fn generate(wasm: &Path, out_dir: &Path, release: bool, split: bool, hot: bo
 }
 
 /// Optimize `wasm` in place. `Ok(false)` when `wasm-opt` is not on `PATH`.
-pub fn wasm_opt(wasm: &Path) -> Result<bool> {
+pub fn wasm_opt(wasm: &Path, output: &Output) -> Result<bool> {
     let Some(bin) = which("wasm-opt") else {
         return Ok(false);
     };
@@ -109,7 +110,7 @@ pub fn wasm_opt(wasm: &Path) -> Result<bool> {
         .arg(wasm)
         .arg("-o")
         .arg(&out);
-    run(
+    output.run(
         "wasm-opt",
         &mut cmd,
         "update binaryen (https://github.com/WebAssembly/binaryen), or remove wasm-opt from PATH to skip it",

@@ -7,7 +7,8 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use crate::error::{run, Error, IoContext, Result};
+use crate::error::{Error, IoContext, Result};
+use crate::Output;
 
 /// The prefix island modules are imported under, followed by a path relative to
 /// the web crate root.
@@ -28,6 +29,8 @@ pub struct BundleRequest<'a> {
     pub library: bool,
     /// The glue is from a hot-patchable base, which links every js-sys binding, `eval` included.
     pub hot: bool,
+    /// Where esbuild's output goes.
+    pub output: Output,
 }
 
 /// What a bundler wrote, as paths relative to its `out_dir`.
@@ -113,7 +116,7 @@ impl Bundler for Esbuild {
         if let Some(dir) = req.node_modules {
             cmd.env("NODE_PATH", dir.join("node_modules"));
         }
-        run(
+        req.output.run(
             "esbuild",
             &mut cmd,
             "check the import named above; npm packages belong in [package.metadata.doxa.npm]",
@@ -827,6 +830,7 @@ mod tests {
             release: true,
             library: false,
             hot: false,
+            output: Output::default(),
         };
         let args: Vec<String> = Esbuild::args(&req, Path::new("/s/meta.json"))
             .into_iter()

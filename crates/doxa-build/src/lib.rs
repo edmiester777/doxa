@@ -30,6 +30,8 @@ pub mod library;
 #[cfg(feature = "pipeline")]
 pub mod npm;
 #[cfg(feature = "pipeline")]
+mod output;
+#[cfg(feature = "pipeline")]
 pub mod pipeline;
 #[cfg(feature = "pipeline")]
 pub mod split;
@@ -42,5 +44,7 @@ pub mod tool;
 pub use client::{openapi_from_json, ClientSpec, GenerateError};
 #[cfg(feature = "tool")]
 pub use error::{Error, Result};
+#[cfg(feature = "pipeline")]
+pub use output::Output;
 #[cfg(feature = "pipeline")]
 pub use pipeline::{BuildOptions, Pipeline};

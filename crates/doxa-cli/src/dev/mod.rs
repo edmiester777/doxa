@@ -5,6 +5,7 @@ mod log;
 mod proxy;
 mod service;
 mod siblings;
+mod tui;
 mod watch;
 
 use std::collections::BTreeMap;
@@ -18,18 +19,18 @@ use axum::Router;
 use doxa_build::config::Workspace;
 use doxa_build::dist::Dist;
 use doxa_build::hot::Patched;
-use doxa_build::pipeline::note;
 use doxa_build::{BuildOptions, Pipeline};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch as signal};
 
-use log::Tag;
+use log::{Console, Tag};
 use proxy::{
     allowed_hosts, forward, guard_host, lan_ip, reload_events, routes, urls, Proxy, Reload,
     RELOAD_PATH,
 };
 use service::{SendError, Service};
 use siblings::LockGuard;
+use tui::{Status, Tui};
 use watch::{canonical, classify, Plan, Watch};
 
 fn rebuild(p: &mut Pipeline, plan: Plan) -> doxa_build::Result<Option<Dist>> {
@@ -53,20 +54,38 @@ fn rebuild(p: &mut Pipeline, plan: Plan) -> doxa_build::Result<Option<Dist>> {
     }
 }
 
-/// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page.
+/// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page, and `tui`
+/// gives each service a pane.
 pub async fn run(
     package: Option<String>,
     port: u16,
     locked: bool,
     hot: bool,
+    tui: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let console = match (tui, tui::available()) {
+        (true, true) => Console::Tui(tui::Shared::new()),
+        (true, false) => {
+            Console::Stderr
+                .web()
+                .note("--tui needs an interactive terminal; showing plain output");
+            Console::Stderr
+        }
+        (false, _) => Console::Stderr,
+    };
+    // Dropped before main prints an error, so the error lands on the restored screen.
+    let _screen = match &console {
+        Console::Tui(s) => Some(Tui::start(s.clone())?),
+        Console::Stderr => None,
+    };
     let opts = BuildOptions {
         package,
         locked,
         hot,
+        output: console.output(),
         ..BuildOptions::default()
     };
-    serve(opts, port)
+    serve(opts, port, console)
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)
 }
@@ -84,7 +103,7 @@ pub async fn gallery(
         gallery: true,
         ..BuildOptions::default()
     };
-    serve(opts, port)
+    serve(opts, port, Console::Stderr)
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)
 }
@@ -98,7 +117,7 @@ struct Loaded {
     width: usize,
 }
 
-fn load(cwd: PathBuf, opts: BuildOptions) -> Result<Loaded, SendError> {
+fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, SendError> {
     let mut pipeline = Pipeline::new(&cwd, opts.clone())?;
     let services = match opts.gallery {
         true => Vec::new(),
@@ -119,15 +138,15 @@ fn load(cwd: PathBuf, opts: BuildOptions) -> Result<Loaded, SendError> {
     let siblings = services
         .iter()
         .enumerate()
-        .map(|(i, (name, s))| Service::sibling(name, &s.path, Tag::new(name, i, width)))
+        .map(|(i, (name, s))| Service::sibling(name, &s.path, console.tag(name, i, width)))
         .collect::<Result<Vec<_>, _>>()?;
     let workspaces: Vec<&Workspace> = siblings.iter().map(|(_, ws)| ws).collect();
-    let (patches, foreign) = siblings::wire(&pipeline.graph, &workspaces)?;
+    let (patches, foreign) = siblings::wire(&pipeline.graph, &workspaces, &console.web())?;
     let lock = match patches.is_empty() {
         true => None,
         false => {
             let lock = LockGuard::take(&pipeline.workspace.workspace_root);
-            note(format!(
+            console.web().note(format!(
                 "compiling {} against the dev services' local source; Cargo.lock is restored on exit (`git checkout Cargo.lock` if doxa is killed)",
                 pipeline.web.name
             ));
@@ -150,16 +169,21 @@ fn load(cwd: PathBuf, opts: BuildOptions) -> Result<Loaded, SendError> {
     })
 }
 
-async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
+async fn serve(opts: BuildOptions, port: u16, console: Console) -> Result<(), SendError> {
     let cwd = std::env::current_dir()?;
     let (hot, gallery) = (opts.hot, opts.gallery);
+    let web = console.web();
+    let (stops, mut stop) = signal::channel(0);
+    console.stops(stops.clone());
+    let loading = console.clone();
     let Loaded {
         pipeline,
         siblings,
         foreign,
         lock: _lock,
         width,
-    } = tokio::task::spawn_blocking(move || load(cwd, opts)).await??;
+    } = tokio::task::spawn_blocking(move || load(cwd, opts, &loading)).await??;
+    web.rename(&pipeline.web.name);
     let server_pkg = match gallery {
         true => None,
         false => pipeline.web.config.server.clone(),
@@ -170,7 +194,7 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
             &pipeline.workspace,
             pkg,
             dist.clone(),
-            Tag::new(pkg, siblings.len(), width),
+            console.server_tag(pkg, siblings.len(), width),
         )?),
         None => None,
     };
@@ -214,7 +238,7 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
     let mut views = watch.client_views();
     let pipeline = Arc::new(Mutex::new(pipeline));
     for route in &routes {
-        note(format!("proxying {} to {}", route.prefix, route.target));
+        web.note(format!("proxying {} to {}", route.prefix, route.target));
     }
 
     let (reload, _) = broadcast::channel(16);
@@ -248,13 +272,15 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
         .with_state(proxy.clone())
         .layer(axum::middleware::from_fn_with_state(allowed, guard_host));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    for url in urls(host, lan_ip(), port) {
-        note(format!("serving {url}"));
+    let served = urls(host, lan_ip(), port);
+    for url in &served {
+        web.note(format!("serving {url}"));
     }
+    console.header(served);
     tokio::spawn(async move { axum::serve(listener, app).await });
 
     // Services stop on the signal itself, not when this loop next breaks.
-    let mut stop = stop_signal()?;
+    listen(stops)?;
     let mut tasks = Vec::new();
     // Startup builds one at a time, to bound memory: the services in order, the web crate, its server.
     let mut turn = None;
@@ -276,6 +302,7 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
     // The web crate's classify() decides when the in-workspace server rebuilds.
     let kick = server.map(|svc| {
         let (kick, kicks) = mpsc::unbounded_channel();
+        svc.tag.kicks(&kick);
         tasks.push(tokio::spawn(service::supervise(
             svc,
             None,
@@ -288,58 +315,73 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
     });
 
     let (changed, mut changes) = mpsc::unbounded_channel::<Vec<PathBuf>>();
+    let watching = web.clone();
     let mut debouncer = new_debouncer(
         Duration::from_millis(200),
         move |res: DebounceEventResult| match res {
             Ok(events) => {
                 let _ = changed.send(events.into_iter().map(|e| e.path).collect());
             }
-            Err(e) => eprintln!("error: watching for changes: {e}"),
+            Err(e) => watching.line(format!("error: watching for changes: {e}")),
         },
     )?;
     for (dir, mode) in watch.roots() {
         debouncer.watcher().watch(&dir, mode)?;
     }
+    // Only the TUI holds a sender; without one, `recv` is `None` and its arm never fires.
+    let mut web_kicks = {
+        let (kick, kicks) = mpsc::unbounded_channel::<bool>();
+        web.kicks(&kick);
+        kicks
+    };
 
     let p = pipeline.clone();
+    let starting = web.clone();
     let first = async move {
         if let Some(turn) = web_turn {
             let _ = turn.await;
         }
+        starting.status(Status::Compiling);
         let r = tokio::task::spawn_blocking(move || p.lock().expect("pipeline").build().map(drop))
             .await;
         drop(web_built);
         r
     };
     let mut built = tokio::select! {
-        _ = stop.changed() => return finish(tasks).await,
+        _ = stop.changed() => return finish(tasks, stop, &web).await,
         r = first => match r? {
-            Ok(()) => true,
+            Ok(()) => {
+                web.status(Status::Running(None));
+                true
+            }
             Err(e) => {
-                eprintln!("error: {e}");
-                note("waiting for changes");
+                web.line(format!("error: {e}"));
+                web.note("waiting for changes");
+                web.status(Status::Failed { running: false });
                 false
             }
         },
     };
 
     loop {
-        let mut paths = tokio::select! {
+        let (mut paths, forced) = tokio::select! {
             _ = stop.changed() => break,
-            Some(paths) = changes.recv() => paths,
+            Some(paths) = changes.recv() => (paths, false),
+            Some(_) = web_kicks.recv() => (Vec::new(), true),
         };
         while let Ok(more) = changes.try_recv() {
             paths.extend(more);
         }
         let plan = classify(paths.iter().map(PathBuf::as_path), &watch, &mut views);
-        if plan.is_empty() {
+        if plan.is_empty() && !forced {
             continue;
         }
         // The server rebuilds on its own; a failed web build mustn't swallow its change.
         if let (true, Some(kick)) = (plan.server, &kick) {
-            let _ = kick.send(());
+            let _ = kick.send(false);
         }
-        if !built {
+        if !built || forced {
+            web.status(Status::Compiling);
             let p = pipeline.clone();
             let full = tokio::select! {
                 _ = stop.changed() => break,
@@ -348,32 +390,42 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
             match full {
                 Ok(()) => {
                     built = true;
+                    web.status(Status::Running(None));
                     *proxy.latest_patch.lock().expect("patch") = None;
                     let _ = reload.send(Reload::Page);
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => {
+                    web.line(format!("error: {e}"));
+                    web.status(Status::Failed { running: built });
+                }
             }
             continue;
         }
         if hot && plan.patch && !plan.bundle && !plan.css && !plan.server {
+            web.status(Status::Patching);
             let p = pipeline.clone();
             match tokio::task::spawn_blocking(move || p.lock().expect("pipeline").patch()).await? {
                 Ok(Patched::Table(table)) => {
                     *proxy.latest_patch.lock().expect("patch") = Some(table.clone());
                     let _ = reload.send(Reload::Patch(table));
+                    web.status(Status::Running(None));
                     continue;
                 }
-                Ok(Patched::NotCompiled) => continue,
-                Ok(Patched::NeedsRebuild(why)) => note(format!("{why}; rebuilding")),
+                Ok(Patched::NotCompiled) => {
+                    web.status(Status::Failed { running: true });
+                    continue;
+                }
+                Ok(Patched::NeedsRebuild(why)) => web.note(format!("{why}; rebuilding")),
                 Err(e) => {
-                    eprintln!("error: {e}");
-                    note("rebuilding instead");
+                    web.line(format!("error: {e}"));
+                    web.note("rebuilding instead");
                 }
             }
         }
         if !(plan.wasm || plan.bundle || plan.css) {
             continue;
         }
+        web.status(Status::Compiling);
         let p = pipeline.clone();
         let rebuilt =
             tokio::task::spawn_blocking(move || rebuild(&mut p.lock().expect("pipeline"), plan))
@@ -381,10 +433,12 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
         let dist = match rebuilt {
             Ok(dist) => dist,
             Err(e) => {
-                eprintln!("error: {e}");
+                web.line(format!("error: {e}"));
+                web.status(Status::Failed { running: true });
                 continue;
             }
         };
+        web.status(Status::Running(None));
         if plan.wasm {
             *proxy.latest_patch.lock().expect("patch") = None;
         }
@@ -397,37 +451,46 @@ async fn serve(opts: BuildOptions, port: u16) -> Result<(), SendError> {
         };
         let _ = reload.send(event);
     }
-    finish(tasks).await
+    finish(tasks, stop, &web).await
 }
 
-/// Wait for every service to stop; a second signal stops waiting, and dropping the runtime
-/// then kills each child.
-async fn finish(tasks: Vec<tokio::task::JoinHandle<()>>) -> Result<(), SendError> {
-    let mut again = stop_signal()?;
+/// Wait for every service to stop; another stop a second or more later stops waiting, and
+/// dropping the runtime then kills each child.
+async fn finish(
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    mut stop: signal::Receiver<u32>,
+    web: &Tag,
+) -> Result<(), SendError> {
+    web.status(Status::Stopping);
+    stop.borrow_and_update();
     tokio::select! {
         _ = futures::future::join_all(tasks) => {}
         _ = async {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let _ = again.changed().await;
-        } => note("stopping now"),
+            let _ = stop.changed().await;
+        } => web.note("stopping now"),
     }
+    web.status(Status::Stopped);
     Ok(())
 }
 
-/// Changes once Ctrl-C or SIGTERM arrives, at any point after this call.
-fn stop_signal() -> std::io::Result<tokio::sync::watch::Receiver<()>> {
-    let (tx, rx) = tokio::sync::watch::channel(());
+/// Count each Ctrl-C and SIGTERM from now on into `stops`.
+fn listen(stops: signal::Sender<u32>) -> std::io::Result<()> {
     #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::spawn(async move {
-        #[cfg(unix)]
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        loop {
+            #[cfg(unix)]
+            tokio::select! {
+                r = tokio::signal::ctrl_c() => if r.is_err() { break },
+                Some(()) = term.recv() => {}
+            }
+            #[cfg(not(unix))]
+            if tokio::signal::ctrl_c().await.is_err() {
+                break;
+            }
+            stops.send_modify(|n| *n += 1);
         }
-        #[cfg(not(unix))]
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = tx.send(());
     });
-    Ok(rx)
+    Ok(())
 }

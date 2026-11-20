@@ -10,7 +10,8 @@ use lightningcss::stylesheet::{MinifyOptions, ParserOptions, PrinterOptions};
 use std::collections::BTreeMap;
 
 use crate::config::Preprocess;
-use crate::error::{run, Error, IoContext, Result};
+use crate::error::{Error, IoContext, Result};
+use crate::Output;
 
 /// A built stylesheet and the local files its `url()`s point at, under hashed names.
 #[derive(Debug, Default)]
@@ -54,6 +55,8 @@ pub struct Inputs<'a> {
     pub base: &'a str,
     /// The workspace, which every local `url()` must resolve inside (or inside `node_modules`).
     pub workspace: &'a Path,
+    /// Where the tools' output goes.
+    pub output: &'a Output,
 }
 
 /// Where a preprocessor writes `input`'s CSS: beside it, so relative paths still resolve.
@@ -88,7 +91,7 @@ fn preprocess(at: &Inputs<'_>, input: &Path) -> Result<Option<PathBuf>> {
             .unwrap_or(path);
         cmd.env("PATH", joined);
     }
-    run(
+    at.output.run(
         "preprocessor",
         &mut cmd,
         &format!("fix the error above, or the `{ext}` preprocess command"),
@@ -208,7 +211,7 @@ fn tailwind_and_bundle(
         std::fs::write(&wrapper, tailwind_wrapper(&input, &sources)).at(&wrapper)?;
         let tool = crate::tool::tailwind()?;
         let mut cmd = tailwind_command(&tool, at, &wrapper, &output, release);
-        run(
+        at.output.run(
             "tailwindcss",
             &mut cmd,
             "fix the stylesheet error reported above",
@@ -432,6 +435,7 @@ mod tests {
     use super::*;
 
     static NONE: BTreeMap<String, Preprocess> = BTreeMap::new();
+    static STDERR: std::sync::LazyLock<Output> = std::sync::LazyLock::new(Output::default);
 
     fn plain(web_dir: &Path) -> Inputs<'_> {
         Inputs {
@@ -442,6 +446,7 @@ mod tests {
             library: false,
             base: "/",
             workspace: web_dir,
+            output: &STDERR,
         }
     }
 

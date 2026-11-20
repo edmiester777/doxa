@@ -69,6 +69,9 @@ enum Command {
         /// Rebuild and reload on a web crate change instead of patching the running page.
         #[arg(long)]
         no_hot: bool,
+        /// Show each service's output in its own pane, under its status.
+        #[arg(long)]
+        tui: bool,
     },
     /// Build the `#[story]` functions into a gallery, serve it, and patch in each change.
     Gallery {
@@ -137,9 +140,10 @@ fn main() -> ExitCode {
             port,
             locked,
             no_hot,
+            tui,
         } => tokio::runtime::Runtime::new()
             .map_err(Into::into)
-            .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot))),
+            .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot, tui))),
         Command::Gallery {
             package,
             locked,
@@ -259,7 +263,15 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["doxa", "dev", "--no-hot"]),
-            Command::Dev { no_hot: true, .. }
+            Command::Dev {
+                no_hot: true,
+                tui: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["doxa", "dev", "--tui"]),
+            Command::Dev { tui: true, .. }
         ));
         assert!(matches!(
             parse(&["doxa", "gallery"]),

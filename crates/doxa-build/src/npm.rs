@@ -7,7 +7,8 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::config::{Layout, WebCrate};
-use crate::error::{run, Error, IoContext, Result};
+use crate::error::{Error, IoContext, Result};
+use crate::Output;
 
 /// A JS package manager, chosen by the lockfile beside `package.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +156,7 @@ pub fn frozen(locked: bool) -> bool {
 
 /// Install dependencies for `source`, skipping when nothing changed since the last
 /// install.
-pub fn install(source: &Source, locked: bool) -> Result<()> {
+pub fn install(source: &Source, locked: bool, out: &Output) -> Result<()> {
     let frozen = frozen(locked);
     let (dir, lock_dir) = match source {
         Source::None => return Ok(()),
@@ -186,7 +187,7 @@ pub fn install(source: &Source, locked: bool) -> Result<()> {
         clear_if_patches_changed(dir)?;
         let mut cmd = Command::new(manager.program());
         cmd.args(manager.install_args(frozen)).current_dir(dir);
-        run(manager.program(), &mut cmd, manager.fix())?;
+        out.run(manager.program(), &mut cmd, manager.fix())?;
         // Taken after the install, which may have written the lockfile.
         std::fs::write(&stamp_path, stamp(dir)).at(&stamp_path)?;
         let applied = dir.join("node_modules").join(APPLIED_PATCHES);
@@ -328,7 +329,9 @@ mod tests {
             deps: BTreeMap::new(),
             lock_dir: web.clone(),
         };
-        let err = install(&source, true).unwrap_err().to_string();
+        let err = install(&source, true, &Output::default())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no npm lockfile"), "{err}");
 
         std::fs::create_dir_all(dir.join("node_modules")).unwrap();

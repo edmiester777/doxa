@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::log::{self, Tag};
 use super::proxy::Reload;
+use super::tui::Status;
 use super::watch::{canonical, outermost};
 
 /// `Service::sibling` runs under `spawn_blocking`, so its error crosses threads.
@@ -56,7 +57,7 @@ impl Feeds {
 
 pub struct Service {
     pub name: String,
-    tag: Tag,
+    pub tag: Tag,
     run: Run,
     feeds: Feeds,
     child: Option<Child>,
@@ -225,26 +226,38 @@ impl Service {
         Ok(())
     }
 
-    /// Build, then swap the running process for the new one. `true` once it listens.
-    pub async fn rebuild(&mut self) -> bool {
+    /// Build, then swap the running process for the new one, even a fresh build's when `force`.
+    /// `true` once it listens.
+    pub async fn rebuild(&mut self, force: bool) -> bool {
+        self.tag.status(Status::Compiling);
         let built = self.build().await;
         self.built = None;
         let exe = match built {
-            Ok(Some((_, true))) if self.running() => return false,
+            Ok(Some((_, true))) if !force && self.running() => {
+                self.tag.status(Status::Running(Some(self.run.port)));
+                return false;
+            }
             Ok(Some((exe, _))) => exe,
-            Ok(None) => return false,
+            Ok(None) => return self.failed(),
             Err(e) => {
                 self.tag.line(format!("error: running cargo: {e}"));
-                return false;
+                return self.failed();
             }
         };
         self.stop().await;
         if let Err(e) = self.spawn(&exe) {
             self.tag
                 .line(format!("error: starting {}: {e}", exe.display()));
+            self.tag.status(Status::Exited);
             return false;
         }
         self.wait_ready().await
+    }
+
+    fn failed(&mut self) -> bool {
+        let running = self.running();
+        self.tag.status(Status::Failed { running });
+        false
     }
 
     /// Until the port answers (`true`), the process exits, or two minutes pass.
@@ -252,12 +265,14 @@ impl Service {
         for _ in 0..1200 {
             if port_taken(self.run.port).await {
                 self.tag.line(format!("ready on :{}", self.run.port));
+                self.tag.status(Status::Running(Some(self.run.port)));
                 return true;
             }
             if let Some(Ok(Some(status))) = self.child.as_mut().map(|c| c.try_wait()) {
                 self.tag.line(format!(
                     "exited with {status}; will restart on the next change"
                 ));
+                self.tag.status(Status::Exited);
                 return false;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -266,7 +281,20 @@ impl Service {
             "not listening on :{} after 2 minutes — does its main use #[doxa::main]?",
             self.run.port
         ));
+        self.tag.status(Status::Unready);
         false
+    }
+
+    /// Once the running process exits on its own; never when none runs.
+    async fn exited(&mut self) {
+        match &mut self.child {
+            Some(child) => {
+                let _ = child.wait().await;
+                self.child = None;
+                self.tag.status(Status::Exited);
+            }
+            None => std::future::pending().await,
+        }
     }
 
     fn running(&mut self) -> bool {
@@ -313,15 +341,16 @@ pub async fn port_taken(port: u16) -> bool {
         .is_ok()
 }
 
-/// Watch `svc`'s sources; one `()` per batch that needs a rebuild.
-pub fn watch_sources(svc: &Service) -> Result<(Watcher, mpsc::UnboundedReceiver<()>), SendError> {
+/// Watch `svc`'s sources; one unforced kick per batch that needs a rebuild.
+pub fn watch_sources(svc: &Service) -> Result<(Watcher, mpsc::UnboundedReceiver<bool>), SendError> {
     let (tx, rx) = mpsc::unbounded_channel();
+    svc.tag.kicks(&tx);
     let feeds = svc.feeds.clone();
     let mut d = new_debouncer(
         Duration::from_millis(200),
         move |res: DebounceEventResult| {
             if res.is_ok_and(|ev| ev.iter().any(|e| feeds.feeds(&e.path))) {
-                let _ = tx.send(());
+                let _ = tx.send(false);
             }
         },
     )?;
@@ -341,9 +370,9 @@ pub fn watch_sources(svc: &Service) -> Result<(Watcher, mpsc::UnboundedReceiver<
 pub async fn supervise(
     mut svc: Service,
     _watcher: Option<Watcher>,
-    mut kicks: mpsc::UnboundedReceiver<()>,
+    mut kicks: mpsc::UnboundedReceiver<bool>,
     turn: Option<oneshot::Receiver<()>>,
-    mut stop: tokio::sync::watch::Receiver<()>,
+    mut stop: tokio::sync::watch::Receiver<u32>,
     reload: broadcast::Sender<Reload>,
 ) {
     if port_taken(svc.port()).await {
@@ -351,39 +380,51 @@ pub async fn supervise(
             "port {0} is in use — using what's there, not starting it\n  fix: `lsof -i :{0}` shows what holds it",
             svc.port()
         ));
+        svc.tag.status(Status::External(svc.port()));
         return;
     }
+    let mut force = false;
     if let Some(turn) = turn {
         tokio::select! {
-            _ = stop.changed() => return,
+            _ = stop.changed() => return svc.tag.status(Status::Stopped),
             _ = turn => {}
         }
         // The first build sees every change made while it waited.
         while kicks.try_recv().is_ok() {}
     }
-    loop {
+    'run: loop {
         // Dropping the build on stop drops its cargo child, which is kill_on_drop.
         let up = tokio::select! {
             _ = stop.changed() => break,
-            up = svc.rebuild() => up,
+            up = svc.rebuild(force) => up,
         };
         if up {
             let _ = reload.send(Reload::Page);
         }
-        tokio::select! {
-            _ = stop.changed() => break,
-            Some(()) = kicks.recv() => {
-                // Whatever arrived during the last build joins this one.
-                while kicks.try_recv().is_ok() {}
+        loop {
+            tokio::select! {
+                _ = stop.changed() => break 'run,
+                () = svc.exited() => {}
+                Some(f) = kicks.recv() => {
+                    force = f;
+                    // Whatever arrived during the last build joins this one.
+                    while let Ok(f) = kicks.try_recv() {
+                        force |= f;
+                    }
+                    break;
+                }
             }
         }
     }
+    svc.tag.status(Status::Stopping);
     svc.stop().await;
+    svc.tag.status(Status::Stopped);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dev::log::Console;
 
     #[test]
     fn a_service_rebuilds_for_its_sources_and_root_manifests_only() {
@@ -466,9 +507,9 @@ fn main() {{
         let main = root.join("srv/src/main.rs");
         std::fs::write(&main, server_source("v1")).unwrap();
 
-        let (svc, _) = Service::sibling("srv", &root, Tag::new("srv", 0, 3)).unwrap();
+        let (svc, _) = Service::sibling("srv", &root, Console::Stderr.tag("srv", 0, 3)).unwrap();
         let (watcher, kicks) = watch_sources(&svc).unwrap();
-        let (stop, stopped) = tokio::sync::watch::channel(());
+        let (stop, stopped) = tokio::sync::watch::channel(0);
         let (reload, _) = broadcast::channel(16);
         let task = tokio::spawn(supervise(svc, Some(watcher), kicks, None, stopped, reload));
         until(port, "v1").await;
@@ -482,7 +523,7 @@ fn main() {{
             until(port, reply).await;
         }
 
-        stop.send(()).unwrap();
+        stop.send(1).unwrap();
         task.await.unwrap();
         assert!(!port_taken(port).await);
     }

@@ -9,10 +9,10 @@ use crate::bundle::{
 };
 use crate::config::{Layout, WebCrate, Workspace};
 use crate::dist::{self, Dist};
-use crate::error::{run, Error, IoContext, Result};
+use crate::error::{Error, IoContext, Result};
 use crate::graph::Graph;
 use crate::hot::Patched;
-use crate::{bindgen, css, hot, npm, split, stories};
+use crate::{bindgen, css, hot, npm, split, stories, Output};
 
 /// How to build.
 #[derive(Debug, Clone, Default)]
@@ -33,6 +33,8 @@ pub struct BuildOptions {
     pub base: Option<String>,
     /// `--config` values for every cargo call, e.g. a `doxa dev` patch to a sibling's source.
     pub cargo_config: Vec<String>,
+    /// Where notes and tool output go.
+    pub output: Output,
 }
 
 /// One app's build, holding what earlier steps produced.
@@ -62,11 +64,6 @@ pub struct Pipeline {
 }
 
 const PATCH_URL: &str = "/__doxa_patch";
-
-/// Print a progress line.
-pub fn note(msg: impl std::fmt::Display) {
-    eprintln!("[doxa] {msg}");
-}
 
 impl Pipeline {
     /// Read the workspace containing `cwd`.
@@ -135,16 +132,18 @@ impl Pipeline {
     /// Install npm dependencies, when there are any.
     pub fn npm(&self) -> Result<()> {
         if self.npm != npm::Source::None {
-            note("installing npm dependencies");
+            self.opts.output.note("installing npm dependencies");
         }
-        npm::install(&self.npm, self.opts.locked)
+        npm::install(&self.npm, self.opts.locked, &self.opts.output)
     }
 
     /// Compile the web crate to wasm and generate its bindings.
     pub fn wasm(&mut self) -> Result<()> {
         let lock = self.workspace.workspace_root.join("Cargo.lock");
         let checked = self.check_lock(&lock)?;
-        note(format!("compiling {} to wasm", self.web.name));
+        self.opts
+            .output
+            .note(format!("compiling {} to wasm", self.web.name));
         let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
         for c in &self.opts.cargo_config {
             cmd.args(["--config", c]);
@@ -184,7 +183,7 @@ impl Pipeline {
         } else {
             None
         };
-        run(
+        self.opts.output.run(
             "cargo",
             &mut cmd,
             "fix the compile error above; if the target is missing, run `rustup target add wasm32-unknown-unknown`",
@@ -196,7 +195,7 @@ impl Pipeline {
         let out = self.bindgen_dir();
         self.hot = None;
         if let Some(records) = &records {
-            note("linking the hot-patchable base");
+            self.opts.output.note("linking the hot-patchable base");
             let base = records.fat_link(
                 &self.layout.wasm_target(),
                 &self.workspace.workspace_root,
@@ -234,8 +233,8 @@ impl Pipeline {
             let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
             let stripped = split::strip_link_sections(&bytes, !self.opts.release);
             std::fs::write(&app_wasm, stripped).at(&app_wasm)?;
-            if self.opts.release && !bindgen::wasm_opt(&app_wasm)? {
-                note("wasm-opt not on PATH; skipping it");
+            if self.opts.release && !bindgen::wasm_opt(&app_wasm, &self.opts.output)? {
+                self.opts.output.note("wasm-opt not on PATH; skipping it");
             }
         }
         let bytes = std::fs::read(&app_wasm).at(&app_wasm)?;
@@ -254,7 +253,9 @@ impl Pipeline {
 
     /// Split `app_wasm` in place, optimize each part, and write the `__wasm_split.js` the glue imports.
     fn split(&mut self, original: &[u8], app_wasm: &Path) -> Result<()> {
-        note("splitting the wasm at its lazy pages");
+        self.opts
+            .output
+            .note("splitting the wasm at its lazy pages");
         let bindgened = std::fs::read(app_wasm).at(app_wasm)?;
         let mut out = split::split(original, &bindgened)?;
         let names = !self.opts.release;
@@ -271,7 +272,7 @@ impl Pipeline {
             }
             let path = dir.join(&part.file);
             std::fs::write(&path, &part.bytes).at(&path)?;
-            skipped |= !bindgen::wasm_opt(&path)?;
+            skipped |= !bindgen::wasm_opt(&path, &self.opts.output)?;
             part.bytes = std::fs::read(&path).at(&path)?;
             check_budget(
                 &part.file,
@@ -284,21 +285,21 @@ impl Pipeline {
             )?;
         }
         if self.opts.release {
-            skipped |= !bindgen::wasm_opt(app_wasm)?;
+            skipped |= !bindgen::wasm_opt(app_wasm, &self.opts.output)?;
         }
         if skipped {
-            note("wasm-opt not on PATH; skipping it");
+            self.opts.output.note("wasm-opt not on PATH; skipping it");
         }
         let hashed = |p: &split::Part| dist::hashed_name(&p.file, &p.bytes);
         let js = split::loader_js(&out, hashed);
         let loader = dir.join("__wasm_split.js");
         std::fs::write(&loader, js).at(&loader)?;
-        note(format!(
+        self.opts.output.note(format!(
             "main module: {} KiB",
             out.main.len().div_ceil(1024)
         ));
         for part in out.chunks.into_iter().chain(out.modules) {
-            note(format!(
+            self.opts.output.note(format!(
                 "{}: {} KiB",
                 part.file,
                 part.bytes.len().div_ceil(1024)
@@ -315,8 +316,8 @@ impl Pipeline {
         let base = self.hot.as_mut().ok_or_else(|| {
             Error::config("no hot-patchable base", "run a full build with hot on")
         })?;
-        note(format!("patching {}", self.web.name));
-        base.patch(&dir, PATCH_URL)
+        self.opts.output.note(format!("patching {}", self.web.name));
+        base.patch(&dir, PATCH_URL, &self.opts.output)
     }
 
     /// Where patches are written; the page fetches them from `/__doxa_patch/`.
@@ -357,7 +358,7 @@ impl Pipeline {
                 "run a full build",
             )
         })?;
-        note("bundling JS");
+        self.opts.output.note("bundling JS");
         let dir = self.bindgen_dir();
         let glue_path = dir.join("app.js");
         let glue = std::fs::read_to_string(&glue_path).at(&glue_path)?;
@@ -394,6 +395,7 @@ impl Pipeline {
             release: self.opts.release,
             library: false,
             hot: self.hot.is_some(),
+            output: self.opts.output.clone(),
         })?);
         Ok(())
     }
@@ -405,7 +407,7 @@ impl Pipeline {
         let mut out = Vec::new();
         let base = self.base();
         for entry in &cfg.css {
-            note(format!("building {entry}"));
+            self.opts.output.note(format!("building {entry}"));
             let inputs = css::Inputs {
                 web_dir: &self.web.dir,
                 sources: &self.tailwind_sources,
@@ -414,6 +416,7 @@ impl Pipeline {
                 library: self.library,
                 base: &base,
                 workspace: &self.workspace.workspace_root,
+                output: &self.opts.output,
             };
             let built = css::build(&inputs, entry, &stage, self.opts.release)?;
             let stem = Path::new(entry)
@@ -494,13 +497,17 @@ impl Pipeline {
             &html,
             self.opts.compress.then_some(cache.as_path()),
         )?;
-        note(format!("wrote {}", self.dist_dir().display()));
+        self.opts
+            .output
+            .note(format!("wrote {}", self.dist_dir().display()));
         Ok(d)
     }
 
     /// Build the server with the dist embedded.
     pub fn build_server(&self, server: &str) -> Result<()> {
-        note(format!("building {server} with the dist embedded"));
+        self.opts
+            .output
+            .note(format!("building {server} with the dist embedded"));
         let dist = std::fs::canonicalize(self.dist_dir()).at(&self.dist_dir())?;
         let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
         cmd.args(["build", "-p", server, "--features", "embed"])
@@ -509,7 +516,7 @@ impl Pipeline {
         if self.opts.release {
             cmd.arg("--release");
         }
-        run(
+        self.opts.output.run(
             "cargo",
             &mut cmd,
             &format!("give {server} a feature `embed = [\"doxa/embed\"]`, and fix any compile error above"),

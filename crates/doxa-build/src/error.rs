@@ -108,21 +108,3 @@ pub(crate) fn display_command(command: &Command) -> String {
     }
     out
 }
-
-/// Run `command`, failing with a [`Error::Tool`] that names `tool` and `fix`.
-#[cfg(feature = "pipeline")]
-pub(crate) fn run(tool: &'static str, command: &mut Command, fix: &str) -> Result<()> {
-    let status = command
-        .status()
-        .map_err(|e| Error::tool(tool, command, format!("could not start: {e}"), fix))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::tool(
-            tool,
-            command,
-            format!("exited with {status}"),
-            fix,
-        ))
-    }
-}

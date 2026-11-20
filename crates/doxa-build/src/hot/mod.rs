@@ -10,6 +10,7 @@ use std::process::{Command, ExitCode};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, IoContext, Result};
+use crate::Output;
 
 /// Set on cargo's rustc wrapper: where to record the web crate's rustc command.
 const RUSTC_FILE: &str = "DOXA_HOT_RUSTC";
@@ -318,7 +319,7 @@ impl Base {
     }
 
     /// Recompile the web crate and link a patch into `dir`, naming it by its path under `url`.
-    pub(crate) fn patch(&mut self, dir: &Path, url: &str) -> Result<Patched> {
+    pub(crate) fn patch(&mut self, dir: &Path, url: &str, out: &Output) -> Result<Patched> {
         let cache = self
             .cache
             .as_ref()
@@ -352,7 +353,7 @@ impl Base {
             .env(LINK_FILE, &thin)
             .current_dir(&self.rustc.cwd);
         let _temps = Temps::of(&self.rustc);
-        if !compile(&mut cmd)? {
+        if !compile(&mut cmd, out)? {
             return Ok(Patched::NotCompiled);
         }
         if self.patches == 0 && dir.exists() {
@@ -586,7 +587,7 @@ fn lld_run(lld: &Path, args: &[String], what: &str, file: &Path) -> Result<()> {
 }
 
 /// Run a recorded rustc, printing its JSON diagnostics as rendered text; whether it succeeded.
-fn compile(cmd: &mut Command) -> Result<bool> {
+fn compile(cmd: &mut Command, to: &Output) -> Result<bool> {
     let out = cmd
         .output()
         .map_err(|e| Error::tool("rustc", cmd, e.to_string(), "install Rust with rustup"))?;
@@ -594,10 +595,10 @@ fn compile(cmd: &mut Command) -> Result<bool> {
         match serde_json::from_str::<serde_json::Value>(line) {
             Ok(v) => {
                 if let Some(text) = v.get("rendered").and_then(|r| r.as_str()) {
-                    eprint!("{text}");
+                    to.text(text);
                 }
             }
-            Err(_) => eprintln!("{line}"),
+            Err(_) => to.line(line),
         }
     }
     Ok(out.status.success())

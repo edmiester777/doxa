@@ -2,15 +2,19 @@
 
 use std::path::{Path, PathBuf};
 
+use super::log::Tag;
 use doxa_build::config::Workspace;
 use doxa_build::graph::Graph;
-use doxa_build::pipeline::note;
 
 use super::watch::{canonical, Foreign};
 
 /// The `--config` patches that point the web crate's git or crates.io copies of dev service
 /// crates at the local ones, and the directories those crates add to the watch.
-pub fn wire(graph: &Graph, siblings: &[&Workspace]) -> Result<(Vec<String>, Foreign), String> {
+pub fn wire(
+    graph: &Graph,
+    siblings: &[&Workspace],
+    web: &Tag,
+) -> Result<(Vec<String>, Foreign), String> {
     let (mut patches, mut foreign) = (Vec::new(), Foreign::default());
     let mut used = Vec::new();
     for m in &graph.members {
@@ -31,7 +35,7 @@ pub fn wire(graph: &Graph, siblings: &[&Workspace]) -> Result<(Vec<String>, Fore
         let dir = canonical(ws.package(&m.name).expect("owned").dir());
         if canonical(&m.dir) != dir {
             let Some(key) = patch_key(m.source.as_deref()) else {
-                note(format!(
+                web.note(format!(
                     "{} comes from {}, which doxa can't patch; its edits won't reach the browser",
                     m.name,
                     m.source.as_deref().unwrap_or("a path")
@@ -109,6 +113,7 @@ impl Drop for LockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dev::log::Console;
     use doxa_build::graph::Member;
 
     #[test]
@@ -167,7 +172,7 @@ mod tests {
         let graph = Graph {
             members: vec![member(&root.join("api"), None)],
         };
-        let (patches, foreign) = wire(&graph, &[&ws]).unwrap();
+        let (patches, foreign) = wire(&graph, &[&ws], &Console::Stderr.web()).unwrap();
         assert!(patches.is_empty());
         assert_eq!(foreign.wasm_dirs, [root.join("api")]);
         assert_eq!(foreign.server_only, [root.join("api/src/server")]);
@@ -183,7 +188,7 @@ mod tests {
         let graph = Graph {
             members: vec![member(checkout, Some("git+https://host/b.git#01"))],
         };
-        let (patches, foreign) = wire(&graph, &[&ws]).unwrap();
+        let (patches, foreign) = wire(&graph, &[&ws], &Console::Stderr.web()).unwrap();
         assert_eq!(
             patches,
             [format!(
