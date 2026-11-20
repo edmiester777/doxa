@@ -130,7 +130,7 @@ pub(crate) fn signature(ty: &Type) -> Option<Sig> {
         ReturnType::Default => None,
     };
     Some(Sig {
-        inputs: f.inputs.iter().cloned().collect(),
+        inputs: f.inputs.iter().map(|a| a.ty.clone()).collect(),
         output: f.output.clone(),
         future_of,
     })
