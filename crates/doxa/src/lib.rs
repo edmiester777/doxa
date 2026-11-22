@@ -142,6 +142,34 @@ pub use doxa_macros::{
     prelude, server, server_only, service, Identity,
 };
 
+#[cfg(any(feature = "macros", feature = "client"))]
+pub use doxa_macros::{android, app, desktop, ios, mobile, native};
+
+/// A gated item is gone from a build whose target doesn't match (a doctest is a web build):
+///
+/// ```
+/// #[doxa::desktop]
+/// fn menu() {}
+/// #[doxa::app]
+/// mod shell { pub fn command() {} }
+/// fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// #[doxa::desktop]
+/// fn menu() {}
+/// fn main() { menu() }
+/// ```
+///
+/// ```compile_fail
+/// #[doxa::app]
+/// mod shell { pub fn command() {} }
+/// fn main() { shell::command() }
+/// ```
+#[cfg(any(feature = "macros", feature = "client"))]
+#[doc(hidden)]
+pub mod gate_diagnostics {}
+
 /// A mirrored type and its wire copy must agree on every variant:
 ///
 /// ```

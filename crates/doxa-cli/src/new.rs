@@ -131,7 +131,7 @@ mod tests {
         assert!(read("web/src/lib.rs").contains("use shop_app_api::*;"));
         assert!(read("api/build.rs").contains("doxa_role::api()"));
         assert!(read("api/Cargo.toml").contains("server_only = [\"src/server\"]"));
-        assert!(read("api/src/main.rs").contains("shop_app_api::server::app()"));
+        assert!(read("api/src/main.rs").contains("shop_app_api::server::start(stop)"));
         assert!(!root.join("server").exists());
         let settings: serde_json::Value =
             serde_json::from_str(&read(".vscode/settings.json")).unwrap();

@@ -34,6 +34,7 @@ mod hot;
 mod icon;
 #[cfg(any(feature = "npm", feature = "react"))]
 mod js;
+pub mod native;
 #[cfg(feature = "npm")]
 mod npm;
 #[cfg(feature = "oidc")]

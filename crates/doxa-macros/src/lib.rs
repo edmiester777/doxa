@@ -228,6 +228,7 @@ mod faults;
 mod grant;
 mod method;
 mod mirror;
+mod native;
 mod patch;
 mod policy_resource;
 mod role;
@@ -926,6 +927,35 @@ pub fn entity(args: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn mirror(args: TokenStream, item: TokenStream) -> TokenStream {
     mirror::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+macro_rules! gates {
+    ($($name:ident => $cfg:literal, $doc:literal;)*) => {$(
+        #[doc = $doc]
+        #[proc_macro_attribute]
+        pub fn $name(args: TokenStream, item: TokenStream) -> TokenStream {
+            native::gate($cfg, args.into(), item.into())
+                .unwrap_or_else(syn::Error::into_compile_error)
+                .into()
+        }
+    )*};
+}
+
+gates! {
+    native => "doxa_native", "Compiles the item only for native builds (desktop, iOS, Android); `#[cfg(doxa_native)]` in a fn body.";
+    desktop => "doxa_desktop", "Compiles the item only for desktop builds; `#[cfg(doxa_desktop)]` in a fn body.";
+    mobile => "doxa_mobile", "Compiles the item only for iOS and Android builds; `#[cfg(doxa_mobile)]` in a fn body.";
+    ios => "doxa_ios", "Compiles the item only for iOS builds; `#[cfg(doxa_ios)]` in a fn body.";
+    android => "doxa_android", "Compiles the item only for Android builds; `#[cfg(doxa_android)]` in a fn body.";
+}
+
+/// The native app's entry, on `fn app() -> doxa_native::App`; on a `mod`, shell-only code. Both
+/// compile only into the native shell, never the page's wasm.
+#[proc_macro_attribute]
+pub fn app(args: TokenStream, item: TokenStream) -> TokenStream {
+    native::app(args.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

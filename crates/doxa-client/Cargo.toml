@@ -15,6 +15,11 @@ default = []
 router = ["dep:axum", "dep:tower", "dep:http", "dep:http-body-util", "dep:bytes"]
 # `oidc::Oidc`: sign-in with authorization code and PKCE, refreshed and shared across tabs.
 oidc = ["dep:sha2"]
+# `native`: the page's bridge to the native shell's commands and events.
+native = []
+
+[build-dependencies]
+doxa-role = { workspace = true }
 
 [dependencies]
 doxa-wire = { workspace = true }

@@ -141,6 +141,34 @@ pub fn generated_html(title: &str, tags: &str) -> String {
     )
 }
 
+/// Padding that keeps content clear of the notch and home indicator; `:where` gives it no
+/// specificity, so any rule of the app's wins.
+const SAFE_AREA: &str = "<style data-doxa-native>:where(html){padding:env(safe-area-inset-top) \
+env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}</style>\n";
+
+/// A native build's page: the viewport covers the whole screen (`viewport-fit=cover`), and
+/// a safe-area padding, which any app rule overrides, pads the content back in.
+pub fn edge_to_edge(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let viewport = lower.find("name=\"viewport\"").and_then(|at| {
+        let tag_start = lower[..at].rfind('<')?;
+        let tag_end = at + lower[at..].find('>')?;
+        let content =
+            tag_start + lower[tag_start..tag_end].find("content=\"")? + "content=\"".len();
+        let close = content + lower[content..].find('"')?;
+        Some((content, close))
+    });
+    let html = match viewport {
+        Some((_, close)) if lower[..close].contains("viewport-fit") => html.to_owned(),
+        Some((_, close)) => format!("{}, viewport-fit=cover{}", &html[..close], &html[close..]),
+        None => inject(
+            html,
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n",
+        ),
+    };
+    inject(&html, SAFE_AREA)
+}
+
 /// The Rust expression `dist!()` includes: every file, by dist-relative path.
 pub fn embed_rs(dist_dir: &Path, files: &[String]) -> String {
     let mut rs = String::from("&[\n");
@@ -330,6 +358,30 @@ fn text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn a_native_page_covers_the_screen_and_pads_into_the_safe_area() {
+        let generated = edge_to_edge(&generated_html("Shop", ""));
+        assert!(generated
+            .contains("content=\"width=device-width, initial-scale=1, viewport-fit=cover\""));
+        assert!(generated.contains("safe-area-inset-bottom"));
+        let own = edge_to_edge(
+            "<html><head><META NAME=\"viewport\" CONTENT=\"width=device-width\"></head></html>",
+        );
+        assert!(
+            own.contains("CONTENT=\"width=device-width, viewport-fit=cover\""),
+            "{own}"
+        );
+        let set = "<head><meta name=\"viewport\" content=\"viewport-fit=contain\"></head>";
+        assert!(edge_to_edge(set).contains("content=\"viewport-fit=contain\""));
+        let none = edge_to_edge("<html><head><title>x</title></head></html>");
+        assert!(none.contains("viewport-fit=cover"));
+    }
 }
 
 #[cfg(test)]

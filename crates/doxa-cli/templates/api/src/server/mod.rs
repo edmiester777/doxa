@@ -13,6 +13,12 @@ pub fn app() -> axum::Router {
     router
 }
 
+/// The routes and the page: what the bin serves, and a native app's in-process server.
+pub async fn start(_stop: doxa::boot::Stopping) -> axum::Router {
+    use doxa::{dist, MountSpaExt, Spa};
+    app().mount_spa(Spa::auto(dist!()))
+}
+
 /// The greeting for `name`.
 pub fn greet(name: Option<String>) -> Greeting {
     let name = name.unwrap_or_else(|| "world".into());

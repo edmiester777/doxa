@@ -144,7 +144,7 @@ pub fn pipe(tag: Tag, from: impl AsyncRead + Unpin + Send + 'static) {
     tokio::spawn(lines(from, move |l| tag.line(l)));
 }
 
-async fn lines(from: impl AsyncRead + Unpin, mut each: impl FnMut(&str)) {
+pub async fn lines(from: impl AsyncRead + Unpin, mut each: impl FnMut(&str)) {
     let mut from = BufReader::new(from);
     let mut buf = Vec::new();
     while from.read_until(b'\n', &mut buf).await.is_ok_and(|n| n > 0) {

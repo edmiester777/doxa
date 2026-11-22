@@ -67,5 +67,9 @@ fn apply() {
     });
     if let Some(title) = title {
         dom.set_title(&title);
+        #[cfg(all(feature = "native", doxa_desktop))]
+        if doxa_client::native::available() {
+            crate::native::window().set_title(&title);
+        }
     }
 }

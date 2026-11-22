@@ -10,6 +10,9 @@ description = "A client-rendered, async-native UI for doxa apps: components are 
 keywords = ["doxa", "wasm", "ui", "frontend", "react"]
 categories = ["web-programming", "wasm", "gui"]
 
+[build-dependencies]
+doxa-role = { workspace = true }
+
 [dependencies]
 doxa-client = { workspace = true }
 doxa-wire = { workspace = true }
@@ -32,6 +35,8 @@ oidc = ["doxa-client/oidc"]
 npm = ["dep:serde-wasm-bindgen"]
 # The `doxa gallery` interface, around the app's `#[story]` exports.
 gallery = []
+# `native`: the native shell's APIs, in builds for a native target.
+native = ["doxa-client/native"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

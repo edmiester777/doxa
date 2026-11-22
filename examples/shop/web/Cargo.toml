@@ -5,11 +5,26 @@ edition.workspace = true
 publish = false
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[[bin]]
+name = "shop-web"
+path = "src/main.rs"
+required-features = ["native"]
+
+[features]
+native = ["dep:doxa-native", "dep:tauri"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+doxa-native = { workspace = true, optional = true }
+tauri = { version = "2.12", optional = true, features = [] }
+
+[build-dependencies]
+doxa-role = { workspace = true, features = ["native-build"] }
 
 [dependencies]
 shop-api = { path = "../api" }
-doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind"] }
+doxa = { workspace = true, features = ["ui", "react", "forms", "export", "npm", "tailwind", "native"] }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,6 +40,11 @@ server = "shop-api"
 wasm_budget_kb = 700
 css = ["style/app.css"]
 library = { name = "@shop/kit", scope = ".shop-kit" }
+
+[package.metadata.doxa.native]
+identifier = "dev.doxa.shop"
+name = "Shop"
+schemes = ["doxa-shop"]
 
 [package.metadata.doxa.npm]
 react = "^19"

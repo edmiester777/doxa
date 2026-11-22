@@ -5,9 +5,17 @@ use doxa::ui::{form, Field};
 use shop_api::widgets::*;
 
 pub mod button;
+#[doxa::desktop]
+mod desktop;
+// Only the desktop menus reach it so far.
+#[doxa::native]
+#[cfg_attr(not(doxa_desktop), allow(dead_code))]
+mod export;
 pub mod icons;
 pub mod interop;
 pub mod kit;
+#[doxa::native]
+mod links;
 pub mod motion;
 pub mod runs;
 pub mod stories;
@@ -35,6 +43,24 @@ pub fn app() -> App {
     App::new(router).theme(LIGHT)
 }
 
+/// The native app: the shop's server, in-process.
+#[doxa::app]
+fn shell() -> doxa_native::App {
+    doxa_native::App::new()
+        .local(shop_api::server::start)
+        .commands(tauri::generate_handler![commands::export_widgets])
+}
+
+/// Commands the page invokes; `build.rs` lists each, so the page may call it.
+#[doxa::app]
+mod commands {
+    /// Writes an export to the path the user picked in the save dialog.
+    #[tauri::command]
+    pub fn export_widgets(path: String, json: String) -> Result<(), String> {
+        std::fs::write(&path, json).map_err(|e| format!("writing {path}: {e}"))
+    }
+}
+
 #[doxa::start]
 fn start() {
     app().mount("#app");
@@ -43,6 +69,10 @@ fn start() {
 /// The frame around every page; it stays mounted as pages change.
 #[page("/")]
 fn Shell() -> View {
+    #[cfg(doxa_desktop)]
+    desktop::chrome();
+    #[cfg(doxa_native)]
+    links::follow();
     view! {
         <header>
             <Link to={WidgetsPage::route()}>"All widgets"</Link>
@@ -81,8 +111,15 @@ pub struct Count {
 
 #[component]
 fn WidgetRow(widget: Widget) -> View {
+    let name = widget.name.clone();
+    let row_menu = move |e: Event| {
+        #[cfg(doxa_desktop)]
+        desktop::row_menu(&e, name.clone());
+        #[cfg(not(doxa_desktop))]
+        let _ = (e, &name);
+    };
     view! {
-        <li use:flip use:exit={"leaving"}>
+        <li use:flip use:exit={"leaving"} on:contextmenu={row_menu}>
             <Link to={WidgetPage::route(&widget.name)}>{&widget.name}</Link>
         </li>
     }
