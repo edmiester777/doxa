@@ -74,7 +74,15 @@ pub async fn run(
             tag.status(Status::Stopped);
         }
         status = child.wait() => {
+            // On a device, Tauri's `dev` exits once the app is launched; the app keeps loading
+            // from this server.
+            let launched = target != Target::Desktop && status.as_ref().is_ok_and(|s| s.success());
             match status {
+                Ok(_) if launched => {
+                    tag.line("the app is running on the device; doxa dev keeps serving it");
+                    tag.status(Status::Running(port));
+                    return;
+                }
                 Ok(s) => tag.line(format!("exited with {s}; stopping doxa dev")),
                 Err(e) => tag.line(format!("error: waiting for `doxa tauri dev`: {e}")),
             }

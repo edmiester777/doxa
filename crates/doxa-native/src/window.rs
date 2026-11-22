@@ -5,8 +5,10 @@ use tauri::{AppHandle, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry
 /// The main window's label; the runtime capability is bound to it.
 pub(crate) const MAIN: &str = "main";
 
-/// The main window's size and limits, in logical pixels. Its title follows the page's `title()`.
+/// The main window's size and limits, in logical pixels; mobile ignores them. Its title follows
+/// the page's `title()`.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 pub struct Window {
     size: (f64, f64),
     min_size: Option<(f64, f64)>,
@@ -57,11 +59,16 @@ impl Window {
     ) -> tauri::Result<WebviewWindow<Wry>> {
         let mut b = WebviewWindowBuilder::new(app, MAIN, url)
             .title(title)
-            .inner_size(self.size.0, self.size.1)
-            .resizable(self.resizable)
             .initialization_script(platform_script());
-        if let Some((w, h)) = self.min_size {
-            b = b.min_inner_size(w, h);
+        // On mobile the window is the screen; a size would leave the rest of it black.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            b = b
+                .inner_size(self.size.0, self.size.1)
+                .resizable(self.resizable);
+            if let Some((w, h)) = self.min_size {
+                b = b.min_inner_size(w, h);
+            }
         }
         let nav_origin = origin.clone();
         let opener = app.clone();

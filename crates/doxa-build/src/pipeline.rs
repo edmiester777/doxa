@@ -501,6 +501,10 @@ impl Pipeline {
             };
             dist::generated_html(title, &d.html_tags())
         };
+        let html = match self.opts.target {
+            Some(_) => dist::edge_to_edge(&html),
+            None => html,
+        };
         let cache = self.layout.stage().join("compressed");
         dist::write(
             &self.dist_dir(),
