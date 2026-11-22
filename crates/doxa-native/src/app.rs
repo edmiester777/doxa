@@ -269,13 +269,21 @@ impl App {
             })
             .build(ctx)
             .expect("building the Tauri app");
-        app.run(move |app, event| {
-            if let RunEvent::ExitRequested { api, code, .. } = event {
-                if app.try_state::<Running>().is_some() && !on_exit.swap(true, Ordering::SeqCst) {
-                    api.prevent_exit();
-                    drain_then_exit(app, code.unwrap_or(0));
-                }
+        app.run(move |app, event| match event {
+            RunEvent::ExitRequested { api, code, .. }
+                if app.try_state::<Running>().is_some()
+                    && !on_exit.swap(true, Ordering::SeqCst) =>
+            {
+                api.prevent_exit();
+                drain_then_exit(app, code.unwrap_or(0));
             }
+            #[cfg(target_os = "ios")]
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Resumed,
+                ..
+            } if label == MAIN && !on_exit.load(Ordering::SeqCst) => rebind(app),
+            _ => {}
         });
     }
 }
@@ -341,6 +349,28 @@ fn exit_on_signal(app: &AppHandle<Wry>) {
         };
         rt.block_on(doxa::boot::shutdown_signal());
         handle.exit(0);
+    });
+}
+
+/// iOS may reclaim a suspended app's sockets, so each resume binds the port afresh. If another
+/// process took it, the app quits rather than let that process inherit the origin's IPC grant.
+#[cfg(target_os = "ios")]
+fn rebind(app: &AppHandle<Wry>) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let Some(running) = handle.try_state::<Running>() else {
+            return;
+        };
+        let Err(e) = running.0.lock().expect("server").rebind() else {
+            return;
+        };
+        if let (Some(w), Ok(blank)) = (handle.get_webview_window(MAIN), "about:blank".parse()) {
+            let _ = w.navigate(blank);
+        }
+        fail(
+            &handle,
+            format!("The app lost its port while in the background: {e}"),
+        );
     });
 }
 

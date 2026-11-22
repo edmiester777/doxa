@@ -307,10 +307,11 @@ async fn run_serve(
 /// Serve on an already-bound `listener` until `signal` resolves, then drain and tear down.
 pub async fn serve_listener(
     serve: Serve,
-    listener: tokio::net::TcpListener,
+    listener: impl axum::serve::Listener<Addr = SocketAddr>,
     stop: Stop,
     signal: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), BoxError> {
+    use axum::serve::ListenerExt;
     let Serve {
         router,
         drain,
@@ -322,8 +323,9 @@ pub async fn serve_listener(
         if let Ok(addr) = listener.local_addr() {
             tracing::info!(%addr, "listening");
         }
+        // `tap_io` is axum's route to `ConnectInfo<SocketAddr>` for any listener.
         let server = axum::serve(
-            listener,
+            listener.tap_io(|_| {}),
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
