@@ -539,7 +539,6 @@ impl Window {
 
     /// Shows, unminimizes and focuses it.
     pub fn focus(self) {
-        self.act(json!({ "action": "show" }));
         self.act(json!({ "action": "focus" }))
     }
 

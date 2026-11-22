@@ -85,9 +85,7 @@ impl Target {
     }
 }
 
-/// Emits the `doxa_native` / `doxa_desktop` / `doxa_mobile` / `doxa_ios` / `doxa_android` cfgs
-/// for this build, which `#[doxa::native]` and its siblings test. Returns the target.
-///
+/// Emits this build's `doxa_native`-family cfgs, which `#[doxa::native]` and its siblings test.
 /// Panics on a bad `$DOXA_TARGET`.
 pub fn target_cfgs() -> Option<Target> {
     println!(

@@ -9,9 +9,30 @@ use tauri::{Emitter, Manager, Runtime, State};
 /// Emitted with the URLs a deep link opened the app with.
 pub(crate) const OPEN_URL_EVENT: &str = "doxa://open-url";
 
-/// Deep-link URLs not yet taken by the page; the first launch's arrive before wasm listens.
+/// Deep-link URLs from before the page first took them; after that the event alone carries them.
 #[derive(Default)]
-pub(crate) struct OpenUrls(Mutex<Vec<String>>);
+pub(crate) struct OpenUrls(Mutex<Buffered>);
+
+#[derive(Default)]
+struct Buffered {
+    urls: Vec<String>,
+    taken: bool,
+}
+
+impl OpenUrls {
+    fn hold(&self, urls: &[String]) {
+        let mut b = self.0.lock().expect("open urls");
+        if !b.taken {
+            b.urls.extend(urls.iter().cloned());
+        }
+    }
+
+    fn take(&self) -> Vec<String> {
+        let mut b = self.0.lock().expect("open urls");
+        b.taken = true;
+        std::mem::take(&mut b.urls)
+    }
+}
 
 /// Records URLs a deep link opened, and tells a listening page.
 pub(crate) fn opened<R: Runtime>(app: &tauri::AppHandle<R>, urls: Vec<String>) {
@@ -23,17 +44,14 @@ pub(crate) fn opened<R: Runtime>(app: &tauri::AppHandle<R>, urls: Vec<String>) {
         return;
     }
     if let Some(buf) = app.try_state::<OpenUrls>() {
-        buf.0
-            .lock()
-            .expect("open urls")
-            .extend(urls.iter().cloned());
+        buf.hold(&urls);
     }
     let _ = app.emit(OPEN_URL_EVENT, urls);
 }
 
 #[tauri::command]
 fn take_open_urls(urls: State<'_, OpenUrls>) -> Vec<String> {
-    std::mem::take(&mut *urls.0.lock().expect("open urls"))
+    urls.take()
 }
 
 /// What `native::window()` does; desktop only, as mobile windows can't be moved or sized.
@@ -66,7 +84,11 @@ fn window<R: Runtime>(window: tauri::WebviewWindow<R>, action: WindowAction) -> 
         WindowAction::Fullscreen { on } => window.set_fullscreen(on),
         WindowAction::Show => window.show(),
         WindowAction::Hide => window.hide(),
-        WindowAction::Focus => window.set_focus(),
+        // Windows' `set_focus` does nothing to a minimized window.
+        WindowAction::Focus => window
+            .unminimize()
+            .and_then(|()| window.show())
+            .and_then(|()| window.set_focus()),
         WindowAction::Close => window.close(),
         WindowAction::SetTitle { title } => window.set_title(&title),
     };
@@ -120,6 +142,15 @@ mod tests {
         for c in REGISTERED {
             assert!(doxa_role::native::DOXA_COMMANDS.contains(c), "{c}");
         }
+    }
+
+    #[test]
+    fn urls_are_held_only_until_the_page_first_takes_them() {
+        let urls = OpenUrls::default();
+        urls.hold(&["acme:/a".into()]);
+        assert_eq!(urls.take(), ["acme:/a"]);
+        urls.hold(&["acme:/b".into()]);
+        assert!(urls.take().is_empty());
     }
 
     #[test]

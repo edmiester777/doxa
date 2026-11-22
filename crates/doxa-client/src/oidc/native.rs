@@ -8,9 +8,8 @@ use super::{default_host, origin, pkce, Host};
 /// The query parameter the callback comes back to the page in.
 const CALLBACK: &str = "doxa_oidc";
 
-/// The page inside a doxa native app. The issuer opens in the system browser, and the shell
-/// brings its callback back. `redirect_uri` must be one of the app's `schemes` or an
-/// `oidc_loopback` port.
+/// The page in a native app: the issuer opens in the system browser. `redirect_uri` must be one
+/// of the app's `schemes` or an `oidc_loopback` port.
 pub struct NativeHost {
     page: Rc<dyn Host>,
     abandoned: Rc<RefCell<Option<Abandoned>>>,

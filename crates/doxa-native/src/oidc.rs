@@ -1,6 +1,7 @@
 //! `sign_in`: a native sign-in in the system browser, its callback caught on a listed loopback
 //! port or app scheme and handed back to the page.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -47,6 +48,7 @@ enum Plan {
     /// Sign-out: open it, wait for nothing.
     Open,
     Loopback {
+        ip: IpAddr,
         port: u16,
         path: String,
         base: String,
@@ -91,6 +93,11 @@ fn plan(url: &str, policy: &Policy) -> Result<Plan, String> {
     } else if r.scheme() == "http" && loopback_host(&r) {
         match r.port() {
             Some(port) if policy.loopback.contains(&port) => Plan::Loopback {
+                // A browser tries IPv4 for `localhost` when ::1 refuses.
+                ip: match r.host_str() {
+                    Some("[::1]") => Ipv6Addr::LOCALHOST.into(),
+                    _ => Ipv4Addr::LOCALHOST.into(),
+                },
                 port,
                 path: r.path().to_owned(),
                 base: base(&back),
@@ -122,10 +129,10 @@ pub(crate) async fn sign_in<R: Runtime>(
     };
     // Bound before the browser opens, so a quick issuer can't beat it.
     let listener = match &plan {
-        Plan::Loopback { port, .. } => Some(
-            tokio::net::TcpListener::bind(("127.0.0.1", *port))
+        Plan::Loopback { ip, port, .. } => Some(
+            tokio::net::TcpListener::bind((*ip, *port))
                 .await
-                .map_err(|e| format!("listening on 127.0.0.1:{port} for the sign-in: {e}"))?,
+                .map_err(|e| format!("listening on {ip}:{port} for the sign-in: {e}"))?,
         ),
         _ => None,
     };
@@ -249,11 +256,16 @@ mod tests {
         assert_eq!(
             plan(&auth("http://127.0.0.1:47999/cb"), &policy()),
             Ok(Plan::Loopback {
+                ip: Ipv4Addr::LOCALHOST.into(),
                 port: 47999,
                 path: "/cb".into(),
                 base: "http://127.0.0.1:47999/cb".into()
             })
         );
+        assert!(matches!(
+            plan(&auth("http://[::1]:47999/cb"), &policy()),
+            Ok(Plan::Loopback { ip, .. }) if ip == IpAddr::from(Ipv6Addr::LOCALHOST)
+        ));
         assert!(plan(&auth("http://127.0.0.1:48000/cb"), &policy())
             .unwrap_err()
             .contains("oidc_loopback"));

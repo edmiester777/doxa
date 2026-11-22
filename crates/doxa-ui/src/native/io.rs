@@ -1,5 +1,8 @@
 //! What every native target has: dialogs, notifications, the clipboard, URLs and shell events.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -27,10 +30,18 @@ pub fn on<T: DeserializeOwned + 'static>(event: &str, f: impl Fn(T) + 'static) {
 pub fn on_open_url(f: impl Fn(Vec<String>) + 'static) {
     let f = latest(f);
     effect((), async move |_: &()| {
+        // What the event brings while the take is in flight; the shell held those too.
+        let heard = Rc::new(RefCell::new(Some(Vec::<String>::new())));
+        let seen = heard.clone();
         let listening = listen("doxa://open-url", move |urls: Vec<String>| {
+            if let Some(s) = seen.borrow_mut().as_mut() {
+                s.extend(urls.iter().cloned());
+            }
             f.with(|f| f(urls));
         });
-        let waiting: Vec<String> = invoke("plugin:doxa|take_open_urls", &json!({})).await?;
+        let mut waiting: Vec<String> = invoke("plugin:doxa|take_open_urls", &json!({})).await?;
+        let heard = heard.borrow_mut().take().unwrap_or_default();
+        waiting.retain(|u| !heard.contains(u));
         if !waiting.is_empty() {
             f.with(|f| f(waiting));
         }

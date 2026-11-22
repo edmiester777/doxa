@@ -578,12 +578,11 @@ mod tests {
         assert_eq!(c.apple_team.as_deref(), Some("T"));
     }
 
+    /// A fresh dir per call, as tests run in parallel in one process.
     fn dir_with(files: &[&str]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "doxa-native-{}-{}",
-            std::process::id(),
-            files.join("-").replace('/', "_")
-        ));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("doxa-native-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for f in files {
             let p = dir.join(f);

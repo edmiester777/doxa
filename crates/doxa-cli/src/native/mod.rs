@@ -92,7 +92,7 @@ fn subcommand(target: Target) -> Option<&'static str> {
 }
 
 /// The Tauri `build` arguments for a web crate whose page is at `dist`. A mobile local-mode
-/// build gets `dist` from [`mobile::dist_config`] instead: Xcode and Gradle run cargo.
+/// build gets `dist` from [`mobile::cargo_config`] instead: Xcode and Gradle run cargo.
 fn build_args(
     cfg: &NativeConfig,
     api: Option<&str>,
@@ -118,7 +118,13 @@ fn build_args(
             if target == Target::Desktop {
                 cargo.extend([
                     "--config".into(),
-                    format!("env.DOXA_DIST='{}'", dist.display()).into(),
+                    format!(
+                        "env.DOXA_DIST={}",
+                        toml_edit::value(dist.to_string_lossy().as_ref())
+                            .to_string()
+                            .trim()
+                    )
+                    .into(),
                 ]);
             }
         }
@@ -248,8 +254,23 @@ mod tests {
                 "--verbose",
                 "--",
                 "--config",
-                "env.DOXA_DIST='/t/dist-desktop'",
+                "env.DOXA_DIST=\"/t/dist-desktop\"",
             ]
+        );
+        let quoted = build_args(
+            &cfg("identifier = \"com.a.b\""),
+            Some("shop-api"),
+            Path::new("/home/o'brien/dist"),
+            true,
+            Target::Desktop,
+            &[],
+        )
+        .unwrap();
+        let value = strings(quoted).pop().unwrap();
+        let parsed: toml::Table = value.parse().unwrap();
+        assert_eq!(
+            parsed["env"]["DOXA_DIST"].as_str(),
+            Some("/home/o'brien/dist")
         );
         assert!(build_args(
             &cfg("identifier = \"com.a.b\""),
