@@ -432,6 +432,15 @@ fn report(component: Option<&str>, e: &Thrown) {
     eprintln!("{msg}");
 }
 
+/// A problem worth seeing that nothing catches.
+#[cfg_attr(not(all(feature = "native", doxa_desktop)), allow(dead_code))]
+pub(crate) fn warn(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys_console(msg);
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{msg}");
+}
+
 #[cfg(target_arch = "wasm32")]
 fn web_sys_console(msg: &str) {
     #[wasm_bindgen::prelude::wasm_bindgen]

@@ -1,7 +1,7 @@
 use axum::Router;
-use doxa::{dist, MountSpaExt, Spa};
+use doxa::boot::Stopping;
 
 #[doxa::main]
-async fn start() -> Router {
-    __crate___api::server::app().mount_spa(Spa::auto(dist!()))
+async fn start(stop: Stopping) -> Router {
+    __crate___api::server::start(stop).await
 }

@@ -33,6 +33,8 @@ pub struct BuildOptions {
     pub base: Option<String>,
     /// `--config` values for every cargo call, e.g. a `doxa dev` patch to a sibling's source.
     pub cargo_config: Vec<String>,
+    /// The native shell the page is for; its wasm gets that target's cfgs and its own dist.
+    pub target: Option<doxa_role::Target>,
     /// Where notes and tool output go.
     pub output: Output,
 }
@@ -71,10 +73,11 @@ impl Pipeline {
         let workspace = Workspace::load(cwd)?;
         let web = workspace.web_crate(opts.package.as_deref())?;
         let layout = workspace.layout();
-        let layout = if opts.gallery {
-            layout.apart("gallery-build")
-        } else {
-            layout
+        let layout = match (opts.gallery, opts.target) {
+            (true, _) => layout.apart("gallery-build"),
+            // Its own target dir, so switching between web and native builds rebuilds nothing.
+            (false, Some(t)) => layout.apart(&format!("{}-build", t.as_str())),
+            (false, None) => layout,
         };
         let graph = Graph::load(cwd, &web.name, &opts.cargo_config)?;
         let needed = graph.npm(&web.name, &web.config.npm)?;
@@ -112,10 +115,10 @@ impl Pipeline {
 
     /// The served directory.
     pub fn dist_dir(&self) -> PathBuf {
-        if self.opts.gallery {
-            self.layout.gallery()
-        } else {
-            self.layout.dist()
+        match (self.opts.gallery, self.opts.target) {
+            (true, _) => self.layout.gallery(),
+            (false, Some(t)) => self.layout.root.join(format!("dist-{}", t.as_str())),
+            (false, None) => self.layout.dist(),
         }
     }
 
@@ -172,6 +175,9 @@ impl Pipeline {
         }
         if self.opts.gallery {
             cmd.args(["--features", "doxa/gallery"]);
+        }
+        if let Some(t) = self.opts.target {
+            cmd.env(doxa_role::TARGET_ENV, t.as_str());
         }
         // wasm-split builds its call graph from the relocations and finds functions by name;
         // only this crate links. Both are stripped from what ships.

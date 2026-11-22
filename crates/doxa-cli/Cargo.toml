@@ -18,6 +18,7 @@ doc = false
 
 [dependencies]
 doxa-build = { workspace = true, features = ["pipeline"] }
+doxa-role = { workspace = true }
 doxa-fmt = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { workspace = true }
@@ -36,6 +37,11 @@ quote = { workspace = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 ansi-to-tui = "8.0.1"
 unicode-width = "0.2"
+# `doxa tauri`, which `doxa build --desktop|--ios|--android` runs; its output is tagged `[tauri]`.
+tauri-cli = "2.12"
+toml_edit = "0.23"
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 # jemalloc doesn't build for MSVC.
 [target.'cfg(not(windows))'.dependencies]
@@ -46,4 +52,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+toml = "0.9"
 tower = { workspace = true, features = ["util"] }

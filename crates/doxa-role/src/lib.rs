@@ -10,6 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "native")]
+pub mod native;
+
 /// Environment variable doxa's macros read to pick which half to emit.
 pub const ROLE_ENV: &str = "DOXA_ROLE";
 /// The lib target's root file, absolute: where `doxa::prelude!()` declares the modules below.
@@ -23,10 +26,126 @@ pub const SERVICE_ENV: &str = "DOXA_SERVICE";
 /// `[package.metadata.doxa] tenant_field`: the `route` span's field for the caller's tenant.
 pub const TENANT_FIELD_ENV: &str = "DOXA_TENANT_FIELD";
 
-/// Build this crate as the client half: routes become typed HTTP calls.
+/// The native target a build is for: `desktop`, `ios` or `android`. doxa sets it for the page's
+/// wasm and the desktop shell; mobile shells are recognised by their `target_os`.
+pub const TARGET_ENV: &str = "DOXA_TARGET";
+
+/// A native shell target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// macOS, Windows or Linux.
+    Desktop,
+    /// iOS.
+    Ios,
+    /// Android.
+    Android,
+}
+
+impl Target {
+    /// The `cfg`s a build for this target gets.
+    pub fn cfgs(self) -> &'static [&'static str] {
+        match self {
+            Target::Desktop => &["doxa_native", "doxa_desktop"],
+            Target::Ios => &["doxa_native", "doxa_mobile", "doxa_ios"],
+            Target::Android => &["doxa_native", "doxa_mobile", "doxa_android"],
+        }
+    }
+
+    /// `desktop`, `ios` or `android`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::Desktop => "desktop",
+            Target::Ios => "ios",
+            Target::Android => "android",
+        }
+    }
+
+    /// Parses `desktop`, `ios` or `android`.
+    pub fn parse(s: &str) -> Option<Target> {
+        match s {
+            "desktop" => Some(Target::Desktop),
+            "ios" => Some(Target::Ios),
+            "android" => Some(Target::Android),
+            _ => None,
+        }
+    }
+
+    /// The target of this build: `$DOXA_TARGET`, else an iOS/Android `target_os`.
+    fn of(doxa_target: Option<&str>, target_os: &str) -> Result<Option<Target>, String> {
+        match doxa_target.filter(|t| !t.is_empty()) {
+            Some(t) => Target::parse(t).map(Some).ok_or_else(|| {
+                format!("`{TARGET_ENV}={t}`: expected `desktop`, `ios` or `android`")
+            }),
+            None => Ok(match target_os {
+                "ios" => Some(Target::Ios),
+                "android" => Some(Target::Android),
+                _ => None,
+            }),
+        }
+    }
+}
+
+/// Emits the `doxa_native` / `doxa_desktop` / `doxa_mobile` / `doxa_ios` / `doxa_android` cfgs
+/// for this build, which `#[doxa::native]` and its siblings test. Returns the target.
+///
+/// Panics on a bad `$DOXA_TARGET`.
+pub fn target_cfgs() -> Option<Target> {
+    println!(
+        "cargo::rustc-check-cfg=cfg(doxa_native, doxa_desktop, doxa_mobile, doxa_ios, doxa_android)"
+    );
+    println!("cargo::rerun-if-env-changed={TARGET_ENV}");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target = Target::of(std::env::var(TARGET_ENV).ok().as_deref(), &os)
+        .unwrap_or_else(|e| panic!("{e}"));
+    for cfg in target.map(Target::cfgs).unwrap_or_default() {
+        println!("cargo::rustc-cfg={cfg}");
+    }
+    target
+}
+
+/// Build this crate as the client half: routes become typed HTTP calls. With `--features native`
+/// on a native target, it is also the app's shell; see [`Client`].
 pub fn client() {
-    emit("client");
-    println!("cargo::rustc-cfg=doxa_client");
+    Client::new().build();
+}
+
+/// [`client`], with the app's own shell commands.
+#[derive(Debug, Default)]
+pub struct Client {
+    commands: &'static [&'static str],
+}
+
+impl Client {
+    /// The defaults [`client`] uses.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The app's `#[tauri::command]`s the page may call; each gets an `allow-<command>`.
+    pub fn commands(mut self, commands: &'static [&'static str]) -> Self {
+        self.commands = commands;
+        self
+    }
+
+    /// Emits the build. Panics when a native shell build can't be set up.
+    pub fn build(self) {
+        emit("client");
+        println!("cargo::rustc-cfg=doxa_client");
+        let target = target_cfgs();
+        let shell = target.is_some()
+            && std::env::var_os("CARGO_FEATURE_NATIVE").is_some()
+            && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("wasm32");
+        if !shell {
+            return;
+        }
+        #[cfg(feature = "native-build")]
+        native::shell(self.commands);
+        #[cfg(not(feature = "native-build"))]
+        panic!(
+            "building the native shell needs `doxa-role = {{ features = [\"native-build\"] }}` in \
+             [build-dependencies]"
+        );
+    }
 }
 
 /// Build this crate for both halves: routes serve off wasm and are calls everywhere.
@@ -34,6 +153,7 @@ pub fn client() {
 /// Panics on a bad `server_only` / `client_only` in `[package.metadata.doxa]`.
 pub fn api() {
     emit("api");
+    target_cfgs();
     let split = manifest();
     println!("cargo::rustc-env={LIB_ENV}={}", split.lib.display());
     println!(
@@ -266,6 +386,35 @@ mod tests {
         );
         assert!(err("[package.metadata.doxa]\nserver_only = [\"src/empty\"]").contains("mod.rs"));
         assert!(err("[package.metadata.doxa]\nserver_only = \"src/a\"").contains("list"));
+    }
+
+    #[test]
+    fn the_target_comes_from_doxa_target_else_a_mobile_target_os() {
+        assert_eq!(Target::of(None, "macos"), Ok(None));
+        assert_eq!(Target::of(Some(""), "linux"), Ok(None));
+        assert_eq!(Target::of(None, "ios"), Ok(Some(Target::Ios)));
+        assert_eq!(Target::of(None, "android"), Ok(Some(Target::Android)));
+        assert_eq!(
+            Target::of(Some("desktop"), "unknown"),
+            Ok(Some(Target::Desktop))
+        );
+        assert_eq!(Target::of(Some("ios"), "unknown"), Ok(Some(Target::Ios)));
+        assert!(Target::of(Some("tvos"), "macos")
+            .unwrap_err()
+            .contains("expected"));
+    }
+
+    #[test]
+    fn every_target_is_native_and_mobile_ones_are_mobile() {
+        assert_eq!(Target::Desktop.cfgs(), ["doxa_native", "doxa_desktop"]);
+        assert_eq!(
+            Target::Ios.cfgs(),
+            ["doxa_native", "doxa_mobile", "doxa_ios"]
+        );
+        assert_eq!(
+            Target::Android.cfgs(),
+            ["doxa_native", "doxa_mobile", "doxa_android"]
+        );
     }
 
     #[test]

@@ -20,6 +20,9 @@ const RUSTC_CRATE: &str = "DOXA_HOT_CRATE";
 const LINK_FILE: &str = "DOXA_HOT_LINK";
 /// The names of doxa's own environment variables, one per line, which the record leaves out.
 const INHERITED: &str = "DOXA_HOT_INHERITED";
+
+/// What marks a `doxa` process as a rustc wrapper or linker; a child doxa runs as itself unsets them.
+pub const ENV: [&str; 4] = [RUSTC_FILE, RUSTC_CRATE, LINK_FILE, INHERITED];
 /// Inherited variables cargo may change for rustc, so recorded anyway.
 const LIBRARY_PATHS: [&str; 5] = [
     "PATH",

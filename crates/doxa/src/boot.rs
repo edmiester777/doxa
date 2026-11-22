@@ -26,6 +26,22 @@ impl Stopping {
     }
 }
 
+/// Begins shutdown for the [`Stopping`] made with it.
+pub struct Stop(watch::Sender<bool>);
+
+impl Stop {
+    /// Begin shutdown.
+    pub fn stop(&self) {
+        let _ = self.0.send(true);
+    }
+}
+
+/// A linked [`Stop`] and [`Stopping`], for a host that runs `start` itself.
+pub fn stopping() -> (Stop, Stopping) {
+    let (tx, rx) = watch::channel(false);
+    (Stop(tx), Stopping(rx))
+}
+
 /// What `start` serves.
 pub struct Serve {
     router: Router,
@@ -69,6 +85,12 @@ impl Serve {
     /// Runs after serving stops, however it stopped.
     pub fn teardown(mut self, f: impl Future<Output = ()> + 'static) -> Self {
         self.teardown = Some(Box::pin(f));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn map_router(mut self, f: impl FnOnce(Router) -> Router) -> Self {
+        self.router = f(self.router);
         self
     }
 }
@@ -231,8 +253,8 @@ where
     F: FnOnce(Stopping) -> Fut,
     Fut: Future<Output: IntoServe>,
 {
-    let (tx, rx) = watch::channel(false);
-    let serve = start(Stopping(rx.clone())).await.into_serve()?;
+    let (stop, stopping) = stopping();
+    let serve = start(stopping).await.into_serve()?;
     let env_port = std::env::var("PORT").ok().and_then(|p| p.parse().ok());
     // Under `doxa dev`, its SIGKILL after 10 s is the backstop instead.
     let exit_early = serve.exit_on_second_signal && std::env::var_os("DOXA_DEV_CHILD").is_none();
@@ -242,7 +264,7 @@ where
             tokio::spawn(exit_on_second_signal());
         }
     };
-    run_serve(serve, port, env_port, (tx, rx), signal).await
+    run_serve(serve, port, env_port, stop, signal).await
 }
 
 /// Where to bind: `--port` on loopback, else `$PORT` on the configured host, else as configured.
@@ -258,31 +280,55 @@ async fn run_serve(
     serve: Serve,
     port: Option<u16>,
     env_port: Option<u16>,
-    (tx, rx): (watch::Sender<bool>, watch::Receiver<bool>),
+    stop: Stop,
     signal: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), BoxError> {
-    let Serve {
-        router,
-        addr,
-        drain,
-        teardown,
-        ..
-    } = serve;
-    let result = async {
-        let configured = tokio::net::lookup_host(addr.as_str())
+    let bound = async {
+        let addr = serve.addr.as_str();
+        let configured = tokio::net::lookup_host(addr)
             .await?
             .next()
             .ok_or_else(|| format!("{addr} resolves to no address"))?;
         let addr = bind_addr(port, env_port, configured);
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!(%addr, "listening");
+        Ok::<_, BoxError>(tokio::net::TcpListener::bind(addr).await?)
+    }
+    .await;
+    match bound {
+        Ok(listener) => serve_listener(serve, listener, stop, signal).await,
+        Err(e) => {
+            if let Some(t) = serve.teardown {
+                t.await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Serve on an already-bound `listener` until `signal` resolves, then drain and tear down.
+pub async fn serve_listener(
+    serve: Serve,
+    listener: tokio::net::TcpListener,
+    stop: Stop,
+    signal: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), BoxError> {
+    let Serve {
+        router,
+        drain,
+        teardown,
+        ..
+    } = serve;
+    let rx = stop.0.subscribe();
+    let result = async {
+        if let Ok(addr) = listener.local_addr() {
+            tracing::info!(%addr, "listening");
+        }
         let server = axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             signal.await;
-            let _ = tx.send(true);
+            stop.stop();
         })
         .into_future();
         let drained = async {
@@ -530,13 +576,7 @@ mod tests {
         };
         let served = tokio::task::LocalSet::new();
         let run = served.run_until(async move {
-            let task = tokio::task::spawn_local(run_serve(
-                serve,
-                None,
-                None,
-                watch::channel(false),
-                signal,
-            ));
+            let task = tokio::task::spawn_local(run_serve(serve, None, None, stopping().0, signal));
             let mut conn = loop {
                 if let Ok(c) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
                     break c;
@@ -559,6 +599,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_listener_serves_a_prebound_listener_and_signals_stopping() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (stop, stopping) = stopping();
+        let flag = Arc::new(AtomicBool::new(false));
+        let serve = Serve::new(Router::new().route("/", axum::routing::get(|| async { "hi" })))
+            .map_router(|r| r.route("/extra", axum::routing::get(|| async { "extra" })))
+            .drain(Duration::from_millis(50))
+            .teardown(torn_down(&flag));
+        let (go, went) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::task::LocalSet::new();
+        let run = served.run_until(async move {
+            let task =
+                tokio::task::spawn_local(serve_listener(serve, listener, stop, async move {
+                    let _ = went.await;
+                }));
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            conn.write_all(b"GET /extra HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut body = String::new();
+            conn.read_to_string(&mut body).await.unwrap();
+            assert!(body.ends_with("extra"), "{body}");
+            go.send(()).unwrap();
+            stopping.wait().await;
+            task.await.unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("shutdown completes")
+            .unwrap();
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn teardown_runs_when_binding_fails() {
         let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = taken.local_addr().unwrap();
@@ -566,14 +644,7 @@ mod tests {
         let serve = Serve::new(Router::new())
             .addr(addr.to_string())
             .teardown(torn_down(&flag));
-        let result = run_serve(
-            serve,
-            None,
-            None,
-            watch::channel(false),
-            std::future::pending(),
-        )
-        .await;
+        let result = run_serve(serve, None, None, stopping().0, std::future::pending()).await;
         assert!(result.is_err());
         assert!(flag.load(Ordering::SeqCst));
     }

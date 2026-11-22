@@ -44,9 +44,12 @@ pub mod tool;
 
 #[cfg(feature = "client")]
 pub use client::{openapi_from_json, ClientSpec, GenerateError};
+/// `[package.metadata.doxa.native]` and the `tauri.conf.json` generated from it.
+#[cfg(feature = "pipeline")]
+pub use doxa_role::native;
 #[cfg(feature = "tool")]
 pub use error::{Error, Result};
 #[cfg(feature = "pipeline")]
-pub use output::Output;
+pub use output::{plain, settled, Output};
 #[cfg(feature = "pipeline")]
 pub use pipeline::{BuildOptions, Pipeline};

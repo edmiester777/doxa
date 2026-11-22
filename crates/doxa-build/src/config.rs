@@ -57,6 +57,8 @@ pub struct DoxaConfig {
     pub dev: Option<DevConfig>,
     /// The tenant column; `doxa-role` passes it to the macros as `DOXA_TENANT_FIELD`.
     pub tenant_field: Option<String>,
+    /// How the web crate builds as a native app.
+    pub native: Option<doxa_role::native::NativeConfig>,
 }
 
 /// `[package.metadata.doxa.dev]`: `port = 8081`, and `bin` when the package has several.
@@ -198,18 +200,27 @@ impl Package {
 
     /// `[package.metadata.doxa]`, if present.
     pub fn doxa(&self) -> Result<Option<DoxaConfig>> {
-        match self.metadata.get("doxa") {
-            None => Ok(None),
-            Some(v) => serde_json::from_value(v.clone()).map(Some).map_err(|e| {
+        let Some(v) = self.metadata.get("doxa") else {
+            return Ok(None);
+        };
+        let config: DoxaConfig = serde_json::from_value(v.clone()).map_err(|e| {
+            Error::config(
+                format!(
+                    "[package.metadata.doxa] in {}: {e}",
+                    self.manifest_path.display()
+                ),
+                "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, server_only, client_only, service, tenant_field, and npm, services, preprocess, proxy, dev and native tables",
+            )
+        })?;
+        if let Some(native) = &config.native {
+            native.validate().map_err(|e| {
                 Error::config(
-                    format!(
-                        "[package.metadata.doxa] in {}: {e}",
-                        self.manifest_path.display()
-                    ),
-                    "keys are role, server, css, css_sources, public, base, wasm_budget_kb, chunk_budget_kb, library, server_only, client_only, service, tenant_field, and npm, services, preprocess, proxy and dev tables",
+                    format!("{e}, in {}", self.manifest_path.display()),
+                    "see the `[package.metadata.doxa.native]` keys in doxa-role's `NativeConfig`",
                 )
-            }),
+            })?;
         }
+        Ok(Some(config))
     }
 
     /// `[package.metadata.doxa.dev]` alone, so a sibling on another doxa revision still loads.
@@ -622,6 +633,19 @@ mod tests {
         assert_eq!(reports.env.as_deref(), Some("A"));
         assert!(reports.strip);
         assert!(!config.proxy["/api"].strip);
+    }
+
+    #[test]
+    fn a_native_table_parses_and_is_validated() {
+        let mut ws = Workspace::from_json(METADATA).unwrap();
+        let web = &mut ws.packages[2];
+        web.metadata = serde_json::json!({"doxa": {"role": "client",
+            "native": {"identifier": "com.acme.shop", "schemes": ["acme"]}}});
+        let native = web.doxa().unwrap().unwrap().native.unwrap();
+        assert_eq!(native.schemes, ["acme"]);
+        web.metadata = serde_json::json!({"doxa": {"native": {"identifier": "shop"}}});
+        let err = web.doxa().unwrap_err().to_string();
+        assert!(err.contains("identifier"), "{err}");
     }
 
     #[test]

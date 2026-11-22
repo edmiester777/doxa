@@ -97,6 +97,9 @@ main = ["docs", "dep:doxa-macros", "dep:clap", "dep:tokio", "dep:tracing"]
 client =["dep:doxa-client", "dep:doxa-macros"]
 # `doxa::client::oidc`: sign-in in the browser with authorization code and PKCE.
 oidc = ["client", "doxa-client/oidc", "doxa-ui?/oidc"]
+# `doxa::ui::native` and `doxa::client::native`: the native shell's APIs, in `doxa build|dev
+# --desktop|--ios|--android` builds.
+native = ["client", "doxa-client/native", "doxa-ui?/native"]
 # Drive client calls through an in-process axum `Router`, for native tests.
 client-router = ["client", "doxa-client/router"]
 ui = ["client", "dep:doxa-ui"]

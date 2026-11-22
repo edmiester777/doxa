@@ -4,6 +4,7 @@
 mod log;
 mod proxy;
 mod service;
+mod shell;
 mod siblings;
 mod tui;
 mod watch;
@@ -60,7 +61,8 @@ fn rebuild(p: &mut Pipeline, plan: Plan) -> doxa_build::Result<Option<Dist>> {
 const MAX_PARALLEL_BUILD: NonZeroUsize = NonZeroUsize::new(4).expect("nonzero");
 
 /// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page, and `tui`
-/// gives each service a pane when a terminal is attached.
+/// gives each service a pane when a terminal is attached. With a `target`, the native app runs
+/// too, showing the page.
 pub async fn run(
     package: Option<String>,
     port: u16,
@@ -68,7 +70,11 @@ pub async fn run(
     hot: bool,
     tui: bool,
     max_parallel: Option<NonZeroUsize>,
+    target: Option<doxa_role::Target>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(t) = target {
+        crate::native::supported(t)?;
+    }
     let console = if tui && tui::available() {
         Console::Tui(tui::Shared::new())
     } else {
@@ -84,6 +90,7 @@ pub async fn run(
         locked,
         hot,
         output: console.output(),
+        target,
         ..BuildOptions::default()
     };
     serve(opts, port, console, max_parallel)
@@ -124,6 +131,12 @@ struct Loaded {
 
 fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, SendError> {
     let mut pipeline = Pipeline::new(&cwd, opts.clone())?;
+    if opts.target.is_some() {
+        let web = &pipeline.web;
+        crate::native::config(web)
+            .and_then(|cfg| crate::native::prepare(web, &cfg, &opts.output))
+            .map_err(|e| e.to_string())?;
+    }
     let services = match opts.gallery {
         true => Vec::new(),
         false => pipeline.workspace.dev_services()?,
@@ -221,7 +234,7 @@ async fn serve(
     max_parallel: Option<NonZeroUsize>,
 ) -> Result<(), SendError> {
     let cwd = std::env::current_dir()?;
-    let (hot, gallery) = (opts.hot, opts.gallery);
+    let (hot, gallery, target) = (opts.hot, opts.gallery, opts.target);
     let web = console.web();
     let (stops, mut stop) = signal::channel(0);
     console.stops(stops.clone());
@@ -299,6 +312,10 @@ async fn serve(
         foreign,
     );
     let mut views = watch.client_views();
+    let shell = target.map(|t| {
+        let tag = console.tag("tauri", siblings.len() + 1, width.max("tauri".len()));
+        (pipeline.web.dir.clone(), t, tag)
+    });
     let pipeline = Arc::new(Mutex::new(pipeline));
     for route in &routes {
         web.note(format!("proxying {} to {}", route.prefix, route.target));
@@ -344,7 +361,7 @@ async fn serve(
     tokio::spawn(async move { axum::serve(listener, app).await });
 
     // Services stop on the signal itself, not when this loop next breaks.
-    listen(stops)?;
+    listen(stops.clone())?;
     let mut tasks = Vec::new();
     // Startup build slots go out in order: the services, the web crate, its server.
     let mut turns = Vec::new();
@@ -433,6 +450,17 @@ async fn serve(
             }
         },
     };
+    // After the first page build, so the shell's cargo run doesn't take its build slot.
+    if let Some((dir, t, tag)) = shell {
+        tasks.push(tokio::spawn(shell::run(
+            dir,
+            served_port,
+            t,
+            tag,
+            stop.clone(),
+            stops,
+        )));
+    }
     // False after a failed wasm rebuild: the sources no longer match the hot base.
     let mut patchable = true;
 

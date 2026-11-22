@@ -129,6 +129,23 @@ pub fn app(state: ShopState) -> Router {
     router.layer(doxa::ETagLayer)
 }
 
+/// What the bin serves, and the native app's local server: the seeded app and its page.
+pub async fn start(_stop: doxa::boot::Stopping) -> Router {
+    use doxa::{dist, MountSpaExt, Spa};
+    app(seeded())
+        // The example has no sign-in: a browser that sends no `x-role` acts as a viewer.
+        .layer(axum::middleware::from_fn(
+            |mut req: Request, next: Next| async move {
+                if !req.headers().contains_key("x-role") {
+                    req.headers_mut()
+                        .insert("x-role", axum::http::HeaderValue::from_static("viewer"));
+                }
+                next.run(req).await
+            },
+        ))
+        .mount_spa(Spa::auto(dist!()))
+}
+
 /// Three widgets and two orders to start with.
 pub fn seeded() -> ShopState {
     let widget = |id, name: &str| WidgetRow {

@@ -2,10 +2,12 @@
 
 mod check;
 mod dev;
+mod native;
 mod new;
 mod patch;
 mod view;
 
+use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -67,6 +69,15 @@ enum Command {
         /// Run startup builds one at a time, in `after` order; `--max-parallel-build 1`.
         #[arg(long, conflicts_with = "max_parallel_build")]
         serial: bool,
+        /// Also run the desktop app, showing the page, with Tauri.
+        #[arg(long, group = "native")]
+        desktop: bool,
+        /// Also run the iOS app, with Tauri.
+        #[arg(long, group = "native")]
+        ios: bool,
+        /// Also run the Android app, with Tauri.
+        #[arg(long, group = "native")]
+        android: bool,
     },
     /// Build the `#[story]` functions into a gallery, serve it, and patch in each change.
     Gallery {
@@ -107,6 +118,15 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         args: Vec<String>,
     },
+    /// Set the web crate up to build as a native app.
+    #[command(subcommand)]
+    Native(NativeCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum NativeCommand {
+    /// Add the native feature, bin, `#[doxa::app]` entry, icon and config to the web crate.
+    Init,
 }
 
 #[derive(Debug, Args)]
@@ -129,9 +149,36 @@ struct BuildArgs {
     /// Write a static site to this directory instead of building the server.
     #[arg(long, conflicts_with = "lib")]
     out: Option<PathBuf>,
+    /// Bundle a desktop app, with Tauri.
+    #[arg(long, group = "native", conflicts_with_all = ["lib", "out"])]
+    desktop: bool,
+    /// Bundle an iOS app, with Tauri.
+    #[arg(long, group = "native", conflicts_with_all = ["lib", "out"])]
+    ios: bool,
+    /// Bundle an Android app, with Tauri.
+    #[arg(long, group = "native", conflicts_with_all = ["lib", "out"])]
+    android: bool,
+    /// With a native target, arguments for `tauri build`.
+    #[arg(last = true, requires = "native")]
+    tauri: Vec<String>,
+}
+
+fn native_target(desktop: bool, ios: bool, android: bool) -> Option<doxa_role::Target> {
+    use doxa_role::Target;
+    [
+        (desktop, Target::Desktop),
+        (ios, Target::Ios),
+        (android, Target::Android),
+    ]
+    .into_iter()
+    .find_map(|(on, t)| on.then_some(t))
 }
 
 impl BuildArgs {
+    fn target(&self) -> Option<doxa_role::Target> {
+        native_target(self.desktop, self.ios, self.android)
+    }
+
     fn options(&self) -> BuildOptions {
         BuildOptions {
             release: self.release,
@@ -148,12 +195,20 @@ fn main() -> ExitCode {
     if let Some(code) = doxa_build::hot::intercept() {
         return code;
     }
+    // `doxa tauri <args>`: the linked Tauri CLI (https://tauri.app), with its own parser.
+    let mut argv = std::env::args_os().skip(1).peekable();
+    if argv.peek().is_some_and(|a| a == "tauri") {
+        return native::tauri::passthrough(argv.skip(1).collect::<Vec<OsString>>());
+    }
     let cli = Cli::parse();
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
         Command::New { name } => std::env::current_dir()
             .map_err(Into::into)
             .and_then(|cwd| new::scaffold(&cwd, &name).map_err(Into::into)),
-        Command::Build(args) => build(args.options(), args.lib, args.out.as_deref()),
+        Command::Build(args) => match args.target() {
+            Some(t) => native::build(args.options(), t, &args.tauri),
+            None => build(args.options(), args.lib, args.out.as_deref()),
+        },
         Command::BuildDev(args) => build_dev(&args),
         Command::Dev {
             package,
@@ -163,11 +218,19 @@ fn main() -> ExitCode {
             no_tui,
             max_parallel_build,
             serial,
+            desktop,
+            ios,
+            android,
         } => {
             let max = serial.then_some(NonZeroUsize::MIN).or(max_parallel_build);
+            let target = native_target(desktop, ios, android);
             tokio::runtime::Runtime::new()
                 .map_err(Into::into)
-                .and_then(|rt| rt.block_on(dev::run(package, port, locked, !no_hot, !no_tui, max)))
+                .and_then(|rt| {
+                    rt.block_on(dev::run(
+                        package, port, locked, !no_hot, !no_tui, max, target,
+                    ))
+                })
         }
         Command::Gallery {
             package,
@@ -197,6 +260,9 @@ fn main() -> ExitCode {
         Command::Check { package, .. } => check::wire(&package),
         Command::Patch { command } => return patch::run(command),
         Command::Fmt { args } => return doxa_fmt::run(args),
+        Command::Native(NativeCommand::Init) => std::env::current_dir()
+            .map_err(Into::into)
+            .and_then(|cwd| native::init::run(&cwd)),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -364,7 +430,39 @@ mod tests {
                 lib: false,
                 base: None,
                 out: None,
+                desktop: false,
+                ios: false,
+                android: false,
+                ..
             })
+        ));
+    }
+
+    #[test]
+    fn native_targets_are_exclusive_and_take_tauri_args() {
+        let target = |args: &[&str]| match parse(args) {
+            Command::Build(b) => (b.target(), b.tauri),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            target(&["doxa", "build", "--desktop", "--release", "--", "--verbose"]),
+            (
+                Some(doxa_role::Target::Desktop),
+                vec!["--verbose".to_owned()]
+            )
+        );
+        assert_eq!(target(&["doxa", "build"]), (None, vec![]));
+        for bad in [
+            &["doxa", "build", "--desktop", "--ios"][..],
+            &["doxa", "build", "--desktop", "--lib"],
+            &["doxa", "build", "--android", "--out", "s"],
+            &["doxa", "build", "--", "--verbose"],
+        ] {
+            assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+        }
+        assert!(matches!(
+            parse(&["doxa", "native", "init"]),
+            Command::Native(NativeCommand::Init)
         ));
     }
 
@@ -424,9 +522,18 @@ mod tests {
             parse(&["doxa", "dev", "--serial"]),
             Command::Dev { serial: true, .. }
         ));
+        assert!(matches!(
+            parse(&["doxa", "dev", "--desktop"]),
+            Command::Dev {
+                desktop: true,
+                ios: false,
+                ..
+            }
+        ));
         for bad in [
             &["doxa", "dev", "--max-parallel-build", "0"][..],
             &["doxa", "dev", "--serial", "--max-parallel-build", "2"],
+            &["doxa", "dev", "--desktop", "--ios"],
         ] {
             assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
         }

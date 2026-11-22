@@ -12,3 +12,12 @@ categories = ["development-tools::build-utils"]
 
 [dependencies]
 toml = "0.9"
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tauri-build = { version = "2.7", optional = true }
+
+[features]
+# `[package.metadata.doxa.native]` and the `tauri.conf.json` generated from it.
+native = ["dep:serde", "dep:serde_json"]
+# A web crate's `build.rs` building it as a native shell: `tauri-build` runs too.
+native-build = ["native", "dep:tauri-build"]
