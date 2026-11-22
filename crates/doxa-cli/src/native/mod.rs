@@ -144,7 +144,8 @@ pub fn build(opts: BuildOptions, target: Target, extra: &[String]) -> Result<(),
         Some(crate::check::TARGET),
         pipeline.cargo_config(),
     )?;
-    let cfg = config(&pipeline.web)?;
+    let cfg = config(&pipeline.web)?.with(&Overrides::from_env());
+    remote_services(&mut pipeline.web.config, &cfg);
     let _ = pipeline.build()?;
     let dist = pipeline.dist_dir();
     out.note(format!(
@@ -165,6 +166,16 @@ pub fn build(opts: BuildOptions, target: Target, extra: &[String]) -> Result<(),
         &[(doxa_role::TARGET_ENV, target.as_str().into())],
         &out,
     )
+}
+
+/// For `server = "remote"`, the page reaches its server at `url`, unless `services` says
+/// otherwise; the app's own origin serves only the page.
+fn remote_services(web: &mut doxa_build::config::DoxaConfig, cfg: &NativeConfig) {
+    if let (Server::Remote, Some(server), Some(url)) = (cfg.server, &web.server, &cfg.url) {
+        web.services
+            .entry(server.clone())
+            .or_insert_with(|| url.trim_end_matches('/').to_owned());
+    }
 }
 
 fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
@@ -241,6 +252,28 @@ mod tests {
                 r#"{"build":{"devUrl":"http://127.0.0.1:3000/"}}"#,
             ]
         );
+    }
+
+    #[test]
+    fn remote_points_the_page_s_server_at_its_url_unless_services_says() {
+        let remote =
+            cfg("identifier = \"com.a.b\"\nserver = \"remote\"\nurl = \"https://api.a.b/\"");
+        let mut web = doxa_build::config::DoxaConfig {
+            server: Some("shop-api".into()),
+            ..Default::default()
+        };
+        remote_services(&mut web, &remote);
+        assert_eq!(web.services["shop-api"], "https://api.a.b");
+        web.services
+            .insert("shop-api".into(), "https://other.a.b".into());
+        remote_services(&mut web, &remote);
+        assert_eq!(web.services["shop-api"], "https://other.a.b");
+        let mut local = doxa_build::config::DoxaConfig {
+            server: Some("shop-api".into()),
+            ..Default::default()
+        };
+        remote_services(&mut local, &cfg("identifier = \"com.a.b\""));
+        assert!(local.services.is_empty());
     }
 
     #[test]
