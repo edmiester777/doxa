@@ -158,6 +158,7 @@ pub(crate) async fn sign_in<R: Runtime>(
         _ => unreachable!("each plan has its listener"),
     };
     let callback = caught.map_err(|_| "the sign-in timed out".to_owned())??;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();

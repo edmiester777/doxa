@@ -62,7 +62,8 @@ const MAX_PARALLEL_BUILD: NonZeroUsize = NonZeroUsize::new(4).expect("nonzero");
 
 /// Run `doxa dev` until interrupted; `hot` patches web crate changes into the page, and `tui`
 /// gives each service a pane when a terminal is attached. With a `target`, the native app runs
-/// too, showing the page.
+/// too, showing the page; `tauri` goes to Tauri's `dev`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     package: Option<String>,
     port: u16,
@@ -71,10 +72,8 @@ pub async fn run(
     tui: bool,
     max_parallel: Option<NonZeroUsize>,
     target: Option<doxa_role::Target>,
+    tauri: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(t) = target {
-        crate::native::supported(t)?;
-    }
     let console = if tui && tui::available() {
         Console::Tui(tui::Shared::new())
     } else {
@@ -93,7 +92,7 @@ pub async fn run(
         target,
         ..BuildOptions::default()
     };
-    serve(opts, port, console, max_parallel)
+    serve(opts, port, console, max_parallel, tauri)
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)
 }
@@ -111,7 +110,7 @@ pub async fn gallery(
         gallery: true,
         ..BuildOptions::default()
     };
-    serve(opts, port, Console::Stderr, None)
+    serve(opts, port, Console::Stderr, None, Vec::new())
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)
 }
@@ -131,10 +130,14 @@ struct Loaded {
 
 fn load(cwd: PathBuf, opts: BuildOptions, console: &Console) -> Result<Loaded, SendError> {
     let mut pipeline = Pipeline::new(&cwd, opts.clone())?;
-    if opts.target.is_some() {
+    if let Some(t) = opts.target {
         let web = &pipeline.web;
         crate::native::config(web)
-            .and_then(|cfg| crate::native::prepare(web, &cfg, &opts.output))
+            .and_then(|cfg| crate::native::prepare(web, &cfg, t, &opts.output))
+            .and_then(|_| match t {
+                doxa_role::Target::Desktop => Ok(()),
+                _ => crate::native::mobile::cargo_config(&web.dir, t, None),
+            })
             .map_err(|e| e.to_string())?;
     }
     let services = match opts.gallery {
@@ -232,6 +235,7 @@ async fn serve(
     port: u16,
     console: Console,
     max_parallel: Option<NonZeroUsize>,
+    tauri: Vec<String>,
 ) -> Result<(), SendError> {
     let cwd = std::env::current_dir()?;
     let (hot, gallery, target) = (opts.hot, opts.gallery, opts.target);
@@ -456,6 +460,7 @@ async fn serve(
             dir,
             served_port,
             t,
+            tauri,
             tag,
             stop.clone(),
             stops,

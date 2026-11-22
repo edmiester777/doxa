@@ -78,6 +78,9 @@ enum Command {
         /// Also run the Android app, with Tauri.
         #[arg(long, group = "native")]
         android: bool,
+        /// With a native target, arguments for `tauri dev`, e.g. the simulator to run on.
+        #[arg(last = true, requires = "native")]
+        tauri: Vec<String>,
     },
     /// Build the `#[story]` functions into a gallery, serve it, and patch in each change.
     Gallery {
@@ -221,6 +224,7 @@ fn main() -> ExitCode {
             desktop,
             ios,
             android,
+            tauri,
         } => {
             let max = serial.then_some(NonZeroUsize::MIN).or(max_parallel_build);
             let target = native_target(desktop, ios, android);
@@ -228,7 +232,7 @@ fn main() -> ExitCode {
                 .map_err(Into::into)
                 .and_then(|rt| {
                     rt.block_on(dev::run(
-                        package, port, locked, !no_hot, !no_tui, max, target,
+                        package, port, locked, !no_hot, !no_tui, max, target, tauri,
                     ))
                 })
         }

@@ -3,9 +3,8 @@
 
 use std::sync::Mutex;
 
-use serde::Deserialize;
 use tauri::plugin::{Builder, TauriPlugin};
-use tauri::{Emitter, Manager, Runtime, State, WebviewWindow};
+use tauri::{Emitter, Manager, Runtime, State};
 
 /// Emitted with the URLs a deep link opened the app with.
 pub(crate) const OPEN_URL_EVENT: &str = "doxa://open-url";
@@ -37,8 +36,9 @@ fn take_open_urls(urls: State<'_, OpenUrls>) -> Vec<String> {
     std::mem::take(&mut *urls.0.lock().expect("open urls"))
 }
 
-/// What `native::window()` does.
-#[derive(Debug, Deserialize, PartialEq)]
+/// What `native::window()` does; desktop only, as mobile windows can't be moved or sized.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[derive(Debug, serde::Deserialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum WindowAction {
     Minimize,
@@ -52,8 +52,9 @@ enum WindowAction {
     SetTitle { title: String },
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
-fn window<R: Runtime>(window: WebviewWindow<R>, action: WindowAction) -> Result<(), String> {
+fn window<R: Runtime>(window: tauri::WebviewWindow<R>, action: WindowAction) -> Result<(), String> {
     let r = match action {
         WindowAction::Minimize => window.minimize(),
         WindowAction::Maximize => window.maximize(),
@@ -97,7 +98,6 @@ pub(crate) fn init<R: Runtime>() -> TauriPlugin<R> {
     ]);
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let b = Builder::new("doxa").invoke_handler(tauri::generate_handler![
-        window,
         take_open_urls,
         crate::oidc::sign_in
     ]);

@@ -1,6 +1,7 @@
 //! `doxa build --desktop|--ios|--android` and `doxa native init`: the web crate as a native app.
 
 pub mod init;
+pub mod mobile;
 pub mod tauri;
 
 use std::ffi::OsString;
@@ -25,15 +26,20 @@ pub fn config(web: &WebCrate) -> Result<NativeConfig, Error> {
     })
 }
 
-/// Writes what Tauri reads from the crate dir: the overrides, the icons, `tauri.conf.json`.
-pub fn prepare(web: &WebCrate, cfg: &NativeConfig, out: &Output) -> Result<NativeConfig, Error> {
+/// Writes what Tauri reads from the crate dir: the overrides, `tauri.conf.json`, a mobile
+/// target's project under `gen/`, the icons.
+pub fn prepare(
+    web: &WebCrate,
+    cfg: &NativeConfig,
+    target: Target,
+    out: &Output,
+) -> Result<NativeConfig, Error> {
     let dir = &web.dir;
     let overrides = Overrides::from_env();
     write_if_changed(
         &dir.join(native::OVERRIDES),
         &(serde_json::to_string_pretty(&overrides)? + "\n"),
     )?;
-    icons(dir, out)?;
     let cfg = cfg.clone().with(&overrides);
     native::write_generated(
         &cfg,
@@ -43,6 +49,11 @@ pub fn prepare(web: &WebCrate, cfg: &NativeConfig, out: &Output) -> Result<Nativ
         },
         dir,
     )?;
+    if target != Target::Desktop && mobile::project(dir, &cfg, &web.name, target, out)? {
+        // `tauri icon` fills the new project's icon sets too.
+        let _ = std::fs::remove_file(dir.join(ICON_STAMP));
+    }
+    icons(dir, out)?;
     Ok(cfg)
 }
 
@@ -71,15 +82,27 @@ fn icons(dir: &Path, out: &Output) -> Result<(), Error> {
     Ok(())
 }
 
-/// The Tauri `build` arguments for a web crate whose page is at `dist`.
+/// Tauri's subcommand for `target`, before `build` or `dev`.
+fn subcommand(target: Target) -> Option<&'static str> {
+    match target {
+        Target::Desktop => None,
+        Target::Ios => Some("ios"),
+        Target::Android => Some("android"),
+    }
+}
+
+/// The Tauri `build` arguments for a web crate whose page is at `dist`. A mobile local-mode
+/// build gets `dist` from [`mobile::dist_config`] instead: Xcode and Gradle run cargo.
 fn build_args(
     cfg: &NativeConfig,
     api: Option<&str>,
     dist: &Path,
     release: bool,
+    target: Target,
     extra: &[String],
 ) -> Result<Vec<OsString>, Error> {
-    let mut args: Vec<OsString> = vec!["build".into()];
+    let mut args: Vec<OsString> = subcommand(target).into_iter().map(Into::into).collect();
+    args.push("build".into());
     if !release {
         args.push("--debug".into());
     }
@@ -92,11 +115,12 @@ fn build_args(
                  `[package.metadata.doxa] server` names",
             )?;
             args.extend(["--features".into(), format!("{api}/embed").into()]);
-            // Mobile IDE builds drop most of the environment, so this goes as cargo config.
-            cargo.extend([
-                "--config".into(),
-                format!("env.DOXA_DIST='{}'", dist.display()).into(),
-            ]);
+            if target == Target::Desktop {
+                cargo.extend([
+                    "--config".into(),
+                    format!("env.DOXA_DIST='{}'", dist.display()).into(),
+                ]);
+            }
         }
         Server::Remote => {
             let config = serde_json::json!({ "build": { "frontendDist": dist } });
@@ -112,25 +136,19 @@ fn build_args(
 }
 
 /// The Tauri `dev` arguments: the shell opens `url`, which `doxa dev` serves and rebuilds.
-pub fn dev_args(url: &str) -> Vec<OsString> {
+pub fn dev_args(url: &str, target: Target, extra: &[String]) -> Vec<OsString> {
     let config = serde_json::json!({ "build": { "devUrl": url } });
-    ["dev", "--no-watch", "--features", "native", "--config"]
+    subcommand(target)
         .into_iter()
+        .chain(["dev", "--no-watch", "--features", "native", "--config"])
         .map(OsString::from)
         .chain([config.to_string().into()])
+        .chain(extra.iter().map(Into::into))
         .collect()
-}
-
-pub fn supported(target: Target) -> Result<(), Error> {
-    match target {
-        Target::Desktop => Ok(()),
-        _ => Err(format!("`--{}` isn't supported yet", target.as_str()).into()),
-    }
 }
 
 /// `doxa build --<target>`: the page for `target`, then Tauri's bundle.
 pub fn build(opts: BuildOptions, target: Target, extra: &[String]) -> Result<(), Error> {
-    supported(target)?;
     let (release, out) = (opts.release, opts.output.clone());
     let mut pipeline = Pipeline::new(
         &std::env::current_dir()?,
@@ -152,20 +170,25 @@ pub fn build(opts: BuildOptions, target: Target, extra: &[String]) -> Result<(),
         "building the native app with Tauri {} (https://tauri.app)",
         tauri::version()
     ));
-    let cfg = prepare(&pipeline.web, &cfg, &out)?;
+    let cfg = prepare(&pipeline.web, &cfg, target, &out)?;
+    if target != Target::Desktop {
+        let local = (cfg.server == Server::Local).then_some(dist.as_path());
+        mobile::cargo_config(&pipeline.web.dir, target, local)?;
+    }
     let args = build_args(
         &cfg,
         pipeline.web.config.server.as_deref(),
         &dist,
         release,
+        target,
         extra,
     )?;
-    tauri::run(
-        &pipeline.web.dir,
-        &args,
-        &[(doxa_role::TARGET_ENV, target.as_str().into())],
-        &out,
-    )
+    tauri::run(&pipeline.web.dir, &args, &env(target), &out)
+}
+
+/// The env every Tauri run for `target` gets.
+pub fn env(target: Target) -> Vec<(&'static str, OsString)> {
+    vec![(doxa_role::TARGET_ENV, target.as_str().into())]
 }
 
 /// For `server = "remote"`, the page reaches its server at `url`, unless `services` says
@@ -209,6 +232,7 @@ mod tests {
             Some("shop-api"),
             Path::new("/t/dist-desktop"),
             false,
+            Target::Desktop,
             &["--verbose".into()],
         )
         .unwrap();
@@ -232,6 +256,7 @@ mod tests {
             None,
             Path::new("/d"),
             true,
+            Target::Desktop,
             &[]
         )
         .unwrap_err()
@@ -240,9 +265,36 @@ mod tests {
     }
 
     #[test]
+    fn mobile_local_leaves_the_page_to_the_dist_config() {
+        let args = build_args(
+            &cfg("identifier = \"com.a.b\""),
+            Some("shop-api"),
+            Path::new("/t/dist-ios"),
+            false,
+            Target::Ios,
+            &["--target".into(), "aarch64-sim".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            strings(args),
+            [
+                "ios",
+                "build",
+                "--debug",
+                "--features",
+                "native",
+                "--features",
+                "shop-api/embed",
+                "--target",
+                "aarch64-sim",
+            ]
+        );
+    }
+
+    #[test]
     fn dev_opens_the_dev_server_and_leaves_rebuilding_to_doxa() {
         assert_eq!(
-            strings(dev_args("http://127.0.0.1:3000/")),
+            strings(dev_args("http://127.0.0.1:3000/", Target::Desktop, &[])),
             [
                 "dev",
                 "--no-watch",
@@ -252,6 +304,13 @@ mod tests {
                 r#"{"build":{"devUrl":"http://127.0.0.1:3000/"}}"#,
             ]
         );
+        let ios = strings(dev_args(
+            "http://127.0.0.1:3000/",
+            Target::Ios,
+            &["iPhone 17".into()],
+        ));
+        assert_eq!(&ios[..2], ["ios", "dev"]);
+        assert_eq!(ios.last().map(String::as_str), Some("iPhone 17"));
     }
 
     #[test]
@@ -283,6 +342,7 @@ mod tests {
             None,
             Path::new("/t/dist-desktop"),
             true,
+            Target::Desktop,
             &[],
         )
         .unwrap();

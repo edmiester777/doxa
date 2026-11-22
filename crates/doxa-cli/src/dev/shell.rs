@@ -18,6 +18,7 @@ pub async fn run(
     dir: PathBuf,
     port: u16,
     target: Target,
+    extra: Vec<String>,
     tag: Tag,
     mut stop: signal::Receiver<u32>,
     stops: signal::Sender<u32>,
@@ -27,19 +28,20 @@ pub async fn run(
         "running the native app with Tauri {} (https://tauri.app)",
         native::tauri::version()
     ));
-    let env = [(doxa_role::TARGET_ENV, target.as_str().into())];
+    let env = native::env(target);
     let url = format!("http://127.0.0.1:{port}/");
-    let spawned = native::tauri::command(&dir, &native::dev_args(&url), &env).and_then(|c| {
-        let mut c = Command::from(c);
-        // Its own group, so stopping reaches the app too: Tauri's `dev` doesn't pass signals on.
-        #[cfg(unix)]
-        c.process_group(0);
-        c.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-    });
+    let spawned = native::tauri::command(&dir, &native::dev_args(&url, target, &extra), &env)
+        .and_then(|c| {
+            let mut c = Command::from(c);
+            // Its own group, so stopping reaches the app too: Tauri's `dev` doesn't pass signals on.
+            #[cfg(unix)]
+            c.process_group(0);
+            c.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+        });
     let mut child = match spawned {
         Ok(c) => c,
         Err(e) => {

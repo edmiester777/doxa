@@ -286,6 +286,7 @@ pub fn tauri_config(cfg: &NativeConfig, pkg: &Package, dir: &Path) -> Value {
         macos.insert("entitlements".into(), json!("native/Entitlements.plist"));
     }
     let mut ios = serde_json::Map::new();
+    ios.insert("infoPlist".into(), json!(IOS_PLIST));
     if let Some(team) = &cfg.apple_team {
         ios.insert("developmentTeam".into(), json!(team));
     }
@@ -326,10 +327,50 @@ pub fn tauri_config(cfg: &NativeConfig, pkg: &Package, dir: &Path) -> Value {
     })
 }
 
-/// Writes `tauri.conf.json` and the stub page under `dir`, each only when its content changed.
+/// The iOS app's extra `Info.plist` keys: `native/Info.plist`, then `native/Info.ios.plist`,
+/// then what local mode needs.
+pub const IOS_PLIST: &str = "gen/doxa/Info.ios.plist";
+
+/// [`IOS_PLIST`]'s content for the crate at `dir`; later sources win key by key.
+pub fn ios_plist(cfg: &NativeConfig, dir: &Path) -> std::io::Result<String> {
+    let mut merged = plist::Dictionary::new();
+    for src in ["native/Info.plist", "native/Info.ios.plist"] {
+        let path = dir.join(src);
+        if !path.is_file() {
+            continue;
+        }
+        let v = plist::Value::from_file(&path)
+            .map_err(|e| std::io::Error::other(format!("{}: {e}", path.display())))?;
+        let Some(d) = v.into_dictionary() else {
+            return Err(std::io::Error::other(format!(
+                "{}: not a <dict>",
+                path.display()
+            )));
+        };
+        merged.extend(d);
+    }
+    if cfg.server == Server::Local {
+        // The window loads http://127.0.0.1, which App Transport Security blocks otherwise.
+        let mut ats = merged
+            .remove("NSAppTransportSecurity")
+            .and_then(plist::Value::into_dictionary)
+            .unwrap_or_default();
+        ats.insert("NSAllowsLocalNetworking".into(), true.into());
+        merged.insert("NSAppTransportSecurity".into(), ats.into());
+    }
+    let mut out = Vec::new();
+    plist::Value::Dictionary(merged)
+        .to_writer_xml(&mut out)
+        .map_err(std::io::Error::other)?;
+    Ok(String::from_utf8_lossy(&out).into_owned() + "\n")
+}
+
+/// Writes `tauri.conf.json`, the iOS plist and the stub page under `dir`, each only when its
+/// content changed.
 pub fn write_generated(cfg: &NativeConfig, pkg: &Package, dir: &Path) -> std::io::Result<()> {
     let conf = serde_json::to_string_pretty(&tauri_config(cfg, pkg, dir))? + "\n";
     write_if_changed(&dir.join("tauri.conf.json"), &conf)?;
+    write_if_changed(&dir.join(IOS_PLIST), &ios_plist(cfg, dir)?)?;
     write_if_changed(
         &dir.join(STUB_DIST).join("index.html"),
         "<!doctype html><title></title>\n",
@@ -599,6 +640,37 @@ mod tests {
             ])
         );
         assert_eq!(c["bundle"]["iOS"]["developmentTeam"], "T1");
+    }
+
+    #[test]
+    fn the_ios_plist_merges_the_sources_and_lets_local_mode_reach_its_server() {
+        let dir = dir_with(&["native/plist-test"]);
+        let p = |body: &str| {
+            format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>{body}</dict></plist>")
+        };
+        std::fs::write(
+            dir.join("native/Info.plist"),
+            p("<key>A</key><string>shared</string><key>B</key><string>shared</string>"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("native/Info.ios.plist"),
+            p("<key>B</key><string>ios</string>"),
+        )
+        .unwrap();
+        let local = ios_plist(&cfg("identifier = \"com.a.b\""), &dir).unwrap();
+        let v = plist::Value::from_reader_xml(local.as_bytes()).unwrap();
+        let d = v.as_dictionary().unwrap();
+        assert_eq!(d["A"].as_string(), Some("shared"));
+        assert_eq!(d["B"].as_string(), Some("ios"));
+        let ats = d["NSAppTransportSecurity"].as_dictionary().unwrap();
+        assert_eq!(ats["NSAllowsLocalNetworking"].as_boolean(), Some(true));
+        let remote = ios_plist(
+            &cfg("identifier = \"com.a.b\"\nserver = \"remote\"\nurl = \"https://a.b\""),
+            &dir,
+        )
+        .unwrap();
+        assert!(!remote.contains("NSAppTransportSecurity"));
     }
 
     #[test]

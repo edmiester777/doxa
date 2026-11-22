@@ -9,6 +9,8 @@
 mod acl;
 mod app;
 mod guard;
+#[cfg(target_os = "ios")]
+mod ios;
 mod local;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod menu;
