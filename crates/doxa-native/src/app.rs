@@ -201,8 +201,13 @@ impl App {
         let stopping = Arc::new(AtomicBool::new(false));
         let on_exit = stopping.clone();
         let commands = shell.commands;
+        let policy = crate::oidc::Policy {
+            schemes: shell.config.schemes.clone(),
+            loopback: shell.config.oidc_loopback.clone(),
+        };
         let app = b
             .setup(move |app| {
+                app.manage(policy);
                 deep_links(app);
                 let handle = app.handle().clone();
                 match page {

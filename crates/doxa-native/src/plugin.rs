@@ -16,6 +16,10 @@ pub(crate) struct OpenUrls(Mutex<Vec<String>>);
 
 /// Records URLs a deep link opened, and tells a listening page.
 pub(crate) fn opened<R: Runtime>(app: &tauri::AppHandle<R>, urls: Vec<String>) {
+    let urls: Vec<String> = match app.try_state::<crate::oidc::Waiting>() {
+        Some(w) => urls.into_iter().filter(|u| !w.take(u)).collect(),
+        None => urls,
+    };
     if urls.is_empty() {
         return;
     }
@@ -73,6 +77,7 @@ fn window<R: Runtime>(window: WebviewWindow<R>, action: WindowAction) -> Result<
 const REGISTERED: &[&str] = &[
     "window",
     "take_open_urls",
+    "sign_in",
     "menu_set",
     "menu_popup",
     "tray_set",
@@ -84,15 +89,21 @@ pub(crate) fn init<R: Runtime>() -> TauriPlugin<R> {
     let b = Builder::new("doxa").invoke_handler(tauri::generate_handler![
         window,
         take_open_urls,
+        crate::oidc::sign_in,
         crate::menu::menu_set,
         crate::menu::menu_popup,
         crate::menu::tray_set,
         crate::menu::shortcut_set
     ]);
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    let b = Builder::new("doxa").invoke_handler(tauri::generate_handler![window, take_open_urls]);
+    let b = Builder::new("doxa").invoke_handler(tauri::generate_handler![
+        window,
+        take_open_urls,
+        crate::oidc::sign_in
+    ]);
     b.setup(|app, _| {
         app.manage(OpenUrls::default());
+        app.manage(crate::oidc::Waiting::default());
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         app.on_menu_event(crate::menu::on_menu_event);
         Ok(())

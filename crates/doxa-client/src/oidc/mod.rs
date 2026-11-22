@@ -4,6 +4,8 @@
 //! and agrees with the app's other tabs so only one of them refreshes.
 
 mod host;
+#[cfg(feature = "native")]
+mod native;
 mod pkce;
 mod session;
 
@@ -25,6 +27,8 @@ use crate::layer::Layer;
 use crate::transport::{Payload, Request};
 
 pub use host::{Host, MemoryHost};
+#[cfg(feature = "native")]
+pub use native::NativeHost;
 pub use session::{Session, Tokens};
 
 use session::TokenResponse;
@@ -132,6 +136,12 @@ where
         oidc.0
             .host
             .listen(Box::new(move |message| heard.hear(&message)));
+        let abandoned = oidc.clone();
+        oidc.0.host.on_abandoned(Box::new(move || {
+            if matches!(abandoned.session(), Session::Redirecting) {
+                abandoned.set(Session::SignedOut);
+            }
+        }));
         let started = oidc.clone();
         crate::task::spawn(async move { started.start().await });
         oidc

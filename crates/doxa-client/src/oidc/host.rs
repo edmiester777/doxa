@@ -24,6 +24,8 @@ pub trait Host: 'static {
     fn post(&self, message: &str);
     /// Hear what other tabs post.
     fn listen(&self, f: Box<dyn Fn(String)>);
+    /// Call `f` when a redirect the page never left for fails, so the session can retry.
+    fn on_abandoned(&self, _f: Box<dyn Fn()>) {}
 }
 
 type Listener = Rc<dyn Fn(String)>;

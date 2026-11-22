@@ -175,6 +175,75 @@ fn a_callback_signs_in_and_returns_to_where_sign_in_began() {
     );
 }
 
+/// A page whose redirects never leave, as a native sign-in that fails or is cancelled.
+struct Stuck(
+    MemoryHost,
+    std::rc::Rc<std::cell::RefCell<Option<OnAbandoned>>>,
+);
+
+type OnAbandoned = Box<dyn Fn()>;
+
+impl doxa::client::oidc::Host for Stuck {
+    fn url(&self) -> String {
+        self.0.url()
+    }
+    fn redirect(&self, _: &str) {
+        if let Some(f) = &*self.1.borrow() {
+            f()
+        }
+    }
+    fn replace(&self, url: &str) {
+        self.0.replace(url)
+    }
+    fn load(&self, key: &str) -> Option<String> {
+        self.0.load(key)
+    }
+    fn store(&self, key: &str, value: &str) {
+        self.0.store(key, value)
+    }
+    fn forget(&self, key: &str) {
+        self.0.forget(key)
+    }
+    fn random(&self, out: &mut [u8]) {
+        self.0.random(out)
+    }
+    fn post(&self, message: &str) {
+        self.0.post(message)
+    }
+    fn listen(&self, f: Box<dyn Fn(String)>) {
+        self.0.listen(f)
+    }
+    fn on_abandoned(&self, f: Box<dyn Fn()>) {
+        *self.1.borrow_mut() = Some(f);
+    }
+}
+
+#[test]
+fn an_abandoned_sign_in_signs_out_so_it_can_be_tried_again() {
+    let shared = Shared::default();
+    service(SERVICE)
+        .layers()
+        .push(transport(issuer(shared.clone())));
+    let oidc = Oidc::<Claims>::issuer(ISSUER)
+        .client_id("native")
+        .redirect_uri("acme:/callback")
+        .host(Stuck(
+            MemoryHost::new(&format!("{APP}/")),
+            Default::default(),
+        ))
+        .install();
+    task::run_until_stalled();
+    oidc.sign_in();
+    task::run_until_stalled();
+    assert!(
+        matches!(oidc.session(), Session::SignedOut),
+        "{:?}",
+        oidc.session()
+    );
+    oidc.sign_in();
+    assert!(matches!(oidc.session(), Session::Redirecting));
+}
+
 #[test]
 fn a_callback_with_the_wrong_state_signs_nobody_in() {
     let _clock = clock::manual();

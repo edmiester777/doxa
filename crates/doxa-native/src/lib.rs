@@ -12,6 +12,7 @@ mod guard;
 mod local;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod menu;
+mod oidc;
 mod plugin;
 mod window;
 
